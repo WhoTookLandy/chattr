@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		3FAB5CE02FC5BAD300054B6B /* TwitchKit in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CDF2FC5BAD300054B6B /* TwitchKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		3FAB5CA02FC5AA9300054B6B /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -53,6 +57,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3FAB5CE02FC5BAD300054B6B /* TwitchKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +123,7 @@
 			);
 			name = chattr;
 			packageProductDependencies = (
+				3FAB5CDF2FC5BAD300054B6B /* TwitchKit */,
 			);
 			productName = chattr;
 			productReference = 3FAB5C922FC5AA9200054B6B /* chattr.app */;
@@ -201,6 +207,9 @@
 			);
 			mainGroup = 3FAB5C892FC5AA9100054B6B;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3FAB5CDE2FC5BAD300054B6B /* XCRemoteSwiftPackageReference "TwitchKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3FAB5C932FC5AA9200054B6B /* Products */;
 			projectDirPath = "";
@@ -406,6 +415,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -448,6 +458,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -617,6 +628,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		3FAB5CDE2FC5BAD300054B6B /* XCRemoteSwiftPackageReference "TwitchKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/AndrewBeshay/TwitchKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.2.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3FAB5CDF2FC5BAD300054B6B /* TwitchKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3FAB5CDE2FC5BAD300054B6B /* XCRemoteSwiftPackageReference "TwitchKit" */;
+			productName = TwitchKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 3FAB5C8A2FC5AA9100054B6B /* Project object */;
 }
