@@ -12,6 +12,7 @@
 		3FAB5CE62FC5C0A400054B6B /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CE52FC5C0A400054B6B /* DesignSystem */; };
 		3FAB5CE92FC5C5B400054B6B /* Accounts in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CE82FC5C5B400054B6B /* Accounts */; };
 		3FAB5CEC2FC5C9B400054B6B /* Channels in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CEB2FC5C9B400054B6B /* Channels */; };
+		3FAB5CEF2FC5CCB300054B6B /* Features in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CEE2FC5CCB300054B6B /* Features */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,6 +65,7 @@
 				3FAB5CE92FC5C5B400054B6B /* Accounts in Frameworks */,
 				3FAB5CE62FC5C0A400054B6B /* DesignSystem in Frameworks */,
 				3FAB5CE02FC5BAD300054B6B /* TwitchKit in Frameworks */,
+				3FAB5CEF2FC5CCB300054B6B /* Features in Frameworks */,
 				3FAB5CE32FC5C09000054B6B /* Core in Frameworks */,
 				3FAB5CEC2FC5C9B400054B6B /* Channels in Frameworks */,
 			);
@@ -136,6 +138,7 @@
 				3FAB5CE52FC5C0A400054B6B /* DesignSystem */,
 				3FAB5CE82FC5C5B400054B6B /* Accounts */,
 				3FAB5CEB2FC5C9B400054B6B /* Channels */,
+				3FAB5CEE2FC5CCB300054B6B /* Features */,
 			);
 			productName = chattr;
 			productReference = 3FAB5C922FC5AA9200054B6B /* chattr.app */;
@@ -225,6 +228,7 @@
 				3FAB5CE42FC5C0A400054B6B /* XCLocalSwiftPackageReference "Packages/DesignSystem" */,
 				3FAB5CE72FC5C5B400054B6B /* XCLocalSwiftPackageReference "Packages/Accounts" */,
 				3FAB5CEA2FC5C9B400054B6B /* XCLocalSwiftPackageReference "Packages/Channels" */,
+				3FAB5CED2FC5CCB300054B6B /* XCLocalSwiftPackageReference "Packages/Features" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3FAB5C932FC5AA9200054B6B /* Products */;
@@ -662,6 +666,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/Channels;
 		};
+		3FAB5CED2FC5CCB300054B6B /* XCLocalSwiftPackageReference "Packages/Features" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/Features;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -696,6 +704,10 @@
 		3FAB5CEB2FC5C9B400054B6B /* Channels */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = Channels;
+		};
+		3FAB5CEE2FC5CCB300054B6B /* Features */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Features;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
