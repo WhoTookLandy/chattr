@@ -26,16 +26,16 @@ public struct SignInView: View {
         .userReadFollows,
     ]
 
-    /// The redirect URI we instruct Twitch to send the auth code to.
+    /// Universal Link components for the OAuth callback.
     ///
-    /// Twitch's dev portal requires HTTPS — custom URL schemes like `chattr://...`
-    /// are rejected. We use `https://localhost`, which no actual server serves;
-    /// instead our `TwitchAuthView`'s `WKNavigationDelegate` intercepts the navigation
-    /// attempt before WebKit tries to load it, extracts the `code` query parameter,
-    /// and cancels the navigation. This is the same pattern Streamly uses.
-    private static let redirectURI = "https://localhost"
-
-    @State private var pendingAuth: PendingAuth?
+    /// We host a tiny Vercel project at this domain (`~/Dev/chattr-auth/`) that
+    /// serves an Apple App Site Association file declaring chattr handles
+    /// `/oauth/callback*` URLs as Universal Links. Twitch's dev portal accepts the
+    /// HTTPS URL (custom URL schemes are rejected); iOS silently intercepts the
+    /// navigation when it sees the Universal Link.
+    private static let callbackHost = "chattr-auth.vercel.app"
+    private static let callbackPath = "/oauth/callback"
+    private static var redirectURI: String { "https://\(callbackHost)\(callbackPath)" }
 
     public init(accountStore: AccountStore, clientId: String) {
         self.accountStore = accountStore
@@ -64,7 +64,7 @@ public struct SignInView: View {
             Spacer()
 
             Button {
-                startSignIn()
+                Task { await signIn() }
             } label: {
                 if isSigningIn {
                     ProgressView()
@@ -90,66 +90,59 @@ public struct SignInView: View {
 
             Spacer().frame(height: 32)
         }
-#if canImport(UIKit)
-        .sheet(item: $pendingAuth) { auth in
-            TwitchAuthSheet(
-                authURL: auth.authURL,
-                onCode: { code in
-                    pendingAuth = nil
-                    Task { await exchangeAndPersist(code: code, oauthClient: auth.oauthClient) }
-                },
-                onError: { message in
-                    pendingAuth = nil
-                    isSigningIn = false
-                    errorMessage = message
-                    logger.error("OAuth WebView reported error: \(message)")
-                },
-                onCancel: {
-                    pendingAuth = nil
-                    isSigningIn = false
-                }
-            )
-        }
-#endif
     }
 
-    /// Builds the OAuth URL and presents the sign-in sheet.
-    /// The sheet itself drives the rest of the flow via its callbacks.
+    /// Run the full sign-in flow: build OAuth URL → present ASWebAuthenticationSession with
+    /// Universal Link callback → exchange code for tokens → persist account via AccountStore.
     @MainActor
-    private func startSignIn() {
-#if canImport(UIKit)
+    private func signIn() async {
         isSigningIn = true
         errorMessage = nil
-
-        let oauthClient = TwitchOAuthClient(
-            clientId: clientId,
-            redirectUri: Self.redirectURI
-        )
-        let authURL = oauthClient.authorizationCodeURL(scopes: Self.scopes)
-        pendingAuth = PendingAuth(authURL: authURL, oauthClient: oauthClient)
-#else
-        errorMessage = "Sign-in is not supported on this platform."
-#endif
-    }
-
-    /// Once the WebView intercepts the code, exchange it for tokens and persist the account.
-    @MainActor
-    private func exchangeAndPersist(code: String, oauthClient: TwitchOAuthClient) async {
         defer { isSigningIn = false }
+
         do {
-            let token = try await oauthClient.exchangeAuthorizationCode(code)
+            // 1. Construct our own TwitchOAuthClient so we can specify the custom redirect URI.
+            //    TwitchClient's facade init hardcodes the default `https://localhost`, which
+            //    we no longer want.
+            let oauthClient = TwitchOAuthClient(
+                clientId: clientId,
+                redirectUri: Self.redirectURI
+            )
+            let authURL = oauthClient.authorizationCodeURL(scopes: Self.scopes)
+
+#if canImport(UIKit)
+            // 2. Find the active window to anchor the ASWebAuthenticationSession sheet.
+            guard
+                let scene = UIApplication.shared.connectedScenes
+                    .first(where: { $0 is UIWindowScene }) as? UIWindowScene,
+                let anchor = scene.windows.first
+            else {
+                errorMessage = "Couldn't find a window to present sign-in from."
+                return
+            }
+
+            // 3. Present the sheet, await the Universal Link callback.
+            let result = try await OAuthFlow.run(
+                authURL: authURL,
+                callbackHost: Self.callbackHost,
+                callbackPath: Self.callbackPath,
+                presentationAnchor: anchor
+            )
+
+            // 4. Exchange the code for tokens — same `oauthClient` is reused so the
+            //    redirect_uri parameter matches (Twitch validates it).
+            let token = try await oauthClient.exchangeAuthorizationCode(result.code)
+
+            // 5. Hand off to AccountStore — it does the /users probe + persistence.
             _ = try await accountStore.add(token: token, scopes: Self.scopes)
             logger.info("Sign-in succeeded")
+#else
+            // Slice 1 is iOS-only; macOS host reaches this path only in unit tests.
+            errorMessage = "Sign-in is not supported on this platform."
+#endif
         } catch {
-            logger.error("Token exchange or account-add failed: \(error.localizedDescription)")
+            logger.error("Sign-in failed: \(error.localizedDescription)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription
         }
     }
-}
-
-/// Holds the per-attempt OAuth state. `Identifiable` so it can drive `.sheet(item:)`.
-private struct PendingAuth: Identifiable {
-    let id = UUID()
-    let authURL: URL
-    let oauthClient: TwitchOAuthClient
 }
