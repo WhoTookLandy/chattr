@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		3FAB5CE02FC5BAD300054B6B /* TwitchKit in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CDF2FC5BAD300054B6B /* TwitchKit */; };
+		3FAB5CE32FC5C09000054B6B /* Core in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CE22FC5C09000054B6B /* Core */; };
+		3FAB5CE62FC5C0A400054B6B /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CE52FC5C0A400054B6B /* DesignSystem */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,7 +59,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3FAB5CE62FC5C0A400054B6B /* DesignSystem in Frameworks */,
 				3FAB5CE02FC5BAD300054B6B /* TwitchKit in Frameworks */,
+				3FAB5CE32FC5C09000054B6B /* Core in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -124,6 +128,8 @@
 			name = chattr;
 			packageProductDependencies = (
 				3FAB5CDF2FC5BAD300054B6B /* TwitchKit */,
+				3FAB5CE22FC5C09000054B6B /* Core */,
+				3FAB5CE52FC5C0A400054B6B /* DesignSystem */,
 			);
 			productName = chattr;
 			productReference = 3FAB5C922FC5AA9200054B6B /* chattr.app */;
@@ -209,6 +215,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				3FAB5CDE2FC5BAD300054B6B /* XCRemoteSwiftPackageReference "TwitchKit" */,
+				3FAB5CE12FC5C09000054B6B /* XCLocalSwiftPackageReference "Packages/Core" */,
+				3FAB5CE42FC5C0A400054B6B /* XCLocalSwiftPackageReference "Packages/DesignSystem" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3FAB5C932FC5AA9200054B6B /* Products */;
@@ -629,6 +637,17 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		3FAB5CE12FC5C09000054B6B /* XCLocalSwiftPackageReference "Packages/Core" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/Core;
+		};
+		3FAB5CE42FC5C0A400054B6B /* XCLocalSwiftPackageReference "Packages/DesignSystem" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/DesignSystem;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		3FAB5CDE2FC5BAD300054B6B /* XCRemoteSwiftPackageReference "TwitchKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -645,6 +664,14 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 3FAB5CDE2FC5BAD300054B6B /* XCRemoteSwiftPackageReference "TwitchKit" */;
 			productName = TwitchKit;
+		};
+		3FAB5CE22FC5C09000054B6B /* Core */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Core;
+		};
+		3FAB5CE52FC5C0A400054B6B /* DesignSystem */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DesignSystem;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
