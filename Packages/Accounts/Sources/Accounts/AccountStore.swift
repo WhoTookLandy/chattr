@@ -11,7 +11,15 @@ private let logger = AppLogger.make("Accounts.AccountStore")
 ///
 /// Persistence: SwiftData (`Account` rows).
 /// Per-account `TwitchClient` instances are constructed lazily and cached in-memory.
-public actor AccountStore {
+///
+/// Isolation: `@MainActor` rather than `actor`. SwiftData's main `ModelContext` is
+/// `@MainActor`-bound by design (it backs `@Query` and `@Environment(\.modelContext)`),
+/// and `@Model` instances aren't `Sendable` — passing them across an `actor` boundary
+/// triggers strict-concurrency violations. `@MainActor` keeps `Account` instances inside
+/// the isolation domain they already live in. Operations are lightweight and HTTP calls
+/// are `async`-and-awaited, so suspending on main doesn't block the thread.
+@MainActor
+public final class AccountStore {
     private let modelContainer: ModelContainer
     private let clientId: String
 
