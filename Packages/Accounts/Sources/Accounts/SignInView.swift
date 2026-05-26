@@ -26,6 +26,17 @@ public struct SignInView: View {
         .userReadFollows,
     ]
 
+    /// Custom URL scheme registered in Info.plist + Twitch dev portal.
+    ///
+    /// We use a custom URL scheme (RFC 8252 — "OAuth 2.0 for Native Apps") instead of
+    /// TwitchKit's default `https://localhost` because `ASWebAuthenticationSession` only
+    /// intercepts callbacks for *custom* URL schemes — passing `callbackURLScheme: "https"`
+    /// silently fails because the system can't safely intercept arbitrary https traffic.
+    /// The full callback URI is `chattr://oauth-callback?code=...&state=...`.
+    private static let callbackScheme = "chattr"
+    private static let callbackHost = "oauth-callback"
+    private static var redirectURI: String { "\(callbackScheme)://\(callbackHost)" }
+
     public init(accountStore: AccountStore, clientId: String) {
         self.accountStore = accountStore
         self.clientId = clientId
@@ -88,9 +99,18 @@ public struct SignInView: View {
         defer { isSigningIn = false }
 
         do {
-            // 1. Build the OAuth URL.
-            let temporaryClient = TwitchClient(clientId: clientId, tokenStore: InMemoryTokenStore())
-            let authURL = temporaryClient.auth.authorizationCodeURL(scopes: Self.scopes)
+            // 1. Construct our own TwitchOAuthClient with the custom redirect URI.
+            //    We bypass `TwitchClient`'s facade here because TwitchClient hard-codes
+            //    TwitchOAuthClient's default `https://localhost` — we need our custom
+            //    `chattr://oauth-callback` for the ASWebAuthenticationSession intercept.
+            //    This OAuth client is used only for URL building + code exchange; once we
+            //    have the token, `AccountStore.add(...)` constructs its own clients with
+            //    Keychain-backed persistence.
+            let oauthClient = TwitchOAuthClient(
+                clientId: clientId,
+                redirectUri: Self.redirectURI
+            )
+            let authURL = oauthClient.authorizationCodeURL(scopes: Self.scopes)
 
             // 2–4. iOS-only: present ASWebAuthenticationSession, exchange code, persist account.
 #if canImport(UIKit)
@@ -105,14 +125,14 @@ public struct SignInView: View {
 
             let result = try await OAuthFlow.run(
                 authURL: authURL,
-                callbackScheme: "https",
-                callbackHost: "localhost",
+                callbackScheme: Self.callbackScheme,
+                callbackHost: Self.callbackHost,
                 presentationAnchor: anchor
             )
 
-            // 3. Exchange the code for tokens (use the same temporary client; it has the OAuthClient configured).
-            try await temporaryClient.auth.authenticate(withAuthorizationCode: result.code)
-            let token = try await temporaryClient.auth.tokenProvider.token()
+            // 3. Exchange the code for tokens directly via the OAuth client.
+            //    `exchangeAuthorizationCode` posts to /oauth2/token with our matching redirectUri.
+            let token = try await oauthClient.exchangeAuthorizationCode(result.code)
 
             // 4. Hand off to AccountStore — it does the /users probe + persistence.
             _ = try await accountStore.add(token: token, scopes: Self.scopes)
