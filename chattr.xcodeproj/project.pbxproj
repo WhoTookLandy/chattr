@@ -10,6 +10,7 @@
 		3FAB5CE02FC5BAD300054B6B /* TwitchKit in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CDF2FC5BAD300054B6B /* TwitchKit */; };
 		3FAB5CE32FC5C09000054B6B /* Core in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CE22FC5C09000054B6B /* Core */; };
 		3FAB5CE62FC5C0A400054B6B /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CE52FC5C0A400054B6B /* DesignSystem */; };
+		3FAB5CE92FC5C5B400054B6B /* Accounts in Frameworks */ = {isa = PBXBuildFile; productRef = 3FAB5CE82FC5C5B400054B6B /* Accounts */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,6 +60,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3FAB5CE92FC5C5B400054B6B /* Accounts in Frameworks */,
 				3FAB5CE62FC5C0A400054B6B /* DesignSystem in Frameworks */,
 				3FAB5CE02FC5BAD300054B6B /* TwitchKit in Frameworks */,
 				3FAB5CE32FC5C09000054B6B /* Core in Frameworks */,
@@ -130,6 +132,7 @@
 				3FAB5CDF2FC5BAD300054B6B /* TwitchKit */,
 				3FAB5CE22FC5C09000054B6B /* Core */,
 				3FAB5CE52FC5C0A400054B6B /* DesignSystem */,
+				3FAB5CE82FC5C5B400054B6B /* Accounts */,
 			);
 			productName = chattr;
 			productReference = 3FAB5C922FC5AA9200054B6B /* chattr.app */;
@@ -217,6 +220,7 @@
 				3FAB5CDE2FC5BAD300054B6B /* XCRemoteSwiftPackageReference "TwitchKit" */,
 				3FAB5CE12FC5C09000054B6B /* XCLocalSwiftPackageReference "Packages/Core" */,
 				3FAB5CE42FC5C0A400054B6B /* XCLocalSwiftPackageReference "Packages/DesignSystem" */,
+				3FAB5CE72FC5C5B400054B6B /* XCLocalSwiftPackageReference "Packages/Accounts" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3FAB5C932FC5AA9200054B6B /* Products */;
@@ -646,6 +650,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/DesignSystem;
 		};
+		3FAB5CE72FC5C5B400054B6B /* XCLocalSwiftPackageReference "Packages/Accounts" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/Accounts;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -672,6 +680,10 @@
 		3FAB5CE52FC5C0A400054B6B /* DesignSystem */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = DesignSystem;
+		};
+		3FAB5CE82FC5C5B400054B6B /* Accounts */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Accounts;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
