@@ -5,6 +5,10 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 xcuserdata/
 *.xcuserdata
+# Xcode 17 occasionally regenerates an empty .xcodeproj shell inside the
+# source folder after a project move. Ignore the stray; the real project
+# is at the repo root.
+chattr/chattr.xcodeproj/
 *.pbxuser
 !default.pbxuser
 *.mode1v3
