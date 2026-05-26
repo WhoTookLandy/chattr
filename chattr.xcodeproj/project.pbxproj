@@ -27,7 +27,8 @@
 		3FAB5C922FC5AA9200054B6B /* chattr.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = chattr.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FAB5C9F2FC5AA9300054B6B /* chattrTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = chattrTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FAB5CA92FC5AA9300054B6B /* chattrUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = chattrUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		3FAB5CC82FC5AFF800054B6B /* chattr.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = chattr.xcodeproj; sourceTree = "<group>"; };
+		3FAB5CCB2FC5B7F700054B6B /* chattr.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = chattr.xcodeproj; sourceTree = "<group>"; };
+		3FAB5CD02FC5B81000054B6B /* chattr.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = chattr.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -93,7 +94,12 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		3FAB5CC92FC5AFF800054B6B /* Products */ = {
+		3FAB5CCC2FC5B7F700054B6B /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3FAB5CD32FC5B81000054B6B /* Products */ = {
 			isa = PBXGroup;
 			name = Products;
 			sourceTree = "<group>";
@@ -206,8 +212,12 @@
 			projectDirPath = "";
 			projectReferences = (
 				{
-					ProductGroup = 3FAB5CC92FC5AFF800054B6B /* Products */;
-					ProjectRef = 3FAB5CC82FC5AFF800054B6B /* chattr.xcodeproj */;
+					ProductGroup = 3FAB5CCC2FC5B7F700054B6B /* Products */;
+					ProjectRef = 3FAB5CCB2FC5B7F700054B6B /* chattr.xcodeproj */;
+				},
+				{
+					ProductGroup = 3FAB5CD32FC5B81000054B6B /* Products */;
+					ProjectRef = 3FAB5CD02FC5B81000054B6B /* chattr.xcodeproj */;
 				},
 			);
 			projectRoot = "";
@@ -431,7 +441,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
@@ -473,7 +483,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
