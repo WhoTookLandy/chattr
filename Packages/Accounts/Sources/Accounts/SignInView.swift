@@ -7,10 +7,17 @@ import os
 
 private let logger = AppLogger.make("Accounts.SignInView")
 
-/// First-launch screen: presents a "Sign in with Twitch" button that runs the OAuth flow.
+/// First-launch screen: presents a "Sign in with Twitch" button that runs the OAuth flow
+/// via the Vercel bridge.
 ///
-/// On success, the new Account is persisted via `AccountStore.add(token:scopes:)` and the
-/// caller observes the change via SwiftData's `@Query`.
+/// The bridge exchanges the auth code for tokens server-side (so the client_secret stays
+/// off-device), then 302-redirects to `chattr://oauth-complete?access_token=...&...`.
+/// ASWebAuthenticationSession privileged-intercepts that custom scheme inside the auth
+/// sheet, and we extract the tokens directly. No `TwitchOAuthClient.exchangeAuthorizationCode`
+/// call is needed here — Vercel did the exchange already.
+///
+/// On success, the new Account is persisted via `AccountStore.add(token:scopes:)`. RootView's
+/// `@Query` observes the new SwiftData row and re-renders to ChannelListScreen automatically.
 public struct SignInView: View {
     private let accountStore: AccountStore
     private let clientId: String
@@ -26,16 +33,16 @@ public struct SignInView: View {
         .userReadFollows,
     ]
 
-    /// Universal Link components for the OAuth callback.
-    ///
-    /// We host a tiny Vercel project at this domain (`~/Dev/chattr-auth/`) that
-    /// serves an Apple App Site Association file declaring chattr handles
-    /// `/oauth/callback*` URLs as Universal Links. Twitch's dev portal accepts the
-    /// HTTPS URL (custom URL schemes are rejected); iOS silently intercepts the
-    /// navigation when it sees the Universal Link.
-    private static let callbackHost = "chattr-auth.vercel.app"
-    private static let callbackPath = "/oauth/callback"
-    private static var redirectURI: String { "https://\(callbackHost)\(callbackPath)" }
+    /// The redirect URI we instruct Twitch to send the auth code to. Must match the URL
+    /// registered at the Twitch dev portal and the URL the Vercel bridge expects at
+    /// `/oauth/callback`.
+    private static let redirectURI = "https://chattr-auth.vercel.app/oauth/callback"
+
+    /// Custom URL scheme the bridge 302-redirects to after exchanging the code for tokens.
+    /// Must be registered in the app's `Info.plist` under `CFBundleURLTypes`.
+    /// `ASWebAuthenticationSession.callbackURLScheme` accepts this and intercepts the
+    /// `chattr://` navigation before iOS would show "Open in chattr?".
+    private static let callbackScheme = "chattr"
 
     public init(accountStore: AccountStore, clientId: String) {
         self.accountStore = accountStore
@@ -92,8 +99,6 @@ public struct SignInView: View {
         }
     }
 
-    /// Run the full sign-in flow: build OAuth URL → present ASWebAuthenticationSession with
-    /// Universal Link callback → exchange code for tokens → persist account via AccountStore.
     @MainActor
     private func signIn() async {
         isSigningIn = true
@@ -101,9 +106,9 @@ public struct SignInView: View {
         defer { isSigningIn = false }
 
         do {
-            // 1. Construct our own TwitchOAuthClient so we can specify the custom redirect URI.
-            //    TwitchClient's facade init hardcodes the default `https://localhost`, which
-            //    we no longer want.
+            // Build the OAuth URL. We only use TwitchOAuthClient for URL construction —
+            // the actual code-for-token exchange happens server-side on the Vercel bridge,
+            // so we never pass (or store) a client_secret here.
             let oauthClient = TwitchOAuthClient(
                 clientId: clientId,
                 redirectUri: Self.redirectURI
@@ -111,7 +116,7 @@ public struct SignInView: View {
             let authURL = oauthClient.authorizationCodeURL(scopes: Self.scopes)
 
 #if canImport(UIKit)
-            // 2. Find the active window to anchor the ASWebAuthenticationSession sheet.
+            // Find an active window to anchor the ASWebAuthenticationSession sheet.
             guard
                 let scene = UIApplication.shared.connectedScenes
                     .first(where: { $0 is UIWindowScene }) as? UIWindowScene,
@@ -121,19 +126,16 @@ public struct SignInView: View {
                 return
             }
 
-            // 3. Present the sheet, await the Universal Link callback.
-            let result = try await OAuthFlow.run(
+            // Present the sheet, await the chattr:// callback carrying the exchanged tokens.
+            let token = try await OAuthFlow.run(
                 authURL: authURL,
-                callbackHost: Self.callbackHost,
-                callbackPath: Self.callbackPath,
+                callbackScheme: Self.callbackScheme,
                 presentationAnchor: anchor
             )
 
-            // 4. Exchange the code for tokens — same `oauthClient` is reused so the
-            //    redirect_uri parameter matches (Twitch validates it).
-            let token = try await oauthClient.exchangeAuthorizationCode(result.code)
-
-            // 5. Hand off to AccountStore — it does the /users probe + persistence.
+            // Hand off to AccountStore — it does the /users probe + Keychain persistence
+            // + SwiftData insert. RootView's @Query will observe the new Account row
+            // and transition away from this view automatically.
             _ = try await accountStore.add(token: token, scopes: Self.scopes)
             logger.info("Sign-in succeeded")
 #else

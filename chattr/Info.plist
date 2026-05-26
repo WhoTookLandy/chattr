@@ -2,5 +2,24 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!--
+	  URL scheme registration for the OAuth callback path. The Vercel bridge
+	  (chattr-auth.vercel.app) 302-redirects to chattr://oauth-complete after
+	  exchanging Twitch's authorization code for tokens; ASWebAuthenticationSession
+	  intercepts that scheme via its `callbackURLScheme: "chattr"` parameter.
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.landy.chattr.oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>chattr</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

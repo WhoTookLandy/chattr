@@ -2,21 +2,5 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!--
-	  Associated Domains for chattr OAuth.
-
-	  `webcredentials:` is REQUIRED for ASWebAuthenticationSession.Callback.https()
-	  (Twitch OAuth callback). `applinks:` is for future Universal Link deep-linking.
-
-	  `?mode=developer` makes iOS fetch the AASA file directly from
-	  chattr-auth.vercel.app instead of via Apple's CDN — useful while iterating on
-	  the AASA during development. Strip `?mode=developer` before TestFlight/App Store
-	  submission so iOS uses the production CDN-cached path.
-	-->
-	<key>com.apple.developer.associated-domains</key>
-	<array>
-		<string>applinks:chattr-auth.vercel.app?mode=developer</string>
-		<string>webcredentials:chattr-auth.vercel.app?mode=developer</string>
-	</array>
 </dict>
 </plist>
