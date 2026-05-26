@@ -28,7 +28,6 @@
 		3FAB5C9F2FC5AA9300054B6B /* chattrTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = chattrTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FAB5CA92FC5AA9300054B6B /* chattrUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = chattrUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FAB5CCB2FC5B7F700054B6B /* chattr.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = chattr.xcodeproj; sourceTree = "<group>"; };
-		3FAB5CD02FC5B81000054B6B /* chattr.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = chattr.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -95,11 +94,6 @@
 			sourceTree = "<group>";
 		};
 		3FAB5CCC2FC5B7F700054B6B /* Products */ = {
-			isa = PBXGroup;
-			name = Products;
-			sourceTree = "<group>";
-		};
-		3FAB5CD32FC5B81000054B6B /* Products */ = {
 			isa = PBXGroup;
 			name = Products;
 			sourceTree = "<group>";
@@ -214,10 +208,6 @@
 				{
 					ProductGroup = 3FAB5CCC2FC5B7F700054B6B /* Products */;
 					ProjectRef = 3FAB5CCB2FC5B7F700054B6B /* chattr.xcodeproj */;
-				},
-				{
-					ProductGroup = 3FAB5CD32FC5B81000054B6B /* Products */;
-					ProjectRef = 3FAB5CD02FC5B81000054B6B /* chattr.xcodeproj */;
 				},
 			);
 			projectRoot = "";
