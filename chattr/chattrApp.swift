@@ -3,11 +3,11 @@
 //  chattr
 //
 
-import SwiftUI
-import SwiftData
 import Accounts
 import Channels
 import Features
+import SwiftData
+import SwiftUI
 import TwitchKit
 
 @main
@@ -20,7 +20,7 @@ struct chattrApp: App {
     // is NOT required when using PKCE. (TwitchKit's TwitchOAuthClient handles
     // the flow.)
     // ────────────────────────────────────────────────────────────────────────
-    static let clientId = "TWITCH_CLIENT_ID_HERE"
+    static let clientId = "u39wc5fdx2ser9lkf8ntl9dzyj51dh"
 
     let modelContainer: ModelContainer
     let accountStore: AccountStore
