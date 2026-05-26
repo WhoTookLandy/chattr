@@ -1,6 +1,32 @@
 # TwitchKit Extraction (Phase 0) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **⚠️ STATUS: SUPERSEDED (2026-05-26) — historical artifact only.**
+>
+> This plan was written but **never executed task-by-task**. The implementer (Andrew) drove the extraction independently and arrived at a substantially better design than the plan sketched. The actual work lives in `~/Dev/twitch-kit/` (published as `github.com/AndrewBeshay/TwitchKit`); the authoritative record is its git log + README + CHANGELOG.
+>
+> **How reality differed from this plan (summary):**
+>
+> | Dimension | This plan | What was actually built |
+> |---|---|---|
+> | Repo name | `twitch-kit` / module `TwitchKit` | Same (✓) |
+> | Auth abstraction | Single `TokenStore` protocol | **Split into four:** `TwitchAccessTokenProvider` (token reading), `TwitchTokenStore` (persistence interface), `KeychainTokenStore` + `InMemoryTokenStore` (impls), `TwitchOAuthClient` (OAuth exchange). Cleaner separation of concerns. |
+> | Multi-account key | `KeychainTokenStore(identifier:)` | `TwitchClient(clientId:tokenNamespace:)` — `tokenNamespace` is a better name. |
+> | Scopes | `Scopes.viewer` / `Scopes.streamer` namespace constants | `TwitchScope` enum with `CaseIterable` strongly-typed cases (e.g. `.userReadChat` instead of `"user:read:chat"`). |
+> | Helix endpoints | ~8 viewer endpoints in one `HelixClient.swift` | **17 endpoint-group extension files** (`HelixClient+Users.swift`, `+Search.swift`, `+Chat.swift`, `+Moderation.swift`, …) covering far more API surface (viewer + streamer + mod + creator tools + channel points + polls + predictions + hype train + charity + schedule). |
+> | EventSub events | 4 new event types added on top of existing 3 | **Complete EventSub coverage** including chat events, mod events, channel points, polls, predictions, hype train, charity, shield mode, shoutouts, shared chat, AutoMod. Driven by `EventSubKnownEventType` enum (~50 cases) with rich payload types. |
+> | Pagination | Manual cursor passing per endpoint | `HelixPagedSequence<Element>: AsyncSequence` — `for try await x in client.followedChannels(userId:)` handles pagination invisibly. |
+> | HTTP transport | Default `URLSession.shared` with optional `urlSession:` parameter | `HTTPClient` protocol + `URLSessionHTTPClient` impl, fully injectable for tests. |
+> | Networking metadata | Not modeled | `HelixRateLimit` + `HelixResponseMetadata` exposed via optional `responseMetadataHandler` callback. |
+> | Retry policy | Hard-coded in `request<T>` | `HelixRetryPolicy: Sendable` value type, configurable per `TwitchClient`. |
+> | Versioning at audit time | `v0.1.0` target | `0.2.0-beta.2` — past the plan's milestone. |
+> | Distribution | Local SPM path (deferred publish) | Published to GitHub with CI, DocC, Swift Package Index registration, smoke-test executable target. |
+> | Streamly migration | Tasks 3, 8, 11, 27 in this plan | **Not done yet** — Andrew is doing it on his own timeline, on the `twitchkit-extraction` branch in Streamly. Out of scope for chattr work. |
+>
+> **Verdict from the chattr-needs audit (2026-05-26):** 100% coverage of chattr's documented requirements, with a substantial bonus surface. No gaps; chattr work proceeds against `branch: "main"` of the published package.
+>
+> The plan below is preserved unchanged for traceability — it captures how the work was initially framed.
+
+---
 
 **Goal:** Extract Streamly's local `TwitchKit` package to its own git repo at `~/Dev/twitch-kit/`, refactor it to support multi-account use (pluggable `TokenStore`), add viewer-side scopes + Helix endpoints, extend EventSub parsing for chat-side event types, and tag `v0.1.0` — all while keeping Streamly building at every commit.
 
