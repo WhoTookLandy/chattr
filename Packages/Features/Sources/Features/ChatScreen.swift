@@ -26,6 +26,11 @@ public struct ChatScreen: View {
     /// channel badges don't bleed into a different broadcaster's chat.
     @State private var badgeStore = ChatBadgeStore()
 
+    /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
+    /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
+    /// the binding also updates as the user scrolls manually (iOS 17+ API).
+    @State private var scrolledMessageId: String?
+
     /// Pre-cached global Twitch data (loaded once at app launch by RootView).
     /// We pass its global-badges slice into `badgeStore.load(...)` so the
     /// per-channel load skips the redundant /chat/badges/global fetch.
@@ -53,36 +58,45 @@ public struct ChatScreen: View {
     }
 
     public var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    if let errorMessage {
-                        Text(errorMessage)
-                            .foregroundStyle(.red)
-                            .padding()
-                    }
-                    ForEach(lines) { line in
-                        ChatRow(
-                            message: line,
-                            badgeEntries: badgeStore.entries(for: line.badges)
-                        )
-                        .id(line.messageId)
-                    }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 4) {
+                if let errorMessage {
+                    Text(errorMessage)
+                        .foregroundStyle(.red)
+                        .padding()
                 }
-                .padding(.horizontal)
+                ForEach(lines) { line in
+                    ChatRow(
+                        message: line,
+                        badgeEntries: badgeStore.entries(for: line.badges)
+                    )
+                    .id(line.messageId)
+                }
             }
-            .onChange(of: lines.count) { _, _ in
-                if let last = lines.last {
-                    withAnimation(.easeOut(duration: 0.1)) {
-                        proxy.scrollTo(last.messageId, anchor: .bottom)
-                    }
-                }
+            // `.scrollTargetLayout` tells the enclosing ScrollView to treat
+            // this LazyVStack's children's `.id(...)` values as anchor points
+            // for `.scrollPosition(id:)`. Without it, the position binding
+            // has nothing to attach to.
+            .scrollTargetLayout()
+            .padding(.horizontal)
+        }
+        // Declarative replacement for `ScrollViewReader { proxy.scrollTo(...) }`
+        // (iOS 17+). Writing to `scrolledMessageId` scrolls; the binding also
+        // updates as the user scrolls manually so we could read it later for
+        // "snap to bottom only when already at bottom" UX without changing
+        // this auto-scroll-on-new-message behavior.
+        .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
+        .onChange(of: lines.count) { _, _ in
+            guard let last = lines.last else { return }
+            withAnimation(.easeOut(duration: 0.1)) {
+                scrolledMessageId = last.messageId
             }
         }
         .navigationTitle("#\(channelLoginName)")
-#if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-#endif
+        // `.toolbarTitleDisplayMode` is cross-platform (iOS 17 / macOS 14+)
+        // unlike the older iOS-only `.navigationBarTitleDisplayMode`. No
+        // `#if os(iOS)` guard needed for SPM macOS host compilation.
+        .toolbarTitleDisplayMode(.inline)
         // Two structured tasks. Both are bound to this view's lifetime —
         // SwiftUI cancels them on tear-down (incl. when ChatTabsScreen swaps
         // the active channel via `.id(...)`).

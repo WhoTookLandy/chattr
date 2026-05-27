@@ -81,9 +81,9 @@ public struct SettingsScreen: View {
             }
         }
         .navigationTitle("Settings")
-        // `.navigationBarTitleDisplayMode(.inline)` would be the iOS-native choice
-        // here, but it's unavailable on the macOS host SPM uses for cross-platform
-        // package compilation. Form's default title rendering is acceptable.
+        // `.toolbarTitleDisplayMode` is cross-platform (iOS 17 / macOS 14+) —
+        // newer replacement for the iOS-only `.navigationBarTitleDisplayMode`.
+        .toolbarTitleDisplayMode(.inline)
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,

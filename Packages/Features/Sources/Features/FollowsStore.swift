@@ -48,6 +48,18 @@ public final class FollowsStore {
     public private(set) var totalFollowed: Int?
     public private(set) var allErrorMessage: String?
 
+    /// Memoized: `channels` sorted live-first (desc viewer count) with offline
+    /// channels in their original recently-followed order. Recomputed only when
+    /// `channels` or `liveStreams` actually change — moving this out of the
+    /// View's computed property avoids re-sorting on every keystroke in search
+    /// (the old code did O(n log n) per body recompute).
+    ///
+    /// Maintained by `recomputeSortedAllChannels()` which is called after every
+    /// page commit in `loadAll` and after every live-pagination commit in
+    /// `refreshLive`. Sort is stable: ties (same viewer count, or both offline)
+    /// resolve by original-index position in `channels`.
+    public private(set) var sortedAllChannels: [FollowedChannel] = []
+
     // MARK: - "Live" data set (foreground, refetched per visit)
 
     /// Live channels in Twitch's returned order (desc viewer count). Drives
@@ -123,6 +135,10 @@ public final class FollowsStore {
                 // Commit progressively so the UI sees streams as pages arrive.
                 liveStreamsOrdered = fresh
                 liveStreams = freshMap
+                // liveStreams changed — refresh the sort cache too so the
+                // All view's live-first ordering reflects the new live set
+                // as it arrives.
+                recomputeSortedAllChannels()
 
                 // Kick off profile enrichment for live channels not already cached.
                 let liveIds = page.data.map(\.userId)
@@ -158,6 +174,31 @@ public final class FollowsStore {
         liveStreams[broadcasterId] = nil
         liveStreamsOrdered.removeAll { $0.userId == broadcasterId }
         userProfiles[broadcasterId] = nil
+        recomputeSortedAllChannels()
+    }
+
+    // MARK: - Sorted cache maintenance
+
+    /// Recomputes `sortedAllChannels` from the current `channels` + `liveStreams`.
+    /// Called from every data-mutation site (page commits in `loadAll` and
+    /// `refreshLive`, plus `dropChannel`).
+    ///
+    /// We sort `(index, channel)` tuples and use the index as the tie-breaker
+    /// for the offline-vs-offline case — Swift's `sorted(by:)` is not
+    /// guaranteed stable, so we force stability explicitly.
+    private func recomputeSortedAllChannels() {
+        let indexed = channels.enumerated().map { ($0.offset, $0.element) }
+        let sorted = indexed.sorted { lhs, rhs in
+            let lViewers = liveStreams[lhs.1.broadcasterId]?.viewerCount
+            let rViewers = liveStreams[rhs.1.broadcasterId]?.viewerCount
+            switch (lViewers, rViewers) {
+            case let (l?, r?): return l > r
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none): return lhs.0 < rhs.0
+            }
+        }
+        sortedAllChannels = sorted.map { $0.1 }
     }
 
     // MARK: - Load implementation: All
@@ -191,6 +232,7 @@ public final class FollowsStore {
             liveStreams = [:]
             liveStreamsOrdered = []
             userProfiles = [:]
+            recomputeSortedAllChannels()
         }
 
         do {
@@ -217,6 +259,10 @@ public final class FollowsStore {
                 accumulated.append(contentsOf: page.data)
                 channels = accumulated
                 allLoadProgress = accumulated.count
+                // channels changed — refresh the sort cache. Per-page commit
+                // means the All view sees rows appearing in correct sorted
+                // order as pagination progresses.
+                recomputeSortedAllChannels()
 
                 if totalFollowed == nil, let total = page.total {
                     totalFollowed = total

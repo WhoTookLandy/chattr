@@ -45,9 +45,7 @@ public struct ChatTabsScreen: View {
             }
         }
         .navigationTitle("Chat")
-#if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-#endif
+        .toolbarTitleDisplayMode(.inline)
     }
 
     /// Renders the ChatScreen for the currently-active channel. `.id(...)`

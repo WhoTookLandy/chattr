@@ -28,6 +28,10 @@ public struct ChannelListScreen: View {
     @State private var showingSignOutConfirm = false
     @State private var searchText: String = ""
     @State private var errorMessage: String?
+    /// Guards the failed-state Sign Out button against double-taps during an
+    /// in-flight signout. Mirrors SettingsScreen's same-named state — both
+    /// sign-out entry points should behave identically.
+    @State private var isSigningOut = false
 
     @AppStorage("followsViewMode") private var rawViewMode: String = ViewMode.live.rawValue
 
@@ -66,27 +70,21 @@ public struct ChannelListScreen: View {
 
     // MARK: - Sorting + filtering
 
-    /// All channels sorted live-first (descending by viewer count), with
-    /// offline channels in their original recently-followed order.
+    /// All channels sorted live-first (desc viewer count) with offline ones in
+    /// original order. Read from the store's memoized cache rather than
+    /// recomputed here — the sort lives in `FollowsStore.sortedAllChannels`
+    /// and only updates when `channels` or `liveStreams` actually change,
+    /// rather than once per body invocation (which previously meant once per
+    /// keystroke in search).
     private var sortedAllChannels: [FollowedChannel] {
-        let indexed = channels.enumerated().map { ($0.offset, $0.element) }
-        let sorted = indexed.sorted { lhs, rhs in
-            let lViewers = liveStreamsDict[lhs.1.broadcasterId]?.viewerCount
-            let rViewers = liveStreamsDict[rhs.1.broadcasterId]?.viewerCount
-            switch (lViewers, rViewers) {
-            case let (l?, r?): return l > r
-            case (.some, .none): return true
-            case (.none, .some): return false
-            case (.none, .none): return lhs.0 < rhs.0
-            }
-        }
-        return sorted.map { $0.1 }
+        followsStore?.sortedAllChannels ?? []
     }
 
     private var filteredAllChannels: [FollowedChannel] {
-        guard !searchText.isEmpty else { return sortedAllChannels }
+        let sorted = sortedAllChannels
+        guard !searchText.isEmpty else { return sorted }
         let query = searchText.lowercased()
-        return sortedAllChannels.filter { channel in
+        return sorted.filter { channel in
             channel.broadcasterName.lowercased().contains(query)
                 || channel.broadcasterLogin.lowercased().contains(query)
         }
@@ -296,6 +294,7 @@ public struct ChannelListScreen: View {
                 showingSignOutConfirm = true
             }
             .buttonStyle(.borderedProminent)
+            .disabled(isSigningOut)
             .padding(.bottom, 32)
         }
     }
@@ -379,6 +378,8 @@ public struct ChannelListScreen: View {
 
     @MainActor
     private func signOut() async {
+        isSigningOut = true
+        defer { isSigningOut = false }
         do {
             try await accountStore.remove(account: account)
             logger.info("Signed out @\(account.login)")
