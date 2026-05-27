@@ -21,6 +21,10 @@ public struct ChatScreen: View {
     @State private var session: ChannelSession?
     @State private var lines: [ChatMessage] = []
     @State private var errorMessage: String?
+    /// Per-channel badge cache. Reset implicitly when the screen pushes a new
+    /// instance — each NavigationLink push creates a fresh `@State` so old
+    /// channel badges don't bleed into a different broadcaster's chat.
+    @State private var badgeStore = ChatBadgeStore()
 
     public init(
         account: Account,
@@ -46,8 +50,11 @@ public struct ChatScreen: View {
                             .padding()
                     }
                     ForEach(lines) { line in
-                        ChatRow(message: line)
-                            .id(line.messageId)
+                        ChatRow(
+                            message: line,
+                            badgeEntries: badgeStore.entries(for: line.badges)
+                        )
+                        .id(line.messageId)
                     }
                 }
                 .padding(.horizontal)
@@ -69,6 +76,17 @@ public struct ChatScreen: View {
 
     @MainActor
     private func startSession() async {
+        // Kick off badge fetch in parallel — doesn't block chat from appearing.
+        // Each ChatRow looks up its badges synchronously via badgeStore once the
+        // fetch completes; until then rows just render without the icon block.
+        Task {
+            await badgeStore.load(
+                account: account,
+                accountStore: accountStore,
+                channelId: channelId
+            )
+        }
+
         do {
             let client = accountStore.client(for: account)
             let session = ChannelSession(
