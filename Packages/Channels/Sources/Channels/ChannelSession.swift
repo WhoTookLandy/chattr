@@ -34,9 +34,6 @@ public actor ChannelSession {
     private var coalesceTask: Task<Void, Never>?
     private var lastEmittedCount: Int = 0
 
-    /// EventSub event-listening task. Cancelled on `stop()`.
-    private var listenerTask: Task<Void, Never>?
-
     /// ID of the active EventSub subscription, captured from the record that
     /// `subscribe(...)` returns. `nil` when:
     ///   - `start()` hasn't been called yet
@@ -110,16 +107,12 @@ public actor ChannelSession {
         }
         logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName)")
 
-        // Start listening for events.
-        listenerTask?.cancel()
-        listenerTask = Task { [weak self] in
-            guard let self else { return }
-            let stream = self.client.eventSub.events
-            for await event in stream {
-                guard !Task.isCancelled else { return }
-                await self.handle(event: event)
-            }
-        }
+        // NOTE: We deliberately do NOT iterate `client.eventSub.events` here.
+        // That AsyncStream is single-consumer — if every ChannelSession had its
+        // own iterator, the events would get split unpredictably between them
+        // and messages would silently drop. Instead, `ChannelSessionRegistry`
+        // owns one shared dispatcher Task per client that consumes the stream
+        // once and routes each event to the matching session via `handle(event:)`.
     }
 
     /// Stops the session: deletes the EventSub subscription on Twitch's side,
@@ -146,17 +139,20 @@ public actor ChannelSession {
             activeSubscriptionId = nil
         }
 
-        // 2. Local cleanup — cancel tasks. The lines AsyncStream stays open
-        //    (deinit will finish it) so any in-flight consumers see the end.
-        listenerTask?.cancel()
-        listenerTask = nil
+        // 2. Local cleanup — cancel the coalesce timer. The lines AsyncStream
+        //    stays open (deinit will finish it) so any in-flight consumers see
+        //    the end. No listenerTask to cancel — see comment in start().
         coalesceTask?.cancel()
         coalesceTask = nil
     }
 
-    // MARK: - Private
-
-    private func handle(event: EventSubEvent) {
+    /// Driven by `ChannelSessionRegistry`'s shared event dispatcher — the
+    /// registry pulls events off `client.eventSub.events` once and calls this
+    /// on the session whose `channelId` matches the event's broadcaster ID.
+    ///
+    /// `internal` (default access) rather than `private` so the registry can
+    /// call it. Module boundary keeps it from leaking out.
+    func handle(event: EventSubEvent) {
         guard let message = Self.extractChatMessage(from: event) else { return }
         guard message.broadcasterUserId == channelId else { return }
 
@@ -194,5 +190,21 @@ public actor ChannelSession {
     private static func extractChatMessage(from event: EventSubEvent) -> ChatMessage? {
         if case let .chatMessage(message) = event { return message }
         return nil
+    }
+
+    /// Pulls the broadcaster user ID out of any EventSub event we know how to
+    /// route. Used by `ChannelSessionRegistry`'s dispatcher to look up the
+    /// owning session before calling `handle(event:)`. Returns nil for event
+    /// types we don't subscribe to (those would never have an owning session
+    /// anyway — defensive).
+    public static func broadcasterUserId(from event: EventSubEvent) -> String? {
+        switch event {
+        case let .chatMessage(message):
+            return message.broadcasterUserId
+        default:
+            // Future event types (channel.subscribe, channel.raid, etc.) would
+            // add their cases here.
+            return nil
+        }
     }
 }
