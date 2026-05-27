@@ -96,22 +96,15 @@ struct ChannelRow: View {
 
 extension ChannelRow {
     /// Initialize from a `FollowedChannel` (the All view's data source).
+    ///
+    /// There used to be a `TwitchStream`-source overload here too, but the
+    /// Live tab moved to `LiveStreamRow` (with thumbnail + game + tags) so
+    /// this row is now All-tab-only. If we ever bring a compact stream view
+    /// back, restore the TwitchStream convenience init.
     init(channel: FollowedChannel, stream: TwitchStream?, profileImageURL: URL?) {
         self.init(
             displayName: channel.broadcasterName,
             loginName: channel.broadcasterLogin,
-            stream: stream,
-            profileImageURL: profileImageURL
-        )
-    }
-
-    /// Initialize from a `TwitchStream` (the Live view's data source).
-    /// `stream` is non-nil here because by definition the source is a live
-    /// stream — the LIVE badge always shows.
-    init(stream: TwitchStream, profileImageURL: URL?) {
-        self.init(
-            displayName: stream.userName,
-            loginName: stream.userLogin,
             stream: stream,
             profileImageURL: profileImageURL
         )

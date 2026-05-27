@@ -211,10 +211,9 @@ public struct ChannelListScreen: View {
                             .flatMap { URL(string: $0.profileImageUrl) }
                         openChannel?(stream: stream, profileImageURL: profileURL)
                     } label: {
-                        ChannelRow(
+                        LiveStreamRow(
                             stream: stream,
-                            profileImageURL: userProfiles[stream.userId]
-                                .flatMap { URL(string: $0.profileImageUrl) }
+                            profile: userProfiles[stream.userId]
                         )
                     }
                     .buttonStyle(.plain)
