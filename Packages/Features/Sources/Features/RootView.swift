@@ -19,6 +19,12 @@ public struct RootView: View {
     @Query(sort: \Account.addedAt, order: .reverse)
     private var accounts: [Account]
 
+    /// App-wide cache of global badges + emotes. Owned here so it survives
+    /// channel-list / chat-screen navigation but gets re-instantiated if the
+    /// whole RootView is unmounted (e.g. on full sign-out — though we're
+    /// keeping the data across sign-outs is also fine since it's not auth-specific).
+    @State private var globalCatalog = GlobalCatalog()
+
     public init(accountStore: AccountStore, clientId: String) {
         self.accountStore = accountStore
         self.clientId = clientId
@@ -34,12 +40,21 @@ public struct RootView: View {
                 SignInView(accountStore: accountStore, clientId: clientId)
             }
         }
+        .environment(\.globalCatalog, globalCatalog)
         .onChange(of: accounts.first?.userId) { _, newId in
             // AccountStore is @MainActor; setActive is sync — no Task wrapper / await needed.
             // (The plan template had Task { await ... } from the older actor design.)
             if let newId {
                 accountStore.setActive(userId: newId)
             }
+        }
+        // Pre-fetch global Twitch data once on first sign-in. `.task(id:)` re-fires
+        // when the active userId changes (nil → userId, or A → B on account swap);
+        // the catalog's `hasLoaded` guard makes subsequent fires no-ops, so we
+        // don't refetch on account swap. Cancellation is automatic on view tear-down.
+        .task(id: accounts.first?.userId) {
+            guard let active = accounts.first else { return }
+            await globalCatalog.load(account: active, accountStore: accountStore)
         }
     }
 }

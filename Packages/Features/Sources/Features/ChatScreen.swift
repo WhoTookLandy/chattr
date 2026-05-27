@@ -26,6 +26,11 @@ public struct ChatScreen: View {
     /// channel badges don't bleed into a different broadcaster's chat.
     @State private var badgeStore = ChatBadgeStore()
 
+    /// Pre-cached global Twitch data (loaded once at app launch by RootView).
+    /// We pass its global-badges slice into `badgeStore.load(...)` so the
+    /// per-channel load skips the redundant /chat/badges/global fetch.
+    @Environment(\.globalCatalog) private var globalCatalog
+
     public init(
         account: Account,
         accountStore: AccountStore,
@@ -79,11 +84,19 @@ public struct ChatScreen: View {
         // Kick off badge fetch in parallel — doesn't block chat from appearing.
         // Each ChatRow looks up its badges synchronously via badgeStore once the
         // fetch completes; until then rows just render without the icon block.
+        //
+        // Capture the catalog's current globalBadges snapshot before spawning the
+        // Task — keeps the closure Sendable-friendly and avoids reading @Environment
+        // from a non-main context. If the catalog hasn't loaded yet (or the env
+        // value is nil — e.g. previews), the store falls back to fetching global
+        // itself, so chat still works.
+        let cachedGlobalBadges = globalCatalog?.globalBadges ?? [:]
         Task {
             await badgeStore.load(
                 account: account,
                 accountStore: accountStore,
-                channelId: channelId
+                channelId: channelId,
+                globalBadges: cachedGlobalBadges
             )
         }
 

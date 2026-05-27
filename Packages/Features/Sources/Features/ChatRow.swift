@@ -16,7 +16,7 @@ import DesignSystem
 /// recomputation.
 struct ChatRow: View {
     let message: ChatMessage
-    let badgeEntries: [ChatBadgeStore.BadgeEntry]
+    let badgeEntries: [ChatBadgeEntry]
 
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
@@ -83,7 +83,7 @@ struct ChatRow: View {
 /// from 72px (source 4x) to 54px physical pixels on @3x devices. Without
 /// high-quality interpolation, edges look jagged on small icons.
 private struct BadgeImage: View {
-    let entry: ChatBadgeStore.BadgeEntry
+    let entry: ChatBadgeEntry
 
     var body: some View {
         AsyncImage(url: entry.url) { phase in
