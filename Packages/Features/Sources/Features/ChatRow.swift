@@ -1,17 +1,27 @@
 import SwiftUI
 import TwitchKit
+import DesignSystem
 
 /// One chat-message row: bold username followed by inline-rendered fragments
 /// (text, Twitch emote images, @mention highlights, cheermote text).
+///
+/// Username color is HSL-lightness-clamped per color scheme — see
+/// `Color.twitchUsername(hex:scheme:)` in DesignSystem. Twitch's user-picked
+/// colors are tuned for dark UIs; without clamping, bright yellows / pale
+/// pastels are unreadable on light backgrounds.
 struct ChatRow: View {
     let message: ChatMessage
+
+    /// Read once per row so the username color recomputes when the user toggles
+    /// theme in Settings. (Environment changes trigger a re-render.)
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         FlowLayout(spacing: 4, alignment: .firstTextBaseline) {
             // Username prefix
             Text(message.chatterUserName)
                 .font(.callout.weight(.semibold))
-                .foregroundStyle(color)
+                .foregroundStyle(usernameColor)
             Text(":")
                 .foregroundStyle(.secondary)
 
@@ -43,27 +53,10 @@ struct ChatRow: View {
         }
     }
 
-    /// Best-effort author color. Falls back to neutral when not parseable.
-    private var color: Color {
-        guard !message.color.isEmpty,
-              let parsed = Color(hex: message.color) else {
-            return .primary
-        }
-        return parsed
-    }
-}
-
-// MARK: - Color hex helper
-
-/// Tiny helper: Color from "#RRGGBB" string.
-private extension Color {
-    init?(hex: String) {
-        var s = hex
-        if s.hasPrefix("#") { s.removeFirst() }
-        guard s.count == 6, let v = UInt64(s, radix: 16) else { return nil }
-        let r = Double((v >> 16) & 0xff) / 255
-        let g = Double((v >> 8) & 0xff) / 255
-        let b = Double(v & 0xff) / 255
-        self.init(red: r, green: g, blue: b)
+    /// Per-row username color. Empty `message.color` (user hasn't picked one)
+    /// falls back to `.primary` so the system handles light/dark automatically.
+    private var usernameColor: Color {
+        guard !message.color.isEmpty else { return .primary }
+        return .twitchUsername(hex: message.color, scheme: colorScheme)
     }
 }

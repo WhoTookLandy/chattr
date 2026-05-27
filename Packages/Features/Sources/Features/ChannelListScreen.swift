@@ -32,7 +32,6 @@ public struct ChannelListScreen: View {
     @State private var loadProgress: Int = 0
     @State private var totalFollowed: Int?
     @State private var errorMessage: String?
-    @State private var isSigningOut = false
     @State private var showingSignOutConfirm = false
     @State private var searchText: String = ""
 
@@ -104,18 +103,17 @@ public struct ChannelListScreen: View {
         .navigationTitle("\(account.displayName)'s Follows")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button(role: .destructive) {
-                        showingSignOutConfirm = true
-                    } label: {
-                        Label("Sign out @\(account.login)", systemImage: "rectangle.portrait.and.arrow.right")
-                    }
+                NavigationLink {
+                    SettingsScreen(account: account, accountStore: accountStore)
                 } label: {
-                    Image(systemName: "person.crop.circle")
+                    Image(systemName: "gearshape")
+                        .accessibilityLabel("Settings")
                 }
-                .disabled(isSigningOut)
             }
         }
+        // failedView's "Sign out and try again" button still triggers this dialog —
+        // we keep it here so that recovery path works even when the user can't
+        // reach Settings (e.g. initial-load failure with no channels).
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,
@@ -273,8 +271,6 @@ public struct ChannelListScreen: View {
     /// re-renders to SignInView automatically — no manual navigation needed.
     @MainActor
     private func signOut() async {
-        isSigningOut = true
-        defer { isSigningOut = false }
         do {
             try await accountStore.remove(account: account)
             logger.info("Signed out @\(account.login)")

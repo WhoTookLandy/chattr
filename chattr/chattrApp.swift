@@ -5,6 +5,7 @@
 
 import Accounts
 import Channels
+import DesignSystem
 import Features
 import SwiftData
 import SwiftUI
@@ -35,10 +36,19 @@ struct chattrApp: App {
         }
     }
 
+    /// Observed by `@AppStorage`; SettingsScreen writes through the same key
+    /// so changes propagate without manual notification plumbing.
+    @AppStorage(AppearanceMode.storageKey) private var appearanceModeRaw: String = AppearanceMode.system.rawValue
+
     var body: some Scene {
         WindowGroup {
             RootView(accountStore: accountStore, clientId: Self.clientId)
                 .modelContainer(modelContainer)
+                // nil = follow system (the default). SwiftUI's preferredColorScheme
+                // recurses through child environments, so all sheets/navs honor it.
+                .preferredColorScheme(
+                    (AppearanceMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme
+                )
         }
     }
 }
