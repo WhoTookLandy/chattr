@@ -83,22 +83,18 @@ public struct ChatScreen: View {
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
 #endif
-        .task { await startSession() }
-    }
-
-    @MainActor
-    private func startSession() async {
-        // Kick off badge fetch in parallel — doesn't block chat from appearing.
-        // Each ChatRow looks up its badges synchronously via badgeStore once the
-        // fetch completes; until then rows just render without the icon block.
+        // Two structured tasks. Both are bound to this view's lifetime —
+        // SwiftUI cancels them on tear-down (incl. when ChatTabsScreen swaps
+        // the active channel via `.id(...)`).
         //
-        // Capture the catalog's current globalBadges snapshot before spawning the
-        // Task — keeps the closure Sendable-friendly and avoids reading @Environment
-        // from a non-main context. If the catalog hasn't loaded yet (or the env
-        // value is nil — e.g. previews), the store falls back to fetching global
-        // itself, so chat still works.
-        let cachedGlobalBadges = globalCatalog?.globalBadges ?? [:]
-        Task {
+        // Splitting badge-load into its own .task means the session connect
+        // and the badge fetch run in parallel, AND we don't leak an
+        // unstructured Task per channel switch (the previous code spawned
+        // `Task { await badgeStore.load(...) }` inside startSession, which
+        // outlived the view).
+        .task { await startSession() }
+        .task {
+            let cachedGlobalBadges = globalCatalog?.globalBadges ?? [:]
             await badgeStore.load(
                 account: account,
                 accountStore: accountStore,
@@ -106,7 +102,12 @@ public struct ChatScreen: View {
                 globalBadges: cachedGlobalBadges
             )
         }
+    }
 
+    @MainActor
+    private func startSession() async {
+        // Badge load runs in a sibling .task modifier (see body) — gives us
+        // structured-cancellation parity with this session-start task.
         guard let registry = channelSessionRegistry else {
             errorMessage = "Couldn't open chat: missing session registry"
             logger.error("ChatScreen has no registry in environment — was RootView injected?")
@@ -127,21 +128,26 @@ public struct ChatScreen: View {
 
             // Bridge AsyncStream → @State updates on the main actor.
             //
-            // Caveat: AsyncStream supports a single consumer at a time. When
-            // ChatScreen unmounts, this Task is cancelled and the iterator is
-            // abandoned. On re-mount (re-entry) we start a fresh iteration on
-            // the same stream — relying on the fact that each yield carries
-            // the full ring buffer, so the next yield after re-subscribe
+            // Note: this loop runs *inside* the .task body (no nested Task).
+            // That means when ChatScreen unmounts or its `.id(channelId)`
+            // changes, the .task is cancelled and this for-await exits cleanly
+            // — no leaked Task that keeps consuming session.lines forever.
+            //
+            // Caveat: AsyncStream is single-consumer. When we re-enter a
+            // channel, we start a fresh iteration on the same stream — relying
+            // on each yield carrying the full ring buffer, so the next yield
             // delivers the current state. If we ever see stale chat on
-            // re-entry, the fix is to add a `currentSnapshot()` actor method
-            // and prime `lines` from it before starting the for-await.
-            Task { [session] in
-                for await snapshot in session.lines {
-                    await MainActor.run {
-                        self.lines = snapshot
-                    }
-                }
+            // re-entry, the fix is a `currentSnapshot()` actor method that
+            // primes `lines` before starting the for-await.
+            for await snapshot in session.lines {
+                self.lines = snapshot
             }
+        } catch is CancellationError {
+            // Expected on view tear-down / channel-tab switch. The .id(channelId)
+            // modifier in ChatTabsScreen forces a fresh ChatScreen instance per
+            // channel; the outgoing instance's `try await registry.session(...)`
+            // gets cancelled in flight. Silently exit — don't show a red error.
+            logger.info("ChatScreen session-start cancelled for #\(channelLoginName)")
         } catch {
             errorMessage = "Couldn't open chat: \(error.localizedDescription)"
             logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")

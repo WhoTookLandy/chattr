@@ -83,6 +83,19 @@ public actor ChannelSession {
             logger.info("EventSub subscribe returned unauthorized; refreshing tokens and retrying")
             try await refreshTokenHandler()
             try await client.eventSub.subscribe(subscription)
+        } catch HelixError.conflict {
+            // 409 means "you already have a subscription for this (type, condition)".
+            // This happens when:
+            //   - The user closed a channel tab (we destroyed the local session) but
+            //     TwitchKit hasn't yet exposed DELETE /eventsub/subscriptions, so the
+            //     subscription on Twitch's side is still active.
+            //   - The user re-opens the channel — we make a fresh session and try to
+            //     subscribe again.
+            // The right behavior is to treat this as success: we ARE subscribed, the
+            // events will flow through our WebSocket as usual, and our local listener
+            // task below will pick them up. The duplicate subscription will be cleaned
+            // up by Twitch when the WebSocket disconnects.
+            logger.info("EventSub already subscribed to channel.chat.message for #\(self.channelLoginName) — reusing existing subscription")
         }
         logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName)")
 

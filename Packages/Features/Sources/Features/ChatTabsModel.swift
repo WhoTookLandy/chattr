@@ -53,6 +53,19 @@ public final class ChatTabsModel {
     /// shows its empty-state CTA in that case).
     public var activeChannelId: String?
 
+    /// Called when a tab is closed. AppShell wires this to
+    /// `registry.leave(accountUserId:channelId:)` so the underlying
+    /// `ChannelSession` is freed — otherwise sessions would accumulate
+    /// indefinitely in the registry as the user opens/closes channels.
+    ///
+    /// Memory consequence: without this callback, every closed channel's
+    /// `ChannelSession` (ring buffer + listener task + EventSub state) stays
+    /// alive until app restart. With it wired, close-X truly releases
+    /// resources. Re-opening the same channel still works because
+    /// `ChannelSession.start()` now tolerates `HelixError.conflict` (the
+    /// EventSub subscription on Twitch's side may still exist).
+    public var onClose: (@MainActor (String) async -> Void)?
+
     public init() {}
 
     /// Adds the descriptor as a tab (or moves it to active if already open)
@@ -64,13 +77,18 @@ public final class ChatTabsModel {
         activeChannelId = descriptor.channelId
     }
 
-    /// Closes the tab for `channelId`. If the closed tab was active, falls
-    /// back to the first remaining (or `nil` if none).
+    /// Closes the tab for `channelId`. Updates UI state synchronously (so the
+    /// pill disappears immediately) and fires the `onClose` callback in a
+    /// detached Task to let AppShell free the underlying session. If the
+    /// closed tab was active, falls back to the first remaining (or `nil`).
     public func close(channelId: String) {
         let wasActive = (activeChannelId == channelId)
         openChannels.removeAll { $0.channelId == channelId }
         if wasActive {
             activeChannelId = openChannels.first?.channelId
+        }
+        if let onClose {
+            Task { await onClose(channelId) }
         }
     }
 }

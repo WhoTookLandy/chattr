@@ -90,8 +90,11 @@ public final class GlobalCatalog {
                 try await client.api.fetchGlobalEmotes()
             }
             // Reduce to (id → emote) so future emote-picker lookups are O(1).
-            // We don't need the full array — the only use case is by-id resolution.
-            return Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
+            // Use `reduce(into:)` (last-wins) rather than `Dictionary(uniqueKeysWithValues:)`
+            // which traps on duplicate keys — Twitch shouldn't return duplicate emote
+            // IDs but the trap is a runtime crash that we'd rather not eat on a
+            // malformed-API regression.
+            return list.reduce(into: [:]) { $0[$1.id] = $1 }
         } catch {
             logger.error("GlobalCatalog emote fetch failed: \(error.localizedDescription)")
             return [:]

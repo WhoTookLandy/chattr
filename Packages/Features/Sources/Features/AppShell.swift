@@ -1,5 +1,6 @@
 import SwiftUI
 import Accounts
+import Channels
 
 /// Top-level navigation shell for a signed-in user: a TabView with two tabs.
 ///
@@ -25,6 +26,9 @@ public struct AppShell: View {
 
     @State private var selectedTab: Tab = .follows
     @State private var chatTabsModel = ChatTabsModel()
+
+    /// Read from environment so we can wire close-X → registry.leave below.
+    @Environment(\.channelSessionRegistry) private var channelSessionRegistry
 
     enum Tab: Hashable, Sendable {
         case follows, chat
@@ -74,5 +78,16 @@ public struct AppShell: View {
             ))
             selectedTab = .chat
         })
+        // Wire close-X to actually free the underlying ChannelSession.
+        // Without this, sessions accumulate in the registry indefinitely as the
+        // user opens and closes channels. ChannelSession.start() tolerates
+        // HelixError.conflict on re-open (Twitch's subscription persists across
+        // close until WebSocket disconnect), so this cleanup is safe — the user
+        // can close a channel and re-open it without breakage.
+        .onAppear {
+            chatTabsModel.onClose = { [accountUserId = account.userId] channelId in
+                await channelSessionRegistry?.leave(accountUserId: accountUserId, channelId: channelId)
+            }
+        }
     }
 }
