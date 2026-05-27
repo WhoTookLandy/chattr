@@ -1,6 +1,10 @@
 import SwiftUI
 import TwitchKit
 
+// Slice-2 interlude: AsyncImage-backed. Slice-2 T16 replaces this with a
+// Nuke-backed `InlineEmoteView` for animated WebP + emote prefetch.
+// See docs/superpowers/specs/2026-05-24-chattr-design.md (Image / emote loading).
+
 /// Loads and displays a single Twitch native emote from the CDN.
 /// Falls back to the literal text name while loading or on failure.
 struct TwitchEmoteImage: View {
