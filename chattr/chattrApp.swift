@@ -25,12 +25,19 @@ struct chattrApp: App {
 
     let modelContainer: ModelContainer
     let accountStore: AccountStore
+    /// App-wide registry of live `ChannelSession`s. Owned by the app (not by
+    /// any view) so chat sessions survive view-tree churn — re-entering a
+    /// channel returns the existing session rather than creating a new one
+    /// that would try (and fail) to re-subscribe to the same EventSub topic.
+    let channelSessionRegistry: ChannelSessionRegistry
 
     init() {
         do {
             let container = try ModelContainer(for: Account.self, JoinedChannel.self)
             self.modelContainer = container
-            self.accountStore = AccountStore(modelContainer: container, clientId: Self.clientId)
+            let store = AccountStore(modelContainer: container, clientId: Self.clientId)
+            self.accountStore = store
+            self.channelSessionRegistry = ChannelSessionRegistry(accountStore: store)
         } catch {
             fatalError("Failed to initialize SwiftData: \(error)")
         }
@@ -42,13 +49,17 @@ struct chattrApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(accountStore: accountStore, clientId: Self.clientId)
-                .modelContainer(modelContainer)
-                // nil = follow system (the default). SwiftUI's preferredColorScheme
-                // recurses through child environments, so all sheets/navs honor it.
-                .preferredColorScheme(
-                    (AppearanceMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme
-                )
+            RootView(
+                accountStore: accountStore,
+                clientId: Self.clientId,
+                channelSessionRegistry: channelSessionRegistry
+            )
+            .modelContainer(modelContainer)
+            // nil = follow system (the default). SwiftUI's preferredColorScheme
+            // recurses through child environments, so all sheets/navs honor it.
+            .preferredColorScheme(
+                (AppearanceMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme
+            )
         }
     }
 }

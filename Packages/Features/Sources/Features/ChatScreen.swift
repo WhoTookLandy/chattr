@@ -31,6 +31,13 @@ public struct ChatScreen: View {
     /// per-channel load skips the redundant /chat/badges/global fetch.
     @Environment(\.globalCatalog) private var globalCatalog
 
+    /// App-wide session registry — `ChatScreen` *must* go through this to
+    /// fetch a session rather than constructing one directly. The registry
+    /// caches sessions by (userId, channelId), so re-entering a channel
+    /// returns the existing already-subscribed session instead of trying to
+    /// re-subscribe (Twitch rejects re-subscribe with "already subscribed").
+    @Environment(\.channelSessionRegistry) private var channelSessionRegistry
+
     public init(
         account: Account,
         accountStore: AccountStore,
@@ -100,19 +107,34 @@ public struct ChatScreen: View {
             )
         }
 
+        guard let registry = channelSessionRegistry else {
+            errorMessage = "Couldn't open chat: missing session registry"
+            logger.error("ChatScreen has no registry in environment — was RootView injected?")
+            return
+        }
+
         do {
-            let client = accountStore.client(for: account)
-            let session = ChannelSession(
-                client: client,
+            // Registry returns the cached session if one exists for this
+            // (userId, channelId), or constructs + starts a new one. Either
+            // way the session is already-running by the time we get it.
+            let session = try await registry.session(
+                account: account,
                 channelId: channelId,
-                channelLoginName: channelLoginName,
-                accountUserId: account.userId
+                channelLoginName: channelLoginName
             )
-            try await session.start()
             self.session = session
-            logger.info("ChatScreen started session for #\(channelLoginName)")
+            logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
 
             // Bridge AsyncStream → @State updates on the main actor.
+            //
+            // Caveat: AsyncStream supports a single consumer at a time. When
+            // ChatScreen unmounts, this Task is cancelled and the iterator is
+            // abandoned. On re-mount (re-entry) we start a fresh iteration on
+            // the same stream — relying on the fact that each yield carries
+            // the full ring buffer, so the next yield after re-subscribe
+            // delivers the current state. If we ever see stale chat on
+            // re-entry, the fix is to add a `currentSnapshot()` actor method
+            // and prime `lines` from it before starting the for-await.
             Task { [session] in
                 for await snapshot in session.lines {
                     await MainActor.run {
@@ -122,7 +144,7 @@ public struct ChatScreen: View {
             }
         } catch {
             errorMessage = "Couldn't open chat: \(error.localizedDescription)"
-            logger.error("ChatScreen start failed: \(error.localizedDescription)")
+            logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")
         }
     }
 }
