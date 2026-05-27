@@ -20,7 +20,7 @@ struct chattrApp: App {
     // is NOT required when using PKCE. (TwitchKit's TwitchOAuthClient handles
     // the flow.)
     // ────────────────────────────────────────────────────────────────────────
-    static let clientId = "u39wc5fdx2ser9lkf8ntl9dzyj51dh"
+    static let clientId = "b3lzm4vxuqw81u2gb478deff8o3tmh"
 
     let modelContainer: ModelContainer
     let accountStore: AccountStore
