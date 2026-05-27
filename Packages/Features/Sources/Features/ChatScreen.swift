@@ -214,19 +214,26 @@ public struct ChatScreen: View {
             self.session = session
             logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
 
+            // Prime `lines` from the session's ring buffer BEFORE entering
+            // the for-await. Without this, re-entering a channel (or even
+            // a transient dual-mount during the openChannel transition) would
+            // show empty chat: the AsyncStream is single-consumer, so a fresh
+            // iterator misses every yield that happened before it attached,
+            // and `emitSnapshot()` only yields when the ring CHANGES — so a
+            // late-attaching consumer sits idle until the next chat message.
+            //
+            // Calling `currentSnapshot()` returns the actor's ring directly.
+            // A subsequent yield from the for-await loop will overwrite with
+            // newer state; ordering is monotonic (ring only grows), so this
+            // never shows stale rows.
+            self.lines = await session.currentSnapshot()
+
             // Bridge AsyncStream → @State updates on the main actor.
             //
             // Note: this loop runs *inside* the .task body (no nested Task).
-            // That means when ChatScreen unmounts or its `.id(channelId)`
-            // changes, the .task is cancelled and this for-await exits cleanly
-            // — no leaked Task that keeps consuming session.lines forever.
-            //
-            // Caveat: AsyncStream is single-consumer. When we re-enter a
-            // channel, we start a fresh iteration on the same stream — relying
-            // on each yield carrying the full ring buffer, so the next yield
-            // delivers the current state. If we ever see stale chat on
-            // re-entry, the fix is a `currentSnapshot()` actor method that
-            // primes `lines` before starting the for-await.
+            // When ChatScreen unmounts or its `.id(channelId)` changes, the
+            // .task is cancelled and this for-await exits cleanly — no leaked
+            // Task that keeps consuming session.lines forever.
             for await snapshot in session.lines {
                 self.lines = snapshot
             }

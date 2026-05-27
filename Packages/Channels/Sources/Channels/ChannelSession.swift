@@ -146,6 +146,23 @@ public actor ChannelSession {
         coalesceTask = nil
     }
 
+    /// Returns the current ring-buffer contents — every chat message we've
+    /// received since this session was created (capped at `ringCapacity`).
+    ///
+    /// Why this exists: `lines` is an `AsyncStream` which is single-consumer.
+    /// When `ChatScreen` unmounts (tab switch) its iterator is dropped, and
+    /// when a new `ChatScreen` mounts later, its NEW iterator starts from
+    /// the *next* yield — missing every yield that happened in between.
+    /// Result: re-entering a chat tab shows empty until the next message
+    /// arrives, even though we have all the previous messages in `ring`.
+    ///
+    /// `ChatScreen` calls this once on appear and assigns the result to
+    /// `self.lines` before entering its `for await` loop. New yields then
+    /// arrive normally and overwrite with newer state.
+    public func currentSnapshot() -> [ChatMessage] {
+        ring
+    }
+
     /// Driven by `ChannelSessionRegistry`'s shared event dispatcher — the
     /// registry pulls events off `client.eventSub.events` once and calls this
     /// on the session whose `channelId` matches the event's broadcaster ID.
