@@ -34,7 +34,7 @@ public struct ChatTabsScreen: View {
 
     public var body: some View {
         Group {
-            if let chatTabs, !chatTabs.openChannels.isEmpty {
+            if let chatTabs, !chatTabs.tabs.isEmpty {
                 VStack(spacing: 0) {
                     ChatTabStrip(model: chatTabs, onAddTab: onAddTab)
                     Divider()
@@ -54,22 +54,30 @@ public struct ChatTabsScreen: View {
     /// subscription pointed at the old channel.
     @ViewBuilder
     private func activeChatContent(chatTabs: ChatTabsModel) -> some View {
-        if let activeId = chatTabs.activeChannelId,
-           let active = chatTabs.openChannels.first(where: { $0.channelId == activeId }) {
+        if let activeId = chatTabs.activeTabId,
+           let active = chatTabs.tabs.first(where: { $0.id == activeId }),
+           let primaryChannel = active.channels.first {
+            // MVP: render the tab's first (and today, only) channel. When
+            // multi-channel-per-tab ships, ChatScreen will take the full
+            // ChatTab and TabChatModel will attach to all its channels —
+            // for now, the single-channel path keeps the View thin.
             ChatScreen(
                 account: account,
                 accountStore: accountStore,
-                channelId: active.channelId,
-                channelLoginName: active.channelLoginName,
-                channelDisplayName: active.channelDisplayName
+                channelId: primaryChannel.channelId,
+                channelLoginName: primaryChannel.channelLoginName,
+                channelDisplayName: primaryChannel.channelDisplayName
             )
-            .id(active.channelId)
+            // Identity by tab id, NOT channel id — different tabs containing
+            // the same channel must have distinct view identities.
+            .id(active.id)
         } else {
             // Tabs exist but none selected — rare (we set activeChannelId on
             // open). Show a small hint.
             VStack(spacing: 8) {
                 Image(systemName: "bubble.left.and.bubble.right")
                     .font(.title)
+                    .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.secondary)
                 Text("Pick a channel above")
                     .foregroundStyle(.secondary)

@@ -61,32 +61,38 @@ public struct AppShell: View {
             .tabItem {
                 Label("Chat", systemImage: "bubble.left.and.bubble.right.fill")
             }
-            .badge(chatTabsModel.openChannels.isEmpty ? 0 : chatTabsModel.openChannels.count)
+            .badge(chatTabsModel.tabs.isEmpty ? 0 : chatTabsModel.tabs.count)
             .tag(Tab.chat)
         }
         .environment(\.chatTabs, chatTabsModel)
         // The openChannel action both updates the tab strip model AND switches
         // the visible tab. Concentrating both side effects behind one verb
         // keeps the call sites (e.g. ChannelListScreen row tap) ignorant of
-        // the navigation model.
+        // the navigation model. Today this wraps a single channel into a new
+        // tab; future "add to existing tab" UI would use a separate action.
         .environment(\.openChannel, OpenChannelAction { channelId, login, displayName, profileImageURL in
-            chatTabsModel.open(OpenChannelDescriptor(
+            let descriptor = ChannelDescriptor(
                 channelId: channelId,
                 channelLoginName: login,
                 channelDisplayName: displayName,
                 profileImageURL: profileImageURL
-            ))
+            )
+            chatTabsModel.open(channel: descriptor)
             selectedTab = .chat
         })
-        // Wire close-X to actually free the underlying ChannelSession.
-        // Without this, sessions accumulate in the registry indefinitely as the
-        // user opens and closes channels. ChannelSession.start() tolerates
-        // HelixError.conflict on re-open (Twitch's subscription persists across
-        // close until WebSocket disconnect), so this cleanup is safe — the user
-        // can close a channel and re-open it without breakage.
+        // Wire close-X to actually free the underlying ChannelSession(s).
+        // The callback receives the closed `ChatTab` so we can iterate its
+        // channels and call `registry.leave` for each. Sessions stay alive
+        // in the registry if other tabs still reference them — commit E
+        // adds proper reference counting; today closing a tab leaves
+        // sessions that any other tab is using (single-channel-per-tab
+        // means no actual sharing happens yet).
         .onAppear {
-            chatTabsModel.onClose = { [accountUserId = account.userId] channelId in
-                await channelSessionRegistry?.leave(accountUserId: accountUserId, channelId: channelId)
+            chatTabsModel.onClose = { [accountUserId = account.userId] tab in
+                guard let registry = channelSessionRegistry else { return }
+                for channel in tab.channels {
+                    await registry.leave(accountUserId: accountUserId, channelId: channel.channelId)
+                }
             }
         }
     }

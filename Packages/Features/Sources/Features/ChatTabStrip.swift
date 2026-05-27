@@ -1,10 +1,13 @@
 import SwiftUI
 
 /// Horizontal pill strip showing one cell per open chat channel. Active cell
-/// is filled with the accent color; inactive cells use a subtle tertiary
-/// background. Each cell carries an X close button; the strip ends with a
-/// + button that triggers `onAddTab` (AppShell wires this to "switch to
-/// Follows tab").
+/// is tinted with the accent color; both states use Liquid Glass capsules.
+/// Each cell carries an X close button; the strip ends with a + button that
+/// triggers `onAddTab` (AppShell wires this to "switch to Follows tab").
+///
+/// Liquid Glass hierarchy: pills are the glass elements. The strip itself is
+/// transparent — putting `.bar`/material on the parent would nest glass on
+/// glass, which the iOS 26 design guidelines explicitly call out as wrong.
 ///
 /// The strip is hidden by ChatTabsScreen when no tabs are open — empty state
 /// is the more informative UI in that case.
@@ -15,12 +18,12 @@ struct ChatTabStrip: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(model.openChannels) { channel in
+                ForEach(model.tabs) { tab in
                     TabCell(
-                        channel: channel,
-                        isActive: model.activeChannelId == channel.channelId,
-                        onTap: { model.activeChannelId = channel.channelId },
-                        onClose: { model.close(channelId: channel.channelId) }
+                        tab: tab,
+                        isActive: model.activeTabId == tab.id,
+                        onTap: { model.activeTabId = tab.id },
+                        onClose: { model.close(tabId: tab.id) }
                     )
                 }
 
@@ -29,7 +32,9 @@ struct ChatTabStrip: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .background(.bar)  // matches navigation/toolbar material on iOS 26
+        // No background — each pill is its own Liquid Glass element so the
+        // chat content beneath subtly shows through the gaps. Nesting glass
+        // inside `.bar` (the previous design) is explicitly discouraged.
     }
 }
 
@@ -37,14 +42,14 @@ struct ChatTabStrip: View {
 /// the X removes it. The X is rendered as a Button so VoiceOver can target
 /// it independently of the cell tap.
 private struct TabCell: View {
-    let channel: OpenChannelDescriptor
+    let tab: ChatTab
     let isActive: Bool
     let onTap: () -> Void
     let onClose: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
-            if let url = channel.profileImageURL {
+            if let url = tab.profileImageURL {
                 AsyncImage(url: url) { phase in
                     if let image = phase.image {
                         image.resizable().scaledToFill()
@@ -56,7 +61,12 @@ private struct TabCell: View {
                 .clipShape(Circle())
             }
 
-            Text("#\(channel.channelLoginName)")
+            // Display name without `#` — broadcasterDisplayName is the
+            // user-facing string Twitch already capitalizes correctly. The
+            // `#` was an IRC affectation; on a modern mobile UI, just show
+            // the name. For multi-channel tabs (future), `tab.displayName`
+            // composes a friendly label like "Lirik · shroud" or "Lirik + 2".
+            Text(tab.displayName)
                 .font(.callout.weight(isActive ? .semibold : .regular))
                 .lineLimit(1)
                 .foregroundStyle(isActive ? .primary : .secondary)
@@ -68,13 +78,16 @@ private struct TabCell: View {
                     .padding(2)
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel("Close \(channel.channelDisplayName)")
+            .accessibilityLabel("Close \(tab.displayName)")
         }
         .padding(.leading, 10)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
-        .background(
-            (isActive ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12)),
+        // Liquid Glass capsule; active state gets accent tint via the
+        // `.regular.tint(_:)` glass style so the material itself colors
+        // rather than overlaying an opaque fill.
+        .glassEffect(
+            isActive ? .regular.tint(Color.accentColor) : .regular,
             in: Capsule()
         )
         // Tap anywhere on the cell (except the X) to activate. The X is a
@@ -82,7 +95,7 @@ private struct TabCell: View {
         .contentShape(Capsule())
         .onTapGesture(perform: onTap)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(channel.channelDisplayName), \(isActive ? "active" : "inactive")")
+        .accessibilityLabel("\(tab.displayName), \(isActive ? "active" : "inactive")")
     }
 }
 
@@ -96,7 +109,7 @@ private struct AddTabButton: View {
             Image(systemName: "plus")
                 .font(.callout.weight(.semibold))
                 .frame(width: 30, height: 30)
-                .background(Color.secondary.opacity(0.12), in: Circle())
+                .glassEffect(in: Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Add channel")
