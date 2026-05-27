@@ -206,24 +206,28 @@ extension AccountStore {
             throw AppError(message: "Token refresh failed (HTTP \(http.statusCode))")
         }
 
-        // Twitch's response is snake_case; decode to a local shape, then construct OAuthToken.
+        // Twitch's response is snake_case. Use `.convertFromSnakeCase` so the struct
+        // stays camelCase — matches `JSONDecoder.twitch()` inside TwitchKit (which is
+        // internal to that library, hence the explicit config here).
         struct TwitchRefreshResponse: Decodable {
-            let access_token: String
-            let refresh_token: String?
-            let expires_in: Int?
+            let accessToken: String
+            let refreshToken: String?
+            let expiresIn: Int?
             let scope: [String]?
-            let token_type: String?
+            let tokenType: String?
         }
-        let parsed = try JSONDecoder().decode(TwitchRefreshResponse.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let parsed = try decoder.decode(TwitchRefreshResponse.self, from: data)
         let newToken = OAuthToken(
-            accessToken: parsed.access_token,
-            refreshToken: parsed.refresh_token,
-            expiresIn: parsed.expires_in,
+            accessToken: parsed.accessToken,
+            refreshToken: parsed.refreshToken,
+            expiresIn: parsed.expiresIn,
             scope: parsed.scope,
-            tokenType: parsed.token_type
+            tokenType: parsed.tokenType
         )
         try await twitchClient.auth.setToken(newToken)
-        logger.info("Refreshed tokens for @\(login) (expires_in=\(parsed.expires_in ?? -1))")
+        logger.info("Refreshed tokens for @\(login) (expires_in=\(parsed.expiresIn ?? -1))")
         return newToken
     }
 
