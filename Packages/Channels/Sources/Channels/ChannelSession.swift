@@ -37,6 +37,17 @@ public actor ChannelSession {
     /// EventSub event-listening task. Cancelled on `stop()`.
     private var listenerTask: Task<Void, Never>?
 
+    /// ID of the active EventSub subscription, captured from the record that
+    /// `subscribe(...)` returns. `nil` when:
+    ///   - `start()` hasn't been called yet
+    ///   - `start()` hit `HelixError.conflict` (subscription already existed
+    ///     from a previous app session — we don't get a record back, so we
+    ///     can't unsubscribe by ID; Twitch will clean it up when the
+    ///     WebSocket disconnects)
+    /// `stop()` uses this to call `eventSub.unsubscribe(id:)` and properly
+    /// release the subscription on Twitch's side.
+    private var activeSubscriptionId: String?
+
     /// Called by `start()` when EventSub subscribe returns unauthorized.
     /// Injected at construction time by `ChannelSessionRegistry` so this actor
     /// doesn't need to know about `AccountStore` or `Account` directly.
@@ -78,24 +89,24 @@ public actor ChannelSession {
             userID: accountUserId
         )
         do {
-            try await client.eventSub.subscribe(subscription)
+            let record = try await client.eventSub.subscribe(subscription)
+            activeSubscriptionId = record.id
         } catch HelixError.unauthorized {
             logger.info("EventSub subscribe returned unauthorized; refreshing tokens and retrying")
             try await refreshTokenHandler()
-            try await client.eventSub.subscribe(subscription)
+            let record = try await client.eventSub.subscribe(subscription)
+            activeSubscriptionId = record.id
         } catch HelixError.conflict {
-            // 409 means "you already have a subscription for this (type, condition)".
-            // This happens when:
-            //   - The user closed a channel tab (we destroyed the local session) but
-            //     TwitchKit hasn't yet exposed DELETE /eventsub/subscriptions, so the
-            //     subscription on Twitch's side is still active.
-            //   - The user re-opens the channel — we make a fresh session and try to
-            //     subscribe again.
-            // The right behavior is to treat this as success: we ARE subscribed, the
-            // events will flow through our WebSocket as usual, and our local listener
-            // task below will pick them up. The duplicate subscription will be cleaned
-            // up by Twitch when the WebSocket disconnects.
-            logger.info("EventSub already subscribed to channel.chat.message for #\(self.channelLoginName) — reusing existing subscription")
+            // 409 "already subscribed" — a previous session opened this same
+            // (type, condition) and we never got to call unsubscribe (e.g. app
+            // crash, force-quit). Twitch keeps the subscription alive on this
+            // WebSocket; events will flow through our listener as normal.
+            //
+            // Caveat: we don't get a record back, so `activeSubscriptionId`
+            // stays nil — our subsequent stop() can't explicitly unsubscribe.
+            // That's fine: Twitch cleans up orphaned subscriptions when the
+            // WebSocket disconnects.
+            logger.info("EventSub already subscribed to channel.chat.message for #\(self.channelLoginName) — reusing existing subscription (no id captured)")
         }
         logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName)")
 
@@ -111,10 +122,32 @@ public actor ChannelSession {
         }
     }
 
-    /// Stops the session: cancels the listener and finishes the lines stream.
-    /// (We do NOT delete the EventSub subscription in slice 1 — that's a later slice's concern.)
-    public func stop() {
+    /// Stops the session: deletes the EventSub subscription on Twitch's side,
+    /// cancels the local listener, and finishes the lines stream.
+    ///
+    /// The unsubscribe call is best-effort: if it fails (network blip, token
+    /// expiry, server error), we still proceed with local cleanup. Twitch will
+    /// garbage-collect the subscription when the WebSocket disconnects, so a
+    /// failed delete just means the subscription lingers for the rest of the
+    /// app's foreground lifetime — annoying but not a leak.
+    public func stop() async {
         logger.info("Stopping session for #\(self.channelLoginName)")
+
+        // 1. Tell Twitch to drop the subscription so we stop consuming our
+        //    EventSub quota (each app has a per-WebSocket subscription cap).
+        if let id = activeSubscriptionId {
+            do {
+                try await client.eventSub.unsubscribe(id: id)
+                logger.info("Deleted EventSub subscription \(id) for #\(self.channelLoginName)")
+            } catch {
+                // Non-fatal — Twitch will clean up on WebSocket disconnect.
+                logger.error("Failed to delete EventSub subscription \(id): \(error.localizedDescription)")
+            }
+            activeSubscriptionId = nil
+        }
+
+        // 2. Local cleanup — cancel tasks. The lines AsyncStream stays open
+        //    (deinit will finish it) so any in-flight consumers see the end.
         listenerTask?.cancel()
         listenerTask = nil
         coalesceTask?.cancel()
