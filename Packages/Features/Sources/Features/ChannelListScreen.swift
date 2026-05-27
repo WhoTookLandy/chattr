@@ -22,6 +22,10 @@ public struct ChannelListScreen: View {
     /// survives back-navigation from chat screens.
     @Environment(\.followsStore) private var followsStore
 
+    /// Injected by AppShell. Invoked when the user taps a row — adds the
+    /// channel to the Chat tab and switches the tab selection to Chat.
+    @Environment(\.openChannel) private var openChannel
+
     @State private var showingSignOutConfirm = false
     @State private var searchText: String = ""
     @State private var errorMessage: String?
@@ -187,14 +191,10 @@ public struct ChannelListScreen: View {
             } else {
                 List {
                     ForEach(filtered) { channel in
-                        NavigationLink {
-                            ChatScreen(
-                                account: account,
-                                accountStore: accountStore,
-                                channelId: channel.broadcasterId,
-                                channelLoginName: channel.broadcasterLogin,
-                                channelDisplayName: channel.broadcasterName
-                            )
+                        Button {
+                            let profileURL = userProfiles[channel.broadcasterId]
+                                .flatMap { URL(string: $0.profileImageUrl) }
+                            openChannel?(channel: channel, profileImageURL: profileURL)
                         } label: {
                             ChannelRow(
                                 channel: channel,
@@ -203,6 +203,9 @@ public struct ChannelListScreen: View {
                                     .flatMap { URL(string: $0.profileImageUrl) }
                             )
                         }
+                        // .plain so the row doesn't get the system Button blue tint
+                        // — it should still look like a list row, but tap-to-open.
+                        .buttonStyle(.plain)
                     }
                     loadingMoreFooter
                 }

@@ -48,9 +48,7 @@ public struct RootView: View {
     public var body: some View {
         Group {
             if let active = accounts.first {
-                NavigationStack {
-                    ChannelListScreen(account: active, accountStore: accountStore)
-                }
+                AppShell(account: active, accountStore: accountStore)
             } else {
                 SignInView(accountStore: accountStore, clientId: clientId)
             }
