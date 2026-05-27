@@ -16,6 +16,8 @@ public struct ChannelListScreen: View {
     @State private var channels: [FollowedChannel] = []
     @State private var loadState: LoadState = .idle
     @State private var errorMessage: String?
+    @State private var isSigningOut = false
+    @State private var showingSignOutConfirm = false
 
     private enum LoadState: Equatable {
         case idle, loading, loaded, failed
@@ -61,16 +63,67 @@ public struct ChannelListScreen: View {
                 }
                 .listStyle(.plain)
             case .failed:
-                ContentUnavailableView(
-                    "Couldn't load channels",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(errorMessage ?? "Unknown error")
-                )
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "Couldn't load channels",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(errorMessage ?? "Unknown error")
+                    )
+                    Button("Sign out and try again") {
+                        showingSignOutConfirm = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.bottom, 32)
+                }
             }
         }
         .navigationTitle("\(account.displayName)'s Follows")
+        .toolbar {
+            // `.primaryAction` is the cross-platform placement that renders top-trailing
+            // on iOS and the appropriate toolbar slot on macOS. `.topBarTrailing` is iOS-only.
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button(role: .destructive) {
+                        showingSignOutConfirm = true
+                    } label: {
+                        Label("Sign out @\(account.login)", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                } label: {
+                    Image(systemName: "person.crop.circle")
+                }
+                .disabled(isSigningOut)
+            }
+        }
+        .confirmationDialog(
+            "Sign out of @\(account.login)?",
+            isPresented: $showingSignOutConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Sign Out", role: .destructive) {
+                Task { await signOut() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You'll need to authorize chattr with Twitch again to use this account.")
+        }
         .task { await load() }
         .refreshable { await load() }
+    }
+
+    /// Removes the current account. RootView's `@Query` observes the SwiftData delete and
+    /// re-renders to SignInView automatically — no manual navigation needed.
+    @MainActor
+    private func signOut() async {
+        isSigningOut = true
+        defer { isSigningOut = false }
+        do {
+            try await accountStore.remove(account: account)
+            logger.info("Signed out @\(account.login)")
+        } catch {
+            // Even if logout HTTP fails, we want to recover — fall back to local deletion.
+            logger.error("Sign out had an error: \(error.localizedDescription)")
+            errorMessage = "Sign out: \(error.localizedDescription)"
+        }
     }
 
     @MainActor

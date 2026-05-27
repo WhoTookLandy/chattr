@@ -115,6 +115,12 @@ public final class AccountStore {
     }
 
     /// Removes an account: clears its Keychain entries, drops cached client, deletes SwiftData row.
+    ///
+    /// Important: we delete via `modelContainer.mainContext` — the same context RootView's
+    /// `@Query` observes. Earlier we created a fresh `ModelContext(modelContainer)` here,
+    /// which can fail to propagate delete events to other contexts watching the store.
+    /// Using mainContext ensures `@Query` immediately sees the empty accounts array and
+    /// re-renders to SignInView.
     public func remove(account: Account) async throws {
         let client = client(for: account)
         // TwitchAuth.logout() delegates to tokenProvider.logout() internally.
@@ -123,7 +129,7 @@ public final class AccountStore {
         if activeUserId == account.userId {
             activeUserId = nil
         }
-        let context = ModelContext(modelContainer)
+        let context = modelContainer.mainContext
         context.delete(account)
         try context.save()
         logger.info("Removed account @\(account.login)")
