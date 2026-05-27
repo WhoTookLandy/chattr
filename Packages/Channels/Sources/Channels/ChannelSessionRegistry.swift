@@ -35,11 +35,19 @@ public final class ChannelSessionRegistry {
         }
 
         let client = accountStore.client(for: account)
+        // Capture stable String values rather than the non-Sendable `Account` model so
+        // the @Sendable closure compiles under Swift 6 strict concurrency.
+        let capturedUserId = account.userId
+        let capturedLogin = account.login
         let session = ChannelSession(
             client: client,
             channelId: channelId,
             channelLoginName: channelLoginName,
-            accountUserId: account.userId
+            accountUserId: account.userId,
+            refreshTokenHandler: { [weak accountStore] in
+                guard let accountStore else { throw AppError(message: "AccountStore deallocated during refresh") }
+                try await accountStore.refreshTokens(userId: capturedUserId, login: capturedLogin)
+            }
         )
         try await session.start()
         sessions[key] = session

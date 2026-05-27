@@ -37,16 +37,25 @@ public actor ChannelSession {
     /// EventSub event-listening task. Cancelled on `stop()`.
     private var listenerTask: Task<Void, Never>?
 
+    /// Called by `start()` when EventSub subscribe returns unauthorized.
+    /// Injected at construction time by `ChannelSessionRegistry` so this actor
+    /// doesn't need to know about `AccountStore` or `Account` directly.
+    private let refreshTokenHandler: @Sendable () async throws -> Void
+
     public init(
         client: TwitchClient,
         channelId: String,
         channelLoginName: String,
-        accountUserId: String
+        accountUserId: String,
+        refreshTokenHandler: @escaping @Sendable () async throws -> Void = {
+            throw AppError(message: "ChannelSession constructed without refreshTokenHandler")
+        }
     ) {
         self.client = client
         self.channelId = channelId
         self.channelLoginName = channelLoginName
         self.accountUserId = accountUserId
+        self.refreshTokenHandler = refreshTokenHandler
         (lines, linesContinuation) = AsyncStream.makeStream(of: [ChatMessage].self)
     }
 
@@ -68,7 +77,13 @@ public actor ChannelSession {
             broadcasterID: channelId,
             userID: accountUserId
         )
-        try await client.eventSub.subscribe(subscription)
+        do {
+            try await client.eventSub.subscribe(subscription)
+        } catch HelixError.unauthorized {
+            logger.info("EventSub subscribe returned unauthorized; refreshing tokens and retrying")
+            try await refreshTokenHandler()
+            try await client.eventSub.subscribe(subscription)
+        }
         logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName)")
 
         // Start listening for events.

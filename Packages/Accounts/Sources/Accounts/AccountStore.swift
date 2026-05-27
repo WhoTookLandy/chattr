@@ -137,3 +137,107 @@ public final class AccountStore {
         "chattr.account.\(userId)"
     }
 }
+
+// MARK: - Token Refresh
+
+extension AccountStore {
+
+    /// URL of chattr-auth's refresh endpoint. Mirrors the auth-flow constants in SignInView.
+    private static var refreshURL: URL {
+        URL(string: "https://chattr-auth.vercel.app/oauth/refresh")!
+    }
+
+    /// Refreshes the OAuth tokens for the given account via the Vercel bridge.
+    ///
+    /// Reads the current refresh_token from this account's TwitchAuth (which reads
+    /// from Keychain via TokenStore), POSTs it to the bridge, parses the new tokens,
+    /// and saves them. Throws `AppError` on any failure — caller decides whether to
+    /// surface as "needs re-auth" UI vs a transient error banner.
+    ///
+    /// Side effects: persists the new OAuthToken via `TwitchAuth.setToken(_:)`, which
+    /// also updates the in-memory cachedAccessToken / cachedRefreshToken.
+    @discardableResult
+    public func refreshTokens(for account: Account) async throws -> OAuthToken {
+        try await refreshTokens(userId: account.userId, login: account.login)
+    }
+
+    /// Variant that accepts plain strings so `@Sendable` closures (e.g. in
+    /// `ChannelSessionRegistry`) can capture stable IDs instead of the non-Sendable
+    /// `Account` model object.
+    @discardableResult
+    public func refreshTokens(userId: String, login: String) async throws -> OAuthToken {
+        // Build a throw-away TwitchClient using the canonical namespace for this userId.
+        // `clients` is keyed by userId so this returns the already-cached client if one exists.
+        let namespace = Self.namespace(for: userId)
+        let twitchClient: TwitchClient
+        if let existing = clients[userId] {
+            twitchClient = existing
+        } else {
+            twitchClient = TwitchClient(clientId: clientId, tokenNamespace: namespace)
+            clients[userId] = twitchClient
+        }
+        let currentToken = try await twitchClient.auth.tokenProvider.token()
+        guard let refreshToken = currentToken.refreshToken, !refreshToken.isEmpty else {
+            throw AppError(message: "No refresh token stored for @\(login) — must re-sign-in")
+        }
+
+        var request = URLRequest(url: Self.refreshURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct RequestBody: Encodable { let refresh_token: String }
+        request.httpBody = try JSONEncoder().encode(RequestBody(refresh_token: refreshToken))
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AppError(message: "Bridge refresh: no HTTP response")
+        }
+
+        if http.statusCode != 200 {
+            let body = String(data: data, encoding: .utf8) ?? "(no body)"
+            logger.error("Bridge refresh failed for @\(login) (HTTP \(http.statusCode)): \(body)")
+            // 4xx → refresh token likely invalid (revoked or expired). 5xx → bridge problem.
+            // Either way: the caller decides whether to prompt re-auth.
+            throw AppError(message: "Token refresh failed (HTTP \(http.statusCode))")
+        }
+
+        // Twitch's response is snake_case; decode to a local shape, then construct OAuthToken.
+        struct TwitchRefreshResponse: Decodable {
+            let access_token: String
+            let refresh_token: String?
+            let expires_in: Int?
+            let scope: [String]?
+            let token_type: String?
+        }
+        let parsed = try JSONDecoder().decode(TwitchRefreshResponse.self, from: data)
+        let newToken = OAuthToken(
+            accessToken: parsed.access_token,
+            refreshToken: parsed.refresh_token,
+            expiresIn: parsed.expires_in,
+            scope: parsed.scope,
+            tokenType: parsed.token_type
+        )
+        try await twitchClient.auth.setToken(newToken)
+        logger.info("Refreshed tokens for @\(login) (expires_in=\(parsed.expires_in ?? -1))")
+        return newToken
+    }
+
+    /// Wraps an async throwing operation with one retry-after-refresh-on-401.
+    ///
+    /// If `operation` throws `HelixError.unauthorized`, this method calls
+    /// `refreshTokens(for:)`, then retries `operation` exactly once. Any throw
+    /// from the refresh OR the retry bubbles to the caller (no infinite loops).
+    ///
+    /// Use at every chattr-side Helix call site to make tokens survive expiry.
+    public func withTokenRefresh<T: Sendable>(
+        for account: Account,
+        _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await operation()
+        } catch HelixError.unauthorized {
+            logger.info("Helix call returned unauthorized for @\(account.login); refreshing tokens and retrying")
+            try await refreshTokens(for: account)
+            return try await operation()
+        }
+    }
+}

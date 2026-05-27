@@ -79,12 +79,17 @@ public struct ChannelListScreen: View {
         errorMessage = nil
         do {
             let client = accountStore.client(for: account)
+            // Capture the userId string before entering the @Sendable closure to avoid
+            // capturing the non-Sendable Account model object across the boundary.
+            let userId = account.userId
             // Actual TwitchKit signature: forUserID:first:after: (cursor label)
-            let page = try await client.api.fetchFollowedChannelsPage(
-                forUserID: account.userId,
-                first: 100,
-                after: nil
-            )
+            let page = try await accountStore.withTokenRefresh(for: account) {
+                try await client.api.fetchFollowedChannelsPage(
+                    forUserID: userId,
+                    first: 100,
+                    after: nil
+                )
+            }
             channels = page.data
             loadState = .loaded
             logger.info("Loaded \(channels.count) followed channels")
