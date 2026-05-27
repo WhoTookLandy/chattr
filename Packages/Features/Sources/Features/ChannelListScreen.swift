@@ -22,6 +22,12 @@ public struct ChannelListScreen: View {
     private let accountStore: AccountStore
 
     @State private var channels: [FollowedChannel] = []
+    /// Live streams among `channels`, keyed by broadcasterId. Populated from a
+    /// parallel `/streams/followed` pagination — empty for offline channels.
+    @State private var liveStreams: [String: TwitchStream] = [:]
+    /// Cached profile metadata (image URL etc) keyed by broadcasterId. Populated
+    /// per-page via batched `fetchUsers(ids:)`. Missing entries render placeholder.
+    @State private var userProfiles: [String: TwitchUser] = [:]
     @State private var loadState: LoadState = .idle
     @State private var loadProgress: Int = 0
     @State private var totalFollowed: Int?
@@ -39,12 +45,36 @@ public struct ChannelListScreen: View {
         self.accountStore = accountStore
     }
 
-    /// Channels filtered by the current search text, case-insensitive against both
-    /// display name and login. Empty `searchText` returns all loaded channels.
+    /// Channels sorted for display: live channels first (descending by viewer
+    /// count), then offline channels in their original follow-list order
+    /// (Twitch returns most-recently-followed first).
+    ///
+    /// We sort `(index, channel)` tuples and use the index as the tie-breaker
+    /// for the offline-vs-offline case — Swift's `sorted(by:)` is not
+    /// guaranteed stable, so we force stability explicitly.
+    private var displayChannels: [FollowedChannel] {
+        let indexed = channels.enumerated().map { ($0.offset, $0.element) }
+        let sorted = indexed.sorted { lhs, rhs in
+            let lViewers = liveStreams[lhs.1.broadcasterId]?.viewerCount
+            let rViewers = liveStreams[rhs.1.broadcasterId]?.viewerCount
+            switch (lViewers, rViewers) {
+            case let (l?, r?): return l > r
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none): return lhs.0 < rhs.0
+            }
+        }
+        return sorted.map { $0.1 }
+    }
+
+    /// `displayChannels` filtered by the current search text, case-insensitive
+    /// against both display name and login. Empty `searchText` returns the
+    /// full sorted list.
     private var filteredChannels: [FollowedChannel] {
-        guard !searchText.isEmpty else { return channels }
+        let sorted = displayChannels
+        guard !searchText.isEmpty else { return sorted }
         let query = searchText.lowercased()
-        return channels.filter { channel in
+        return sorted.filter { channel in
             channel.broadcasterName.lowercased().contains(query)
                 || channel.broadcasterLogin.lowercased().contains(query)
         }
@@ -171,14 +201,12 @@ public struct ChannelListScreen: View {
                                 channelDisplayName: channel.broadcasterName
                             )
                         } label: {
-                            HStack {
-                                Text(channel.broadcasterName)
-                                    .font(.headline)
-                                Spacer()
-                                Text("@\(channel.broadcasterLogin)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
+                            ChannelRow(
+                                channel: channel,
+                                stream: liveStreams[channel.broadcasterId],
+                                profileImageURL: userProfiles[channel.broadcasterId]
+                                    .flatMap { URL(string: $0.profileImageUrl) }
+                            )
                         }
                     }
                     loadingMoreFooter
@@ -261,6 +289,14 @@ public struct ChannelListScreen: View {
     /// SwiftUI view sees rows appear progressively rather than waiting for the
     /// whole load to complete. Safety cap of 200 pages protects against stuck
     /// cursors.
+    ///
+    /// Enrichment (live status + profile images) runs in parallel:
+    ///   - `loadLiveStreams()` paginates `/streams/followed` to mark live rows
+    ///   - `enrichProfiles(ids:)` batches `fetchUsers(ids:)` per follow page
+    ///
+    /// Both are kicked off AFTER the first follow page lands so any token
+    /// refresh triggered by a 401 happens serially through the first call —
+    /// avoids two parallel refreshes racing to consume the same refresh_token.
     @MainActor
     private func load() async {
         loadState = .loading
@@ -268,6 +304,8 @@ public struct ChannelListScreen: View {
         totalFollowed = nil
         errorMessage = nil
         channels = []  // reset on full reload (refreshable)
+        liveStreams = [:]
+        userProfiles = [:]
 
         do {
             let client = accountStore.client(for: account)
@@ -289,15 +327,23 @@ public struct ChannelListScreen: View {
                 }
                 pagesFetched += 1
 
-                // KEY DIFFERENCE FROM PREVIOUS VERSION: append to `channels`
-                // immediately so the view sees the new rows. SwiftUI's diffable
-                // List handles the inserts smoothly.
+                // Append to `channels` immediately so the view sees new rows.
+                // SwiftUI's diffable List handles the inserts smoothly.
                 channels.append(contentsOf: page.data)
                 loadProgress = channels.count
 
                 if totalFollowed == nil, let total = page.total {
                     totalFollowed = total
                 }
+
+                // Kick off enrichment for this page. Fire `loadLiveStreams` only
+                // on the first page so subsequent pages don't restart it.
+                let pageIds = page.data.map(\.broadcasterId)
+                if pagesFetched == 1 {
+                    Task { await loadLiveStreams() }
+                }
+                Task { await enrichProfiles(ids: pageIds) }
+
                 cursor = page.pagination?.cursor
 
                 if pagesFetched >= pageCap {
@@ -315,6 +361,70 @@ public struct ChannelListScreen: View {
             // failedView covers the screen.
             loadState = .failed
             logger.error("Failed to load followed channels: \(error.localizedDescription)")
+        }
+    }
+
+    /// Paginates `/streams/followed` to build a map of currently-live channels.
+    /// Each page is up to 100 streams. The endpoint returns ONLY live channels
+    /// among the user's follows — typically a small set (the user follows a lot
+    /// of people but most are offline at any moment), so this completes in 1–2
+    /// requests for normal accounts. Errors are non-fatal: the channel list
+    /// still renders, just with every row appearing offline.
+    @MainActor
+    private func loadLiveStreams() async {
+        do {
+            let client = accountStore.client(for: account)
+            let userId = account.userId
+            var cursor: String? = nil
+            var pagesFetched = 0
+
+            repeat {
+                let cursorForRequest = cursor
+                let page = try await accountStore.withTokenRefresh(for: account) {
+                    try await client.api.fetchFollowedStreamsPage(
+                        userID: userId,
+                        first: 100,
+                        after: cursorForRequest
+                    )
+                }
+                pagesFetched += 1
+                for stream in page.data {
+                    liveStreams[stream.userId] = stream
+                }
+                cursor = page.pagination?.cursor
+                if pagesFetched >= 20 {
+                    logger.warning("Hit live-streams pagination cap — stopping")
+                    break
+                }
+            } while cursor != nil
+
+            logger.info("Loaded \(liveStreams.count) live followed channel(s) across \(pagesFetched) page(s)")
+        } catch {
+            // Non-fatal — the list renders fine, just without LIVE badges.
+            logger.error("Failed to load live followed channels: \(error.localizedDescription)")
+        }
+    }
+
+    /// Batch-fetches user profiles for the given broadcaster IDs and stores
+    /// them in `userProfiles`. Skips IDs already cached. Errors are non-fatal:
+    /// rows without a profile entry fall back to the placeholder avatar.
+    /// Helix `/users` accepts up to 100 IDs per request — we always feed pages
+    /// of 100 from the follow-list paginator so one call covers a page.
+    @MainActor
+    private func enrichProfiles(ids: [String]) async {
+        let missing = ids.filter { userProfiles[$0] == nil }
+        guard !missing.isEmpty else { return }
+        do {
+            let client = accountStore.client(for: account)
+            let users = try await accountStore.withTokenRefresh(for: account) {
+                try await client.api.fetchUsers(ids: missing)
+            }
+            for user in users {
+                userProfiles[user.id] = user
+            }
+        } catch {
+            // Non-fatal — rows render with the placeholder avatar instead.
+            logger.error("Failed to load profile images for \(missing.count) channels: \(error.localizedDescription)")
         }
     }
 }
