@@ -63,14 +63,28 @@ public final class TabChatModel {
     /// Subscribes to each session, primes `lines` from their combined current
     /// state, and starts receiving new messages via callback.
     ///
-    /// Idempotent in the sense that calling `attach` twice without `detach` in
-    /// between is incorrect usage — it would leak subscriptions. Callers should
-    /// pair attach/detach 1:1.
+    /// **Idempotent**: if called again without an intervening `detach()`, this
+    /// detaches the previous subscriptions FIRST and then re-subscribes. That
+    /// makes attach safe to call from view machinery that can fire it twice —
+    /// notably SwiftUI's `.task` can run twice for the same view identity when
+    /// the parent does several state writes in quick succession (our
+    /// `openChannel` action mutates three @State values, and the resulting
+    /// view-tree settle pattern triggers two `.task` invocations during the
+    /// transition). Without this guard, each extra attach would register a
+    /// duplicate subscriber on every session, and the SAME message would be
+    /// appended to `lines` N times — producing duplicate IDs in `ForEach`
+    /// and rendering the same chat row twice.
     ///
     /// The prime + subscribe happens atomically per-session (one actor call
     /// each via `session.subscribe(_:)`), so each session's contribution to
     /// `lines` can't have a "primed-but-missed-a-message" gap.
     public func attach(sessions: [ChannelSession]) async {
+        // Tear down any prior subscriptions before re-subscribing. Cheap
+        // when there are none (early return inside detach). The actor's
+        // isolation guarantees the detach + re-subscribe happen as a
+        // single uninterrupted sequence on @MainActor.
+        await detach()
+
         attachState = .attaching
 
         var combined: [ChatMessage] = []

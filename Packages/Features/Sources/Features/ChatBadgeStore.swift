@@ -115,6 +115,9 @@ final class ChatBadgeStore {
                 try await client.api.fetchGlobalBadges()
             }
             return Self.flatten(sets: sets)
+        } catch is CancellationError {
+            // Expected on view tear-down — silently exit.
+            return [:]
         } catch {
             // Non-fatal: chat still renders without badges.
             logger.error("Failed to load global badges: \(error.localizedDescription)")
@@ -133,6 +136,11 @@ final class ChatBadgeStore {
                 try await client.api.fetchChannelBadges(forBroadcasterID: channelId)
             }
             return Self.flatten(sets: sets)
+        } catch is CancellationError {
+            // Expected when ChatScreen unmounts mid-fetch — the dual-mount
+            // transition on openChannel cancels the badge .task on the first
+            // ChatScreen instance. Silently exit instead of polluting logs.
+            return [:]
         } catch {
             logger.error("Failed to load channel badges for \(channelId): \(error.localizedDescription)")
             return [:]
