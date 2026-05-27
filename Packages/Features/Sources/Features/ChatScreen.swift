@@ -31,6 +31,11 @@ public struct ChatScreen: View {
     /// the binding also updates as the user scrolls manually (iOS 17+ API).
     @State private var scrolledMessageId: String?
 
+    /// When true, the user has Reduce Motion on in system Accessibility — we
+    /// skip the easeOut tween on auto-scroll so chat snaps instantly to the
+    /// newest message instead of animating.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// Pre-cached global Twitch data (loaded once at app launch by RootView).
     /// We pass its global-badges slice into `badgeStore.load(...)` so the
     /// per-channel load skips the redundant /chat/badges/global fetch.
@@ -58,38 +63,19 @@ public struct ChatScreen: View {
     }
 
     public var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                if let errorMessage {
-                    Text(errorMessage)
-                        .foregroundStyle(.red)
-                        .padding()
-                }
-                ForEach(lines) { line in
-                    ChatRow(
-                        message: line,
-                        badgeEntries: badgeStore.entries(for: line.badges)
-                    )
-                    .id(line.messageId)
-                }
-            }
-            // `.scrollTargetLayout` tells the enclosing ScrollView to treat
-            // this LazyVStack's children's `.id(...)` values as anchor points
-            // for `.scrollPosition(id:)`. Without it, the position binding
-            // has nothing to attach to.
-            .scrollTargetLayout()
-            .padding(.horizontal)
-        }
-        // Declarative replacement for `ScrollViewReader { proxy.scrollTo(...) }`
-        // (iOS 17+). Writing to `scrolledMessageId` scrolls; the binding also
-        // updates as the user scrolls manually so we could read it later for
-        // "snap to bottom only when already at bottom" UX without changing
-        // this auto-scroll-on-new-message behavior.
-        .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
-        .onChange(of: lines.count) { _, _ in
-            guard let last = lines.last else { return }
-            withAnimation(.easeOut(duration: 0.1)) {
-                scrolledMessageId = last.messageId
+        Group {
+            if let errorMessage {
+                errorView(errorMessage)
+            } else if lines.isEmpty {
+                // Distinguish "connecting" (session not yet acquired) from
+                // "connected but quiet" (session in place, but no messages
+                // have arrived yet). Without explicit state UI a quiet channel
+                // looks identical to a broken connection — the "doesn't seem
+                // to connect" bug report was actually correct chat behavior
+                // on an idle channel, just with no visual signal.
+                emptyOrConnectingView
+            } else {
+                chatScrollView
             }
         }
         .navigationTitle("#\(channelLoginName)")
@@ -117,6 +103,94 @@ public struct ChatScreen: View {
             )
         }
     }
+
+    // MARK: - Subviews
+
+    /// Shown when an error has been recorded (couldn't open chat, etc.). Red
+    /// text on the main content area — same visual treatment as before, just
+    /// pulled into its own builder.
+    @ViewBuilder
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.red)
+            Text(message)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Empty-state placeholder. Two flavors driven by whether we've got a
+    /// `session` reference:
+    ///   - nil  → "Connecting to chat…" with a spinner (registry.session()
+    ///            hasn't returned yet — WebSocket + subscribe in flight)
+    ///   - set  → "Connected — waiting for messages" (everything's wired,
+    ///            the channel just hasn't had a chat message yet)
+    @ViewBuilder
+    private var emptyOrConnectingView: some View {
+        VStack(spacing: 12) {
+            if session == nil {
+                ProgressView()
+                Text("Connecting to chat…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.largeTitle)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                Text("Connected to #\(channelLoginName)")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.primary)
+                Text("Waiting for messages…")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The scrolling chat content. Only mounted once we have at least one
+    /// message — keeps the empty-state cleanly separated and avoids feeding
+    /// an empty LazyVStack into `.scrollPosition` (which would no-op until
+    /// rows arrive but log-spams about a missing target).
+    @ViewBuilder
+    private var chatScrollView: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 4) {
+                ForEach(lines) { line in
+                    ChatRow(
+                        message: line,
+                        badgeEntries: badgeStore.entries(for: line.badges)
+                    )
+                    .id(line.messageId)
+                }
+            }
+            // `.scrollTargetLayout` tells the enclosing ScrollView to treat
+            // this LazyVStack's children's `.id(...)` values as anchor points
+            // for `.scrollPosition(id:)`. Without it, the position binding
+            // has nothing to attach to.
+            .scrollTargetLayout()
+            .padding(.horizontal)
+        }
+        // Declarative replacement for `ScrollViewReader { proxy.scrollTo(...) }`.
+        // Writing to `scrolledMessageId` scrolls; the binding also updates as
+        // the user scrolls manually, opening the door to "snap to bottom only
+        // when already at bottom" UX later without changing today's behavior.
+        .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
+        .onChange(of: lines.count) { _, _ in
+            guard let last = lines.last else { return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.1)) {
+                scrolledMessageId = last.messageId
+            }
+        }
+    }
+
+    // MARK: - Session lifecycle
 
     @MainActor
     private func startSession() async {
