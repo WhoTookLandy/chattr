@@ -9,6 +9,14 @@ private let logger = AppLogger.make("Features.ChannelList")
 
 /// Displays the signed-in user's followed channels.
 /// Tapping a row pushes a `ChatScreen` for that channel.
+///
+/// Pagination behaviour: rather than blocking on the full follow-list before
+/// showing anything, this screen renders the list as soon as the first page
+/// arrives and appends more rows as additional pages stream in. While
+/// pagination continues, a "loading more" footer cell stays at the bottom of
+/// the list with a live count. Users can interact with already-loaded
+/// channels (tap to open chat, search to filter) while loading completes in
+/// the background.
 public struct ChannelListScreen: View {
     private let account: Account
     private let accountStore: AccountStore
@@ -44,30 +52,23 @@ public struct ChannelListScreen: View {
 
     public var body: some View {
         Group {
-            switch loadState {
-            case .idle, .loading:
-                loadingView
-            case .loaded where channels.isEmpty:
-                ContentUnavailableView(
-                    "No followed channels",
-                    systemImage: "person.crop.circle.badge.questionmark",
-                    description: Text("Follow channels on twitch.tv and they'll appear here.")
-                )
-            case .loaded:
-                loadedListView
-            case .failed:
-                VStack(spacing: 16) {
-                    ContentUnavailableView(
-                        "Couldn't load channels",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(errorMessage ?? "Unknown error")
-                    )
-                    Button("Sign out and try again") {
-                        showingSignOutConfirm = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .padding(.bottom, 32)
+            if channels.isEmpty {
+                // No rows yet — show the initial placeholder for whichever
+                // state we're in.
+                switch loadState {
+                case .idle, .loading:
+                    initialLoadingView
+                case .loaded:
+                    emptyFollowsView
+                case .failed:
+                    failedView
                 }
+            } else {
+                // We have at least one channel — show the list. If pagination
+                // is still in flight, the list footer carries a "loading more"
+                // row; if pagination failed mid-stream, the footer becomes a
+                // small error indicator.
+                loadedListView
             }
         }
         .navigationTitle("\(account.displayName)'s Follows")
@@ -103,25 +104,15 @@ public struct ChannelListScreen: View {
 
     // MARK: - Subviews
 
-    /// Loading state. Shows a progressive count once any channels arrive — many
-    /// power users follow 500+ channels, so a static spinner with no feedback
-    /// can feel like the app is stuck. We update `loadProgress` after each page.
+    /// First-load state — no channels arrived yet. Shows a spinner with an
+    /// optional progressive count if `loadProgress` is non-zero (we capture
+    /// `total` from the first page response when Twitch includes it).
     @ViewBuilder
-    private var loadingView: some View {
+    private var initialLoadingView: some View {
         VStack(spacing: 12) {
             ProgressView()
             if loadProgress > 0 {
-                if let total = totalFollowed, total > 0 {
-                    Text("Loading channels — \(loadProgress) of \(total)")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                        .contentTransition(.numericText())
-                } else {
-                    Text("Loading channels — \(loadProgress) so far")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                        .contentTransition(.numericText())
-                }
+                progressText
             } else {
                 Text("Loading channels…")
                     .foregroundStyle(.secondary)
@@ -131,35 +122,120 @@ public struct ChannelListScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Filtered list of followed channels.
+    /// "No followed channels" state — distinct from loading.
+    @ViewBuilder
+    private var emptyFollowsView: some View {
+        ContentUnavailableView(
+            "No followed channels",
+            systemImage: "person.crop.circle.badge.questionmark",
+            description: Text("Follow channels on twitch.tv and they'll appear here.")
+        )
+    }
+
+    /// Initial-load failure with no partial data — the user is stuck. Surface
+    /// the "Sign out and try again" recovery path here too.
+    @ViewBuilder
+    private var failedView: some View {
+        VStack(spacing: 16) {
+            ContentUnavailableView(
+                "Couldn't load channels",
+                systemImage: "exclamationmark.triangle",
+                description: Text(errorMessage ?? "Unknown error")
+            )
+            Button("Sign out and try again") {
+                showingSignOutConfirm = true
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.bottom, 32)
+        }
+    }
+
+    /// The list of channels (filtered + tappable). Includes a footer row when
+    /// pagination is still in flight or has failed mid-load.
     @ViewBuilder
     private var loadedListView: some View {
         let filtered = filteredChannels
-        if filtered.isEmpty {
-            ContentUnavailableView.search(text: searchText)
-        } else {
-            List(filtered) { channel in
-                NavigationLink {
-                    ChatScreen(
-                        account: account,
-                        accountStore: accountStore,
-                        channelId: channel.broadcasterId,
-                        channelLoginName: channel.broadcasterLogin,
-                        channelDisplayName: channel.broadcasterName
-                    )
-                } label: {
-                    HStack {
-                        Text(channel.broadcasterName)
-                            .font(.headline)
-                        Spacer()
-                        Text("@\(channel.broadcasterLogin)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+        Group {
+            if filtered.isEmpty && !searchText.isEmpty {
+                // We have channels but the current search matches none of them.
+                ContentUnavailableView.search(text: searchText)
+            } else {
+                List {
+                    ForEach(filtered) { channel in
+                        NavigationLink {
+                            ChatScreen(
+                                account: account,
+                                accountStore: accountStore,
+                                channelId: channel.broadcasterId,
+                                channelLoginName: channel.broadcasterLogin,
+                                channelDisplayName: channel.broadcasterName
+                            )
+                        } label: {
+                            HStack {
+                                Text(channel.broadcasterName)
+                                    .font(.headline)
+                                Spacer()
+                                Text("@\(channel.broadcasterLogin)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
+                    loadingMoreFooter
                 }
+                .listStyle(.plain)
             }
-            .listStyle(.plain)
-            .searchable(text: $searchText, prompt: "Search channels")
+        }
+        .searchable(text: $searchText, prompt: "Search channels")
+    }
+
+    /// Footer row shown at the bottom of the list while pagination is still in
+    /// flight or if it failed mid-load. Hidden once loadState is .loaded.
+    @ViewBuilder
+    private var loadingMoreFooter: some View {
+        switch loadState {
+        case .loading:
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.75)
+                progressText
+                Spacer()
+            }
+            .padding(.vertical, 4)
+            .listRowSeparator(.hidden)
+        case .failed:
+            // Partial load — show what we have plus a "couldn't load remaining" notice.
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Couldn't load remaining channels")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Retry") {
+                    Task { await load() }
+                }
+                .font(.footnote)
+            }
+            .padding(.vertical, 4)
+            .listRowSeparator(.hidden)
+        case .idle, .loaded:
+            EmptyView()
+        }
+    }
+
+    /// Reusable progress label — shows total when known, otherwise a "so far" count.
+    @ViewBuilder
+    private var progressText: some View {
+        if let total = totalFollowed, total > 0 {
+            Text("Loading channels — \(loadProgress) of \(total)")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+                .contentTransition(.numericText())
+        } else {
+            Text("Loading channels — \(loadProgress) so far")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+                .contentTransition(.numericText())
         }
     }
 
@@ -175,33 +251,29 @@ public struct ChannelListScreen: View {
             try await accountStore.remove(account: account)
             logger.info("Signed out @\(account.login)")
         } catch {
-            // Even if logout HTTP fails, we want to recover — fall back to local deletion.
             logger.error("Sign out had an error: \(error.localizedDescription)")
             errorMessage = "Sign out: \(error.localizedDescription)"
         }
     }
 
-    /// Loads ALL of the user's followed channels by paginating Helix until the
-    /// `pagination.cursor` is nil. Updates `loadProgress` between pages so the
-    /// loading state can show a live counter. Most users follow under a few
-    /// hundred channels; power users can follow 1000+ which is ~10–11 pages
-    /// at Twitch's 100-per-page max.
+    /// Loads ALL of the user's followed channels by paginating Helix until
+    /// `pagination.cursor` is nil. Updates `channels` AFTER EACH PAGE so the
+    /// SwiftUI view sees rows appear progressively rather than waiting for the
+    /// whole load to complete. Safety cap of 200 pages protects against stuck
+    /// cursors.
     @MainActor
     private func load() async {
         loadState = .loading
         loadProgress = 0
         totalFollowed = nil
         errorMessage = nil
+        channels = []  // reset on full reload (refreshable)
+
         do {
             let client = accountStore.client(for: account)
-            // Capture stable Sendable values for the closure — `Account` isn't Sendable.
             let userId = account.userId
 
-            var collected: [FollowedChannel] = []
             var cursor: String? = nil
-            // Safety cap: refuse to follow more than 200 pages = 20,000 channels.
-            // Catches infinite-loop bugs in Twitch's cursor pagination (very rare but
-            // we'd rather throw than hang the UI forever).
             let pageCap = 200
             var pagesFetched = 0
 
@@ -215,14 +287,17 @@ public struct ChannelListScreen: View {
                         after: cursorForRequest
                     )
                 }
-                collected.append(contentsOf: page.data)
                 pagesFetched += 1
 
-                // Twitch only includes `total` on the first page response. Capture it then.
+                // KEY DIFFERENCE FROM PREVIOUS VERSION: append to `channels`
+                // immediately so the view sees the new rows. SwiftUI's diffable
+                // List handles the inserts smoothly.
+                channels.append(contentsOf: page.data)
+                loadProgress = channels.count
+
                 if totalFollowed == nil, let total = page.total {
                     totalFollowed = total
                 }
-                loadProgress = collected.count
                 cursor = page.pagination?.cursor
 
                 if pagesFetched >= pageCap {
@@ -231,11 +306,13 @@ public struct ChannelListScreen: View {
                 }
             } while cursor != nil
 
-            channels = collected
             loadState = .loaded
             logger.info("Loaded \(channels.count) followed channels across \(pagesFetched) page(s)")
         } catch {
             errorMessage = "\(error)"
+            // If we have ANY channels already, transition to .failed (the list
+            // stays visible with an error footer). If we have none, the
+            // failedView covers the screen.
             loadState = .failed
             logger.error("Failed to load followed channels: \(error.localizedDescription)")
         }
