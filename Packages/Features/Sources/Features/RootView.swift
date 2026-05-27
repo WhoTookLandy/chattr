@@ -15,6 +15,10 @@ private let logger = AppLogger.make("Features.Root")
 public struct RootView: View {
     private let accountStore: AccountStore
     private let clientId: String
+    /// Owned by chattrApp, not by RootView — re-instantiating RootView (e.g.
+    /// on a future hot reload or scene rebuild) shouldn't blow away in-flight
+    /// chat sessions.
+    private let channelSessionRegistry: ChannelSessionRegistry
 
     @Query(sort: \Account.addedAt, order: .reverse)
     private var accounts: [Account]
@@ -25,9 +29,20 @@ public struct RootView: View {
     /// keeping the data across sign-outs is also fine since it's not auth-specific).
     @State private var globalCatalog = GlobalCatalog()
 
-    public init(accountStore: AccountStore, clientId: String) {
+    /// Cache of the active account's followed channels + enrichment data.
+    /// Owned here so the data survives chat-screen push/pop — previously
+    /// every back-nav refetched the entire follow list because the state
+    /// lived in ChannelListScreen's `@State` and `.task` re-fired on appear.
+    @State private var followsStore = FollowsStore()
+
+    public init(
+        accountStore: AccountStore,
+        clientId: String,
+        channelSessionRegistry: ChannelSessionRegistry
+    ) {
         self.accountStore = accountStore
         self.clientId = clientId
+        self.channelSessionRegistry = channelSessionRegistry
     }
 
     public var body: some View {
@@ -41,6 +56,8 @@ public struct RootView: View {
             }
         }
         .environment(\.globalCatalog, globalCatalog)
+        .environment(\.followsStore, followsStore)
+        .environment(\.channelSessionRegistry, channelSessionRegistry)
         .onChange(of: accounts.first?.userId) { _, newId in
             // AccountStore is @MainActor; setActive is sync — no Task wrapper / await needed.
             // (The plan template had Task { await ... } from the older actor design.)
@@ -55,6 +72,13 @@ public struct RootView: View {
         .task(id: accounts.first?.userId) {
             guard let active = accounts.first else { return }
             await globalCatalog.load(account: active, accountStore: accountStore)
+        }
+        // Trigger an initial follow-list load on first sign-in (or account swap).
+        // `loadIfNeeded` no-ops when the store already holds the requested account's
+        // data, so back-nav from chat screens doesn't refetch.
+        .task(id: accounts.first?.userId) {
+            guard let active = accounts.first else { return }
+            await followsStore.loadIfNeeded(account: active, accountStore: accountStore)
         }
     }
 }
