@@ -69,11 +69,11 @@ public struct AppShell: View {
         // the visible tab. Concentrating both side effects behind one verb
         // keeps the call sites (e.g. ChannelListScreen row tap) ignorant of
         // the navigation model.
-        .environment(\.openChannel, OpenChannelAction { channel, profileImageURL in
+        .environment(\.openChannel, OpenChannelAction { channelId, login, displayName, profileImageURL in
             chatTabsModel.open(OpenChannelDescriptor(
-                channelId: channel.broadcasterId,
-                channelLoginName: channel.broadcasterLogin,
-                channelDisplayName: channel.broadcasterName,
+                channelId: channelId,
+                channelLoginName: login,
+                channelDisplayName: displayName,
                 profileImageURL: profileImageURL
             ))
             selectedTab = .chat

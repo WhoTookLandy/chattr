@@ -7,20 +7,30 @@ import os
 
 private let logger = AppLogger.make("Features.FollowsStore")
 
-/// App-level cache of the active account's followed channels + their enrichment
-/// data (live streams, profile images).
+/// App-level cache of the active account's followed channels.
 ///
-/// Why this exists: before this store, all follow-list state lived in
-/// `ChannelListScreen`'s `@State`. SwiftUI's `.task` modifier re-fires every
-/// time a view re-appears, and `load()` resets state at the start — so every
-/// pop-back from a chat triggered a full refetch (pagination + per-page
-/// live-streams + per-page user-profile batches). That's a lot of wasted
-/// requests for what should be a stable list.
+/// Owns two independent data sets sourced from two Helix endpoints:
 ///
-/// This store hoists the state up to `RootView`, which owns it as `@State`
-/// and triggers a single load via `.task(id: account.userId)` on first sign-in
-/// (or account swap). Subsequent ChannelListScreen mounts read from the store
-/// without re-fetching. Pull-to-refresh calls `refresh()` for an explicit reload.
+///   - **Live** (`/streams/followed`): currently-live channels with rich
+///     metadata (game, viewer count, title). Refetched on every Follows-tab
+///     visit and on pull-to-refresh — live status changes minute-to-minute.
+///     `liveStreamsOrdered` holds the array in Twitch's returned order
+///     (descending viewer count); `liveStreams` is a (broadcasterId → stream)
+///     dict used by the All view to overlay LIVE badges.
+///
+///   - **All** (`/channels/followed`): every followed channel (live + offline)
+///     with only identity fields (id, login, name, followedAt). Loaded once
+///     per account on first sign-in via `loadAllIfNeeded`, cached in-memory
+///     for the rest of the session. Pull-to-refresh on the All view forces
+///     a reload via `refreshAll`.
+///
+/// `userProfiles` (broadcasterId → TwitchUser) is shared between both views —
+/// each refresh batches `fetchUsers(ids:)` for IDs not already cached.
+///
+/// Why this lives in a store (not in `ChannelListScreen.@State`): before this
+/// existed, every pop-back from a chat triggered `.task` to re-fire and
+/// `load()` to refetch from scratch. Hoisting to `RootView`-owned state means
+/// the data survives view-tree churn and only refetches when actually wanted.
 @MainActor
 @Observable
 public final class FollowsStore {
@@ -29,96 +39,157 @@ public final class FollowsStore {
         case idle, loading, loaded, failed
     }
 
-    // MARK: - Observable state
+    // MARK: - "All" data set (full follow list, cached)
 
     public private(set) var channels: [FollowedChannel] = []
-    public private(set) var liveStreams: [String: TwitchStream] = [:]
     public private(set) var userProfiles: [String: TwitchUser] = [:]
-    public private(set) var loadState: LoadState = .idle
-    public private(set) var loadProgress: Int = 0
+    public private(set) var allLoadState: LoadState = .idle
+    public private(set) var allLoadProgress: Int = 0
     public private(set) var totalFollowed: Int?
-    public private(set) var errorMessage: String?
+    public private(set) var allErrorMessage: String?
+
+    // MARK: - "Live" data set (foreground, refetched per visit)
+
+    /// Live channels in Twitch's returned order (desc viewer count). Drives
+    /// the Live segmented view.
+    public private(set) var liveStreamsOrdered: [TwitchStream] = []
+
+    /// Same data keyed by broadcasterId. Drives LIVE badges on the All view.
+    public private(set) var liveStreams: [String: TwitchStream] = [:]
+
+    public private(set) var liveLoadState: LoadState = .idle
+    public private(set) var liveErrorMessage: String?
 
     // MARK: - Internal bookkeeping
 
-    /// Which account's data we currently hold. Reset on account-change so the
-    /// next load() repopulates with the new account's follows.
-    private var loadedForUserId: String?
+    /// Which account's *All* data we currently hold. The cache hit/miss is
+    /// driven entirely off this. Live data isn't cached this way — it's always
+    /// considered stale and refetched on demand.
+    private var loadedAllForUserId: String?
 
-    /// In-flight enrichment Tasks (live-streams + per-page profile batches).
-    /// Cancelled at the start of every load() so an account swap mid-flight
-    /// can't have the *previous* account's enrichment write stale data into
-    /// the new state. Without this guard, profile/live-stream Tasks spawned
-    /// for account A would happily complete and write into the shared
-    /// dictionaries after we'd cleared them for account B.
+    /// In-flight enrichment Tasks (per-page profile batches + the inline
+    /// loadAll pagination). Cancelled at the start of every load to prevent
+    /// stale-account writes during a swap.
     private var enrichmentTasks: [Task<Void, Never>] = []
 
     public init() {}
 
-    // MARK: - Public API
+    // MARK: - Public API: All
 
-    /// Loads only when the data we hold isn't for the requested account.
-    /// Safe to call from `.task(id:)` which re-fires on account swap.
-    public func loadIfNeeded(account: Account, accountStore: AccountStore) async {
-        guard loadedForUserId != account.userId else { return }
-        await load(account: account, accountStore: accountStore)
+    /// Loads the full follow list only if we don't already have data for this
+    /// account. Safe to call from `.task(id:)` which re-fires on account swap.
+    public func loadAllIfNeeded(account: Account, accountStore: AccountStore) async {
+        guard loadedAllForUserId != account.userId else { return }
+        await loadAll(account: account, accountStore: accountStore)
     }
 
-    /// Force-reload — drops all state and re-fetches. Drives pull-to-refresh.
-    public func refresh(account: Account, accountStore: AccountStore) async {
-        await load(account: account, accountStore: accountStore)
+    /// Force-reload the All list (pull-to-refresh on the All view).
+    public func refreshAll(account: Account, accountStore: AccountStore) async {
+        await loadAll(account: account, accountStore: accountStore)
     }
+
+    // MARK: - Public API: Live
+
+    /// Reloads the Live list. Not cached — every call refetches. Drives
+    /// `.task` on the Live view appearance + pull-to-refresh.
+    public func refreshLive(account: Account, accountStore: AccountStore) async {
+        liveLoadState = .loading
+        liveErrorMessage = nil
+
+        var fresh: [TwitchStream] = []
+        var freshMap: [String: TwitchStream] = [:]
+
+        do {
+            let client = accountStore.client(for: account)
+            let userId = account.userId
+            var cursor: String? = nil
+            var pagesFetched = 0
+
+            repeat {
+                let cursorForRequest = cursor
+                let page = try await accountStore.withTokenRefresh(for: account) {
+                    try await client.api.fetchFollowedStreamsPage(
+                        userID: userId,
+                        first: 100,
+                        after: cursorForRequest
+                    )
+                }
+                pagesFetched += 1
+
+                fresh.append(contentsOf: page.data)
+                for stream in page.data {
+                    freshMap[stream.userId] = stream
+                }
+                // Commit progressively so the UI sees streams as pages arrive.
+                liveStreamsOrdered = fresh
+                liveStreams = freshMap
+
+                // Kick off profile enrichment for live channels not already cached.
+                let liveIds = page.data.map(\.userId)
+                let task = Task { await self.enrichProfiles(ids: liveIds, account: account, accountStore: accountStore) }
+                enrichmentTasks.append(task)
+
+                cursor = page.pagination?.cursor
+                if pagesFetched >= 20 {
+                    logger.warning("Hit live-streams pagination cap — stopping")
+                    break
+                }
+            } while cursor != nil
+
+            liveLoadState = .loaded
+            logger.info("Loaded \(fresh.count) live followed channel(s) across \(pagesFetched) page(s)")
+        } catch is CancellationError {
+            // Cancelled (e.g. tab switch mid-load) — leave whatever we already
+            // committed visible and exit silently.
+            logger.info("Live-streams load cancelled")
+        } catch {
+            liveErrorMessage = "\(error)"
+            liveLoadState = .failed
+            logger.error("Failed to load live followed channels: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Public API: misc
 
     /// Removes a channel from the local list. Used by the future "unfollow"
-    /// affordance or by external state syncing — not currently called but
-    /// reserved for the tab-bar `close X` flow if we ever want close to also
-    /// un-follow. (Currently close just stops the EventSub session.)
+    /// affordance — not currently called but kept for parity.
     public func dropChannel(broadcasterId: String) {
         channels.removeAll { $0.broadcasterId == broadcasterId }
         liveStreams[broadcasterId] = nil
+        liveStreamsOrdered.removeAll { $0.userId == broadcasterId }
         userProfiles[broadcasterId] = nil
     }
 
-    // MARK: - Load implementation (lifted from ChannelListScreen)
+    // MARK: - Load implementation: All
 
-    /// Paginates Helix until pagination.cursor is nil. Builds the next channel
-    /// list in a local array and commits to `channels` per page so the UI sees
-    /// rows progressively. Enrichment (live streams + profile images) fires
-    /// after the first page lands.
+    /// Paginates `/channels/followed`, building the next channel list into a
+    /// local array and committing per page so the UI sees rows progressively.
+    /// Profile enrichment fires per page.
     ///
     /// State-reset policy:
-    ///   - On account swap (loadedForUserId differs from new): wipe stale data
-    ///     immediately so the previous user's follows don't briefly appear.
-    ///   - On refresh (same account): keep existing data visible until new
-    ///     pages arrive — pull-to-refresh's own spinner is the loading signal.
+    ///   - Account swap: wipe stale data immediately so the previous user's
+    ///     follows don't briefly appear under the new user's name.
+    ///   - Refresh (same account): keep existing data visible until new pages
+    ///     arrive — pull-to-refresh's own spinner is the loading signal.
     ///
-    /// CancellationError is treated as benign: it just means the task was
-    /// cancelled by view tear-down or a `.task(id:)` re-fire. We log it and
-    /// leave `loadState` / `errorMessage` alone so the user doesn't see a
-    /// spurious "Couldn't load channels" full-screen failure.
-    private func load(account: Account, accountStore: AccountStore) async {
-        // Cancel any in-flight enrichment from a previous load before kicking
-        // off new work. Critical for the account-swap case: without this,
-        // account A's profile/live-stream Tasks would happily complete after
-        // we've reset state for account B and write stale data on top.
-        for task in enrichmentTasks {
-            task.cancel()
-        }
+    /// CancellationError is treated as benign and leaves state intact (view
+    /// tear-down / `.task(id:)` re-fire).
+    private func loadAll(account: Account, accountStore: AccountStore) async {
+        // Cancel any in-flight enrichment from previous loads.
+        for task in enrichmentTasks { task.cancel() }
         enrichmentTasks = []
 
-        let isAccountSwap = (loadedForUserId != nil && loadedForUserId != account.userId)
+        let isAccountSwap = (loadedAllForUserId != nil && loadedAllForUserId != account.userId)
 
-        loadState = .loading
-        loadProgress = 0
+        allLoadState = .loading
+        allLoadProgress = 0
         totalFollowed = nil
-        errorMessage = nil
+        allErrorMessage = nil
 
-        // Only blow away cached data when the *account* changed. Refresh of
-        // the same account keeps the existing rows visible so pull-to-refresh
-        // doesn't briefly empty the screen if it gets cancelled mid-load.
         if isAccountSwap {
             channels = []
             liveStreams = [:]
+            liveStreamsOrdered = []
             userProfiles = [:]
         }
 
@@ -126,12 +197,7 @@ public final class FollowsStore {
             let client = accountStore.client(for: account)
             let userId = account.userId
 
-            // Build into a local array, then swap into `channels` per page.
-            // This way a cancellation mid-pagination leaves the *previous*
-            // full list intact (we only swap once we have a complete page),
-            // and refresh-of-same-account never goes empty.
             var accumulated: [FollowedChannel] = []
-
             var cursor: String? = nil
             let pageCap = 200
             var pagesFetched = 0
@@ -149,20 +215,16 @@ public final class FollowsStore {
                 pagesFetched += 1
 
                 accumulated.append(contentsOf: page.data)
-                channels = accumulated  // commit each page
-                loadProgress = accumulated.count
+                channels = accumulated
+                allLoadProgress = accumulated.count
 
                 if totalFollowed == nil, let total = page.total {
                     totalFollowed = total
                 }
 
+                // Enrich profile images for this page. We DON'T do live-stream
+                // enrichment here anymore — refreshLive() handles that path.
                 let pageIds = page.data.map(\.broadcasterId)
-                if pagesFetched == 1 {
-                    // Track the live-streams Task so a subsequent load() can
-                    // cancel it before it writes stale data.
-                    let task = Task { await self.loadLiveStreams(account: account, accountStore: accountStore) }
-                    enrichmentTasks.append(task)
-                }
                 let profileTask = Task { await self.enrichProfiles(ids: pageIds, account: account, accountStore: accountStore) }
                 enrichmentTasks.append(profileTask)
 
@@ -174,65 +236,21 @@ public final class FollowsStore {
                 }
             } while cursor != nil
 
-            loadState = .loaded
-            loadedForUserId = account.userId
+            allLoadState = .loaded
+            loadedAllForUserId = account.userId
             logger.info("Loaded \(self.channels.count) followed channels across \(pagesFetched) page(s)")
         } catch is CancellationError {
-            // Expected when the task is torn down (view unmount, .task(id:)
-            // re-fire, etc.). Leave state untouched so the next load picks up
-            // from a sane place.
-            logger.info("Follow-list load cancelled — leaving existing data intact")
+            logger.info("All-channels load cancelled — leaving existing data intact")
         } catch {
-            errorMessage = "\(error)"
-            loadState = .failed
+            allErrorMessage = "\(error)"
+            allLoadState = .failed
             logger.error("Failed to load followed channels: \(error.localizedDescription)")
         }
     }
 
-    /// Builds the fresh live-streams map into a local dict and assigns it
-    /// atomically at the end. Mutating `liveStreams` per page would *merge*
-    /// new live streams on top of stale ones — channels that went offline
-    /// since last load would stay marked live forever.
-    private func loadLiveStreams(account: Account, accountStore: AccountStore) async {
-        var fresh: [String: TwitchStream] = [:]
-        do {
-            let client = accountStore.client(for: account)
-            let userId = account.userId
-            var cursor: String? = nil
-            var pagesFetched = 0
-
-            repeat {
-                let cursorForRequest = cursor
-                let page = try await accountStore.withTokenRefresh(for: account) {
-                    try await client.api.fetchFollowedStreamsPage(
-                        userID: userId,
-                        first: 100,
-                        after: cursorForRequest
-                    )
-                }
-                pagesFetched += 1
-                for stream in page.data {
-                    fresh[stream.userId] = stream
-                }
-                cursor = page.pagination?.cursor
-                if pagesFetched >= 20 {
-                    logger.warning("Hit live-streams pagination cap — stopping")
-                    break
-                }
-            } while cursor != nil
-
-            // Atomic swap — old "live" channels that didn't appear in this
-            // pagination are correctly dropped.
-            liveStreams = fresh
-            logger.info("Loaded \(fresh.count) live followed channel(s) across \(pagesFetched) page(s)")
-        } catch is CancellationError {
-            // Cancelled — leave whatever was previously cached, will retry next time.
-            logger.info("Live-streams load cancelled")
-        } catch {
-            logger.error("Failed to load live followed channels: \(error.localizedDescription)")
-        }
-    }
-
+    /// Batches `fetchUsers(ids:)` for IDs not already cached. Skips empty
+    /// inputs cheaply. Called from both loadAll (per page) and refreshLive
+    /// (per page). The userProfiles dict accretes across both sources.
     private func enrichProfiles(ids: [String], account: Account, accountStore: AccountStore) async {
         let missing = ids.filter { userProfiles[$0] == nil }
         guard !missing.isEmpty else { return }
@@ -245,7 +263,6 @@ public final class FollowsStore {
                 userProfiles[user.id] = user
             }
         } catch is CancellationError {
-            // Cancelled mid-batch — the missing IDs will be retried on next load.
             logger.info("Profile enrichment cancelled for \(missing.count) channels")
         } catch {
             logger.error("Failed to load profile images for \(missing.count) channels: \(error.localizedDescription)")
@@ -256,8 +273,6 @@ public final class FollowsStore {
 // MARK: - Environment plumbing
 
 private struct FollowsStoreKey: EnvironmentKey {
-    /// nil default for the same MainActor-isolation reason as GlobalCatalog —
-    /// constructing `@MainActor` instances in a nonisolated context trips Swift 6.
     static let defaultValue: FollowsStore? = nil
 }
 

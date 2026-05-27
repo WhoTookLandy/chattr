@@ -1,37 +1,62 @@
 import SwiftUI
 import TwitchKit
 
-/// Environment action invoked when the user taps a channel in the Follows
-/// tab. The receiver (AppShell) adds the channel to `ChatTabsModel` and
-/// switches the tab selection to Chat.
+/// Environment action invoked when the user taps a channel anywhere in the
+/// app (Follows tab — Live OR All view). The receiver (AppShell) adds the
+/// channel to `ChatTabsModel` and switches the tab selection to Chat.
 ///
-/// This is a closure wrapper rather than passing a direct `ChatTabsModel`
-/// because the act of "open this channel" also entails switching tabs —
-/// that's owned by `AppShell.selectedTab`, which the leaf views shouldn't
-/// know about. The closure encapsulates both side effects behind one verb.
+/// Takes plain fields rather than a `FollowedChannel` so the Live view can
+/// dispatch from a `TwitchStream` source without synthesizing a fake
+/// `FollowedChannel` (which would also imply a fake `followedAt` date that
+/// downstream code might trust).
 ///
 /// `Sendable` so the environment-key static default (`nil`) doesn't trip
 /// Swift 6's mutable-global-variable check.
 ///
 /// The captured closure is `@MainActor` because AppShell's implementation
 /// mutates `selectedTab` and `chatTabsModel` — both `@MainActor`-isolated
-/// SwiftUI state. Marking the closure type itself as `@MainActor` lets
-/// AppShell's body capture them without "Sendable closure references main-
-/// actor state" warnings. The trade-off: `callAsFunction` is also
-/// `@MainActor`, so callers must be on the main actor (they always are —
-/// they're SwiftUI Views).
+/// SwiftUI state.
 public struct OpenChannelAction: Sendable {
-    private let perform: @MainActor @Sendable (FollowedChannel, URL?) -> Void
+    private let perform: @MainActor @Sendable (
+        _ channelId: String,
+        _ login: String,
+        _ displayName: String,
+        _ profileImageURL: URL?
+    ) -> Void
 
-    public init(perform: @MainActor @Sendable @escaping (FollowedChannel, URL?) -> Void) {
+    public init(
+        perform: @MainActor @Sendable @escaping (
+            _ channelId: String,
+            _ login: String,
+            _ displayName: String,
+            _ profileImageURL: URL?
+        ) -> Void
+    ) {
         self.perform = perform
     }
 
-    /// `callAsFunction` lets call sites read as `openChannel(channel: x, profileImageURL: y)`
-    /// rather than `openChannel.perform(x, y)`. Same idiom Apple uses for `\.openURL`.
+    /// `callAsFunction` lets call sites read as
+    /// `openChannel(channelId: x, login: y, displayName: z, profileImageURL: w)`.
+    @MainActor
+    public func callAsFunction(
+        channelId: String,
+        login: String,
+        displayName: String,
+        profileImageURL: URL?
+    ) {
+        perform(channelId, login, displayName, profileImageURL)
+    }
+
+    /// Convenience for FollowedChannel call sites (the All view).
     @MainActor
     public func callAsFunction(channel: FollowedChannel, profileImageURL: URL?) {
-        perform(channel, profileImageURL)
+        perform(channel.broadcasterId, channel.broadcasterLogin, channel.broadcasterName, profileImageURL)
+    }
+
+    /// Convenience for TwitchStream call sites (the Live view).
+    @MainActor
+    public func callAsFunction(stream: TwitchStream, profileImageURL: URL?) {
+        perform(stream.userId, stream.userLogin, stream.userName, profileImageURL)
     }
 }
 
@@ -41,8 +66,7 @@ private struct OpenChannelActionKey: EnvironmentKey {
 
 public extension EnvironmentValues {
     /// Open the given channel in the Chat tab. `nil` when the action hasn't
-    /// been injected (e.g. in previews); call sites should fall back gracefully
-    /// (typically: just do nothing).
+    /// been injected (e.g. in previews); call sites should fall back gracefully.
     var openChannel: OpenChannelAction? {
         get { self[OpenChannelActionKey.self] }
         set { self[OpenChannelActionKey.self] = newValue }

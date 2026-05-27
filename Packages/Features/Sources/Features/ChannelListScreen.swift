@@ -7,28 +7,40 @@ import os
 
 private let logger = AppLogger.make("Features.ChannelList")
 
-/// Displays the signed-in user's followed channels.
-/// Tapping a row pushes a `ChatScreen` for that channel.
+/// Top-level Follows tab content.
 ///
-/// State lives in `FollowsStore` (owned by `RootView`), not in this view. That
-/// keeps the loaded list alive across navigation — popping back from a chat
-/// no longer triggers a refetch. Pull-to-refresh and the failed-state retry
-/// both call `store.refresh()` for an explicit reload.
+/// Two segmented views:
+///   - **Live** (default): currently-streaming channels, refetched per visit
+///     and on pull-to-refresh. Backed by `FollowsStore.liveStreamsOrdered`.
+///   - **All**: full follow list (live + offline), cached once per account.
+///     Backed by `FollowsStore.channels` + `liveStreams` (dict) for badges.
+///
+/// The two views share `searchText` so typing on Live and switching to All
+/// keeps the filter. The selected view is persisted via `@AppStorage` so it
+/// survives navigation away and back.
 public struct ChannelListScreen: View {
     private let account: Account
     private let accountStore: AccountStore
 
-    /// Injected by RootView. The actual data + load logic lives here so it
-    /// survives back-navigation from chat screens.
     @Environment(\.followsStore) private var followsStore
-
-    /// Injected by AppShell. Invoked when the user taps a row — adds the
-    /// channel to the Chat tab and switches the tab selection to Chat.
     @Environment(\.openChannel) private var openChannel
 
     @State private var showingSignOutConfirm = false
     @State private var searchText: String = ""
     @State private var errorMessage: String?
+
+    @AppStorage("followsViewMode") private var rawViewMode: String = ViewMode.live.rawValue
+
+    enum ViewMode: String, CaseIterable {
+        case live, all
+
+        var displayName: String {
+            switch self {
+            case .live: return "Live"
+            case .all:  return "All"
+            }
+        }
+    }
 
     public init(account: Account, accountStore: AccountStore) {
         self.account = account
@@ -37,29 +49,30 @@ public struct ChannelListScreen: View {
 
     // MARK: - Convenience accessors
 
-    /// Empty when the store hasn't been injected (e.g. SwiftUI previews) — falls
-    /// back to the "loading" placeholder rather than crashing.
     private var channels: [FollowedChannel] { followsStore?.channels ?? [] }
-    private var liveStreams: [String: TwitchStream] { followsStore?.liveStreams ?? [:] }
+    private var liveStreamsDict: [String: TwitchStream] { followsStore?.liveStreams ?? [:] }
+    private var liveStreamsOrdered: [TwitchStream] { followsStore?.liveStreamsOrdered ?? [] }
     private var userProfiles: [String: TwitchUser] { followsStore?.userProfiles ?? [:] }
-    private var loadState: FollowsStore.LoadState { followsStore?.loadState ?? .idle }
-    private var loadProgress: Int { followsStore?.loadProgress ?? 0 }
+    private var allLoadState: FollowsStore.LoadState { followsStore?.allLoadState ?? .idle }
+    private var liveLoadState: FollowsStore.LoadState { followsStore?.liveLoadState ?? .idle }
+    private var allLoadProgress: Int { followsStore?.allLoadProgress ?? 0 }
     private var totalFollowed: Int? { followsStore?.totalFollowed }
-    /// Combined: store's load error OR our local sign-out error.
-    private var visibleError: String? { errorMessage ?? followsStore?.errorMessage }
+    private var allErrorMessage: String? { followsStore?.allErrorMessage }
+    private var liveErrorMessage: String? { followsStore?.liveErrorMessage }
 
-    /// Channels sorted for display: live channels first (descending by viewer
-    /// count), then offline channels in their original follow-list order
-    /// (Twitch returns most-recently-followed first).
-    ///
-    /// We sort `(index, channel)` tuples and use the index as the tie-breaker
-    /// for the offline-vs-offline case — Swift's `sorted(by:)` is not
-    /// guaranteed stable, so we force stability explicitly.
-    private var displayChannels: [FollowedChannel] {
+    private var selectedMode: ViewMode {
+        ViewMode(rawValue: rawViewMode) ?? .live
+    }
+
+    // MARK: - Sorting + filtering
+
+    /// All channels sorted live-first (descending by viewer count), with
+    /// offline channels in their original recently-followed order.
+    private var sortedAllChannels: [FollowedChannel] {
         let indexed = channels.enumerated().map { ($0.offset, $0.element) }
         let sorted = indexed.sorted { lhs, rhs in
-            let lViewers = liveStreams[lhs.1.broadcasterId]?.viewerCount
-            let rViewers = liveStreams[rhs.1.broadcasterId]?.viewerCount
+            let lViewers = liveStreamsDict[lhs.1.broadcasterId]?.viewerCount
+            let rViewers = liveStreamsDict[rhs.1.broadcasterId]?.viewerCount
             switch (lViewers, rViewers) {
             case let (l?, r?): return l > r
             case (.some, .none): return true
@@ -70,32 +83,51 @@ public struct ChannelListScreen: View {
         return sorted.map { $0.1 }
     }
 
-    /// `displayChannels` filtered by the current search text, case-insensitive
-    /// against both display name and login. Empty `searchText` returns the
-    /// full sorted list.
-    private var filteredChannels: [FollowedChannel] {
-        let sorted = displayChannels
-        guard !searchText.isEmpty else { return sorted }
+    private var filteredAllChannels: [FollowedChannel] {
+        guard !searchText.isEmpty else { return sortedAllChannels }
         let query = searchText.lowercased()
-        return sorted.filter { channel in
+        return sortedAllChannels.filter { channel in
             channel.broadcasterName.lowercased().contains(query)
                 || channel.broadcasterLogin.lowercased().contains(query)
         }
     }
 
+    /// Live channels filtered by search. `/streams/followed` already returns
+    /// them in descending viewer-count order, so no extra sort needed.
+    private var filteredLiveStreams: [TwitchStream] {
+        guard !searchText.isEmpty else { return liveStreamsOrdered }
+        let query = searchText.lowercased()
+        return liveStreamsOrdered.filter { stream in
+            stream.userName.lowercased().contains(query)
+                || stream.userLogin.lowercased().contains(query)
+                || stream.gameName.lowercased().contains(query)
+        }
+    }
+
+    // MARK: - Body
+
     public var body: some View {
-        Group {
-            if channels.isEmpty {
-                switch loadState {
-                case .idle, .loading:
-                    initialLoadingView
-                case .loaded:
-                    emptyFollowsView
-                case .failed:
-                    failedView
+        VStack(spacing: 0) {
+            // Segmented picker pinned above whichever list is showing. Hidden
+            // inside the body's VStack rather than as a toolbar item so it
+            // stays visible while the list scrolls.
+            Picker("View", selection: Binding(
+                get: { selectedMode },
+                set: { rawViewMode = $0.rawValue }
+            )) {
+                ForEach(ViewMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
                 }
-            } else {
-                loadedListView
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            Group {
+                switch selectedMode {
+                case .live: liveSegment
+                case .all:  allSegment
+                }
             }
         }
         .navigationTitle("\(account.displayName)'s Follows")
@@ -109,8 +141,6 @@ public struct ChannelListScreen: View {
                 }
             }
         }
-        // failedView's "Sign out and try again" button triggers this dialog —
-        // keep the recovery path available even when settings is unreachable.
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,
@@ -123,27 +153,119 @@ public struct ChannelListScreen: View {
         } message: {
             Text("You'll need to authorize chattr with Twitch again to use this account.")
         }
-        // Pull-to-refresh explicitly forces a reload regardless of cache state.
+        // Search applies to whichever view is showing — the filter logic is
+        // mode-aware inside `filteredAllChannels` / `filteredLiveStreams`.
+        .searchable(text: $searchText, prompt: searchPrompt)
+        // Pull-to-refresh routes to the right refresher.
         .refreshable {
             guard let store = followsStore else { return }
-            await store.refresh(account: account, accountStore: accountStore)
+            switch selectedMode {
+            case .live:
+                await store.refreshLive(account: account, accountStore: accountStore)
+            case .all:
+                await store.refreshAll(account: account, accountStore: accountStore)
+            }
         }
-        // NOTE: No `.task` here. The initial load is triggered by RootView's
-        // `.task(id: account.userId)` which calls `store.loadIfNeeded(...)` once
-        // on first sign-in. Avoiding `.task` here is the whole point — it would
-        // re-fire on every back-nav.
+        // Refresh live data whenever the user visits the Follows tab. The
+        // initial load is triggered by RootView's .task on sign-in; this
+        // .task fires on every appear (including tab switches), giving us
+        // fresh live data without manual pull-to-refresh.
+        .task {
+            guard let store = followsStore else { return }
+            await store.refreshLive(account: account, accountStore: accountStore)
+        }
     }
 
-    // MARK: - Subviews
+    /// Mode-specific search placeholder.
+    private var searchPrompt: String {
+        switch selectedMode {
+        case .live: return "Search live channels"
+        case .all:  return "Search all channels"
+        }
+    }
 
-    /// First-load state — no channels arrived yet. Shows a spinner with an
-    /// optional progressive count if `loadProgress` is non-zero.
+    // MARK: - Live segment
+
     @ViewBuilder
-    private var initialLoadingView: some View {
+    private var liveSegment: some View {
+        let filtered = filteredLiveStreams
+        if liveStreamsOrdered.isEmpty {
+            switch liveLoadState {
+            case .idle, .loading:
+                ProgressView("Loading live channels…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .loaded:
+                ContentUnavailableView(
+                    "Nobody's live",
+                    systemImage: "wifi.slash",
+                    description: Text("None of your followed channels are streaming right now. Switch to All to see your full list.")
+                )
+            case .failed:
+                liveFailedView
+            }
+        } else if filtered.isEmpty && !searchText.isEmpty {
+            ContentUnavailableView.search(text: searchText)
+        } else {
+            List {
+                ForEach(filtered, id: \.userId) { stream in
+                    Button {
+                        let profileURL = userProfiles[stream.userId]
+                            .flatMap { URL(string: $0.profileImageUrl) }
+                        openChannel?(stream: stream, profileImageURL: profileURL)
+                    } label: {
+                        ChannelRow(
+                            stream: stream,
+                            profileImageURL: userProfiles[stream.userId]
+                                .flatMap { URL(string: $0.profileImageUrl) }
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    @ViewBuilder
+    private var liveFailedView: some View {
+        VStack(spacing: 16) {
+            ContentUnavailableView(
+                "Couldn't load live channels",
+                systemImage: "exclamationmark.triangle",
+                description: Text(liveErrorMessage ?? "Unknown error")
+            )
+            Button("Retry") {
+                guard let store = followsStore else { return }
+                Task { await store.refreshLive(account: account, accountStore: accountStore) }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    // MARK: - All segment
+
+    @ViewBuilder
+    private var allSegment: some View {
+        if channels.isEmpty {
+            switch allLoadState {
+            case .idle, .loading:
+                initialAllLoadingView
+            case .loaded:
+                emptyFollowsView
+            case .failed:
+                allFailedView
+            }
+        } else {
+            allLoadedListView
+        }
+    }
+
+    @ViewBuilder
+    private var initialAllLoadingView: some View {
         VStack(spacing: 12) {
             ProgressView()
-            if loadProgress > 0 {
-                progressText
+            if allLoadProgress > 0 {
+                allProgressText
             } else {
                 Text("Loading channels…")
                     .foregroundStyle(.secondary)
@@ -153,7 +275,6 @@ public struct ChannelListScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// "No followed channels" state — distinct from loading.
     @ViewBuilder
     private var emptyFollowsView: some View {
         ContentUnavailableView(
@@ -163,14 +284,13 @@ public struct ChannelListScreen: View {
         )
     }
 
-    /// Initial-load failure with no partial data — surface the sign-out path.
     @ViewBuilder
-    private var failedView: some View {
+    private var allFailedView: some View {
         VStack(spacing: 16) {
             ContentUnavailableView(
                 "Couldn't load channels",
                 systemImage: "exclamationmark.triangle",
-                description: Text(visibleError ?? "Unknown error")
+                description: Text(errorMessage ?? allErrorMessage ?? "Unknown error")
             )
             Button("Sign out and try again") {
                 showingSignOutConfirm = true
@@ -180,50 +300,41 @@ public struct ChannelListScreen: View {
         }
     }
 
-    /// The list of channels (filtered + tappable). Includes a footer row when
-    /// pagination is still in flight or has failed mid-load.
     @ViewBuilder
-    private var loadedListView: some View {
-        let filtered = filteredChannels
-        Group {
-            if filtered.isEmpty && !searchText.isEmpty {
-                ContentUnavailableView.search(text: searchText)
-            } else {
-                List {
-                    ForEach(filtered) { channel in
-                        Button {
-                            let profileURL = userProfiles[channel.broadcasterId]
+    private var allLoadedListView: some View {
+        let filtered = filteredAllChannels
+        if filtered.isEmpty && !searchText.isEmpty {
+            ContentUnavailableView.search(text: searchText)
+        } else {
+            List {
+                ForEach(filtered) { channel in
+                    Button {
+                        let profileURL = userProfiles[channel.broadcasterId]
+                            .flatMap { URL(string: $0.profileImageUrl) }
+                        openChannel?(channel: channel, profileImageURL: profileURL)
+                    } label: {
+                        ChannelRow(
+                            channel: channel,
+                            stream: liveStreamsDict[channel.broadcasterId],
+                            profileImageURL: userProfiles[channel.broadcasterId]
                                 .flatMap { URL(string: $0.profileImageUrl) }
-                            openChannel?(channel: channel, profileImageURL: profileURL)
-                        } label: {
-                            ChannelRow(
-                                channel: channel,
-                                stream: liveStreams[channel.broadcasterId],
-                                profileImageURL: userProfiles[channel.broadcasterId]
-                                    .flatMap { URL(string: $0.profileImageUrl) }
-                            )
-                        }
-                        // .plain so the row doesn't get the system Button blue tint
-                        // — it should still look like a list row, but tap-to-open.
-                        .buttonStyle(.plain)
+                        )
                     }
-                    loadingMoreFooter
+                    .buttonStyle(.plain)
                 }
-                .listStyle(.plain)
+                allLoadingMoreFooter
             }
+            .listStyle(.plain)
         }
-        .searchable(text: $searchText, prompt: "Search channels")
     }
 
-    /// Footer row shown at the bottom of the list while pagination is still in
-    /// flight or if it failed mid-load. Hidden once loadState is .loaded.
     @ViewBuilder
-    private var loadingMoreFooter: some View {
-        switch loadState {
+    private var allLoadingMoreFooter: some View {
+        switch allLoadState {
         case .loading:
             HStack(spacing: 8) {
                 ProgressView().scaleEffect(0.75)
-                progressText
+                allProgressText
                 Spacer()
             }
             .padding(.vertical, 4)
@@ -238,7 +349,7 @@ public struct ChannelListScreen: View {
                 Spacer()
                 Button("Retry") {
                     guard let store = followsStore else { return }
-                    Task { await store.refresh(account: account, accountStore: accountStore) }
+                    Task { await store.refreshAll(account: account, accountStore: accountStore) }
                 }
                 .font(.footnote)
             }
@@ -249,16 +360,15 @@ public struct ChannelListScreen: View {
         }
     }
 
-    /// Reusable progress label — shows total when known, otherwise a "so far" count.
     @ViewBuilder
-    private var progressText: some View {
+    private var allProgressText: some View {
         if let total = totalFollowed, total > 0 {
-            Text("Loading channels — \(loadProgress) of \(total)")
+            Text("Loading channels — \(allLoadProgress) of \(total)")
                 .foregroundStyle(.secondary)
                 .font(.callout)
                 .contentTransition(.numericText())
         } else {
-            Text("Loading channels — \(loadProgress) so far")
+            Text("Loading channels — \(allLoadProgress) so far")
                 .foregroundStyle(.secondary)
                 .font(.callout)
                 .contentTransition(.numericText())
@@ -267,8 +377,6 @@ public struct ChannelListScreen: View {
 
     // MARK: - Actions
 
-    /// Removes the current account. RootView's `@Query` observes the SwiftData delete and
-    /// re-renders to SignInView automatically — no manual navigation needed.
     @MainActor
     private func signOut() async {
         do {
@@ -281,9 +389,12 @@ public struct ChannelListScreen: View {
     }
 }
 
-/// Retroactive `Identifiable` conformance for use in `ForEach`. Twitch's
-/// broadcasterId is the natural stable identity for a followed channel.
+// MARK: - Identifiable conformance
+
+/// Retroactive `Identifiable` conformance for use in `ForEach` over
+/// `[FollowedChannel]`. The All view uses this; the Live view uses an
+/// explicit `id: \.userId` keyPath because TwitchStream isn't Identifiable
+/// out of the box and we don't need that conformance at the top level.
 extension FollowedChannel: @retroactive Identifiable {
     public var id: String { broadcasterId }
 }
-

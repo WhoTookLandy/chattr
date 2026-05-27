@@ -71,12 +71,28 @@ public struct RootView: View {
             guard let active = accounts.first else { return }
             await globalCatalog.load(account: active, accountStore: accountStore)
         }
-        // Trigger an initial follow-list load on first sign-in (or account swap).
-        // `loadIfNeeded` no-ops when the store already holds the requested account's
-        // data, so back-nav from chat screens doesn't refetch.
+        // Trigger initial loads on first sign-in (or account swap).
+        //
+        // - All list (`loadAllIfNeeded`): cached per account. Runs once, then
+        //   skipped until the user signs out / swaps accounts.
+        // - Live list (`refreshLive`): not cached. Refreshes whenever this
+        //   task re-fires. We do it here so the Live tab has data ready when
+        //   the user first opens the Follows tab — they don't have to wait.
+        //
+        // Two separate `.task(id:)` modifiers — both fire concurrently on
+        // appearance. Can't use `withTaskGroup` because `Account` is a
+        // SwiftData `@Model` (non-Sendable), and TaskGroup's child closures
+        // would need to send it across an isolation boundary. Two .task
+        // modifiers each run on @MainActor (no boundary crossing), but
+        // suspend independently on network I/O — so the calls interleave
+        // and effectively run in parallel anyway.
         .task(id: accounts.first?.userId) {
             guard let active = accounts.first else { return }
-            await followsStore.loadIfNeeded(account: active, accountStore: accountStore)
+            await followsStore.refreshLive(account: active, accountStore: accountStore)
+        }
+        .task(id: accounts.first?.userId) {
+            guard let active = accounts.first else { return }
+            await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
         }
     }
 }
