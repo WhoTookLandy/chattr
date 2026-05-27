@@ -56,6 +56,15 @@ public final class TabChatModel {
     /// always operate on all of them together.
     private var subscriptions: [(session: ChannelSession, token: UUID)] = []
 
+    /// Synchronous re-entry guard for `attach(sessions:)`. Without it, two
+    /// concurrent attach() calls can both pass the "subscriptions empty"
+    /// check before either commits — classic actor reentrancy state-staleness
+    /// pattern from axiom-concurrency's `isolation-inheritance-diag.md`. The
+    /// flag is set/cleared synchronously, so a second call entering the
+    /// method during the first's await suspension sees `isAttaching == true`
+    /// and bails immediately, before any await.
+    private var isAttaching: Bool = false
+
     public init() {}
 
     // MARK: - Attach / detach
@@ -63,26 +72,36 @@ public final class TabChatModel {
     /// Subscribes to each session, primes `lines` from their combined current
     /// state, and starts receiving new messages via callback.
     ///
-    /// **Idempotent**: if called again without an intervening `detach()`, this
-    /// detaches the previous subscriptions FIRST and then re-subscribes. That
-    /// makes attach safe to call from view machinery that can fire it twice —
-    /// notably SwiftUI's `.task` can run twice for the same view identity when
-    /// the parent does several state writes in quick succession (our
-    /// `openChannel` action mutates three @State values, and the resulting
-    /// view-tree settle pattern triggers two `.task` invocations during the
-    /// transition). Without this guard, each extra attach would register a
-    /// duplicate subscriber on every session, and the SAME message would be
-    /// appended to `lines` N times — producing duplicate IDs in `ForEach`
-    /// and rendering the same chat row twice.
+    /// **Re-entry safety**: a synchronous flag (`isAttaching`) guards against
+    /// concurrent invocations. SwiftUI's `.task` can fire twice for the same
+    /// view identity during multi-state transitions like our `openChannel`
+    /// action; without this guard the two calls interleave at their `await`
+    /// suspensions and BOTH register subscribers on the same session — same
+    /// model, double append per message, duplicate IDs in `ForEach`.
     ///
-    /// The prime + subscribe happens atomically per-session (one actor call
-    /// each via `session.subscribe(_:)`), so each session's contribution to
-    /// `lines` can't have a "primed-but-missed-a-message" gap.
+    /// Setting the flag synchronously *before* any `await` is what makes the
+    /// pattern correct. @MainActor's "lock" is released at every suspension
+    /// point, so a flag set after an await wouldn't block re-entry — but
+    /// the synchronous prologue here is atomic relative to any other
+    /// @MainActor work.
+    ///
+    /// Idempotent at the API level: a second attach with the same sessions
+    /// while the first is in flight is a no-op. A subsequent attach AFTER
+    /// the first completes will detach the prior subscriptions and re-subscribe
+    /// (useful for future multi-channel "the user added/removed a channel
+    /// from this tab" flows).
     public func attach(sessions: [ChannelSession]) async {
-        // Tear down any prior subscriptions before re-subscribing. Cheap
-        // when there are none (early return inside detach). The actor's
-        // isolation guarantees the detach + re-subscribe happen as a
-        // single uninterrupted sequence on @MainActor.
+        // Synchronous re-entry guard — must precede any `await`.
+        guard !isAttaching else {
+            logger.info("TabChatModel attach skipped — already in flight")
+            return
+        }
+        isAttaching = true
+        defer { isAttaching = false }
+
+        // Tear down any prior subscriptions (e.g., user changed channel set
+        // in a multi-channel tab). Cheap when subs is empty (early return
+        // inside detach).
         await detach()
 
         attachState = .attaching
