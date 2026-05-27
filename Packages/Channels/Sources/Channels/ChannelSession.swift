@@ -7,19 +7,36 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 
 /// Owns one chat session for a (account × channel) pair.
 ///
-/// Slice 1 behavior: connects to TwitchKit's EventSub, subscribes to `channel.chat.message`
-/// for `channelId × accountUserId`, accumulates messages in a 500-element ring buffer,
-/// and emits coalesced snapshots via `lines` every ~15ms while messages arrive.
+/// Architecture (post-pub-sub refactor):
 ///
-/// Why `actor` (not `@MainActor`): ChannelSession operates only on `String` IDs and
-/// TwitchKit's `ChatMessage` value type — no SwiftData `@Model` instances. The actor's
-/// private isolation domain is the right fit: snapshot work happens off-main, the
-/// `nonisolated` `lines` stream delivers to the consumer without an actor hop.
+/// - **Canonical state**: a 500-element ring buffer of every chat message we've
+///   received since this session was created. The ring is the source of truth
+///   for "what's the latest message history for this channel."
+///
+/// - **Delivery**: a pub-sub subscriber list. Consumers (UI views, future
+///   analytics, etc.) register handlers via `subscribe(_:)` and receive each
+///   new message via callback. Subscribers can come and go; the ring keeps
+///   accruing regardless.
+///
+/// - **Atomic prime + subscribe**: `subscribe(_:)` returns both a token AND a
+///   snapshot of the current ring. This is critical — without atomicity, a
+///   new subscriber could read snapshot=[m1,m2], then m3 arrives and fans
+///   out to existing subscribers (but the new one hasn't registered yet),
+///   then the new subscriber registers and starts at m4. They'd miss m3.
+///   The actor's isolation guarantees that subscribe's two operations
+///   (register + read ring) happen between any two `handle(event:)` calls.
+///
+/// Why `actor` (not `@MainActor`): ChannelSession operates only on `String`
+/// IDs and TwitchKit's `ChatMessage` value type — no `@MainActor` SwiftUI
+/// dependencies. The actor's private isolation domain keeps message
+/// processing off-main; the per-subscriber `Task` invocations hop to
+/// whichever actor the handler captured (typically `@MainActor` for UI).
 public actor ChannelSession {
 
-    /// Sliding-window stream of message snapshots. Consumers iterate without actor hops.
-    public nonisolated let lines: AsyncStream<[ChatMessage]>
-    private let linesContinuation: AsyncStream<[ChatMessage]>.Continuation
+    /// Type for subscriber handlers. `@Sendable` so they can be stored across
+    /// the actor boundary; `async` so they can hop to whatever actor the
+    /// receiver lives on (typically `@MainActor` for SwiftUI consumers).
+    public typealias MessageHandler = @Sendable (ChatMessage) async -> Void
 
     private let client: TwitchClient
     private let channelId: String
@@ -30,9 +47,11 @@ public actor ChannelSession {
     private var ring: [ChatMessage] = []
     private static let ringCapacity = 500
 
-    /// Coalesce ticker — debounces snapshot emission to ~15ms.
-    private var coalesceTask: Task<Void, Never>?
-    private var lastEmittedCount: Int = 0
+    /// Active subscribers keyed by an opaque token returned from `subscribe(_:)`.
+    /// Replaces the previous `AsyncStream<[ChatMessage]>` + coalesce machinery.
+    /// Multi-consumer by design — same channel in multiple tabs registers
+    /// multiple handlers; each gets every new message in arrival order.
+    private var subscribers: [UUID: MessageHandler] = [:]
 
     /// ID of the active EventSub subscription, captured from the record that
     /// `subscribe(...)` returns. `nil` when:
@@ -64,14 +83,9 @@ public actor ChannelSession {
         self.channelLoginName = channelLoginName
         self.accountUserId = accountUserId
         self.refreshTokenHandler = refreshTokenHandler
-        (lines, linesContinuation) = AsyncStream.makeStream(of: [ChatMessage].self)
     }
 
-    deinit {
-        linesContinuation.finish()
-    }
-
-    // MARK: - Public
+    // MARK: - Lifecycle
 
     /// Starts the session: connects EventSub (if needed) and subscribes to chat messages.
     public func start() async throws {
@@ -115,8 +129,10 @@ public actor ChannelSession {
         // once and routes each event to the matching session via `handle(event:)`.
     }
 
-    /// Stops the session: deletes the EventSub subscription on Twitch's side,
-    /// cancels the local listener, and finishes the lines stream.
+    /// Stops the session: deletes the EventSub subscription on Twitch's side
+    /// and clears local state. Subscribers are dropped — the actor itself
+    /// is then eligible for deallocation once the registry releases its
+    /// reference.
     ///
     /// The unsubscribe call is best-effort: if it fails (network blip, token
     /// expiry, server error), we still proceed with local cleanup. Twitch will
@@ -126,8 +142,8 @@ public actor ChannelSession {
     public func stop() async {
         logger.info("Stopping session for #\(self.channelLoginName)")
 
-        // 1. Tell Twitch to drop the subscription so we stop consuming our
-        //    EventSub quota (each app has a per-WebSocket subscription cap).
+        // Tell Twitch to drop the subscription so we stop consuming our
+        // EventSub quota (each app has a per-WebSocket subscription cap).
         if let id = activeSubscriptionId {
             do {
                 try await client.eventSub.unsubscribe(id: id)
@@ -139,37 +155,68 @@ public actor ChannelSession {
             activeSubscriptionId = nil
         }
 
-        // 2. Local cleanup — cancel the coalesce timer. The lines AsyncStream
-        //    stays open (deinit will finish it) so any in-flight consumers see
-        //    the end. No listenerTask to cancel — see comment in start().
-        coalesceTask?.cancel()
-        coalesceTask = nil
+        // Subscribers held strong references to their handlers; clearing the
+        // dictionary releases those closures (and any captured state).
+        subscribers.removeAll()
     }
 
-    /// Returns the current ring-buffer contents — every chat message we've
-    /// received since this session was created (capped at `ringCapacity`).
+    // MARK: - Pub-sub API
+
+    /// Registers a handler that receives every chat message arriving after the
+    /// call returns, AND returns the current ring snapshot atomically with
+    /// registration. The atomicity guarantee — handler installed + ring read
+    /// happen between any two `handle(event:)` invocations — means a new
+    /// subscriber can never observe a gap between "messages I primed with"
+    /// and "messages I receive via callback."
     ///
-    /// Why this exists: `lines` is an `AsyncStream` which is single-consumer.
-    /// When `ChatScreen` unmounts (tab switch) its iterator is dropped, and
-    /// when a new `ChatScreen` mounts later, its NEW iterator starts from
-    /// the *next* yield — missing every yield that happened in between.
-    /// Result: re-entering a chat tab shows empty until the next message
-    /// arrives, even though we have all the previous messages in `ring`.
-    ///
-    /// `ChatScreen` calls this once on appear and assigns the result to
-    /// `self.lines` before entering its `for await` loop. New yields then
-    /// arrive normally and overwrite with newer state.
+    /// Returns a `(token, snapshot)` tuple. Pass `token` back to
+    /// `unsubscribe(_:)` when done. The snapshot is the caller's starting state.
+    public func subscribe(_ handler: @escaping MessageHandler) -> (token: UUID, snapshot: [ChatMessage]) {
+        let token = UUID()
+        subscribers[token] = handler
+        return (token, ring)
+    }
+
+    /// Removes the handler for the given token. Idempotent — calling with an
+    /// unknown token is a no-op. Subscribers are also cleared en masse by
+    /// `stop()`, so callers don't strictly need to unsubscribe on session
+    /// teardown, but doing so is good hygiene for partial detach scenarios.
+    public func unsubscribe(_ token: UUID) {
+        subscribers.removeValue(forKey: token)
+    }
+
+    /// Returns the current ring snapshot without subscribing. Useful for one-
+    /// shot reads (e.g., debug views, exports). For UI consumers that want
+    /// ongoing updates, use `subscribe(_:)` — it primes AND subscribes in one
+    /// atomic step.
     public func currentSnapshot() -> [ChatMessage] {
         ring
     }
+
+    // MARK: - Event handling (driven by registry's dispatcher)
 
     /// Driven by `ChannelSessionRegistry`'s shared event dispatcher — the
     /// registry pulls events off `client.eventSub.events` once and calls this
     /// on the session whose `channelId` matches the event's broadcaster ID.
     ///
+    /// Fans out to every subscriber serially within this actor's queue:
+    ///   - Snapshot the subscriber dict (defensive against subscribe/unsubscribe
+    ///     racing with the `await handler(message)` suspension below).
+    ///   - For each handler, `await` the callback. Sequential ordering means
+    ///     each subscriber sees messages in the same order — critical for
+    ///     chat readability. Concurrent fan-out (e.g., `Task { await ... }`
+    ///     per subscriber) would let message N reach a subscriber BEFORE
+    ///     message N-1 under contention.
+    ///
+    /// Cost: handler invocations block the actor until they return. Since
+    /// handlers typically just hop to MainActor and update an @Observable
+    /// property (microseconds), this is fine in practice. If a handler ever
+    /// did slow I/O it would back-pressure event processing — but that's the
+    /// handler's responsibility to keep fast.
+    ///
     /// `internal` (default access) rather than `private` so the registry can
     /// call it. Module boundary keeps it from leaking out.
-    func handle(event: EventSubEvent) {
+    func handle(event: EventSubEvent) async {
         guard let message = Self.extractChatMessage(from: event) else { return }
         guard message.broadcasterUserId == channelId else { return }
 
@@ -179,25 +226,12 @@ public actor ChannelSession {
         }
         ring.append(message)
 
-        scheduleCoalescedEmit()
-    }
-
-    private func scheduleCoalescedEmit() {
-        // If a coalesce task is already pending, leave it — the next emit will include this message.
-        if coalesceTask != nil { return }
-
-        coalesceTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(15))
-            guard let self else { return }
-            await self.emitSnapshot()
+        // Snapshot subscribers so subscribe/unsubscribe during the loop's
+        // suspension points don't cause concurrent-modification issues.
+        let snapshot = subscribers
+        for (_, handler) in snapshot {
+            await handler(message)
         }
-    }
-
-    private func emitSnapshot() {
-        coalesceTask = nil
-        guard ring.count != lastEmittedCount else { return }
-        lastEmittedCount = ring.count
-        linesContinuation.yield(ring)
     }
 
     /// Extracts a `TwitchKit.ChatMessage` from the `EventSubEvent` enum.

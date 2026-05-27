@@ -18,9 +18,15 @@ public struct ChatScreen: View {
     private let channelLoginName: String
     private let channelDisplayName: String
 
-    @State private var session: ChannelSession?
-    @State private var lines: [ChatMessage] = []
+    /// Per-tab chat state — owns the rendered `lines` and the session
+    /// subscriptions. Replaces the previous `@State session` + `@State lines`
+    /// pair plus the `for-await session.lines` loop. New messages arrive via
+    /// the model's pub-sub subscriber callback, which appends to `lines` on
+    /// MainActor (the model is `@MainActor @Observable`).
+    @State private var chatModel = TabChatModel()
+
     @State private var errorMessage: String?
+
     /// Per-channel badge cache. Reset implicitly when the screen pushes a new
     /// instance — each NavigationLink push creates a fresh `@State` so old
     /// channel badges don't bleed into a different broadcaster's chat.
@@ -66,13 +72,11 @@ public struct ChatScreen: View {
         Group {
             if let errorMessage {
                 errorView(errorMessage)
-            } else if lines.isEmpty {
-                // Distinguish "connecting" (session not yet acquired) from
-                // "connected but quiet" (session in place, but no messages
+            } else if chatModel.lines.isEmpty {
+                // Distinguish "attaching" (sessions not yet subscribed) from
+                // "attached but quiet" (subscriptions live, but no messages
                 // have arrived yet). Without explicit state UI a quiet channel
-                // looks identical to a broken connection — the "doesn't seem
-                // to connect" bug report was actually correct chat behavior
-                // on an idle channel, just with no visual signal.
+                // looks identical to a broken connection.
                 emptyOrConnectingView
             } else {
                 chatScrollView
@@ -102,6 +106,17 @@ public struct ChatScreen: View {
                 globalBadges: cachedGlobalBadges
             )
         }
+        // Detach pub-sub subscriptions when the view leaves the screen. The
+        // underlying ChannelSession stays alive in the registry; this just
+        // tears down THIS view's subscription. The Task captures `chatModel`
+        // so the model survives long enough to complete detach() even after
+        // SwiftUI releases its @State storage.
+        .onDisappear {
+            let model = chatModel
+            Task { @MainActor in
+                await model.detach()
+            }
+        }
     }
 
     // MARK: - Subviews
@@ -124,16 +139,16 @@ public struct ChatScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Empty-state placeholder. Two flavors driven by whether we've got a
-    /// `session` reference:
-    ///   - nil  → "Connecting to chat…" with a spinner (registry.session()
-    ///            hasn't returned yet — WebSocket + subscribe in flight)
-    ///   - set  → "Connected — waiting for messages" (everything's wired,
-    ///            the channel just hasn't had a chat message yet)
+    /// Empty-state placeholder. Two flavors driven by `chatModel.attachState`:
+    ///   - `.detached` / `.attaching` → "Connecting to chat…" with a spinner
+    ///     (the model's `attach(sessions:)` is in flight — that includes
+    ///     registry.session() which subscribes to EventSub).
+    ///   - `.attached` → "Connected — waiting for messages" (everything's
+    ///     wired, the channel just hasn't had a chat message yet).
     @ViewBuilder
     private var emptyOrConnectingView: some View {
         VStack(spacing: 12) {
-            if session == nil {
+            if chatModel.attachState != .attached {
                 ProgressView()
                 Text("Connecting to chat…")
                     .font(.callout)
@@ -162,7 +177,7 @@ public struct ChatScreen: View {
     private var chatScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(lines) { line in
+                ForEach(chatModel.lines) { line in
                     ChatRow(
                         message: line,
                         badgeEntries: badgeStore.entries(for: line.badges)
@@ -182,8 +197,8 @@ public struct ChatScreen: View {
         // the user scrolls manually, opening the door to "snap to bottom only
         // when already at bottom" UX later without changing today's behavior.
         .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
-        .onChange(of: lines.count) { _, _ in
-            guard let last = lines.last else { return }
+        .onChange(of: chatModel.lines.count) { _, _ in
+            guard let last = chatModel.lines.last else { return }
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.1)) {
                 scrolledMessageId = last.messageId
             }
@@ -211,37 +226,27 @@ public struct ChatScreen: View {
                 channelId: channelId,
                 channelLoginName: channelLoginName
             )
-            self.session = session
             logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
 
-            // Prime `lines` from the session's ring buffer BEFORE entering
-            // the for-await. Without this, re-entering a channel (or even
-            // a transient dual-mount during the openChannel transition) would
-            // show empty chat: the AsyncStream is single-consumer, so a fresh
-            // iterator misses every yield that happened before it attached,
-            // and `emitSnapshot()` only yields when the ring CHANGES — so a
-            // late-attaching consumer sits idle until the next chat message.
+            // Hand the session to the tab model, which atomically primes
+            // `chatModel.lines` from the session's current ring buffer AND
+            // subscribes for future messages via `ChannelSession.subscribe(_:)`.
             //
-            // Calling `currentSnapshot()` returns the actor's ring directly.
-            // A subsequent yield from the for-await loop will overwrite with
-            // newer state; ordering is monotonic (ring only grows), so this
-            // never shows stale rows.
-            self.lines = await session.currentSnapshot()
-
-            // Bridge AsyncStream → @State updates on the main actor.
+            // For the MVP this is always a single-element array. When multi-
+            // channel tabs ship, `attach(sessions: [a, b, c])` will subscribe
+            // to all of them with the same model — the rest of ChatScreen
+            // doesn't need to change.
             //
-            // Note: this loop runs *inside* the .task body (no nested Task).
-            // When ChatScreen unmounts or its `.id(channelId)` changes, the
-            // .task is cancelled and this for-await exits cleanly — no leaked
-            // Task that keeps consuming session.lines forever.
-            for await snapshot in session.lines {
-                self.lines = snapshot
-            }
+            // Lifecycle: detach() is called from `.onDisappear` in the body
+            // below. The model's pub-sub subscriptions stay live as long as
+            // this ChatScreen instance is mounted; on tear-down they're
+            // released, but the underlying `ChannelSession` stays alive in
+            // the registry (other tabs may share it, ref counting in commit E).
+            await chatModel.attach(sessions: [session])
         } catch is CancellationError {
-            // Expected on view tear-down / channel-tab switch. The .id(channelId)
-            // modifier in ChatTabsScreen forces a fresh ChatScreen instance per
-            // channel; the outgoing instance's `try await registry.session(...)`
-            // gets cancelled in flight. Silently exit — don't show a red error.
+            // Expected on view tear-down / channel-tab switch. The outgoing
+            // instance's `try await registry.session(...)` gets cancelled in
+            // flight. Silently exit — don't show a red error.
             logger.info("ChatScreen session-start cancelled for #\(channelLoginName)")
         } catch {
             errorMessage = "Couldn't open chat: \(error.localizedDescription)"
