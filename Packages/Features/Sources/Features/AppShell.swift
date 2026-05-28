@@ -98,17 +98,15 @@ public struct AppShell: View {
             // tabs are open — Tab.badge interprets 0 as "hidden".
             .badge(chatTabsModel.tabs.isEmpty ? 0 : chatTabsModel.tabs.count)
         }
-        // iOS 26+: tab bar auto-collapses on scroll-down within a tab's
-        // content, expands back on scroll-up. Gives the user more vertical
-        // room when reading chat / scrolling channel lists.
-        //
-        // `.onScrollDown` is iOS-only (explicitly unavailable on macOS via
-        // SwiftUI's @available annotation), so we gate the modifier here.
-        // The SPM cross-platform compile targets macOS for type-checking;
-        // without the gate it errors at build time.
-        #if os(iOS)
-        .tabBarMinimizeBehavior(.onScrollDown)
-        #endif
+        // Removed `.tabBarMinimizeBehavior(.onScrollDown)`. iOS 26's minimize
+        // behavior collapses the tab bar into a small floating pill on
+        // scroll-down — designed to give content more room when you have
+        // 4+ tabs and the bar feels chunky. chattr has only 2 tabs
+        // (Follows + Chat), so the minimize trade-off doesn't apply:
+        // the collapsed pill ends up as an unlabeled floating glyph that
+        // confuses the eye more than the full bar would have crowded the
+        // content. With 2 tabs, keeping the bar full-time is the right
+        // call. If we ever ship 4+ tabs, this modifier can come back.
         .environment(\.chatTabs, chatTabsModel)
         // The openChannel action both updates the tab strip model AND switches
         // the visible tab. Concentrating both side effects behind one verb

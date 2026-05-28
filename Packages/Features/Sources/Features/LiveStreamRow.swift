@@ -35,7 +35,12 @@ struct LiveStreamRow: View {
 
     /// Tags shown before truncation. Twitch's UI caps at ~4 too; more than that
     /// becomes visual noise on a list row.
-    private static let tagDisplayCap = 4
+    /// Show only the top 2 tags by stream order. Twitch returns tags in
+    /// relevance order (most-relevant first), so .prefix(2) IS top-by-
+    /// relevance without needing a custom sort. Dropped from 4 because
+    /// four tags consistently overflow the row width and produce a
+    /// "truncation soup" — better to show fewer tags clearly.
+    private static let tagDisplayCap = 2
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -88,17 +93,23 @@ struct LiveStreamRow: View {
     @ViewBuilder
     private var liveBadge: some View {
         HStack(spacing: 4) {
+            // Live dot promoted from 6pt to 7pt for visual parity with
+            // the bumped viewer-count font.
             Image(systemName: "circle.fill")
-                .font(.system(size: 6))
+                .font(.system(size: 7))
                 .foregroundStyle(.red)
                 .symbolEffect(.pulse, options: .repeating)
                 .accessibilityHidden(true)
+            // Bumped from `.caption2` (11pt) → `.caption` (12pt) +
+            // `.semibold`. Viewer count is the most actionable sort
+            // signal on the screen — it deserves to be more legible
+            // than a system caption2 footnote.
             Text(stream.viewerCount.formatted(.number.notation(.compactName)))
-                .font(.caption2.weight(.semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
                 .contentTransition(.numericText())
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 7)
         .padding(.vertical, 3)
         // Intentionally NOT `.glassEffect(.clear, ...)` here despite
         // Clear being the canonical "chrome over media" choice. The
@@ -158,12 +169,15 @@ struct LiveStreamRow: View {
             Text(stream.userName)
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
-            if profile?.broadcasterType == "partner" {
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.caption)
-                    .foregroundStyle(.purple)
-                    .accessibilityLabel("Twitch Partner")
-            }
+            // Verified-partner checkmark removed. Reasons:
+            //   - We weren't matching Twitch's actual partner badge
+            //     (that's a per-channel chat badge with a unique CDN
+            //     URL, not the generic checkmark.seal.fill we used).
+            //   - In practice nearly every live channel is a partner,
+            //     so the badge added visual noise that made names
+            //     harder to scan rather than easier.
+            //   - Twitch's official partner identity comes through the
+            //     chat badges already (we render those in ChatRow).
             Spacer(minLength: 0)
         }
     }

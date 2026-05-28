@@ -105,11 +105,35 @@ public struct ChannelListScreen: View {
     // MARK: - Body
 
     public var body: some View {
-        VStack(spacing: 0) {
-            // Segmented picker pinned above whichever list is showing. Hidden
-            // inside the body's VStack rather than as a toolbar item so it
-            // stays visible while the list scrolls.
-            Picker("View", selection: Binding(
+        // Segmented picker REMOVED. The Live/All toggle is now driven by
+        // the `.toolbarTitleMenu` modifier below — tapping the "Following"
+        // title in the nav bar reveals a menu with Live / All options.
+        // Matches Twitch's app pattern (and Mail's "filter" menu pattern
+        // on iOS), saves a whole row of chrome, and consolidates the
+        // page's mode selection in one canonical affordance.
+        Group {
+            switch selectedMode {
+            case .live: liveSegment
+            case .all:  allSegment
+            }
+        }
+        // "Following" matches the convention every social app uses (Twitter/X,
+        // Instagram, Bluesky). Shorter than the previous "@displayName's Follows".
+        // The account context is one tap away via the gear → Settings.
+        .navigationTitle("Following")
+        // `.inlineLarge` displays the title left-aligned in the nav bar
+        // at a larger size than `.inline` but without the auto-collapsing
+        // big title below the bar. This keeps the title and the gear cog
+        // on the SAME ROW (eliminates the "lonely gear floating on a
+        // mostly-empty row" problem) and saves ~60pt of vertical space
+        // vs the default large-title behavior.
+        .toolbarTitleDisplayMode(.inlineLarge)
+        // Tappable title with a chevron — iOS picks up the Picker inside
+        // and renders it as a checkmark-on-current-mode menu. This is
+        // Apple's standard "tap title to filter" pattern (Mail uses it
+        // for "Unread", "Flagged", etc.).
+        .toolbarTitleMenu {
+            Picker("Following mode", selection: Binding(
                 get: { selectedMode },
                 set: { rawViewMode = $0.rawValue }
             )) {
@@ -117,22 +141,7 @@ public struct ChannelListScreen: View {
                     Text(mode.displayName).tag(mode)
                 }
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-
-            Group {
-                switch selectedMode {
-                case .live: liveSegment
-                case .all:  allSegment
-                }
-            }
         }
-        // "Following" matches the convention every social app uses (Twitter/X,
-        // Instagram, Bluesky). Shorter than the previous "@displayName's Follows",
-        // which gets clipped in the inline (collapsed) title slot anyway. The
-        // user's account context is one tap away via the gear → Settings.
-        .navigationTitle("Following")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 NavigationLink {
