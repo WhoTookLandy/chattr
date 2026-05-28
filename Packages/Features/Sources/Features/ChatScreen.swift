@@ -1,6 +1,7 @@
 import SwiftUI
 import Accounts
 import Channels
+import EmoteSources
 import TwitchKit
 import Core
 import os
@@ -31,6 +32,14 @@ public struct ChatScreen: View {
     /// instance — each NavigationLink push creates a fresh `@State` so old
     /// channel badges don't bleed into a different broadcaster's chat.
     @State private var badgeStore = ChatBadgeStore()
+
+    /// Per-channel third-party emote index (7TV / BTTV / FFZ). Same lifetime
+    /// pattern as `badgeStore` — created fresh per `ChatScreen` instance,
+    /// loaded in a sibling `.task` (see below). When Phase 2.3 Task 11
+    /// lands, ownership moves into `ChannelSession` (which has the right
+    /// lifetime — survives view-tree churn); until then we tolerate the
+    /// reload-on-swipe cost.
+    @State private var emoteIndex = EmoteIndex()
 
     /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
     /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
@@ -105,6 +114,20 @@ public struct ChatScreen: View {
                 globalBadges: cachedGlobalBadges
             )
         }
+        // Third sibling .task: load 7TV / BTTV / FFZ emote definitions
+        // for this channel. Runs in parallel with session-start and
+        // badge-load — each finishes on its own clock. Messages arriving
+        // before this completes render with no third-party emote
+        // resolution (their tokens stay as plain text); messages after
+        // see the populated snapshot. See TabChatModel.append for the
+        // race-tolerant normalization path.
+        .task {
+            await emoteIndex.load(
+                broadcasterId: channelId,
+                broadcasterLogin: channelLoginName
+            )
+            logger.info("EmoteIndex loaded for #\(channelLoginName)")
+        }
         // Detach pub-sub subscriptions when the view leaves the screen. The
         // underlying ChannelSession stays alive in the registry; this just
         // tears down THIS view's subscription. The Task captures `chatModel`
@@ -178,10 +201,10 @@ public struct ChatScreen: View {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(chatModel.lines) { line in
                     ChatRow(
-                        message: line,
-                        badgeEntries: badgeStore.entries(for: line.badges)
+                        line: line,
+                        badgeEntries: badgeStore.entries(for: line.originalBadges)
                     )
-                    .id(line.messageId)
+                    .id(line.id)
                 }
             }
             // `.scrollTargetLayout` tells the enclosing ScrollView to treat
@@ -199,7 +222,7 @@ public struct ChatScreen: View {
         .onChange(of: chatModel.lines.count) { _, _ in
             guard let last = chatModel.lines.last else { return }
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.1)) {
-                scrolledMessageId = last.messageId
+                scrolledMessageId = last.id
             }
         }
     }
@@ -241,7 +264,19 @@ public struct ChatScreen: View {
             // this ChatScreen instance is mounted; on tear-down they're
             // released, but the underlying `ChannelSession` stays alive in
             // the registry (other tabs may share it, ref counting in commit E).
-            await chatModel.attach(sessions: [session])
+            //
+            // Phase 2.2 addition: hand in the per-channel EmoteIndex so each
+            // incoming message gets normalized through
+            // `Normalizer.normalize(...)` against the third-party emote
+            // table. The index may not be loaded yet at this point — the
+            // model tolerates a nil/empty snapshot and tokens stay as text
+            // until the snapshot fills in.
+            await chatModel.attach(
+                sessions: [session],
+                emoteIndex: emoteIndex,
+                currentUserLogin: account.login,
+                highlightKeywords: []   // No user-configurable highlights yet.
+            )
         } catch is CancellationError {
             // Expected on view tear-down / channel-tab switch. The outgoing
             // instance's `try await registry.session(...)` gets cancelled in
