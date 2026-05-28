@@ -65,7 +65,8 @@ struct ChannelRow: View {
                 Image(systemName: "person.crop.circle.fill")
                     .resizable()
                     .scaledToFit()
-                    .foregroundStyle(.secondary.opacity(0.5))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
             @unknown default:
                 Color.clear
             }
@@ -74,13 +75,18 @@ struct ChannelRow: View {
         .clipShape(Circle())
     }
 
-    /// Compact "LIVE • 12.3K" pill.
+    /// Compact "LIVE • 12.3K" pill. The red dot is an SF Symbol so it can
+    /// pulse via `.symbolEffect(.pulse, options: .repeating)` — communicates
+    /// "live, right now" more clearly than a static circle. The system
+    /// down-modulates the effect under Reduce Motion automatically.
     @ViewBuilder
     private func liveBadge(viewerCount: Int) -> some View {
         HStack(spacing: 4) {
-            Circle()
-                .fill(.red)
-                .frame(width: 6, height: 6)
+            Image(systemName: "circle.fill")
+                .font(.system(size: 6))
+                .foregroundStyle(.red)
+                .symbolEffect(.pulse, options: .repeating)
+                .accessibilityHidden(true)
             Text(viewerCount.formatted(.number.notation(.compactName)))
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.primary)
@@ -88,7 +94,16 @@ struct ChannelRow: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(.regularMaterial, in: Capsule())
+        // Liquid Glass capsule — same visual family as `ChatTabStrip`'s
+        // tab pills (small chrome indicator, capsule shape, sits over
+        // varying content). Regular variant, not Clear: ChannelRow is a
+        // standard list row, not media-rich content, so the Clear
+        // variant's three-condition requirement (media + dimming +
+        // bold/bright content) doesn't apply. Regular gives automatic
+        // legibility over whatever's behind, which is what we want here.
+        .glassEffect(in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live, \(viewerCount.formatted(.number.notation(.compactName))) viewers")
     }
 }
 

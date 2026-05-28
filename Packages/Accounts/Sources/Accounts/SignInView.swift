@@ -104,6 +104,19 @@ public struct SignInView: View {
                 }
                 .padding()
                 .frame(maxWidth: .infinity)
+                // Stays on `.regularMaterial` deliberately. The iOS 26
+                // equivalent for content-container glass —
+                // `.glassBackgroundEffect()` — is visionOS-only despite
+                // showing up in cross-platform docs. On iOS we have:
+                //   - `.glassEffect()` for controls / navigation chrome
+                //   - `.regularMaterial` (or `.thickMaterial`) for content
+                //     cards
+                // This banner is a content-layer callout (a small floating
+                // card inside SignInView's VStack — not navigation chrome).
+                // The skill says glass goes on the navigation layer; for
+                // content cards, `.regularMaterial` IS the right iOS 26
+                // material. It adapts to Reduce Transparency and Increase
+                // Contrast automatically.
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal)
                 // Smooth fade-in on first render — feels less abrupt than
