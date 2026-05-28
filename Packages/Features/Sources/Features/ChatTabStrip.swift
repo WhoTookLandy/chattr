@@ -123,9 +123,18 @@ private struct TabCell: View {
         .padding(.vertical, 6)
         // Liquid Glass capsule; active state gets accent tint via the
         // `.regular.tint(_:)` glass style so the material itself colors
-        // rather than overlaying an opaque fill.
+        // rather than overlaying an opaque fill. `.interactive()` makes
+        // the glass surface itself respond to press (scale + luminance
+        // shift) — feels more material than relying on the default plain-
+        // button dimming alone.
         .glassEffect(
-            isActive ? .regular.tint(Color.accentColor) : .regular,
+            // Push `.interactive()` into each branch — Swift's type
+            // inference can't unify the chained method call across the
+            // ternary's two branches when the leaf types differ (one
+            // tinted, one not). Each branch is explicit instead.
+            isActive
+                ? .regular.tint(Color.accentColor).interactive()
+                : .regular.interactive(),
             in: Capsule()
         )
         // Tap anywhere on the cell (except the X) to activate. The X is a
@@ -147,9 +156,15 @@ private struct AddTabButton: View {
             Image(systemName: "plus")
                 .font(.callout.weight(.semibold))
                 .frame(width: 30, height: 30)
-                .glassEffect(in: Circle())
         }
         .buttonStyle(.plain)
+        // Move `.glassEffect(.interactive())` to the Button itself
+        // (outside the label content) so the glass material gets the
+        // press-state animation — scale + luminance shift on touch.
+        // With `.glassEffect` on the inner Image, only the Image got
+        // material treatment; press feedback came only from SwiftUI's
+        // plain-button dimming.
+        .glassEffect(.regular.interactive(), in: Circle())
         .accessibilityLabel("Add channel")
     }
 }

@@ -138,6 +138,7 @@ public struct SignInView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+            .tint(.accentColor)
             .disabled(isSigningIn)
             .padding(.horizontal)
 

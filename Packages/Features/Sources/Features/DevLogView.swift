@@ -73,13 +73,21 @@ public struct DevLogView: View {
             .pickerStyle(.segmented)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    chip(label: "All", isActive: model.selectedCategory == nil) {
-                        model.selectedCategory = nil
-                    }
-                    ForEach(model.availableCategories, id: \.self) { category in
-                        chip(label: category, isActive: model.selectedCategory == category) {
-                            model.selectedCategory = (model.selectedCategory == category) ? nil : category
+                // Same Liquid Glass pattern as ChatTabStrip — adjacent pill
+                // chips morph fluidly when categories appear/disappear,
+                // and active state uses `.regular.tint(accent)` so the
+                // material itself takes the color rather than overlaying
+                // a flat fill. Pattern consistency with the main app
+                // chrome; dev-only view but worth aligning.
+                GlassEffectContainer(spacing: 6) {
+                    HStack(spacing: 6) {
+                        chip(label: "All", isActive: model.selectedCategory == nil) {
+                            model.selectedCategory = nil
+                        }
+                        ForEach(model.availableCategories, id: \.self) { category in
+                            chip(label: category, isActive: model.selectedCategory == category) {
+                                model.selectedCategory = (model.selectedCategory == category) ? nil : category
+                            }
                         }
                     }
                 }
@@ -97,11 +105,17 @@ public struct DevLogView: View {
                 .foregroundStyle(isActive ? .primary : .secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
-                .background(
-                    Capsule().fill(isActive ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
-                )
         }
         .buttonStyle(.plain)
+        .glassEffect(
+            // Per-branch `.interactive()` — same constraint as ChatTabStrip:
+            // ternary + chained method call won't unify across the two
+            // leaf types (tinted vs untinted Glass).
+            isActive
+                ? .regular.tint(Color.accentColor).interactive()
+                : .regular.interactive(),
+            in: Capsule()
+        )
     }
 }
 
@@ -179,7 +193,13 @@ private struct DevLogRow: View {
             HStack(spacing: 6) {
                 Text(entry.level.rawValue.uppercased())
                     .font(.caption2.weight(.bold).monospaced())
-                    .foregroundStyle(.white)
+                    // Pick foreground for WCAG 4.5:1 against the severity
+                    // backplate. White works on red/orange/purple/gray, but
+                    // fails on yellow (WCAG ~1.7:1 in light mode) — use
+                    // black for that case. This also keeps the same
+                    // visual weight across all badges (severity stays
+                    // bold + uppercase + monospaced).
+                    .foregroundStyle(severityForeground)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(severityColor, in: RoundedRectangle(cornerRadius: 4))
@@ -218,6 +238,15 @@ private struct DevLogRow: View {
         case .error:     return .red
         case .fault:     return .purple
         case .undefined: return .gray
+        }
+    }
+
+    /// Contrast-correct foreground for each severity backplate. Yellow is
+    /// the outlier — WCAG 4.5:1 fails with white in light mode.
+    private var severityForeground: Color {
+        switch entry.level {
+        case .notice: return .black
+        default:      return .white
         }
     }
 }

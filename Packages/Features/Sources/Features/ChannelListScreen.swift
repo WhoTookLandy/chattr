@@ -321,6 +321,7 @@ public struct ChannelListScreen: View {
                 Task { await store.refreshLive(account: account, accountStore: accountStore) }
             }
             .buttonStyle(.borderedProminent)
+            .tint(.accentColor)
         }
     }
 
@@ -378,6 +379,7 @@ public struct ChannelListScreen: View {
                 showingSignOutConfirm = true
             }
             .buttonStyle(.borderedProminent)
+            .tint(.accentColor)
             .disabled(isSigningOut)
             .padding(.bottom, 32)
         }

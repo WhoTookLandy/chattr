@@ -195,6 +195,7 @@ public struct ChatTabsScreen: View {
                 onAddTab()
             }
             .buttonStyle(.borderedProminent)
+            .tint(.accentColor)
         }
     }
 }

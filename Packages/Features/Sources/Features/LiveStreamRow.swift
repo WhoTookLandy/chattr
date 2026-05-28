@@ -82,13 +82,17 @@ struct LiveStreamRow: View {
 
     /// Live-dot + compact viewer count, e.g. "🔴 6K". Sits over the thumbnail
     /// so it's always visible regardless of how dark or busy the underlying
-    /// preview frame is.
+    /// preview frame is. The dot pulses via `.symbolEffect(.pulse, options:
+    /// .repeating)` to reinforce "live right now"; the system attenuates the
+    /// effect under Reduce Motion automatically.
     @ViewBuilder
     private var liveBadge: some View {
         HStack(spacing: 4) {
-            Circle()
-                .fill(.red)
-                .frame(width: 6, height: 6)
+            Image(systemName: "circle.fill")
+                .font(.system(size: 6))
+                .foregroundStyle(.red)
+                .symbolEffect(.pulse, options: .repeating)
+                .accessibilityHidden(true)
             Text(stream.viewerCount.formatted(.number.notation(.compactName)))
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white)
@@ -96,7 +100,19 @@ struct LiveStreamRow: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
+        // Intentionally NOT `.glassEffect(.clear, ...)` here despite
+        // Clear being the canonical "chrome over media" choice. The
+        // viewer-count text is 11pt caption2 in white over a busy
+        // 140×79 stream thumbnail — Clear glass's adaptive transparency
+        // can dip below the WCAG 4.5:1 contrast threshold against
+        // colorful video frames (bright skies, light UI elements in
+        // the broadcast). A solid 65% black backdrop guarantees
+        // legibility across all stream content. Compare with
+        // ChannelRow.liveBadge which DOES use Regular glass — that
+        // sits over standard list rows, not media.
         .background(.black.opacity(0.65), in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live, \(stream.viewerCount.formatted(.number.notation(.compactName))) viewers")
     }
 
     /// Builds the concrete CDN URL by substituting Twitch's `{width}`/`{height}`
