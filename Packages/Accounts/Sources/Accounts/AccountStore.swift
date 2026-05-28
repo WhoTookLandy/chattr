@@ -332,7 +332,7 @@ extension AccountStore {
                 // SignInView with a "session expired" banner instead of
                 // leaving the user staring at a broken signed-in screen.
                 await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
-                throw AppError(message: "Session expired for @\(login) — please sign in again")
+                throw AppError.sessionExpired(login: login)
             }
         } catch HelixError.notAuthenticated {
             // TwitchKit's store is empty (most likely because its own
@@ -342,7 +342,7 @@ extension AccountStore {
                 logger.error("TwitchKit store empty AND chattr cache empty for @\(login) — must re-sign-in")
                 // Terminal: drive the auth-state transition (see above).
                 await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
-                throw AppError(message: "Session expired for @\(login) — please sign in again")
+                throw AppError.sessionExpired(login: login)
             }
             logger.info("TwitchKit store empty for @\(login); recovering via chattr-side refresh cache")
             refreshToken = cached
@@ -373,9 +373,9 @@ extension AccountStore {
             //       out — their credentials are probably still good.
             if (400..<500).contains(http.statusCode) {
                 await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
-                throw AppError(message: "Session expired for @\(login) — please sign in again")
+                throw AppError.sessionExpired(login: login)
             }
-            throw AppError(message: "Token refresh failed (HTTP \(http.statusCode))")
+            throw AppError.bridgeRefreshFailed(status: http.statusCode)
         }
 
         // Twitch's response is snake_case. Use `.convertFromSnakeCase` so the struct
