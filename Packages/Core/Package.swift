@@ -14,5 +14,11 @@ let package = Package(
             path: "Sources/Core",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .testTarget(
+            name: "CoreTests",
+            dependencies: ["Core"],
+            path: "Tests/CoreTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
     ]
 )
