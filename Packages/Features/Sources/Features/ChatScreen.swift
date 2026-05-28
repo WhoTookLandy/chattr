@@ -137,6 +137,7 @@ public struct ChatScreen: View {
                 channelLoginName: channelLoginName,
                 channelDisplayName: channelDisplayName,
                 replyContext: chatModel.replyContext,
+                chatRestrictions: chatModel.chatRestrictions,
                 onCancelReply: { chatModel.cancelReply() },
                 onSend: { draft in await chatModel.send(text: draft) }
             )
@@ -501,6 +502,11 @@ private struct ComposeBar: View {
     /// `TabChatModel.replyContext` upstream — the bar is purely
     /// presentational.
     let replyContext: TabChatModel.ReplyContext?
+    /// Channel-wide restrictions to surface above the input (slow mode,
+    /// followers-only, etc.). nil before the first chat-settings fetch
+    /// completes — same visual as a channel with no restrictions, which
+    /// is the common case.
+    let chatRestrictions: ChatRestrictions?
     /// Tapped on the chip's X — dismisses the reply attachment without
     /// sending. The parent (`ChatScreen`) calls `chatModel.cancelReply()`.
     let onCancelReply: () -> Void
@@ -512,6 +518,10 @@ private struct ComposeBar: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            if let restrictions = chatRestrictions, restrictions.hasAny {
+                restrictionsStrip(restrictions)
+            }
+
             if let reply = replyContext {
                 replyChip(reply)
             }
@@ -526,6 +536,73 @@ private struct ComposeBar: View {
         // model) keeps the animation triggered by chip-presence
         // toggling, not by every property change inside the context.
         .animation(.snappy(duration: 0.2), value: replyContext != nil)
+    }
+
+    /// Inline informational strip above the input, listing chat
+    /// restrictions that affect what the user can send (slow mode,
+    /// followers-only, etc.). Non-blocking — the send button stays
+    /// enabled, and if the user fails the restriction (e.g. not yet
+    /// following), Twitch's `dropReason` surfaces on the failed row.
+    ///
+    /// Why informational not blocking: pre-flighting "is the user
+    /// following / subscribed" requires per-user API calls and produces
+    /// the same outcome as letting Twitch tell us via dropReason. The
+    /// strip is just a heads-up so users don't get a surprise rejection.
+    @ViewBuilder
+    private func restrictionsStrip(_ r: ChatRestrictions) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "info.circle.fill")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+                .imageScale(.small)
+            Text(restrictionsLabel(r))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 4)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.10))
+        )
+    }
+
+    /// Build a human-readable comma-joined label of the active
+    /// restrictions. Each phrase is short enough to coexist on one line
+    /// of caption2 when the channel has 1-2 restrictions; with 3+ the
+    /// strip allows up to 2 lines of wrap.
+    private func restrictionsLabel(_ r: ChatRestrictions) -> String {
+        var parts: [String] = []
+        if let secs = r.slowModeSeconds {
+            parts.append("Slow mode: \(secs)s")
+        }
+        if r.followersOnly {
+            if let mins = r.followersDurationMinutes, mins > 0 {
+                // Render "30m" / "1h" / "1d" for readability — Twitch's
+                // duration is in minutes which gets unwieldy at high
+                // values ("43800 minutes").
+                parts.append("Followers only (\(Self.formatMinutes(mins)))")
+            } else {
+                parts.append("Followers only")
+            }
+        }
+        if r.subscribersOnly {
+            parts.append("Subscribers only")
+        }
+        if r.emoteOnly {
+            parts.append("Emote only")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Format a follower-mode duration in the most natural unit:
+    /// minutes for <60, hours for <24h, days otherwise.
+    private static func formatMinutes(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes)m" }
+        if minutes < 60 * 24 { return "\(minutes / 60)h" }
+        return "\(minutes / (60 * 24))d"
     }
 
     /// "Replying to @author: snippet" chip with an X button. Tinted

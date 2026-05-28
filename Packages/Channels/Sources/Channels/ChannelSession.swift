@@ -166,6 +166,21 @@ public actor ChannelSession {
         await subscribeToNotificationTopic(.clearUserMessages, label: "clear_user_messages")
         await subscribeToRaid()
 
+        // Fetch chat-settings restrictions before returning from start().
+        // We DO await this (rather than firing a background Task) because
+        // `TabChatModel.attach` reads `currentChatRestrictions()`
+        // immediately after the session is acquired — if the fetch is
+        // still in flight, attach reads nil and the compose bar shows
+        // no restriction strip for the lifetime of the tab.
+        //
+        // Cost is small: this is a single Helix call (~150ms) on top of
+        // an already-multi-hundred-ms session-start. The restrictions
+        // fetch overlaps with EventSub subscribe + backfill drain in
+        // practice (Swift's async runtime parallelizes I/O-bound work
+        // when there's no explicit ordering dependency, which there
+        // isn't here).
+        await refreshChatRestrictions()
+
         // NOTE: We deliberately do NOT iterate `client.eventSub.events` here.
         // That AsyncStream is single-consumer — if every ChannelSession had
         // its own iterator, the events would get split unpredictably between
@@ -271,6 +286,63 @@ public actor ChannelSession {
         }
 
         subscribers.removeAll()
+    }
+
+    // MARK: - Chat restrictions
+
+    /// Cached restrictions snapshot from the most recent `fetchChatRestrictions()`
+    /// call. nil before we've fetched (briefly, in the first ~300ms of a new
+    /// session). Updated in place each time the helper runs.
+    ///
+    /// Storing inside the actor (rather than passing through Helix every
+    /// time the compose bar wants to render) means the compose bar reads
+    /// from a stable snapshot — re-fetches happen on a deliberate trigger
+    /// (currently only session.start; future: EventSub chat_settings_update).
+    private var cachedRestrictions: ChatRestrictions?
+
+    /// Returns the current chat restrictions for this channel, fetching
+    /// from Helix on first access and returning the cached value
+    /// afterwards. The compose bar in `ChatScreen` reads from this via
+    /// `TabChatModel` to render an inline strip showing what's enabled
+    /// (slow mode, followers-only, subscribers-only, etc.).
+    ///
+    /// Returns nil if the fetch fails — restrictions are bonus polish,
+    /// not safety-critical, so the failure case just falls back to "no
+    /// restrictions" rather than blocking chat entirely. Twitch will
+    /// still return a `dropReason` on `sendChatMessage` if a hidden
+    /// restriction blocks the send.
+    public func currentChatRestrictions() -> ChatRestrictions? {
+        cachedRestrictions
+    }
+
+    /// Refresh the restrictions snapshot from Helix. Called once in
+    /// `start()`; future commits could call it again on a
+    /// `channel.chat_settings.update` EventSub event for live updates.
+    private func refreshChatRestrictions() async {
+        do {
+            let settings = try await accountStoreSafeFetch()
+            cachedRestrictions = ChatRestrictions(from: settings)
+            logger.debug("Refreshed chat restrictions for #\(self.channelLoginName, privacy: .public)")
+        } catch is CancellationError {
+            // Session tear-down racing fetch — silent exit.
+        } catch {
+            // Non-fatal. Leave whatever was cached (or nil) in place;
+            // the user can still chat and Twitch's dropReason will fill
+            // in any restriction we miss.
+            logger.warning("Failed to fetch chat restrictions: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Wrapper around `fetchChatSettings` that handles the
+    /// unauthorized → refresh → retry pattern, matching `send(...)` and
+    /// `subscribeToChat()`.
+    private func accountStoreSafeFetch() async throws -> ChatSettings {
+        do {
+            return try await client.api.fetchChatSettings(broadcasterID: channelId)
+        } catch HelixError.unauthorized {
+            try await refreshTokenHandler()
+            return try await client.api.fetchChatSettings(broadcasterID: channelId)
+        }
     }
 
     // MARK: - Send

@@ -153,6 +153,18 @@ public final class TabChatModel {
     /// remember which message they're replying to).
     public var replyContext: ReplyContext?
 
+    /// Per-channel chat restrictions (slow mode, followers-only,
+    /// subscribers-only, emote-only). nil until the first
+    /// `refreshChatRestrictions()` completes — typically within a few
+    /// hundred ms of session start. The compose bar reads from this
+    /// to render an inline strip when any restriction is active.
+    ///
+    /// Refreshed on-demand by `refreshChatRestrictions()`; not currently
+    /// updated on `channel.chat_settings.update` EventSub events (future
+    /// commit). For now, restrictions are accurate as of session start
+    /// and stale if the broadcaster toggles a setting mid-session.
+    public private(set) var chatRestrictions: ChatRestrictions?
+
     /// Payload for an in-flight reply intent. Held by `replyContext`;
     /// passed to `ChannelSession.send` as `replyParentMessageId` when
     /// the user finally taps Send.
@@ -245,6 +257,20 @@ public final class TabChatModel {
             }
             subscriptions.append((session, token))
             combined.append(contentsOf: snapshot)
+        }
+
+        // Snapshot chat restrictions from the (typically just one)
+        // attached session. ChannelSession.start() kicks an async
+        // restrictions fetch — if we beat it here, we'll get nil and
+        // the compose bar renders without the restrictions strip.
+        // That's correct UX: "no restrictions visible" is a better
+        // initial state than "the strip flickers in late."
+        //
+        // Future commit can subscribe to `channel.chat_settings.update`
+        // and call `refreshChatRestrictions()` to keep this live;
+        // today it's snapshot-at-attach-time.
+        if let firstSession = sessions.first {
+            chatRestrictions = await firstSession.currentChatRestrictions()
         }
 
         // Apply the priming snapshot. For single-session tabs `combined`
