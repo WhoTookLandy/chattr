@@ -63,14 +63,29 @@ public final class AccountStore {
 
     /// Returns (constructing if needed) the TwitchClient for the given account.
     public func client(for account: Account) -> TwitchClient {
-        if let existing = clients[account.userId] {
+        client(forUserId: account.userId)
+    }
+
+    /// String-only variant of `client(for:)` for call sites that hold a
+    /// stable userId but don't want to capture the non-Sendable
+    /// SwiftData `@Model` Account across actor / closure boundaries.
+    /// Used by `ChannelSessionRegistry` so its `acquire` / `session`
+    /// signatures don't force `Account` captures on stored closures —
+    /// see AppShell's `onOpen` for the call site that needed this.
+    ///
+    /// The `tokenNamespace` is reconstructed from `userId` via
+    /// `Self.namespace(for:)`. Stable across launches by construction,
+    /// so the TwitchClient's Keychain-backed token store finds the same
+    /// entries either way.
+    public func client(forUserId userId: String) -> TwitchClient {
+        if let existing = clients[userId] {
             return existing
         }
         let client = TwitchClient(
             clientId: clientId,
-            tokenNamespace: account.tokenNamespace
+            tokenNamespace: Self.namespace(for: userId)
         )
-        clients[account.userId] = client
+        clients[userId] = client
         return client
     }
 

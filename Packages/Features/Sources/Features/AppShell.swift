@@ -168,12 +168,24 @@ public struct AppShell: View {
         // the same reason but at the value-type level.
         .task {
             // 1. Wire callbacks.
-            chatTabsModel.onOpen = { [weak channelSessionRegistry, account] tab in
+            //
+            // Capture stable Strings (`userId`, `login`) rather than the
+            // non-Sendable SwiftData `@Model` Account. The closure is
+            // stored on `ChatTabsModel.onOpen` for the session lifetime
+            // — capturing Account directly would retain it indefinitely
+            // (no `weak` possible on `@Model`) and create undefined
+            // behavior if multi-account/sign-out ever invalidates the
+            // SwiftData context. Matches the existing `onClose` shape.
+            chatTabsModel.onOpen = {
+                [weak channelSessionRegistry,
+                 accountUserId = account.userId,
+                 accountLogin = account.login] tab in
                 guard let registry = channelSessionRegistry else { return }
                 for channel in tab.channels {
                     do {
                         _ = try await registry.acquire(
-                            account: account,
+                            accountUserId: accountUserId,
+                            accountLogin: accountLogin,
                             channelId: channel.channelId,
                             channelLoginName: channel.channelLoginName
                         )
@@ -185,7 +197,7 @@ public struct AppShell: View {
                         // CancellationError above. Log and continue;
                         // the user's next interaction with the tab
                         // will re-trigger the acquire path.
-                        logger.error("acquire failed for \(channel.channelLoginName): \(error.localizedDescription)")
+                        logger.error("acquire failed for \(channel.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     }
                 }
             }

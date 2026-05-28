@@ -79,8 +79,20 @@ public final class ChannelSessionRegistry {
     /// shared event-dispatcher for the account's client is started lazily on
     /// the same path. Concurrent callers for the same key share a single
     /// construction Task.
-    public func session(account: Account, channelId: String, channelLoginName: String) async throws -> ChannelSession {
-        let key = Self.key(accountUserId: account.userId, channelId: channelId)
+    ///
+    /// **Signature uses `accountUserId`/`accountLogin` strings, not `Account`.**
+    /// The original API took the SwiftData `@Model` Account directly, which
+    /// forced strong captures of a non-Sendable type in long-stored
+    /// closures (e.g. `ChatTabsModel.onOpen` on AppShell). String-only
+    /// inputs let those closures capture stable values instead — see
+    /// `AppShell.onOpen` for the call site.
+    public func session(
+        accountUserId: String,
+        accountLogin: String,
+        channelId: String,
+        channelLoginName: String
+    ) async throws -> ChannelSession {
+        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
 
         // Fast path — already created.
         if let existing = sessions[key] {
@@ -91,19 +103,18 @@ public final class ChannelSessionRegistry {
             return try await pending.value
         }
 
-        let client = accountStore.client(for: account)
-        // Capture stable String values rather than the non-Sendable `Account`
-        // model so the @Sendable closure compiles under Swift 6 strict concurrency.
-        let capturedUserId = account.userId
-        let capturedLogin = account.login
+        // `client(forUserId:)` reconstructs the tokenNamespace from userId
+        // — stable across launches, identical to what `client(for: account)`
+        // would have produced.
+        let client = accountStore.client(forUserId: accountUserId)
         let session = ChannelSession(
             client: client,
             channelId: channelId,
             channelLoginName: channelLoginName,
-            accountUserId: capturedUserId,
+            accountUserId: accountUserId,
             refreshTokenHandler: { [weak accountStore] in
                 guard let accountStore else { throw AppError(message: "AccountStore deallocated during refresh") }
-                try await accountStore.refreshTokens(userId: capturedUserId, login: capturedLogin)
+                try await accountStore.refreshTokens(userId: accountUserId, login: accountLogin)
             }
         )
 
@@ -119,10 +130,10 @@ public final class ChannelSessionRegistry {
             // Kick the shared event dispatcher for this account if it isn't
             // already running. Idempotent — multiple session(...) calls for
             // the same account spin up at most one dispatcher Task.
-            ensureEventDispatch(client: client, accountUserId: capturedUserId)
+            ensureEventDispatch(client: client, accountUserId: accountUserId)
             // .notice: session creation is a boundary event — when this fires
             // we just opened a new WebSocket subscription to Twitch.
-            logger.notice("Created session for @\(capturedLogin, privacy: .public)/#\(channelLoginName, privacy: .public)")
+            logger.notice("Created session for @\(accountLogin, privacy: .public)/#\(channelLoginName, privacy: .public)")
             return started
         } catch {
             inFlight[key] = nil
@@ -147,11 +158,12 @@ public final class ChannelSessionRegistry {
     /// twice and must release twice.
     @discardableResult
     public func acquire(
-        account: Account,
+        accountUserId: String,
+        accountLogin: String,
         channelId: String,
         channelLoginName: String
     ) async throws -> ChannelSession {
-        let key = Self.key(accountUserId: account.userId, channelId: channelId)
+        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
         refCounts[key, default: 0] += 1
         // .debug: refcount churn is per-tab-open/close — visible in DevLogView
         // only when investigating session lifecycle issues, otherwise hidden.
@@ -162,7 +174,8 @@ public final class ChannelSessionRegistry {
         // would block teardown forever.
         do {
             return try await session(
-                account: account,
+                accountUserId: accountUserId,
+                accountLogin: accountLogin,
                 channelId: channelId,
                 channelLoginName: channelLoginName
             )

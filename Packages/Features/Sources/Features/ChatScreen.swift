@@ -293,7 +293,8 @@ public struct ChatScreen: View {
             // (userId, channelId), or constructs + starts a new one. Either
             // way the session is already-running by the time we get it.
             let session = try await registry.session(
-                account: account,
+                accountUserId: account.userId,
+                accountLogin: account.login,
                 channelId: channelId,
                 channelLoginName: channelLoginName
             )
