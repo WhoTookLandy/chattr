@@ -1,5 +1,6 @@
 import Foundation
-import SwiftUI
+import Observation   // for @Observable — pulled from Observation rather than SwiftUI
+                     // so this model has no SwiftUI dependency, matching its actual surface
 import TwitchKit
 import Channels
 import ChatModel

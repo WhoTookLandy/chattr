@@ -42,6 +42,14 @@ public struct ChatScreen: View {
     /// reload-on-swipe cost.
     @State private var emoteIndex = EmoteIndex()
 
+    /// Active emote-load Task, stored so we can cancel it on view
+    /// disappear. `.task` was the wrong primitive here (cancels on
+    /// transient identity flicker during channel-open transitions),
+    /// but a bare `Task { }` would leak past view tear-down. Storing
+    /// the handle gives us "ride out brief identity flickers without
+    /// cancelling, but cancel cleanly on real disappear."
+    @State private var emoteLoadTask: Task<Void, Never>?
+
     /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
     /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
     /// the binding also updates as the user scrolls manually (iOS 17+ API).
@@ -144,11 +152,12 @@ public struct ChatScreen: View {
         // EmoteIndex into ChannelSession (actor-owned, session-lifetime)
         // which eliminates this entirely.
         .onAppear {
-            Task {
-                // Signpost-bracket the emote load so Instruments shows the
-                // duration as a "Points of Interest" interval. If the Task
-                // gets cancelled or interrupted, the interval shows up
-                // truncated — visual proof of where the race happened.
+            // Idempotent guard: if a prior `.onAppear` already kicked
+            // a load (and it hasn't completed yet), don't start a
+            // duplicate. Avoids the convoy-of-loads issue under rapid
+            // mount/unmount cycles in the paged ScrollView.
+            guard emoteLoadTask == nil else { return }
+            emoteLoadTask = Task {
                 let id = signposter.makeSignpostID()
                 let state = signposter.beginInterval(
                     "emote-load",
@@ -169,7 +178,13 @@ public struct ChatScreen: View {
         // tears down THIS view's subscription. The Task captures `chatModel`
         // so the model survives long enough to complete detach() even after
         // SwiftUI releases its @State storage.
+        //
+        // Also cancel any in-flight emote-load Task. Without cancellation,
+        // rapid open/close cycles can leave a convoy of orphan loads
+        // running against an EmoteIndex no one will ever read.
         .onDisappear {
+            emoteLoadTask?.cancel()
+            emoteLoadTask = nil
             let model = chatModel
             Task { @MainActor in
                 await model.detach()

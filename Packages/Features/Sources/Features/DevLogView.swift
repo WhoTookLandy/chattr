@@ -1,9 +1,10 @@
 import SwiftUI
+import Observation
 import Core
 
-/// Dev-only log viewer. Reads from `OSLogStore` via
-/// `AppLogger.recentEntries(...)` and displays chattr's recent log entries
-/// with filtering.
+/// Dev-only log viewer. Reads from `OSLogStore` via `DevLogModel`
+/// (which wraps `AppLogger.recentEntries(...)`) and displays chattr's
+/// recent log entries with filtering.
 ///
 /// ## Where this is reachable from
 ///
@@ -12,52 +13,25 @@ import Core
 /// "why doesn't X work?" situations from inside the app without
 /// needing Xcode attached.
 ///
-/// ## Performance notes
+/// ## Architecture
 ///
-/// Earlier version queried OSLogStore on every severity change (~10-50ms
-/// per query) and used non-stable UUIDs (forcing SwiftUI to re-create
-/// every row on every refresh). Current shape:
-///
-///   - **One query**, fetches everything at `.debug` and above into
-///     `allEntries`. Severity changes filter the in-memory array — instant.
-///   - **Deterministic Entry.id** (hash of date+category+message) so SwiftUI
-///     can diff rows across reloads instead of re-creating all 200.
-///   - **Memoized `availableCategories`** in @State, updated only when
-///     `allEntries` changes — not on every body recomputation.
+/// All state + side effects live in `DevLogModel` (separate type
+/// below). This view is a pure renderer. The split enables unit-testing
+/// the filter logic without rendering, and keeps the OSLogStore read
+/// configuration (priority, limit, lookback) co-located with the model
+/// instead of scattered in view modifiers.
 public struct DevLogView: View {
-    /// All entries from the last OSLogStore read, regardless of severity.
-    /// We apply the severity filter in memory rather than re-querying.
-    @State private var allEntries: [AppLogger.Entry] = []
-
-    /// Memoized category set + sort. Recomputed only when `allEntries`
-    /// changes (via the `.onChange` below), not on every body call.
-    @State private var availableCategories: [String] = []
-
-    @State private var minLevel: AppLogger.Entry.Level = .info
-    @State private var selectedCategory: String? = nil
-    @State private var isLoading = false
-
-    /// Entries visible after both severity + category filters. Computed
-    /// fresh on each body recomputation, but that's cheap (~200 element
-    /// array scan with two cheap predicates) — far cheaper than re-querying
-    /// OSLogStore.
-    private var visibleEntries: [AppLogger.Entry] {
-        allEntries.filter { entry in
-            guard entry.level.severity >= minLevel.severity else { return false }
-            if let cat = selectedCategory, entry.category != cat { return false }
-            return true
-        }
-    }
+    @State private var model = DevLogModel()
 
     public init() {}
 
     public var body: some View {
         List {
             Section {
-                ForEach(visibleEntries) { entry in
+                ForEach(model.visibleEntries) { entry in
                     DevLogRow(entry: entry)
                 }
-                if visibleEntries.isEmpty && !isLoading {
+                if model.visibleEntries.isEmpty && !model.isLoading {
                     ContentUnavailableView(
                         "No log entries",
                         systemImage: "doc.text",
@@ -77,22 +51,15 @@ public struct DevLogView: View {
         #if os(iOS)
         .toolbar(.hidden, for: .tabBar)
         #endif
-        .refreshable { await reload() }
-        .task { await reload() }
-        // Recompute the category chip set ONLY when the underlying data
-        // changes. Without this guard, the Set+sort would re-run on every
-        // body recomputation (severity slider, filter chip tap, etc.).
-        .onChange(of: allEntries) { _, new in
-            availableCategories = Array(Set(new.map(\.category))).sorted()
-        }
+        .refreshable { await model.load() }
+        .task { await model.load() }
     }
 
     @ViewBuilder
     private var filterControls: some View {
+        @Bindable var bindable = model
         VStack(alignment: .leading, spacing: 8) {
-            // Severity picker. Changing it just filters `allEntries` in
-            // memory — no OSLogStore re-query needed.
-            Picker("Severity", selection: $minLevel) {
+            Picker("Severity", selection: $bindable.minLevel) {
                 ForEach([
                     AppLogger.Entry.Level.debug,
                     .info,
@@ -105,22 +72,21 @@ public struct DevLogView: View {
             }
             .pickerStyle(.segmented)
 
-            // Category chips. Reads from `availableCategories` (memoized).
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    chip(label: "All", isActive: selectedCategory == nil) {
-                        selectedCategory = nil
+                    chip(label: "All", isActive: model.selectedCategory == nil) {
+                        model.selectedCategory = nil
                     }
-                    ForEach(availableCategories, id: \.self) { category in
-                        chip(label: category, isActive: selectedCategory == category) {
-                            selectedCategory = (selectedCategory == category) ? nil : category
+                    ForEach(model.availableCategories, id: \.self) { category in
+                        chip(label: category, isActive: model.selectedCategory == category) {
+                            model.selectedCategory = (model.selectedCategory == category) ? nil : category
                         }
                     }
                 }
             }
         }
         .padding(.vertical, 8)
-        .textCase(nil)  // List section headers uppercase by default; opt out.
+        .textCase(nil)
     }
 
     @ViewBuilder
@@ -137,18 +103,66 @@ public struct DevLogView: View {
         }
         .buttonStyle(.plain)
     }
+}
 
-    /// Re-read from OSLogStore. Fetches at `.debug` and above so any
-    /// severity filter is satisfiable in memory without a re-query.
-    private func reload() async {
+/// Owns the state + side effects for `DevLogView`. Split out so the
+/// OSLogStore read configuration (limit, lookback, priority) and the
+/// filter logic (severity threshold, category) can be unit-tested
+/// without rendering the view.
+///
+/// ## Caching strategy
+///
+///   - **One OSLogStore read per `load()`.** Severity-picker changes
+///     and category-chip taps don't re-query — they filter the
+///     in-memory `allEntries` via `visibleEntries`.
+///   - **`availableCategories` is a computed property.** With ≤500
+///     entries the Set+sort is sub-millisecond, not worth memoizing
+///     for a dev-only screen.
+@MainActor @Observable
+final class DevLogModel {
+    /// All entries from the last OSLogStore read, regardless of severity.
+    /// Severity filter applies in memory (see `visibleEntries`) so picker
+    /// changes don't re-query OSLogStore.
+    private(set) var allEntries: [AppLogger.Entry] = []
+
+    /// Severity filter. Reads from the segmented picker.
+    var minLevel: AppLogger.Entry.Level = .info
+
+    /// Optional category filter. nil = show all categories.
+    var selectedCategory: String? = nil
+
+    /// True while `load()` is in flight. Drives empty-state vs. content
+    /// disambiguation when `visibleEntries.isEmpty`.
+    private(set) var isLoading = false
+
+    /// Entries visible after applying severity + category filters.
+    var visibleEntries: [AppLogger.Entry] {
+        allEntries.filter { entry in
+            guard entry.level.severity >= minLevel.severity else { return false }
+            if let cat = selectedCategory, entry.category != cat { return false }
+            return true
+        }
+    }
+
+    /// Distinct categories present in the currently-loaded entries. Used
+    /// to populate the chip set. Recomputed via the computed property —
+    /// for ≤500 entries the Set+sort is sub-millisecond. If this ever
+    /// became a hot path (it won't on a dev screen), memoize via
+    /// `.onChange(of: allEntries)` into a stored `@State`.
+    var availableCategories: [String] {
+        Array(Set(allEntries.map(\.category))).sorted()
+    }
+
+    /// Re-read from OSLogStore. Fetches everything at `.debug` and above
+    /// so any severity filter is satisfiable in memory.
+    ///
+    /// The OSLogStore read is synchronous and slow (10-50ms), so we hop
+    /// off-main via `Task.detached(priority: .userInitiated)` to keep
+    /// the refresh-pull animation smooth.
+    func load() async {
         isLoading = true
         defer { isLoading = false }
-        // Off-main read: OSLogStore is sync but slow (~10-50ms). Hopping
-        // keeps the refresh-pull animation smooth.
         let snapshot = await Task.detached(priority: .userInitiated) {
-            // Fetch at the lowest level so picker changes don't need to
-            // re-query. 500 entries is plenty for one debug session and
-            // keeps the in-memory filter snappy.
             AppLogger.recentEntries(limit: 500, minLevel: .debug)
         }.value
         self.allEntries = snapshot

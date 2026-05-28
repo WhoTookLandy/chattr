@@ -225,6 +225,16 @@ public final class ChannelSessionRegistry {
                 // not interesting day-to-day.
                 logger.debug("release \(key, privacy: .public) → refcount 0; no session to stop (still constructing or already gone)")
             }
+            // After tearing down the session, check if THIS account has
+            // any remaining sessions. If not, cancel the shared event
+            // dispatcher Task — otherwise the WebSocket stays connected
+            // forever (the Task's `for await event in client.eventSub.events`
+            // keeps the stream alive even after all sessions are gone).
+            //
+            // Without this, closing all chat tabs leaves an idle WebSocket
+            // consuming socket resources + occasional Twitch heartbeat
+            // traffic for the rest of the app's foreground lifetime.
+            stopDispatcherIfIdle(accountUserId: accountUserId)
         } else {
             // .debug: refcount decrement when not the last reference.
             // Pairs with the .debug "acquire" log on the opposite side.
@@ -244,6 +254,27 @@ public final class ChannelSessionRegistry {
     }
 
     // MARK: - Event dispatch
+
+    /// Cancel + remove the shared event dispatcher Task for an account if
+    /// it has no remaining sessions. The dispatcher's `for await event in
+    /// client.eventSub.events` keeps the WebSocket alive — without
+    /// cancelling, closing all chat tabs would leave an idle connection.
+    ///
+    /// Idempotent: calling when there's no dispatcher (or sessions still
+    /// exist) is a no-op.
+    ///
+    /// Implementation note: `sessions` is keyed by "userId/channelId", so
+    /// "any session for this account" is detected by a key prefix scan.
+    /// O(N) over total sessions, but N is tiny (~tabs the user has open).
+    private func stopDispatcherIfIdle(accountUserId: String) {
+        let prefix = "\(accountUserId)/"
+        let hasActiveSessions = sessions.keys.contains { $0.hasPrefix(prefix) }
+        guard !hasActiveSessions else { return }
+        guard let task = eventDispatchTasks[accountUserId] else { return }
+        task.cancel()
+        eventDispatchTasks[accountUserId] = nil
+        logger.notice("Stopped event dispatcher for account \(accountUserId, privacy: .public) — no remaining sessions")
+    }
 
     /// Starts the single event-dispatch loop for this account's client if it
     /// isn't already running. Subsequent calls for the same account are no-ops.

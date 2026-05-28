@@ -61,6 +61,12 @@ public final class ChatTabsModel {
     /// scope.
     public var persistence: TabPersistence?
 
+    /// Active hydration Task, stored so it can be cancelled if the model
+    /// is torn down (sign-out, multi-account swap) before hydration
+    /// completes. Without this, the Task would run to completion against
+    /// a potentially-gone registry, firing no-op acquires.
+    private var hydrationTask: Task<Void, Never>?
+
     public init() {}
 
     // MARK: - Persistence
@@ -94,12 +100,17 @@ public final class ChatTabsModel {
             let rows = try persistence.fetchAll()
             let restored = rows.map { $0.toChatTab() }
             tabs = restored
+            // Cancel any prior hydration that's still in flight (rare —
+            // would only happen if hydrate is called twice rapidly).
+            hydrationTask?.cancel()
             // Fire onOpen for each so the registry acquires sessions.
-            // Done sequentially via a single Task so the ordering matches
-            // the persisted strip order.
+            // Done sequentially via a single stored Task so the ordering
+            // matches the persisted strip order AND so we can cancel it
+            // on teardown (sign-out / multi-account swap).
             if let onOpen {
-                Task {
+                hydrationTask = Task {
                     for tab in restored {
+                        guard !Task.isCancelled else { return }
                         await onOpen(tab)
                     }
                 }
@@ -109,6 +120,15 @@ public final class ChatTabsModel {
             // empty-state on the Chat tab and can re-open whichever
             // channels they want.
         }
+    }
+
+    /// Cancel any in-flight hydration. Call this from teardown paths
+    /// (sign-out, account swap) where the hydration's onOpen would
+    /// fire against a stale registry. Idempotent — no-op if hydration
+    /// already completed or wasn't running.
+    public func cancelHydration() {
+        hydrationTask?.cancel()
+        hydrationTask = nil
     }
 
     // MARK: - Open
