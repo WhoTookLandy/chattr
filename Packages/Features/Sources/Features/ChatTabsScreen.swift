@@ -5,14 +5,36 @@ import Accounts
 ///
 /// Layout (top to bottom):
 ///   1. The pill tab strip (`ChatTabStrip`) — hidden when no tabs are open.
-///   2. The active channel's `ChatScreen`, or an empty state CTA when no
-///      tabs are open.
+///   2. A horizontally-paged `ScrollView` of `ChatScreen` pages — one page
+///      per open tab. Swipe left/right to switch tabs; tap a pill to jump.
 ///
-/// `ChatScreen` is re-instantiated when `activeChannelId` changes (via the
-/// `.id(...)` modifier), so SwiftUI tears down the previous chat's stream
-/// subscription and starts a fresh one for the newly-active channel. The
-/// underlying `ChannelSession` stays alive in the registry though — only the
-/// SwiftUI consumer changes.
+/// ## How the paging works
+///
+/// `ScrollView(.horizontal) + LazyHStack` with three iOS 17+ modifiers does
+/// the heavy lifting:
+///
+///   - `.scrollTargetLayout()` on the LazyHStack tells SwiftUI that each
+///     child carries an `.id(...)` to use as a snap anchor.
+///   - `.scrollTargetBehavior(.paging)` makes swipes snap one full page at
+///     a time (vs free-scrolling).
+///   - `.scrollPosition(id: $activeTabId)` two-way binds the currently-
+///     visible page to `ChatTabsModel.activeTabId`. Tap a pill → write
+///     `activeTabId` → ScrollView animates to that page. Swipe → ScrollView
+///     writes back to `activeTabId` → pill highlight updates.
+///
+/// ## How sessions persist across swipes
+///
+/// `LazyHStack` lazily mounts ChatScreens — only the visible page (plus
+/// a small adjacent buffer) actually exists in the view tree. When the user
+/// swipes far away, off-screen ChatScreens unmount and their TabChatModels
+/// release their subscriptions.
+///
+/// **The underlying `ChannelSession` stays alive in the registry, though.**
+/// It keeps receiving events, keeps appending to its ring buffer. When the
+/// user swipes back and the ChatScreen remounts, `TabChatModel.attach`
+/// primes from the ring's current snapshot — so the user sees every message
+/// that arrived while the page was off-screen. The "always connected in the
+/// background" requirement is satisfied at the session layer, not the view.
 public struct ChatTabsScreen: View {
     private let account: Account
     private let accountStore: AccountStore
@@ -38,7 +60,7 @@ public struct ChatTabsScreen: View {
                 VStack(spacing: 0) {
                     ChatTabStrip(model: chatTabs, onAddTab: onAddTab)
                     Divider()
-                    activeChatContent(chatTabs: chatTabs)
+                    pagedChatContent(chatTabs: chatTabs)
                 }
             } else {
                 emptyState
@@ -48,19 +70,50 @@ public struct ChatTabsScreen: View {
         .toolbarTitleDisplayMode(.inline)
     }
 
-    /// Renders the ChatScreen for the currently-active channel. `.id(...)`
-    /// forces a fresh subscription when the user switches tabs — otherwise
-    /// SwiftUI would diff the existing ChatScreen and keep its session
-    /// subscription pointed at the old channel.
+    /// Horizontally-paged ScrollView with one ChatScreen per open tab.
+    /// Swipe left/right to switch tabs; tap a pill in the strip above to jump.
+    ///
+    /// The `@Bindable` projection of `chatTabs` lets us pass `$bindable.activeTabId`
+    /// as the `.scrollPosition` binding — that's the two-way connector between
+    /// "what's on screen" and "which tab the model thinks is active." Without
+    /// `@Bindable`, we'd have to hand-roll a `Binding(get:set:)` from the
+    /// @Observable model, which works but is more verbose.
     @ViewBuilder
-    private func activeChatContent(chatTabs: ChatTabsModel) -> some View {
-        if let activeId = chatTabs.activeTabId,
-           let active = chatTabs.tabs.first(where: { $0.id == activeId }),
-           let primaryChannel = active.channels.first {
-            // MVP: render the tab's first (and today, only) channel. When
-            // multi-channel-per-tab ships, ChatScreen will take the full
-            // ChatTab and TabChatModel will attach to all its channels —
-            // for now, the single-channel path keeps the View thin.
+    private func pagedChatContent(chatTabs: ChatTabsModel) -> some View {
+        @Bindable var bindable = chatTabs
+
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(chatTabs.tabs) { tab in
+                    chatPage(for: tab)
+                        // `.containerRelativeFrame(.horizontal)` sizes each
+                        // page to exactly the ScrollView's width — full-page
+                        // panels instead of children at intrinsic width.
+                        .containerRelativeFrame(.horizontal)
+                        // `.id(tab.id)` is the snap anchor for
+                        // `.scrollPosition(id:)`. SwiftUI uses tab.id (UUID)
+                        // for view identity AND for the paged-position lookup
+                        // — same value, both purposes.
+                        .id(tab.id)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        // Two-way bind to activeTabId. Tap-a-pill writes activeTabId in
+        // ChatTabsModel → ScrollView animates to that page. Swipe-to-page
+        // writes back here → pill highlight in ChatTabStrip updates.
+        .scrollPosition(id: $bindable.activeTabId)
+        .scrollIndicators(.hidden)
+    }
+
+    /// One paged ChatScreen for a tab. MVP: renders the tab's first (and
+    /// today, only) channel. When multi-channel-per-tab ships, ChatScreen
+    /// will take the full ChatTab and TabChatModel will attach to ALL its
+    /// channels in one go — the rest of this paged container won't change.
+    @ViewBuilder
+    private func chatPage(for tab: ChatTab) -> some View {
+        if let primaryChannel = tab.channels.first {
             ChatScreen(
                 account: account,
                 accountStore: accountStore,
@@ -68,18 +121,17 @@ public struct ChatTabsScreen: View {
                 channelLoginName: primaryChannel.channelLoginName,
                 channelDisplayName: primaryChannel.channelDisplayName
             )
-            // Identity by tab id, NOT channel id — different tabs containing
-            // the same channel must have distinct view identities.
-            .id(active.id)
         } else {
-            // Tabs exist but none selected — rare (we set activeChannelId on
-            // open). Show a small hint.
+            // Defensive — ChatTab.init has a precondition against empty
+            // channels, so this branch shouldn't reach in normal flow.
+            // If a future code path ever does mutate channels to empty,
+            // render a placeholder rather than a blank page.
             VStack(spacing: 8) {
                 Image(systemName: "bubble.left.and.bubble.right")
                     .font(.title)
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.secondary)
-                Text("Pick a channel above")
+                Text("This tab has no channels")
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
