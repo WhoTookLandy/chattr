@@ -231,13 +231,27 @@ extension AccountStore {
         return newToken
     }
 
-    /// Wraps an async throwing operation with one retry-after-refresh-on-401.
+    /// Wraps an async throwing operation with one retry-after-refresh-on-auth-failure.
     ///
-    /// If `operation` throws `HelixError.unauthorized`, this method calls
-    /// `refreshTokens(for:)`, then retries `operation` exactly once. Any throw
-    /// from the refresh OR the retry bubbles to the caller (no infinite loops).
+    /// Two error paths trigger a refresh-and-retry:
     ///
-    /// Use at every chattr-side Helix call site to make tokens survive expiry.
+    ///   - `HelixError.unauthorized` — Helix call returned 401 directly. The
+    ///     access token has expired or been revoked. Refresh + retry once.
+    ///
+    ///   - `HelixError.oauth(_)` — TwitchKit's *internal* auth-refresh layer
+    ///     intercepted the 401 and tried to call `POST /oauth2/token` itself,
+    ///     but failed because our `TwitchOAuthClient` is constructed without a
+    ///     `client_secret` (the secret lives only on the Vercel bridge to keep
+    ///     it out of the iOS binary). Twitch returns "missing client secret"
+    ///     and TwitchKit wraps that as the `.oauth` case. Same intent as
+    ///     `.unauthorized` — route through our Vercel-bridged refresh and retry.
+    ///
+    /// Either way, `refreshTokens(for:)` POSTs to the bridge with the
+    /// refresh_token and persists the new OAuthToken. Subsequent operation()
+    /// retry uses the fresh access token.
+    ///
+    /// Any throw from the refresh OR the second operation attempt bubbles to
+    /// the caller (no infinite loops — only one retry).
     public func withTokenRefresh<T: Sendable>(
         for account: Account,
         _ operation: @Sendable () async throws -> T
@@ -245,7 +259,13 @@ extension AccountStore {
         do {
             return try await operation()
         } catch HelixError.unauthorized {
-            logger.info("Helix call returned unauthorized for @\(account.login); refreshing tokens and retrying")
+            logger.info("Helix call returned unauthorized for @\(account.login); refreshing via bridge and retrying")
+            try await refreshTokens(for: account)
+            return try await operation()
+        } catch HelixError.oauth(let oauthError) {
+            // TwitchKit's internal auto-refresh fired and failed — likely
+            // "missing client secret" because we don't ship one. Bridge it.
+            logger.info("TwitchKit auto-refresh failed for @\(account.login) (\(oauthError.message)); refreshing via bridge and retrying")
             try await refreshTokens(for: account)
             return try await operation()
         }
