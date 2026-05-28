@@ -105,28 +105,37 @@ public final class TabChatModel {
 
     // MARK: - Send-orchestration state
 
-    /// Maps "message text we sent but haven't seen echoed yet" → "the
-    /// pending-id we used for the optimistic row." Used by `apply()` to
-    /// recognize an incoming `channel.chat.message` as the echo of one
-    /// of our own sends, even when the EventSub echo beats the Helix
-    /// POST response (which races by ~100ms in practice — Twitch broadcasts
-    /// to the WebSocket on the same code path that responds to the POST).
-    ///
-    /// Keyed by text rather than by ID because we only learn the canonical
-    /// `messageId` from one of two sources: the Helix response OR the
-    /// EventSub echo. Either may arrive first. Text is what both have in
-    /// common.
-    ///
-    /// If the user double-sends the same text quickly, the dictionary
-    /// overwrites and the first-sent line keeps its pending-id until its
-    /// Helix response races back — but the echo's broadcast order matches
-    /// the send order, so the second send's pending-id gets reconciled
-    /// against the first echo. The mismatched IDs are unobservable to the
-    /// user (the lines look identical and the dedup still suppresses the
-    /// duplicate). A correctness fix here would be a per-send UUID
-    /// embedded in the message text (Twitch doesn't surface a
-    /// client-correlation field), which isn't worth the complexity at
-    /// chat throughput rates.
+    // Echo-reconciliation is two-keyed. The two keys handle the two
+    // race orderings between the Helix POST response and the EventSub
+    // WebSocket echo (which differ by ~50ms in practice and can land in
+    // either order).
+    //
+    // Primary key — Helix-returned messageId. Unambiguous: Twitch's
+    // messageId is globally unique per send. We learn it from
+    // `sendChatMessage`'s response after our POST round-trips, so this
+    // map is empty during the brief window before Helix responds.
+    //
+    // Fallback key — message text. Used only when the echo arrives
+    // BEFORE Helix's response and we don't yet have a messageId to
+    // match against. Vulnerable to false positives if the user
+    // double-sends identical text within the race window (rare; Twitch
+    // doesn't offer a client-correlation field to fix this fully).
+    //
+    // Lifecycle:
+    //   - `send()` adds to `pendingSendIDByText` synchronously, then
+    //     adds to `helixMessageIdByPendingId` once Helix responds
+    //     (provided the optimistic row is still present — i.e. the echo
+    //     hasn't already reconciled via the text fallback).
+    //   - `apply()` consumes from either map when an echo arrives,
+    //     and `cleanupPending(pendingId:)` removes whichever entries
+    //     still reference the now-reconciled pending id.
+
+    /// Primary echo-correlation map. Populated after `sendChatMessage`
+    /// returns isSent=true.
+    private var helixMessageIdByPendingId: [String: String] = [:]
+
+    /// Fallback echo-correlation map. Populated synchronously in `send(...)`
+    /// — covers the race window before Helix responds.
     private var pendingSendIDByText: [String: String] = [:]
 
     /// Surfaced to the view via @Observable so the compose bar can show a
@@ -320,27 +329,34 @@ public final class TabChatModel {
 
             if response.isSent {
                 // Success: leave the optimistic line untouched and let the
-                // EventSub echo upgrade it.
+                // EventSub echo upgrade it. We don't pre-swap the id —
+                // doing so would short-circuit the echo's normalization
+                // (badges, color, server-parsed fragments) via the
+                // dedup-by-id path.
                 //
-                // Why NOT pre-swap the id to response.messageId here:
-                // a Twitch chat message includes the chatter's badges,
-                // user-picked color, and Twitch's server-parsed fragments
-                // (cheermotes, native emotes, mentions). The optimistic
-                // line has NONE of those — it just has the plain text. The
-                // echo path in `apply()` runs the chat message through
-                // `Normalizer.normalize(...)` and replaces the optimistic
-                // row wholesale, so the user's own message ends up
-                // visually identical to everyone else's.
+                // What we DO is stash the canonical messageId so the
+                // upcoming echo can match unambiguously via Path 0 in
+                // `apply()`. This is the primary correlation key; the
+                // text map remains as a fallback for the rare case
+                // where the echo arrives before we get here.
                 //
-                // If we'd pre-swapped the id, the echo would match the
-                // dedup-by-id branch (drop) instead of the echo-of-pending
-                // branch (upgrade), and the row would stay badge-less for
-                // the rest of its life on screen.
-                //
-                // We don't need any local timeout/fallback: Twitch broadcasts
-                // to the WebSocket on the same code path that responds to
-                // the POST. If isSent=true came back, the echo is essentially
-                // guaranteed to arrive within milliseconds.
+                // Guard: only stash if the optimistic row is still in
+                // `lines`. The echo may have ALREADY arrived during our
+                // await on session.send — it would have reconciled via
+                // the text fallback (Path 2), removed the optimistic
+                // row, and the entry we'd write here would be a dead
+                // letter. Skipping the write avoids a tiny memory leak
+                // and a stale entry that could (extremely unlikely) match
+                // a future event with the same messageId.
+                if lines.contains(where: { $0.id == pendingId }) {
+                    helixMessageIdByPendingId[pendingId] = response.messageId
+                } else {
+                    // Echo already reconciled — defensive sweep in case the
+                    // text-map entry didn't get cleaned by the echo path
+                    // (it should have via cleanupPending, but the cost of
+                    // a no-op removal is zero).
+                    pendingSendIDByText.removeValue(forKey: canonical)
+                }
                 logger.debug("send: Helix accepted; awaiting EventSub echo to upgrade optimistic row")
                 return
             }
@@ -350,18 +366,16 @@ public final class TabChatModel {
             // `msg_banned`, `msg_emoteonly`, `msg_subsonly`,
             // `msg_followersonly`, `msg_slowmode`. The human-readable
             // `dropReason.message` is good enough for the toast.
-            if pendingSendIDByText.removeValue(forKey: canonical) != nil {
-                lines.removeAll { $0.id == pendingId }
-            }
+            cleanupPending(pendingId: pendingId)
+            lines.removeAll { $0.id == pendingId }
             sendError = response.dropReason?.message ?? "Twitch didn't broadcast the message."
             logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(response.dropReason?.message ?? "—", privacy: .public)")
         } catch {
             // Network blip, unauthorized after refresh-and-retry, or
             // ChannelSession.send's own empty-string guard. Drop optimistic
             // line + surface.
-            if pendingSendIDByText.removeValue(forKey: canonical) != nil {
-                lines.removeAll { $0.id == pendingId }
-            }
+            cleanupPending(pendingId: pendingId)
+            lines.removeAll { $0.id == pendingId }
             sendError = error.localizedDescription
             logger.error("send failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -398,53 +412,102 @@ public final class TabChatModel {
     /// emotes correctly. Re-normalizing pre-load messages is deferred to
     /// a future iteration.
     private func apply(_ event: ChannelSession.ChannelEvent) {
-        // Special handling for chat-message events: dedup against echoes
-        // of our own optimistic sends. Pulled out of the shared static
-        // helper because dedup needs read access to `lines` and write
-        // access to `pendingSendIDByText`, neither of which the static
-        // (used for priming, where no pending sends exist) has.
+        // Special handling for chat-message events: reconcile against the
+        // optimistic rows we inserted from `send(...)`. Pulled out of the
+        // shared static helper because reconciliation needs read access to
+        // `lines` and write access to both correlation maps — neither of
+        // which the static (used for priming, where no pending sends
+        // exist) has.
         if case .message(let chatMessage) = event {
-            // (1) dedup-by-id: we already swapped the optimistic line to
-            // the canonical messageId after the Helix response, and now
-            // the EventSub echo arrives carrying the same id. Skip it —
-            // the row already exists with the right id.
+            // ─── Path 0 (primary): Helix-id match ────────────────────
+            //
+            // We learned this messageId from `sendChatMessage`'s response.
+            // Unambiguous — Twitch's messageId is globally unique per send.
+            // Handles every case except "echo arrived before Helix
+            // returned" (Path 2 catches that one).
+            if let matchedPendingId = helixMessageIdByPendingId.first(where: { $0.value == chatMessage.messageId })?.key {
+                cleanupPending(pendingId: matchedPendingId)
+                if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
+                // Optimistic row was removed under us (e.g., a Helix
+                // failure cleanup raced this echo). Fall through to
+                // normal append so the echo still shows up — Twitch
+                // saw the message, the user deserves to see it.
+            }
+
+            // ─── Path 1: dedup-by-id ─────────────────────────────────
+            //
+            // We already reconciled this echo above (or a prior path
+            // already added a row with this id). Drop the duplicate.
+            // This is a defensive check — the cleanup in Path 0 should
+            // prevent the same echo from arriving twice in normal flow,
+            // but Twitch occasionally re-sends events on reconnect.
             if lines.contains(where: { $0.id == chatMessage.messageId }) {
                 return
             }
 
-            // (2) echo-of-pending: the EventSub echo beat our Helix POST
-            // response. Find our optimistic line by text+sender match and
-            // replace it with the normalized echo (canonical id, Twitch's
-            // server-parsed fragments).
+            // ─── Path 2 (fallback): text+sender match ────────────────
             //
-            // Why match `chatterUserId` AND text: two users could send
-            // the same string within milliseconds — only one of them is
-            // ours, and ours is the one whose chatterUserId matches our
-            // signed-in account.
+            // The EventSub echo beat our Helix POST response. We don't
+            // have a messageId in `helixMessageIdByPendingId` yet, so
+            // fall back to matching by (chatterUserId == me, text).
+            //
+            // Vulnerable to false positives if the user double-sends
+            // identical text within the race window AND both echoes
+            // arrive before both Helix responses. The collision is
+            // visible only as one extra row (other matches still
+            // upgrade correctly via Path 0 once Helix returns). Twitch
+            // doesn't offer a client-correlation field — fixing this
+            // edge case fully requires either client-side serialization
+            // of identical-text sends or a custom IRC bridge.
             if chatMessage.chatterUserId == currentUserId,
-               let pendingId = pendingSendIDByText.removeValue(forKey: chatMessage.message.text) {
-                let snapshot = emoteIndex?.snapshot() ?? [:]
-                let normalizedLine = Normalizer.normalize(
-                    message: chatMessage,
-                    emoteSnapshot: snapshot,
-                    currentUserLogin: currentUserLogin,
-                    highlightKeywords: highlightKeywords
-                )
-                if let idx = lines.firstIndex(where: { $0.id == pendingId }) {
-                    lines[idx] = normalizedLine
-                    return
-                }
-                // The optimistic row was removed under us (e.g., we hit
-                // a Helix error that wiped it) before the echo arrived.
-                // Fall through to the normal-append path so the echo
-                // still shows up — Twitch saw the message, the user
-                // deserves to see it too.
+               let matchedPendingId = pendingSendIDByText[chatMessage.message.text] {
+                cleanupPending(pendingId: matchedPendingId)
+                if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
+                // Optimistic row was removed under us — fall through to
+                // normal append.
             }
         }
 
         Self.appendLines(for: event, into: &lines, normalizationContext: self)
         if lines.count > Self.lineCap {
             lines.removeFirst(lines.count - Self.lineCap)
+        }
+    }
+
+    /// Replaces the optimistic row at `pendingId` with a freshly-normalized
+    /// `ChatLine` built from the echoed `chatMessage`. Returns `true` if
+    /// the swap happened (row was present); `false` if the row was gone
+    /// (caller falls through to normal-append behavior).
+    ///
+    /// Pulled out of `apply` so Paths 0 and 2 share the same upgrade logic
+    /// — without it the same six-line block would appear twice with the
+    /// same content but different match-key sources, inviting drift.
+    private func upgradeOptimistic(at pendingId: String, with chatMessage: ChatMessage) -> Bool {
+        guard let idx = lines.firstIndex(where: { $0.id == pendingId }) else {
+            return false
+        }
+        let snapshot = emoteIndex?.snapshot() ?? [:]
+        let normalizedLine = Normalizer.normalize(
+            message: chatMessage,
+            emoteSnapshot: snapshot,
+            currentUserLogin: currentUserLogin,
+            highlightKeywords: highlightKeywords
+        )
+        lines[idx] = normalizedLine
+        return true
+    }
+
+    /// Removes any correlation-map entries pointing at `pendingId` from
+    /// both maps. Called when a pending send reaches a terminal state
+    /// (reconciled via echo, dropped by Twitch, or thrown error).
+    ///
+    /// Removing from the text map requires a value-scan because the map
+    /// is keyed by text; the cost is bounded by the number of pending
+    /// sends, typically 0–1.
+    private func cleanupPending(pendingId: String) {
+        helixMessageIdByPendingId.removeValue(forKey: pendingId)
+        if let textKey = pendingSendIDByText.first(where: { $0.value == pendingId })?.key {
+            pendingSendIDByText.removeValue(forKey: textKey)
         }
     }
 
