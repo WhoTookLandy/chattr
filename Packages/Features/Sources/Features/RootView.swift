@@ -71,6 +71,16 @@ public struct RootView: View {
             guard let active = accounts.first else { return }
             await globalCatalog.load(account: active, accountStore: accountStore)
         }
+        // One-shot Keychain mirror: if the user has a valid TwitchKit
+        // token but nothing in our chattr-side refresh cache (i.e. they
+        // upgraded across the OAuthRefreshTokenCache rollout), copy the
+        // refresh_token over so a future refresh failure can recover.
+        // `warmRefreshTokenCacheIfNeeded` is a no-op once the cache is
+        // populated, so this is cheap on subsequent launches.
+        .task(id: accounts.first?.userId) {
+            guard let active = accounts.first else { return }
+            await accountStore.warmRefreshTokenCacheIfNeeded(for: active)
+        }
         // Trigger initial loads on first sign-in (or account swap).
         //
         // - All list (`loadAllIfNeeded`): cached per account. Runs once, then

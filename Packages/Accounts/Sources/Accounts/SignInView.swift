@@ -1,7 +1,6 @@
 import SwiftUI
 import AuthenticationServices
 import TwitchKit
-import DesignSystem
 import Core
 import os
 
@@ -24,6 +23,16 @@ public struct SignInView: View {
 
     @State private var isSigningIn = false
     @State private var errorMessage: String?
+
+    /// The login of the account whose session just expired, if the previous
+    /// app session was forced out by the auth layer. Read once on appear (and
+    /// cleared) so the banner shows on the *first* render after expiry and
+    /// not again afterwards.
+    ///
+    /// UserDefaults (rather than `@SceneStorage`) so the flag survives true
+    /// cold-start — a session can expire while the app is killed in the
+    /// background, and the user may not relaunch until much later.
+    @State private var sessionExpiredLogin: String?
 
     /// The viewer-facing scopes chattr needs.
     private static let scopes: [TwitchScope] = [
@@ -57,7 +66,7 @@ public struct SignInView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 80, height: 80)
-                .foregroundStyle(Brand.accent)
+                .foregroundStyle(Color.accentColor)
 
             VStack(spacing: 8) {
                 Text("chattr")
@@ -69,6 +78,37 @@ public struct SignInView: View {
             }
 
             Spacer()
+
+            // Soft "session expired" banner — only renders if the previous
+            // app session was force-signed-out (refresh_token revoked,
+            // expired, or wiped by TwitchKit's defensive cleanup). Frames
+            // the sign-in CTA with context so the user understands WHY
+            // they're back here.
+            //
+            // Tone: orange + clock symbol, not red + warning — this is a
+            // routine session timeout, not a security incident.
+            if let sessionExpiredLogin {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock.badge.exclamationmark")
+                        .font(.title2)
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.orange)
+                    Text("Your session for @\(sessionExpiredLogin) expired")
+                        .font(.callout.weight(.medium))
+                        .multilineTextAlignment(.center)
+                    Text("Sign in again to continue.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal)
+                // Smooth fade-in on first render — feels less abrupt than
+                // appearing instantly with the rest of the layout.
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             Button {
                 Task { await signIn() }
@@ -96,6 +136,22 @@ public struct SignInView: View {
             }
 
             Spacer().frame(height: 32)
+        }
+        // One-shot read of the session-expired flag. Done in `.onAppear`
+        // (not at view-init time) so the value is stored in @State and
+        // SwiftUI's `if let sessionExpiredLogin` re-renders when the
+        // flag transitions from nil → value. Cleared immediately so the
+        // banner doesn't reappear on subsequent navigations back to
+        // SignInView (e.g. user signs in successfully, signs out manually,
+        // returns to SignInView — no stale banner).
+        .onAppear {
+            if let login = UserDefaults.standard.string(forKey: AccountStore.lastSessionExpiredLoginKey) {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    sessionExpiredLogin = login
+                }
+                UserDefaults.standard.removeObject(forKey: AccountStore.lastSessionExpiredLoginKey)
+                logger.info("SignInView: showing session-expired banner for @\(login)")
+            }
         }
     }
 
