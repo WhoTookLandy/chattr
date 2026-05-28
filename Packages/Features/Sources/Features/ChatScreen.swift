@@ -1,6 +1,7 @@
 import SwiftUI
 import Accounts
 import Channels
+import ChatModel
 import EmoteSources
 import TwitchKit
 import Core
@@ -71,6 +72,12 @@ public struct ChatScreen: View {
     /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
     /// the binding also updates as the user scrolls manually (iOS 17+ API).
     @State private var scrolledMessageId: String?
+
+    /// Non-nil when the thread sheet is open; carries the thread's root
+    /// message ID. `.sheet(item:)` could use `Identifiable`, but the
+    /// String here is identifiable already (each root id is unique) so
+    /// we wrap it minimally for the API.
+    @State private var viewingThreadRootId: ThreadRootID?
 
     /// When true, the user has Reduce Motion on in system Accessibility — we
     /// skip the easeOut tween on auto-scroll so chat snaps instantly to the
@@ -158,6 +165,19 @@ public struct ChatScreen: View {
             Button("OK", role: .cancel) { chatModel.clearSendError() }
         } message: { reason in
             Text(reason)
+        }
+        // Thread sheet — driven by the @State viewingThreadRootId
+        // wrapper. `.sheet(item:)` ties presentation to a non-nil value
+        // AND passes the unwrapped value into the content closure
+        // automatically.
+        .sheet(item: $viewingThreadRootId) { root in
+            ThreadView(
+                rootMessageId: root.id,
+                chatModel: chatModel,
+                badgeStore: badgeStore,
+                channelLoginName: channelLoginName,
+                channelDisplayName: channelDisplayName
+            )
         }
         // No `.navigationTitle` here — the parent ChatTabsScreen sets it to
         // "Chat" and the active tab pill in the strip already identifies the
@@ -325,7 +345,17 @@ public struct ChatScreen: View {
                         // Long-press → Reply. Sync-only — beginReply
                         // just mutates @Observable state on the model,
                         // no Task needed.
-                        onReply: { chatModel.beginReply(to: line) }
+                        onReply: { chatModel.beginReply(to: line) },
+                        // Long-press → View Thread. Sets the sheet
+                        // state to this line's thread root. The same
+                        // sheet works for both a "reply leading to a
+                        // thread" (root = parent's threadRootMessageId)
+                        // and a "I might be the root of a thread"
+                        // (root = my own id, sheet shows me + any
+                        // matching replies).
+                        onViewThread: {
+                            viewingThreadRootId = ThreadRootID(id: TabChatModel.threadRoot(of: line))
+                        }
                     )
                     .id(line.id)
                 }
@@ -737,6 +767,229 @@ private struct ComposeBar: View {
         // would feel like the message is still in flight.
         composeText = ""
 
+        await onSend(draft)
+    }
+}
+
+// MARK: - Thread sheet
+
+/// `.sheet(item:)` requires its value-type to be `Identifiable`. We
+/// wrap the thread root id String so we can pass it through
+/// `@State viewingThreadRootId: ThreadRootID?`.
+private struct ThreadRootID: Identifiable, Equatable {
+    let id: String
+}
+
+/// Modal sheet that filters chat to a single thread and offers a
+/// dedicated compose bar that automatically threads against the
+/// thread's latest message. Reuses `ChatRow` and `ComposeBar` for
+/// visual consistency with the main chat.
+///
+/// Design choices:
+///   - Lives in a NavigationStack with a Done button so the sheet
+///     reads as a deliberate modal (not a swipe-down popover).
+///   - Compose bar always threads — `replyOverride` is built from
+///     the latest line in the thread, so the user doesn't need to
+///     manually pick a parent for each send.
+///   - Long-press inside the thread sheet does NOT offer "View
+///     Thread" again (would be a no-op — we're already in it).
+///   - "Reply" inside the thread sheet sets the model's reply
+///     context to that specific line, then the compose bar's
+///     replyOverride is preempted by it. Slightly confusing to have
+///     two sources of reply intent — for MVP we just NOT offer Reply
+///     inside the thread sheet either (threading is automatic, no
+///     need for explicit "Reply").
+///
+/// Future polish (not in this commit):
+///   - Scroll to the most recent message on open.
+///   - Inline "View profile" / "Mention" actions on rows.
+///   - Persisted scroll position so re-opening the sheet returns to
+///     where you were reading.
+private struct ThreadView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let rootMessageId: String
+    @Bindable var chatModel: TabChatModel
+    let badgeStore: ChatBadgeStore?
+    let channelLoginName: String
+    let channelDisplayName: String
+
+    /// The full filtered thread, recomputed each body call. Cheap —
+    /// see `TabChatModel.lines(inThreadRootedAt:)` doc-comment.
+    private var threadLines: [ChatLine] {
+        chatModel.lines(inThreadRootedAt: rootMessageId)
+    }
+
+    /// The reply target for the thread's compose bar — last message
+    /// in the thread (chronological), or the root if the thread is
+    /// just the seed.
+    private var threadReplyTarget: TabChatModel.ReplyContext? {
+        guard let lastLine = threadLines.last else { return nil }
+        // Build the override context. The snippet is the line's
+        // already-normalized runs collapsed to text; we use the same
+        // formatter the main reply chip uses for visual consistency.
+        // Borrowing the formatter from TabChatModel would need a
+        // public exposure; for the MVP we render runs inline-ish.
+        let snippet: String = {
+            var out = ""
+            for run in lastLine.runs {
+                switch run {
+                case .text(let s): out += s
+                case .emote(let e): out += e.name
+                case .twitchEmote(_, let display): out += display
+                case .mention(let login, _): out += "@\(login)"
+                case .url(let s): out += s
+                case .cheermote(let prefix, let bits, _): out += "\(prefix)\(bits)"
+                }
+                if out.count >= 80 { break }
+            }
+            return out.count > 80 ? String(out.prefix(80)) + "…" : out
+        }()
+        return TabChatModel.ReplyContext(
+            parentMessageId: lastLine.id,
+            parentAuthorDisplayName: lastLine.authorDisplayName,
+            parentSnippet: snippet
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if threadLines.isEmpty {
+                    ContentUnavailableView(
+                        "Thread not found",
+                        systemImage: "bubble.left.and.bubble.right",
+                        description: Text("The original message may have aged out of the buffer.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(threadLines) { line in
+                                ChatRow(
+                                    line: line,
+                                    badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? []
+                                    // Note: deliberately no onRetry /
+                                    // onReply / onViewThread inside the
+                                    // thread sheet. Reply is implicit
+                                    // (the compose bar threads
+                                    // automatically); recursive
+                                    // View Thread would be a no-op;
+                                    // retry on optimistic rows still
+                                    // works from the main chat view.
+                                )
+                                .id(line.id)
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                }
+
+                // Dedicated compose bar. The replyOverride is built
+                // from `threadReplyTarget` — automatic threading
+                // against the latest message in the thread, which is
+                // what feels natural for "continue this conversation."
+                ThreadComposeBar(
+                    channelLoginName: channelLoginName,
+                    channelDisplayName: channelDisplayName,
+                    replyTarget: threadReplyTarget,
+                    onSend: { draft in
+                        await chatModel.send(
+                            text: draft,
+                            replyOverride: threadReplyTarget
+                        )
+                    }
+                )
+            }
+            .navigationTitle("Thread")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                // `confirmationAction` placement → right side on iOS.
+                // "Done" rather than "Cancel" because closing this
+                // sheet isn't destructive — no input is being
+                // abandoned, the user just finished reading.
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+/// Compose bar variant for the thread sheet. Same look as the main
+/// ComposeBar but without the reply chip (threading is automatic and
+/// always-on, so the chip would be redundant) and without the
+/// restrictions strip (the user already saw it on the main bar).
+///
+/// Pulled out as a separate struct rather than reusing ComposeBar
+/// because (a) ComposeBar's reply chip + restrictions strip + cancel
+/// button machinery is dead weight here, and (b) the placeholder
+/// text needs to read "Reply in thread" instead of "Send a message"
+/// — switching ComposeBar to parameterize that one prompt seemed
+/// less clean than a focused thread-specific variant.
+private struct ThreadComposeBar: View {
+    let channelLoginName: String
+    let channelDisplayName: String
+    let replyTarget: TabChatModel.ReplyContext?
+    let onSend: @MainActor (String) async -> Void
+
+    @State private var composeText: String = ""
+    @State private var isSending: Bool = false
+    @FocusState private var focused: Bool
+
+    private var isActive: Bool {
+        !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
+    }
+
+    private var prompt: String {
+        if let target = replyTarget {
+            return "Reply to \(target.parentAuthorDisplayName)"
+        }
+        return "Send to #\(channelLoginName)"
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField(prompt, text: $composeText)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .submitLabel(.send)
+                .onSubmit { Task { await sendDraft() } }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .glassEffect(.regular, in: Capsule())
+                .accessibilityLabel("Reply input")
+                .accessibilityHint("Type a reply to send to \(channelDisplayName)")
+
+            Button {
+                Task { await sendDraft() }
+            } label: {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .symbolEffect(.bounce, value: isActive)
+                    .padding(2)
+            }
+            .buttonStyle(.glassProminent)
+            .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
+            .disabled(!isActive)
+            .accessibilityLabel("Send reply")
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+
+    private func sendDraft() async {
+        let draft = composeText
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !isSending else { return }
+        isSending = true
+        defer { isSending = false }
+        composeText = ""
         await onSend(draft)
     }
 }

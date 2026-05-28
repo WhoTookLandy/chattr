@@ -34,6 +34,11 @@ struct ChatRow: View {
     /// Called when the user picks "Reply" from the long-press menu on
     /// a `.message` row. Optional for the same reason as `onRetry`.
     var onReply: (() -> Void)? = nil
+    /// Called when the user picks "View Thread" from the long-press
+    /// menu. Optional — when nil, the menu item is hidden (so the
+    /// thread-sheet view itself, which doesn't recurse, sets it nil
+    /// to suppress the entry).
+    var onViewThread: (() -> Void)? = nil
 
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
@@ -51,11 +56,20 @@ struct ChatRow: View {
                 // The menu is empty for those rows, which makes the
                 // long-press a no-op (no menu pops), matching the
                 // platform default.
-                if case .message = line.kind, onReply != nil {
-                    Button {
-                        onReply?()
-                    } label: {
-                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                if case .message = line.kind {
+                    if let onReply {
+                        Button {
+                            onReply()
+                        } label: {
+                            Label("Reply", systemImage: "arrowshape.turn.up.left")
+                        }
+                    }
+                    if let onViewThread {
+                        Button {
+                            onViewThread()
+                        } label: {
+                            Label("View Thread", systemImage: "bubble.left.and.bubble.right")
+                        }
                     }
                 }
             }

@@ -336,7 +336,7 @@ public final class TabChatModel {
     ///
     /// Returns nothing — observable side effects (`lines`, `sendError`)
     /// drive the UI.
-    public func send(text: String) async {
+    public func send(text: String, replyOverride: ReplyContext? = nil) async {
         // Trim here too (in addition to ChannelSession.send) — we don't
         // want to enqueue an optimistic row with leading whitespace that
         // the server then trims. The two trims must produce the same
@@ -349,19 +349,27 @@ public final class TabChatModel {
             return
         }
 
-        // Snapshot the reply context now and clear it immediately. We
-        // clear up-front so the chip disappears from the compose bar at
-        // the same time the optimistic row appears — feels deliberate,
-        // and prevents the user from "double-attaching" a reply by
-        // hitting send twice fast.
+        // Three send paths, all funneled through the same Helix call:
+        //   1. Plain send  — replyOverride nil, replyContext nil
+        //   2. Reply send  — replyOverride nil, replyContext set (the
+        //      main compose bar with the chip showing)
+        //   3. Thread send — replyOverride set (the thread sheet's
+        //      compose bar, which always threads against the thread's
+        //      latest message)
         //
-        // If send fails, the parent message is still in chat so the
-        // user can long-press → reply again. We don't try to restore
-        // the chip on failure because that would require carrying
-        // reply state on the .failed line, which is more complexity
-        // than the rare retry-a-reply case justifies.
-        let replyAttachment = replyContext
-        replyContext = nil
+        // Snapshot the attachment now and clear the chip if we used it.
+        // Skipping the clear when an override is in play means the main
+        // compose bar's chip survives across thread-view sends —
+        // intuitively right: the user might be in the middle of
+        // composing a reply on the main bar and pop into the thread
+        // sheet to add a quick thread response.
+        let replyAttachment: ReplyContext?
+        if let override = replyOverride {
+            replyAttachment = override
+        } else {
+            replyAttachment = replyContext
+            replyContext = nil
+        }
 
         // Build and append the optimistic line. `pending-…` IDs are
         // distinct from anything Twitch can mint (their messageIds are
@@ -544,6 +552,39 @@ public final class TabChatModel {
     /// pending attachment.
     public func cancelReply() {
         replyContext = nil
+    }
+
+    /// Returns every line in `lines` belonging to the thread rooted at
+    /// `rootMessageId` — the root itself plus any reply whose
+    /// `threadRootMessageId` matches. Order is preserved (chronological,
+    /// since `lines` is append-only with timestamp-ordered insertion).
+    ///
+    /// Computed on demand rather than maintained as an index because:
+    ///   - Threads are rare (one in N messages); maintaining a full
+    ///     thread-index for every message would waste memory.
+    ///   - The filter is O(lines.count) which at our cap (~500 lines)
+    ///     is well below the noticeable-cost threshold; SwiftUI calls
+    ///     this once per sheet open + once per chat update while the
+    ///     sheet is open, which is fine.
+    public func lines(inThreadRootedAt rootMessageId: String) -> [ChatLine] {
+        lines.filter { line in
+            line.id == rootMessageId
+                || line.replyParent?.threadRootMessageId == rootMessageId
+        }
+    }
+
+    /// Returns the thread root id for a given line. If the line is
+    /// itself a reply, the thread root is `replyParent.threadRootMessageId`.
+    /// If not, the line itself is the candidate root.
+    ///
+    /// "Candidate" because we have no way to tell from a single line
+    /// whether it's actually been replied to — would require scanning
+    /// other lines. The caller (the View Thread menu item) doesn't
+    /// need this distinction because the sheet handles a "singleton
+    /// thread" (just this one message) the same way it handles a
+    /// 50-message thread.
+    public static func threadRoot(of line: ChatLine) -> String {
+        line.replyParent?.threadRootMessageId ?? line.id
     }
 
     /// Build a short, single-line preview of a message's runs for the
