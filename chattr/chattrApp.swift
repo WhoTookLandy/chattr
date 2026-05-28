@@ -33,7 +33,11 @@ struct chattrApp: App {
 
     init() {
         do {
-            let container = try ModelContainer(for: Account.self, JoinedChannel.self)
+            // PersistedChatTab is the SwiftData projection of ChatTab — added
+            // in commit E so chat tabs survive cold start. Lives in the
+            // Features package alongside the runtime ChatTab struct it
+            // mirrors.
+            let container = try ModelContainer(for: Account.self, JoinedChannel.self, PersistedChatTab.self)
             self.modelContainer = container
             let store = AccountStore(modelContainer: container, clientId: Self.clientId)
             self.accountStore = store

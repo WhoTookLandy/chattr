@@ -58,6 +58,18 @@ public final class ChannelSessionRegistry {
     /// Started lazily on first session creation for an account.
     private var eventDispatchTasks: [String: Task<Void, Never>] = [:]
 
+    /// Reference counts per session key. Each `acquire(...)` increments;
+    /// each `release(...)` decrements. When a count hits 0, the underlying
+    /// `ChannelSession` is stopped and removed.
+    ///
+    /// The refcount tracks *intent to keep alive* — typically one increment
+    /// per `ChatTab` that contains the channel. It is intentionally
+    /// independent from `session(...)` (which is a pure lookup-or-create and
+    /// doesn't affect lifecycle), so view code that needs the session for
+    /// rendering can call `session(...)` repeatedly without inflating the
+    /// count.
+    private var refCounts: [String: Int] = [:]
+
     public init(accountStore: AccountStore) {
         self.accountStore = accountStore
     }
@@ -116,21 +128,93 @@ public final class ChannelSessionRegistry {
         }
     }
 
-    /// Stops and removes the session for the given pair. Also cancels any
-    /// in-flight creation Task — if another caller is currently awaiting
-    /// `session(...)` for this same key, their await will throw
-    /// `CancellationError` (ChatScreen already silently absorbs that).
-    public func leave(accountUserId: String, channelId: String) async {
+    // MARK: - Reference counting
+
+    /// Increment the reference count for a session and construct it if not
+    /// yet alive. Use this at the boundaries where a session's *lifetime*
+    /// changes — typically when a `ChatTab` opens. Pair with `release(...)`
+    /// when that tab closes.
+    ///
+    /// Returns the live session so the caller can begin using it
+    /// immediately. Multiple acquires for the same key share the same
+    /// session object (deduplicated via the existing `session(...)` cache
+    /// + in-flight coalescing).
+    ///
+    /// Idempotency: each call adds exactly 1 to the refcount. A tab that
+    /// holds the same channel twice (degenerate but legal) increments
+    /// twice and must release twice.
+    @discardableResult
+    public func acquire(
+        account: Account,
+        channelId: String,
+        channelLoginName: String
+    ) async throws -> ChannelSession {
+        let key = Self.key(accountUserId: account.userId, channelId: channelId)
+        refCounts[key, default: 0] += 1
+        logger.info("acquire \(key) → refcount \(self.refCounts[key] ?? 0)")
+        // Delegate construction to the existing session(...) path. If
+        // construction fails, roll the refcount back so a future caller
+        // can retry from a clean state — otherwise an orphan refcount
+        // would block teardown forever.
+        do {
+            return try await session(
+                account: account,
+                channelId: channelId,
+                channelLoginName: channelLoginName
+            )
+        } catch {
+            refCounts[key, default: 1] -= 1
+            if refCounts[key] == 0 { refCounts[key] = nil }
+            throw error
+        }
+    }
+
+    /// Decrement the reference count for a session. When the count reaches
+    /// zero the session is stopped (EventSub unsubscribe, dispatcher task
+    /// continues running for the account but skips this channel) and
+    /// removed from the cache.
+    ///
+    /// Safe to call when no session exists (e.g., release races a failed
+    /// acquire) — it just clears any leftover refcount entry.
+    public func release(accountUserId: String, channelId: String) async {
         let key = Self.key(accountUserId: accountUserId, channelId: channelId)
-        if let task = inFlight[key] {
-            task.cancel()
-            inFlight[key] = nil
+        guard let count = refCounts[key], count > 0 else {
+            logger.info("release \(key) with no outstanding refcount — likely a double-release; ignoring")
+            return
         }
-        if let session = sessions[key] {
-            await session.stop()
-            sessions[key] = nil
-            logger.info("Left session \(key)")
+        refCounts[key] = count - 1
+
+        if refCounts[key] == 0 {
+            refCounts[key] = nil
+            // Cancel any in-flight construction — if a peer is still
+            // awaiting acquire's session(...) call, their await throws
+            // CancellationError. ChatScreen already absorbs that
+            // silently.
+            if let task = inFlight[key] {
+                task.cancel()
+                inFlight[key] = nil
+            }
+            if let session = sessions[key] {
+                await session.stop()
+                sessions[key] = nil
+                logger.info("release \(key) → refcount 0; session stopped")
+            } else {
+                logger.info("release \(key) → refcount 0; no session to stop (still constructing or already gone)")
+            }
+        } else {
+            logger.info("release \(key) → refcount \(self.refCounts[key] ?? 0)")
         }
+    }
+
+    /// Legacy single-owner teardown. Kept as a thin alias for `release(...)`
+    /// so call sites that haven't migrated to acquire/release still compile.
+    ///
+    /// Behavior under refcount semantics: this drops the refcount by 1 just
+    /// like `release(...)`. Callers that previously expected unconditional
+    /// teardown should migrate to acquire/release pairs.
+    @available(*, deprecated, renamed: "release(accountUserId:channelId:)", message: "Use the acquire/release pair for proper reference counting.")
+    public func leave(accountUserId: String, channelId: String) async {
+        await release(accountUserId: accountUserId, channelId: channelId)
     }
 
     // MARK: - Event dispatch

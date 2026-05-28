@@ -44,6 +44,25 @@ public struct ChatTabsScreen: View {
 
     @Environment(\.chatTabs) private var chatTabs
 
+    /// Scene-scoped restoration of the active tab id. `@SceneStorage` only
+    /// supports primitive types, so we round-trip through UUID's
+    /// `uuidString` representation. Persisted per-scene (each window has
+    /// its own active tab — relevant for iPad multi-window where the user
+    /// might want one window focused on chat A, another on chat B).
+    ///
+    /// Lifecycle:
+    ///   - On VStack appear, if a saved id matches an existing tab, write
+    ///     it back to `chatTabs.activeTabId`. The pill highlights, the
+    ///     ScrollView snaps.
+    ///   - On every `activeTabId` change (tap a pill, swipe a page), mirror
+    ///     the new value back to `@SceneStorage`. The latest selection is
+    ///     always durable.
+    ///
+    /// Tab list itself lives in SwiftData (account-scoped, see
+    /// `PersistedChatTab`) — this storage is purely "which one was active
+    /// in this scene."
+    @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
+
     public init(
         account: Account,
         accountStore: AccountStore,
@@ -61,6 +80,27 @@ public struct ChatTabsScreen: View {
                     ChatTabStrip(model: chatTabs, onAddTab: onAddTab)
                     Divider()
                     pagedChatContent(chatTabs: chatTabs)
+                }
+                // Restore the active tab from scene storage. Only applies if
+                // the saved id still matches an existing tab — if the user
+                // closed that tab in a previous session, fall through to
+                // whatever default `chatTabs.activeTabId` already holds
+                // (typically the first tab, since pagedChatContent's
+                // ScrollView auto-positions to the first child).
+                .onAppear {
+                    if let savedId = persistedActiveTabId,
+                       let uuid = UUID(uuidString: savedId),
+                       chatTabs.tabs.contains(where: { $0.id == uuid }) {
+                        chatTabs.activeTabId = uuid
+                    }
+                }
+                // Mirror every change back to scene storage. Includes both
+                // tap-a-pill writes (ChatTabStrip → model.activeTabId) AND
+                // swipe-a-page writes (.scrollPosition → model.activeTabId).
+                // nil is written verbatim — restoration tolerates it
+                // gracefully via the `if let savedId` guard above.
+                .onChange(of: chatTabs.activeTabId) { _, newValue in
+                    persistedActiveTabId = newValue?.uuidString
                 }
             } else {
                 emptyState

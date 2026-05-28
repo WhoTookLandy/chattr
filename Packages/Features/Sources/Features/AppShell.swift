@@ -1,6 +1,11 @@
 import SwiftUI
+import SwiftData
 import Accounts
 import Channels
+import Core
+import os
+
+private let logger = AppLogger.make("Features.AppShell")
 
 /// Top-level navigation shell for a signed-in user: a TabView with two tabs.
 ///
@@ -50,6 +55,13 @@ public struct AppShell: View {
 
     /// Read from environment so we can wire close-X → registry.leave below.
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
+
+    /// The app's `ModelContext` (injected by `.modelContainer(...)` at
+    /// chattrApp). We don't use the context itself — we use its `container`
+    /// to construct a `TabPersistence` for the chat-tabs model. SwiftUI
+    /// gives us this for free because RootView already applied the
+    /// `.modelContainer(modelContainer)` modifier.
+    @Environment(\.modelContext) private var modelContext
 
     /// Renamed from `Tab` to disambiguate from SwiftUI's `Tab` struct (iOS
     /// 18+). With both in scope inside `body`, unqualified `Tab(...)` would
@@ -113,20 +125,93 @@ public struct AppShell: View {
             chatTabsModel.open(channel: descriptor)
             selectedTab = .chat
         })
-        // Wire close-X to actually free the underlying ChannelSession(s).
-        // The callback receives the closed `ChatTab` so we can iterate its
-        // channels and call `registry.leave` for each. Sessions stay alive
-        // in the registry if other tabs still reference them — commit E
-        // adds proper reference counting; today closing a tab leaves
-        // sessions that any other tab is using (single-channel-per-tab
-        // means no actual sharing happens yet).
-        .onAppear {
-            chatTabsModel.onClose = { [accountUserId = account.userId] tab in
+        // Single appearance task that does, in this exact order:
+        //
+        //   1. Wire `onOpen` / `onClose` on the ChatTabsModel — these
+        //      bridge to the registry's `acquire` / `release` so refcounts
+        //      track tab lifetime.
+        //   2. Install the `TabPersistence` handle so future mutations
+        //      write through to SwiftData.
+        //   3. Hydrate any persisted tabs from disk — fires the freshly-
+        //      wired `onOpen` for each so the registry acquires their
+        //      sessions and EventSub subscriptions resume.
+        //
+        // Why one `.task` instead of one `.onAppear` + one `.task`:
+        // ordering. `.onAppear` runs synchronously and `.task` runs
+        // asynchronously, so on paper the callbacks would be set before
+        // hydration begins anyway — but combining them into one explicit
+        // sequence makes the dependency obvious to the next reader and
+        // immune to SwiftUI scheduling subtleties.
+        //
+        // ## What `onOpen` does
+        //
+        //   A tab just appeared (user opened a channel OR cold-start
+        //   hydration restored a persisted tab). Bumps the refcount for
+        //   each of its channels and triggers session construction so
+        //   EventSub subscriptions start flowing immediately.
+        //
+        // ## What `onClose` does
+        //
+        //   A tab just disappeared (user tapped the X). Drops the
+        //   refcount for each of its channels. The session keeps running
+        //   while other tabs still hold a reference; when the count hits
+        //   0 the session is stopped and the EventSub subscription is
+        //   released.
+        //
+        // ## Sendable note
+        //
+        // Both closures capture only `Sendable` values: `account` is a
+        // SwiftData @Model (non-Sendable), so we pass it directly to
+        // `registry.acquire` only after the closure has hopped onto
+        // `@MainActor` — Account is touched on main, never crossed a
+        // boundary. `onClose` captures `accountUserId` alone (String) for
+        // the same reason but at the value-type level.
+        .task {
+            // 1. Wire callbacks.
+            chatTabsModel.onOpen = { [weak channelSessionRegistry, account] tab in
                 guard let registry = channelSessionRegistry else { return }
                 for channel in tab.channels {
-                    await registry.leave(accountUserId: accountUserId, channelId: channel.channelId)
+                    do {
+                        _ = try await registry.acquire(
+                            account: account,
+                            channelId: channel.channelId,
+                            channelLoginName: channel.channelLoginName
+                        )
+                    } catch is CancellationError {
+                        // Expected if a release races acquire (rapid
+                        // open-then-close). Swallow silently.
+                    } catch {
+                        // Construction failure here is rare — usually
+                        // CancellationError above. Log and continue;
+                        // the user's next interaction with the tab
+                        // will re-trigger the acquire path.
+                        logger.error("acquire failed for \(channel.channelLoginName): \(error.localizedDescription)")
+                    }
                 }
             }
+            chatTabsModel.onClose = { [weak channelSessionRegistry, accountUserId = account.userId] tab in
+                guard let registry = channelSessionRegistry else { return }
+                for channel in tab.channels {
+                    await registry.release(accountUserId: accountUserId, channelId: channel.channelId)
+                }
+            }
+
+            // 2. Install persistence (uses the container injected by
+            //    chattrApp's `.modelContainer(...)`). Construct lazily
+            //    here so AppShell doesn't have to take the container as
+            //    an init parameter — `@Environment(\.modelContext)` is
+            //    the canonical SwiftUI accessor.
+            let persistence = TabPersistence(modelContainer: modelContext.container)
+            chatTabsModel.persistence = persistence
+
+            // 3. Hydrate. This fires `onOpen` for each restored tab in
+            //    order, which acquires sessions in the registry. The
+            //    actual EventSub subscriptions happen asynchronously
+            //    inside each acquire — the UI shows the restored tab
+            //    pills immediately, and messages start flowing in the
+            //    chat panel as soon as each subscription confirms.
+            chatTabsModel.hydrateFromPersistence()
+            logger.info("AppShell wired tab callbacks + persistence; hydration kicked off")
         }
     }
 }
