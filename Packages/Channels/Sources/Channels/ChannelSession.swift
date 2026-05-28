@@ -273,6 +273,57 @@ public actor ChannelSession {
         subscribers.removeAll()
     }
 
+    // MARK: - Send
+
+    /// Sends a chat message through this session's authenticated user. Wraps
+    /// `client.api.sendChatMessage(...)` with a one-shot token-refresh-and-retry
+    /// on `HelixError.unauthorized`, matching the pattern in `subscribeToChat()`
+    /// — sends are short, so we don't go through `AccountStore.withTokenRefresh`
+    /// (which is geared at the SwiftData-isolated Account model that doesn't
+    /// belong inside this actor).
+    ///
+    /// Returns the Helix response so the caller can:
+    ///   - Inspect `isSent` (a `true` response can still mean "dropped";
+    ///     Twitch returns `isSent=false` + a `dropReason` for automod holds,
+    ///     rate-limit hits, banned-word triggers, etc.).
+    ///   - Read the canonical `messageId` for echo-dedup against the EventSub
+    ///     `channel.chat.message` event that arrives ~100ms after a successful
+    ///     send.
+    ///
+    /// Does NOT touch the ring buffer. The send's success is observable via
+    /// the EventSub echo, which arrives through the same dispatcher that
+    /// drives every other chat event. The send call is fire-then-let-EventSub-
+    /// confirm — see `TabChatModel.send(...)` for the optimistic-insert /
+    /// dedup orchestration on top of that.
+    public func send(_ text: String) async throws -> SendChatMessageResponse {
+        // Trim leading/trailing whitespace only — preserve internal whitespace
+        // so users can put their `:` between word and emote in
+        // ":wave: hello :wave:" style messages. Twitch handles the rest.
+        let payload = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !payload.isEmpty else {
+            throw AppError(message: "Can't send an empty message")
+        }
+        do {
+            return try await client.api.sendChatMessage(
+                broadcasterId: channelId,
+                senderId: accountUserId,
+                message: payload
+            )
+        } catch HelixError.unauthorized {
+            // Same shape as subscribeToChat's recovery: refresh tokens once,
+            // retry once. A second unauthorized error propagates and lets
+            // the caller (TabChatModel.send → ChatScreen) surface the
+            // sign-in-expired UX.
+            logger.info("sendChatMessage unauthorized; refreshing tokens and retrying once")
+            try await refreshTokenHandler()
+            return try await client.api.sendChatMessage(
+                broadcasterId: channelId,
+                senderId: accountUserId,
+                message: payload
+            )
+        }
+    }
+
     // MARK: - Pub-sub API
 
     /// Registers a handler that receives every channel event arriving after

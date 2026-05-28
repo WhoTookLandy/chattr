@@ -87,9 +87,52 @@ public final class TabChatModel {
     /// "@me" until set.
     private var currentUserLogin: String = ""
 
+    /// The signed-in user's Twitch user ID. Used to recognize our own
+    /// messages in the EventSub echo stream so we can swap optimistic
+    /// rows into the canonical echoed row (see `send` / `apply` for
+    /// the orchestration). Empty before attach.
+    private var currentUserId: String = ""
+
+    /// The signed-in user's display name (capitalized as the user picked
+    /// at signup). Stamped onto the optimistic line so the row looks
+    /// right BEFORE the EventSub echo arrives and rewrites it with
+    /// Twitch's authoritative payload.
+    private var currentUserDisplayName: String = ""
+
     /// Case-insensitive substrings that trigger row highlighting. Empty
     /// by default — keyword highlighting disabled.
     private var highlightKeywords: [String] = []
+
+    // MARK: - Send-orchestration state
+
+    /// Maps "message text we sent but haven't seen echoed yet" → "the
+    /// pending-id we used for the optimistic row." Used by `apply()` to
+    /// recognize an incoming `channel.chat.message` as the echo of one
+    /// of our own sends, even when the EventSub echo beats the Helix
+    /// POST response (which races by ~100ms in practice — Twitch broadcasts
+    /// to the WebSocket on the same code path that responds to the POST).
+    ///
+    /// Keyed by text rather than by ID because we only learn the canonical
+    /// `messageId` from one of two sources: the Helix response OR the
+    /// EventSub echo. Either may arrive first. Text is what both have in
+    /// common.
+    ///
+    /// If the user double-sends the same text quickly, the dictionary
+    /// overwrites and the first-sent line keeps its pending-id until its
+    /// Helix response races back — but the echo's broadcast order matches
+    /// the send order, so the second send's pending-id gets reconciled
+    /// against the first echo. The mismatched IDs are unobservable to the
+    /// user (the lines look identical and the dedup still suppresses the
+    /// duplicate). A correctness fix here would be a per-send UUID
+    /// embedded in the message text (Twitch doesn't surface a
+    /// client-correlation field), which isn't worth the complexity at
+    /// chat throughput rates.
+    private var pendingSendIDByText: [String: String] = [:]
+
+    /// Surfaced to the view via @Observable so the compose bar can show a
+    /// transient error toast when a send fails (Twitch dropped it,
+    /// HelixError surfaced, network blip). nil clears the toast.
+    public var sendError: String?
 
     /// Synchronous re-entry guard for `attach(sessions:)`. Without it, two
     /// concurrent attach() calls can both pass the "subscriptions empty"
@@ -128,7 +171,9 @@ public final class TabChatModel {
     public func attach(
         sessions: [ChannelSession],
         emoteIndex: EmoteIndex? = nil,
+        currentUserId: String = "",
         currentUserLogin: String = "",
+        currentUserDisplayName: String = "",
         highlightKeywords: [String] = []
     ) async {
         // Synchronous re-entry guard — must precede any `await`.
@@ -149,7 +194,9 @@ public final class TabChatModel {
         // and so updates to keywords (future feature) flow through without
         // resubscribing.
         self.emoteIndex = emoteIndex
+        self.currentUserId = currentUserId
         self.currentUserLogin = currentUserLogin
+        self.currentUserDisplayName = currentUserDisplayName
         self.highlightKeywords = highlightKeywords
 
         attachState = .attaching
@@ -201,6 +248,132 @@ public final class TabChatModel {
         logger.info("TabChatModel detached \(toRemove.count) subscription(s)")
     }
 
+    // MARK: - Send
+
+    /// Sends a chat message via the first attached session (single-channel
+    /// MVP — multi-channel send-targeting lands when that ships).
+    ///
+    /// Flow:
+    ///   1. Stamp an optimistic ChatLine with a `pending-…` id and append
+    ///      it to `lines` so the user sees their message instantly.
+    ///   2. Record `text → pendingId` in `pendingSendIDByText` so the
+    ///      apply() path can later reconcile the EventSub echo against it.
+    ///   3. Call `ChannelSession.send(_:)`.
+    ///      - Success (Helix `isSent == true`): swap the optimistic row's
+    ///        id to the canonical `messageId`. The subsequent EventSub
+    ///        echo dedups against that id and is silently dropped.
+    ///      - Twitch drop (`isSent == false`, `dropReason` set): remove
+    ///        the optimistic row, surface `dropReason.message` via
+    ///        `sendError` so the compose bar can show a toast.
+    ///      - Thrown error (network, HelixError, unauthorized after
+    ///        refresh-and-retry): same — remove + surface.
+    ///   4. If the EventSub echo arrived FIRST (Helix POST raced — common
+    ///      when the WebSocket beats the POST response by ~50ms), apply()
+    ///      already consumed `pendingSendIDByText[text]` and swapped the
+    ///      optimistic row to the canonical echo. The Helix-response path
+    ///      then sees `pendingSendIDByText[text] == nil` and skips the
+    ///      id-swap (it's already done).
+    ///
+    /// Returns nothing — observable side effects (`lines`, `sendError`)
+    /// drive the UI.
+    public func send(text: String) async {
+        // Trim here too (in addition to ChannelSession.send) — we don't
+        // want to enqueue an optimistic row with leading whitespace that
+        // the server then trims. The two trims must produce the same
+        // canonical text or the echo-dedup text-match breaks.
+        let canonical = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonical.isEmpty else { return }
+
+        guard let session = subscriptions.first?.session else {
+            sendError = "Not connected to chat."
+            return
+        }
+
+        // Build and append the optimistic line. `pending-…` IDs are
+        // distinct from anything Twitch can mint (their messageIds are
+        // UUIDv4s without a prefix), so there's no risk of a real echo
+        // colliding with a pending id.
+        let pendingId = "pending-\(UUID().uuidString)"
+        let optimistic = ChatLine(
+            id: pendingId,
+            kind: .message,
+            authorBadges: [],
+            originalBadges: [],
+            authorUserId: currentUserId,
+            authorDisplayName: currentUserDisplayName.isEmpty ? currentUserLogin : currentUserDisplayName,
+            authorColor: "",            // unknown until echo arrives; renderer falls back to .primary
+            runs: [.text(canonical)],   // no emote resolution on the optimistic row — echo will
+                                        // overwrite with the Normalizer's tokenized version
+            isHighlighted: false,
+            timestamp: .now
+        )
+        lines.append(optimistic)
+        // Cap as usual — sending while at 500 lines drops the oldest, same
+        // as a received message would.
+        if lines.count > Self.lineCap {
+            lines.removeFirst(lines.count - Self.lineCap)
+        }
+        pendingSendIDByText[canonical] = pendingId
+
+        do {
+            let response = try await session.send(canonical)
+
+            // Race window: the EventSub echo might have ARRIVED during the
+            // await above. apply() would then have removed our text→id
+            // entry and swapped the optimistic row to the normalized
+            // echo. If so, there's nothing left for us to do here.
+            guard let stillPendingId = pendingSendIDByText.removeValue(forKey: canonical) else {
+                logger.debug("send: echo arrived before Helix response; nothing to reconcile")
+                return
+            }
+
+            if response.isSent {
+                // Helix accepted and broadcast. Swap our optimistic id to
+                // the canonical messageId. The echo (still en route) will
+                // dedup-by-id when it arrives.
+                if let idx = lines.firstIndex(where: { $0.id == stillPendingId }) {
+                    let row = lines[idx]
+                    lines[idx] = ChatLine(
+                        id: response.messageId,
+                        kind: row.kind,
+                        authorBadges: row.authorBadges,
+                        originalBadges: row.originalBadges,
+                        authorUserId: row.authorUserId,
+                        authorDisplayName: row.authorDisplayName,
+                        authorColor: row.authorColor,
+                        runs: row.runs,
+                        isHighlighted: row.isHighlighted,
+                        timestamp: row.timestamp
+                    )
+                }
+            } else {
+                // Twitch returned 200 OK but didn't broadcast. Common drop
+                // reasons: `msg_ratelimit`, `automod_held`, `msg_banned`,
+                // `msg_emoteonly`, `msg_subsonly`, `msg_followersonly`,
+                // `msg_slowmode`. The human-readable `dropReason.message`
+                // is good enough for the toast.
+                lines.removeAll { $0.id == stillPendingId }
+                sendError = response.dropReason?.message ?? "Twitch didn't broadcast the message."
+                logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(response.dropReason?.message ?? "—", privacy: .public)")
+            }
+        } catch {
+            // Network blip, unauthorized after refresh-and-retry, or
+            // ChannelSession.send's own empty-string guard. Drop optimistic
+            // line + surface.
+            if pendingSendIDByText.removeValue(forKey: canonical) != nil {
+                lines.removeAll { $0.id == pendingId }
+            }
+            sendError = error.localizedDescription
+            logger.error("send failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// View-facing reset for the toast. Call after the toast finishes
+    /// auto-dismissing so a second send error re-triggers the animation.
+    public func clearSendError() {
+        sendError = nil
+    }
+
     // MARK: - Internals
 
     /// Apply one `ChannelEvent` to the `lines` array. Called from the
@@ -209,6 +382,10 @@ public final class TabChatModel {
     ///
     /// Dispatch:
     ///   - `.message`  → normalize + append a `.message` ChatLine
+    ///       - dedup-by-id (Helix returned first, we already swapped our
+    ///         pending-id to the canonical id, then the echo arrives)
+    ///       - echo-of-pending-send (echo beat the Helix response): swap
+    ///         our optimistic row in place with the normalized echo
     ///   - `.notification` / `.raid` → convert via Normalizer.line(from:),
     ///     append a bubble ChatLine
     ///   - `.messageDeleted(id)` → find by id, flip kind to .deletedPlaceholder
@@ -222,6 +399,50 @@ public final class TabChatModel {
     /// emotes correctly. Re-normalizing pre-load messages is deferred to
     /// a future iteration.
     private func apply(_ event: ChannelSession.ChannelEvent) {
+        // Special handling for chat-message events: dedup against echoes
+        // of our own optimistic sends. Pulled out of the shared static
+        // helper because dedup needs read access to `lines` and write
+        // access to `pendingSendIDByText`, neither of which the static
+        // (used for priming, where no pending sends exist) has.
+        if case .message(let chatMessage) = event {
+            // (1) dedup-by-id: we already swapped the optimistic line to
+            // the canonical messageId after the Helix response, and now
+            // the EventSub echo arrives carrying the same id. Skip it —
+            // the row already exists with the right id.
+            if lines.contains(where: { $0.id == chatMessage.messageId }) {
+                return
+            }
+
+            // (2) echo-of-pending: the EventSub echo beat our Helix POST
+            // response. Find our optimistic line by text+sender match and
+            // replace it with the normalized echo (canonical id, Twitch's
+            // server-parsed fragments).
+            //
+            // Why match `chatterUserId` AND text: two users could send
+            // the same string within milliseconds — only one of them is
+            // ours, and ours is the one whose chatterUserId matches our
+            // signed-in account.
+            if chatMessage.chatterUserId == currentUserId,
+               let pendingId = pendingSendIDByText.removeValue(forKey: chatMessage.message.text) {
+                let snapshot = emoteIndex?.snapshot() ?? [:]
+                let normalizedLine = Normalizer.normalize(
+                    message: chatMessage,
+                    emoteSnapshot: snapshot,
+                    currentUserLogin: currentUserLogin,
+                    highlightKeywords: highlightKeywords
+                )
+                if let idx = lines.firstIndex(where: { $0.id == pendingId }) {
+                    lines[idx] = normalizedLine
+                    return
+                }
+                // The optimistic row was removed under us (e.g., we hit
+                // a Helix error that wiped it) before the echo arrived.
+                // Fall through to the normal-append path so the echo
+                // still shows up — Twitch saw the message, the user
+                // deserves to see it too.
+            }
+        }
+
         Self.appendLines(for: event, into: &lines, normalizationContext: self)
         if lines.count > Self.lineCap {
             lines.removeFirst(lines.count - Self.lineCap)
