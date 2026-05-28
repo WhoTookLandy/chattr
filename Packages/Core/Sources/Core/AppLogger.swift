@@ -64,6 +64,35 @@ public enum AppLogger {
         Logger(subsystem: subsystem, category: category)
     }
 
+    /// Companion to `make(_:)` for signpost-based timing instrumentation.
+    /// Returns an `OSSignposter` sharing chattr's subsystem so signposts
+    /// show up alongside text logs under the same identifier.
+    ///
+    /// ## Usage
+    ///
+    /// ```swift
+    /// private let signposter = AppLogger.signposter("ChatScreen")
+    ///
+    /// let id = signposter.makeSignpostID()
+    /// let state = signposter.beginInterval("emote-load", id: id, "channel=\(login)")
+    /// await emoteIndex.load(...)
+    /// signposter.endInterval("emote-load", state, "count=\(emoteIndex.snapshot().count)")
+    /// ```
+    ///
+    /// ## Where to see them
+    ///
+    /// Instruments → File → New Trace → Logging template → "Points of
+    /// Interest" lane. Each `beginInterval`/`endInterval` pair shows as
+    /// a graphical bar — overlapping operations are visible as overlapping
+    /// bars, cancelled operations show as truncated bars.
+    ///
+    /// Free-form signposts (`emitEvent`) also work and appear as
+    /// instantaneous markers — useful for "a thing happened" annotations
+    /// without a duration.
+    public static func signposter(_ category: String) -> OSSignposter {
+        OSSignposter(subsystem: subsystem, category: category)
+    }
+
     // MARK: - Recent entries (DevLogView / debug menu)
 
     /// One log entry, ready for display in a dev-only log viewer.

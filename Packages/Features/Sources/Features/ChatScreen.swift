@@ -7,6 +7,7 @@ import Core
 import os
 
 private let logger = AppLogger.make("Features.ChatScreen")
+private let signposter = AppLogger.signposter("Features.ChatScreen")
 
 /// Renders live `channel.chat.message` events from EventSub as inline-emote rows.
 ///
@@ -114,19 +115,54 @@ public struct ChatScreen: View {
                 globalBadges: cachedGlobalBadges
             )
         }
-        // Third sibling .task: load 7TV / BTTV / FFZ emote definitions
-        // for this channel. Runs in parallel with session-start and
-        // badge-load — each finishes on its own clock. Messages arriving
-        // before this completes render with no third-party emote
-        // resolution (their tokens stay as plain text); messages after
-        // see the populated snapshot. See TabChatModel.append for the
-        // race-tolerant normalization path.
-        .task {
-            await emoteIndex.load(
-                broadcasterId: channelId,
-                broadcasterLogin: channelLoginName
-            )
-            logger.info("EmoteIndex loaded for #\(channelLoginName)")
+        // Load 7TV / BTTV / FFZ emote definitions for this channel.
+        //
+        // ## Why `.onAppear { Task { ... } }` not `.task { ... }`
+        //
+        // `.task` cancels its body when the view "disappears" — including
+        // transient identity flickers during SwiftUI re-renders (e.g., when
+        // openChannel triggers `chatTabsModel.open + selectedTab = .chat`
+        // back-to-back, the paged-ScrollView LazyHStack briefly re-evaluates
+        // children, and ChatScreen's task identity drops mid-flight).
+        //
+        // Observed symptom (before this fix): all 6 emote provider calls
+        // (3 globals + 3 channel-specifics) threw `URLError(.cancelled)`
+        // within the first frame of channel-open, leaving the EmoteIndex
+        // populated with 0 emotes and chat rendering all third-party emote
+        // names as plain text.
+        //
+        // Unstructured `Task { ... }` started in `.onAppear` isn't bound to
+        // view lifetime — view tear-downs don't cancel its HTTP work. The
+        // Task captures `emoteIndex` (an actor, Sendable) strongly, so
+        // even if @State releases it on permanent view tear-down, the
+        // load completes and the actor deallocates cleanly afterward.
+        //
+        // Idempotency: if `.onAppear` fires multiple times (visibility
+        // transitions), each call starts another load. EmoteIndex.load
+        // is last-write-wins on the snapshot, so duplicate loads waste
+        // HTTP but don't corrupt state. Phase 2.3 Task 11 moves the
+        // EmoteIndex into ChannelSession (actor-owned, session-lifetime)
+        // which eliminates this entirely.
+        .onAppear {
+            Task {
+                // Signpost-bracket the emote load so Instruments shows the
+                // duration as a "Points of Interest" interval. If the Task
+                // gets cancelled or interrupted, the interval shows up
+                // truncated — visual proof of where the race happened.
+                let id = signposter.makeSignpostID()
+                let state = signposter.beginInterval(
+                    "emote-load",
+                    id: id,
+                    "channel=\(channelLoginName)"
+                )
+                await emoteIndex.load(
+                    broadcasterId: channelId,
+                    broadcasterLogin: channelLoginName
+                )
+                let count = emoteIndex.snapshot().count
+                signposter.endInterval("emote-load", state, "count=\(count)")
+                logger.info("EmoteIndex loaded for #\(channelLoginName, privacy: .public): \(count) emotes")
+            }
         }
         // Detach pub-sub subscriptions when the view leaves the screen. The
         // underlying ChannelSession stays alive in the registry; this just
@@ -238,6 +274,19 @@ public struct ChatScreen: View {
             logger.error("ChatScreen has no registry in environment — was RootView injected?")
             return
         }
+
+        // Signpost-bracket the session-start so Instruments can show the
+        // overlap with the emote-load interval. Useful for diagnosing
+        // races like the cancellation-during-channel-open bug we hit
+        // (Instruments would show emote-load truncated while session-start
+        // continues to completion, making the relationship obvious).
+        let signpostID = signposter.makeSignpostID()
+        let signpostState = signposter.beginInterval(
+            "session-start",
+            id: signpostID,
+            "channel=\(channelLoginName)"
+        )
+        defer { signposter.endInterval("session-start", signpostState) }
 
         do {
             // Registry returns the cached session if one exists for this
