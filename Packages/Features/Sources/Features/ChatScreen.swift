@@ -255,9 +255,33 @@ public struct ChatScreen: View {
         // the user scrolls manually, opening the door to "snap to bottom only
         // when already at bottom" UX later without changing today's behavior.
         .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
+        // "tail -f" semantics for chat scroll:
+        //
+        //   - If the user is at the bottom of the feed (scroll position is
+        //     on the previous-last message, or scroll is unset), auto-snap
+        //     to the new last message.
+        //   - If the user has scrolled UP to read history (scroll position
+        //     is on some earlier message), DO NOT snap them down. They're
+        //     reading; respect that.
+        //
+        // We also drop the 0.1s easeOut animation entirely. Under burst
+        // traffic (50-200 msgs/sec during raid storms), each animation
+        // requires 100ms but new messages arrive every 5-20ms — SwiftUI
+        // queues animation requests faster than it drains them, creating
+        // visible stutter. Instant snap is more legible at high throughput,
+        // and at low throughput the snap is so small the missing animation
+        // is invisible.
         .onChange(of: chatModel.lines.count) { _, _ in
             guard let last = chatModel.lines.last else { return }
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.1)) {
+            // Determine if user was at the bottom *before* this append.
+            // The new last is `last`; the previous last is the
+            // second-to-last in the current array. If `scrolledMessageId`
+            // matches that, we were tailing. nil means "no scroll yet"
+            // — treat as at-bottom so the first messages trigger scroll.
+            let previousLast = chatModel.lines.dropLast().last
+            let wasTailing = scrolledMessageId == nil
+                || scrolledMessageId == previousLast?.id
+            if wasTailing {
                 scrolledMessageId = last.id
             }
         }

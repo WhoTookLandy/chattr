@@ -69,9 +69,12 @@ struct ChatRow: View {
     @ViewBuilder
     private var messageBody: some View {
         FlowLayout(spacing: 4, alignment: .firstTextBaseline) {
-            // Badges (zero or more — broadcasters typically have 1, partners 2-3,
-            // moderators 1, regular subscribers 1, etc.)
-            ForEach(Array(badgeEntries.enumerated()), id: \.offset) { _, entry in
+            // Badges keyed by `url` — stable per-badge identity across row
+            // re-renders means SwiftUI doesn't destroy + re-create the
+            // underlying AsyncImage (which would re-fetch the badge image).
+            // Pre-fix: `id: \.offset` triggered AsyncImage churn whenever
+            // a row re-rendered (e.g., on `.deletedPlaceholder` flip).
+            ForEach(badgeEntries, id: \.url) { entry in
                 BadgeImage(entry: entry)
             }
             // Username prefix
@@ -81,12 +84,15 @@ struct ChatRow: View {
             Text(":")
                 .foregroundStyle(.secondary)
 
-            // Walk the pre-normalized runs in order. The Normalizer already
-            // coalesced adjacent text runs, so we get a clean "text, emote,
-            // text, mention, text" pattern with minimum Text views — better
-            // baseline alignment for inline emote rows.
-            ForEach(Array(line.runs.enumerated()), id: \.offset) { _, run in
-                runView(for: run)
+            // Walk the pre-normalized runs in order. `line.runs` is immutable
+            // after `Normalizer.normalize(...)` returns (we replace the whole
+            // ChatLine on mutation, never patch runs in place), so positional
+            // indices are safe identity here. Critically, this avoids
+            // `Array(...enumerated())` allocation per body call AND avoids
+            // tripping AsyncImage's identity-change re-fetch for runs that
+            // contain `.emote` / `.twitchEmote` cases.
+            ForEach(line.runs.indices, id: \.self) { idx in
+                runView(for: line.runs[idx])
             }
         }
         // Highlighted lines get an accent-tinted backplate so a "@me ..."

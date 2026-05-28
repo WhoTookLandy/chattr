@@ -327,8 +327,23 @@ public actor ChannelSession {
         // Snapshot subscribers so subscribe/unsubscribe during the loop's
         // suspension points don't cause concurrent-modification issues.
         let snapshot = subscribers
-        for (_, handler) in snapshot {
-            await handler(channelEvent)
+
+        // Fan out to handlers in parallel via TaskGroup. The group is
+        // awaited as a unit, so `handle(event:)` still runs to completion
+        // before the actor processes the next event — event ordering is
+        // preserved. The change is that subscribers' handlers no longer
+        // serialize: 2 tabs × 50ms hop each used to be 100ms of actor
+        // suspension; now it's ~50ms.
+        //
+        // Why this matters: under raid storms / mass-gifting (50-200
+        // events/sec), serial fanout creates head-of-line blocking — the
+        // actor's executor queue grows faster than it drains. Parallel
+        // fanout collapses to O(slowest handler) instead of O(sum of all
+        // handlers), eliminating the queue pileup.
+        await withTaskGroup(of: Void.self) { group in
+            for (_, handler) in snapshot {
+                group.addTask { await handler(channelEvent) }
+            }
         }
     }
 
