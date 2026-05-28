@@ -645,6 +645,21 @@ public final class TabChatModel {
     /// emotes correctly. Re-normalizing pre-load messages is deferred to
     /// a future iteration.
     private func apply(_ event: ChannelSession.ChannelEvent) {
+        // Restrictions-update events don't produce a row — they're
+        // pure state changes. Update the observed property and bail
+        // before the rest of apply tries to add a line.
+        //
+        // Caught here (in the instance method) rather than in the
+        // static appendLines helper because the static can't mutate
+        // self. The priming path in attach() doesn't pass restrictions
+        // updates through this method (it pulls the snapshot
+        // separately) so we never double-apply.
+        if case .restrictionsUpdated(let restrictions) = event {
+            chatRestrictions = restrictions
+            logger.info("Chat restrictions updated mid-session: hasAny=\(restrictions.hasAny)")
+            return
+        }
+
         // Special handling for chat-message events: reconcile against the
         // optimistic rows we inserted from `send(...)`. Pulled out of the
         // shared static helper because reconciliation needs read access to
@@ -816,6 +831,14 @@ public final class TabChatModel {
             for idx in lines.indices where lines[idx].authorUserId == targetUserId {
                 lines[idx] = lines[idx].withDeletedPlaceholder()
             }
+
+        case .restrictionsUpdated:
+            // Restrictions updates produce no row — they're pure state
+            // changes consumed by `apply()` before this switch runs.
+            // The case exists here to keep the switch exhaustive (Swift
+            // would otherwise refuse to compile when ChannelEvent grew
+            // the new case).
+            break
         }
     }
 

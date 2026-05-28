@@ -75,6 +75,13 @@ public actor ChannelSession {
         /// timed out / banned a user, hiding all their prior messages.
         /// Consumers flip every message from `targetUserId` to deleted.
         case messagesClearedFromUser(targetUserId: String)
+
+        /// A `channel.chat_settings.update` event — the broadcaster (or
+        /// a mod) changed chat settings mid-stream (toggled slow mode,
+        /// enabled followers-only, etc). Consumers update their cached
+        /// restrictions snapshot so the compose bar's inline strip
+        /// stays accurate without a tab reopen.
+        case restrictionsUpdated(ChatRestrictions)
     }
 
     /// Type for subscriber handlers. `@Sendable` so they can be stored across
@@ -164,6 +171,7 @@ public actor ChannelSession {
         await subscribeToNotificationTopic(.messageDelete, label: "message_delete")
         await subscribeToNotificationTopic(.clear, label: "chat_clear")
         await subscribeToNotificationTopic(.clearUserMessages, label: "clear_user_messages")
+        await subscribeToNotificationTopic(.settingsUpdate, label: "settings_update")
         await subscribeToRaid()
 
         // Fetch chat-settings restrictions before returning from start().
@@ -221,7 +229,7 @@ public actor ChannelSession {
     /// the same `(broadcasterID, userID)` shape. Failure swallowed — the
     /// session still works without these, just without bubble rendering.
     private enum NotificationKind {
-        case notification, messageDelete, clear, clearUserMessages
+        case notification, messageDelete, clear, clearUserMessages, settingsUpdate
 
         func subscription(broadcasterID: String, userID: String) -> EventSubSubscription {
             switch self {
@@ -229,6 +237,7 @@ public actor ChannelSession {
             case .messageDelete:      return .Chat.messageDelete(broadcasterID: broadcasterID, userID: userID)
             case .clear:              return .Chat.clear(broadcasterID: broadcasterID, userID: userID)
             case .clearUserMessages:  return .Chat.clearUserMessages(broadcasterID: broadcasterID, userID: userID)
+            case .settingsUpdate:     return .Chat.settingsUpdate(broadcasterID: broadcasterID, userID: userID)
             }
         }
     }
@@ -446,6 +455,15 @@ public actor ChannelSession {
     func handle(event: EventSubEvent) async {
         guard let channelEvent = Self.translate(event: event, expectedChannelId: channelId) else { return }
 
+        // Side-effect: update the cached restrictions snapshot when the
+        // event is a restrictions change. This way a freshly-attached
+        // TabChatModel that reads `currentChatRestrictions()` AFTER the
+        // event arrived gets the up-to-date value, not the stale
+        // session-start fetch.
+        if case .restrictionsUpdated(let restrictions) = channelEvent {
+            cachedRestrictions = restrictions
+        }
+
         // Append to ring buffer with cap.
         if ring.count >= Self.ringCapacity {
             ring.removeFirst(ring.count - Self.ringCapacity + 1)
@@ -494,6 +512,21 @@ public actor ChannelSession {
             return .chatCleared
         case .chatClearUserMessages(let c) where c.broadcasterUserId == expectedChannelId:
             return .messagesClearedFromUser(targetUserId: c.targetUserId)
+        case .chatSettingsUpdate(let s) where s.broadcasterUserId == expectedChannelId:
+            // Build a ChatRestrictions directly from the EventSub payload.
+            // Mirrors `ChatRestrictions.init(from: ChatSettings)` — same
+            // semantic fields, different wire shape (slowModeWaitTimeSeconds
+            // vs slowModeWaitTime, etc.). Keeping the construction inline
+            // here rather than adding another init keeps the field-name
+            // diff visible in one place.
+            let restrictions = ChatRestrictions(
+                slowModeSeconds: s.slowMode ? s.slowModeWaitTimeSeconds : nil,
+                followersOnly: s.followerMode,
+                followersDurationMinutes: s.followerMode ? s.followerModeDurationMinutes : nil,
+                subscribersOnly: s.subscriberMode,
+                emoteOnly: s.emoteMode
+            )
+            return .restrictionsUpdated(restrictions)
         default:
             return nil
         }
@@ -511,6 +544,7 @@ public actor ChannelSession {
         case let .chatMessageDelete(d):            return d.broadcasterUserId
         case let .chatClear(c):                    return c.broadcasterUserId
         case let .chatClearUserMessages(c):        return c.broadcasterUserId
+        case let .chatSettingsUpdate(s):           return s.broadcasterUserId
         default:                                    return nil
         }
     }
