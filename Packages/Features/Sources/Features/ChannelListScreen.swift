@@ -33,31 +33,6 @@ public struct ChannelListScreen: View {
     /// sign-out entry points should behave identically.
     @State private var isSigningOut = false
 
-    /// Programmatic toggle for `.searchable(isPresented:)`. Default false —
-    /// the inline search field stays hidden until the user taps the floating
-    /// search button. Twitch mobile's "search appears on scroll-up" pattern.
-    @State private var isSearchPresented = false
-
-    /// Direction the user is currently scrolling. Updated by
-    /// `.onScrollGeometryChange` with a small dead-zone so micro-scroll-jitter
-    /// doesn't flip the value 60×/sec.
-    @State private var scrollDirection: ScrollDirection = .none
-
-    /// True when the scroll offset is within ~30pt of the top — used to hide
-    /// the floating search button when the (still-implicit) standard search
-    /// affordance via the nav bar's title-collapse area is closer at hand.
-    @State private var isAtTop: Bool = true
-
-    enum ScrollDirection {
-        case none, up, down
-    }
-
-    /// FAB visibility: shown when the user is scrolling up but hasn't yet
-    /// reached the top. Mirrors Mail / Music's compose-button reveal pattern.
-    private var showsSearchFAB: Bool {
-        !isAtTop && scrollDirection == .up
-    }
-
     @AppStorage("followsViewMode") private var rawViewMode: String = ViewMode.live.rawValue
 
     enum ViewMode: String, CaseIterable {
@@ -153,7 +128,11 @@ public struct ChannelListScreen: View {
                 }
             }
         }
-        .navigationTitle("\(account.displayName)'s Follows")
+        // "Following" matches the convention every social app uses (Twitter/X,
+        // Instagram, Bluesky). Shorter than the previous "@displayName's Follows",
+        // which gets clipped in the inline (collapsed) title slot anyway. The
+        // user's account context is one tap away via the gear → Settings.
+        .navigationTitle("Following")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 NavigationLink {
@@ -180,48 +159,14 @@ public struct ChannelListScreen: View {
         // Search applies to whichever view is showing — the filter logic is
         // mode-aware inside `filteredAllChannels` / `filteredLiveStreams`.
         //
-        // `isPresented` binding (iOS 17+) makes the search bar programmatically
-        // toggleable rather than always-visible. We start it hidden — the
-        // floating search FAB at the bottom-right is the trigger. Tapping the
-        // FAB sets isSearchPresented = true, which shows the search bar in the
-        // nav-bar area for the user to type into.
-        .searchable(text: $searchText, isPresented: $isSearchPresented, prompt: searchPrompt)
-        // Track scroll direction + position so the FAB can appear only when
-        // the user is scrolling back up (mirrors Twitch mobile's pattern). The
-        // `.onScrollGeometryChange` modifier (iOS 18+) attaches to the nearest
-        // ScrollView/List ancestor — works here because the segment ViewBuilders
-        // each return a List.
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            geometry.contentOffset.y
-        } action: { oldOffset, newOffset in
-            // Update direction with a 4pt dead-zone so micro-scroll jitter
-            // doesn't flip the value continuously while finger-resting.
-            let delta = newOffset - oldOffset
-            if delta > 4 {
-                if scrollDirection != .down { scrollDirection = .down }
-            } else if delta < -4 {
-                if scrollDirection != .up { scrollDirection = .up }
-            }
-            // 30pt threshold rather than literal 0 so a tiny bounce doesn't
-            // count as "scrolled away from top."
-            let nowAtTop = newOffset < 30
-            if nowAtTop != isAtTop {
-                isAtTop = nowAtTop
-            }
-        }
-        // Floating search FAB. Anchored bottom-trailing; conditionally visible
-        // based on scroll direction. Wraps the visibility in `withAnimation`
-        // implicitly via the conditional view — the .transition modifier
-        // animates the scale + opacity when shows/hides flips.
-        .overlay(alignment: .bottomTrailing) {
-            if showsSearchFAB {
-                searchFAB
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 16)
-                    .transition(.scale.combined(with: .opacity))
-            }
-        }
-        .animation(.spring(duration: 0.25), value: showsSearchFAB)
+        // Native scroll-to-reveal: with default placement, iOS hides the
+        // search field when the user scrolls up to read, and reveals it
+        // when they pull down. This is the iOS-idiomatic pattern (Mail,
+        // Music, Contacts all work this way). Previously we hid the
+        // search behind a floating button + `isPresented` binding +
+        // scroll-tracking — replaced by ~30 LOC of cuts and one
+        // signature change.
+        .searchable(text: $searchText, prompt: searchPrompt)
         // Pull-to-refresh routes to the right refresher.
         .refreshable {
             guard let store = followsStore else { return }
@@ -248,23 +193,6 @@ public struct ChannelListScreen: View {
         case .live: return "Search live channels"
         case .all:  return "Search all channels"
         }
-    }
-
-    /// Floating search affordance. Glass-effect circle with a magnifying
-    /// glass; tapping sets `isSearchPresented = true` which surfaces the
-    /// `.searchable` bar in the nav bar for the user to type into.
-    @ViewBuilder
-    private var searchFAB: some View {
-        Button {
-            isSearchPresented = true
-        } label: {
-            Image(systemName: "magnifyingglass")
-                .font(.title3.weight(.semibold))
-                .frame(width: 52, height: 52)
-                .glassEffect(in: Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Search channels")
     }
 
     // MARK: - Live segment
