@@ -44,8 +44,9 @@ public struct SignInView: View {
 
     /// The redirect URI we instruct Twitch to send the auth code to. Must match the URL
     /// registered at the Twitch dev portal and the URL the Vercel bridge expects at
-    /// `/oauth/callback`.
-    private static let redirectURI = "https://chattr-auth.vercel.app/oauth/callback"
+    /// `/oauth/callback`. Centralized in `Core.Endpoints` alongside the refresh URL
+    /// that `AccountStore.refreshTokens(...)` uses — both live on the same bridge.
+    private static let redirectURI = Endpoints.ChattrAuth.callback.absoluteString
 
     /// Custom URL scheme the bridge 302-redirects to after exchanging the code for tokens.
     /// Must be registered in the app's `Info.plist` under `CFBundleURLTypes`.

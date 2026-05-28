@@ -25,16 +25,14 @@ public struct BTTVProvider: EmoteProvider {
     }
 
     public func globalEmotes() async throws -> [Emote] {
-        let url = URL(string: "https://api.betterttv.net/3/cached/emotes/global")!
-        let (data, _) = try await urlSession.data(from: url)
+        let (data, _) = try await urlSession.data(from: Endpoints.BTTV.globalEmotes)
         let emotes = try JSONDecoder().decode([EmoteJSON].self, from: data)
         return emotes.compactMap { Self.map($0, ownerChannelId: nil) }
     }
 
     public func channelEmotes(broadcasterId: String, broadcasterLogin: String) async throws -> [Emote] {
         // BTTV keys by Twitch broadcaster id; login is ignored.
-        let url = URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(broadcasterId)")!
-        let (data, response) = try await urlSession.data(from: url)
+        let (data, response) = try await urlSession.data(from: Endpoints.BTTV.userByTwitchID(broadcasterId))
         // BTTV returns 404 for channels that don't have BTTV emotes configured.
         // That's the common case — most Twitch channels skip BTTV entirely —
         // so we treat 404 as "no emotes" rather than an error condition.
@@ -63,15 +61,13 @@ public struct BTTVProvider: EmoteProvider {
     }
 
     private static func map(_ j: EmoteJSON, ownerChannelId: String?) -> Emote? {
-        // BTTV's CDN URLs are predictable from the id, so we construct
-        // rather than decode them. The pattern hasn't changed since BTTV
-        // launched and isn't likely to.
-        let base = "https://cdn.betterttv.net/emote/\(j.id)"
-        guard
-            let x1 = URL(string: "\(base)/1x"),
-            let x2 = URL(string: "\(base)/2x"),
-            let x4 = URL(string: "\(base)/3x")  // BTTV's largest size is "3x".
-        else { return nil }
+        // BTTV's CDN URLs are predictable from the id, so we construct via
+        // `Endpoints.BTTV.emoteCDN`. The pattern hasn't changed since BTTV
+        // launched and isn't likely to. Note: BTTV's largest size is "3x"
+        // (no "4x"); we map that to our `Size.x4` slot for API uniformity.
+        let x1 = Endpoints.BTTV.emoteCDN(id: j.id, size: "1x")
+        let x2 = Endpoints.BTTV.emoteCDN(id: j.id, size: "2x")
+        let x4 = Endpoints.BTTV.emoteCDN(id: j.id, size: "3x")
 
         return Emote(
             id: "bttv:\(j.id)",

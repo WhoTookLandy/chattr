@@ -1,0 +1,117 @@
+import Foundation
+
+/// Single audit point for every URL chattr talks to.
+///
+/// ## Why this exists
+///
+/// Hardcoded URLs scattered across providers/views make three things hard:
+///
+///   1. **Audit**: "what services does this app contact?" → required for
+///      App Store privacy disclosures, security review, debugging
+///      connectivity issues. A grep is fragile when URLs are templated.
+///
+///   2. **Environment switching**: staging the OAuth bridge to a different
+///      Vercel deployment, or pointing third-party emote APIs at a local
+///      mirror for offline development. Centralized URLs become one-line
+///      changes; scattered URLs become a refactor.
+///
+///   3. **Drift risk**: if 7TV moves their endpoint (they did, once —
+///      pre-v3), only one file needs updating.
+///
+/// ## What's NOT here
+///
+///   - SPM dependency URLs in `Package.swift` (those are build-time, not
+///     runtime — different audit category)
+///   - Test fixture URLs (tests SHOULD pin to specific endpoints; abstracting
+///     them defeats the purpose of fixture-based mocking)
+///   - URLs that come from server responses (e.g., 7TV's `host.url` field —
+///     those are data, not code)
+public enum Endpoints {
+
+    // MARK: - chattr's OAuth bridge
+    //
+    // The Vercel-deployed backend that holds Twitch's `client_secret`
+    // server-side. iOS only knows about the public-safe redirect URI and
+    // refresh proxy — the secret never appears in any iOS binary.
+
+    public enum ChattrAuth {
+        /// Twitch redirects the OAuth code here. Must match the URL
+        /// registered in the Twitch dev portal.
+        public static let callback = URL(string: "https://chattr-auth.vercel.app/oauth/callback")!
+
+        /// POST refresh_token here to exchange for fresh tokens.
+        public static let refresh = URL(string: "https://chattr-auth.vercel.app/oauth/refresh")!
+    }
+
+    // MARK: - Twitch native emote CDN
+    //
+    // Twitch's static-cdn serves emote images by id + format + theme + scale.
+
+    public enum TwitchCDN {
+        /// Construct a CDN URL for a Twitch native emote.
+        /// - Parameters:
+        ///   - id: Emote ID from `EmoteReference.id`.
+        ///   - format: "static" or "animated". Animated falls back to
+        ///     static when the emote has no animated variant.
+        ///   - theme: "light" or "dark". Affects emote outline coloring.
+        ///   - scale: "1.0", "2.0", "3.0". 2.0 matches typical chat row height.
+        public static func emote(
+            id: String,
+            format: String,
+            theme: String = "dark",
+            scale: String = "2.0"
+        ) -> URL {
+            URL(string: "https://static-cdn.jtvnw.net/emoticons/v2/\(id)/\(format)/\(theme)/\(scale)")!
+        }
+    }
+
+    // MARK: - 7TV
+    //
+    // Largest third-party emote provider. v3 API.
+
+    public enum SevenTV {
+        /// Global emote set — available across every channel.
+        public static let globalEmoteSet = URL(string: "https://7tv.io/v3/emote-sets/global")!
+
+        /// Per-channel emote set, keyed by Twitch broadcaster id.
+        /// Returns a user object whose `emote_set.emotes` is the channel set.
+        public static func userByTwitchID(_ id: String) -> URL {
+            URL(string: "https://7tv.io/v3/users/twitch/\(id)")!
+        }
+    }
+
+    // MARK: - BetterTTV (BTTV)
+
+    public enum BTTV {
+        /// Global emotes.
+        public static let globalEmotes = URL(string: "https://api.betterttv.net/3/cached/emotes/global")!
+
+        /// Per-channel emote set, keyed by Twitch broadcaster id. Returns
+        /// a user object with `channelEmotes[]` + `sharedEmotes[]`.
+        /// 404 means the channel hasn't configured BTTV (very common).
+        public static func userByTwitchID(_ id: String) -> URL {
+            URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(id)")!
+        }
+
+        /// CDN URL for a BTTV emote image. Sizes: "1x", "2x", "3x"
+        /// (BTTV's "3x" is the largest; no "4x").
+        public static func emoteCDN(id: String, size: String = "2x") -> URL {
+            URL(string: "https://cdn.betterttv.net/emote/\(id)/\(size)")!
+        }
+    }
+
+    // MARK: - FrankerFaceZ (FFZ)
+
+    public enum FFZ {
+        /// Global emote sets — flatten emoticons across all sets.
+        public static let globalSet = URL(string: "https://api.frankerfacez.com/v1/set/global")!
+
+        /// Per-channel emote room, keyed by Twitch broadcaster *login*
+        /// (lowercase username), NOT id. This is why
+        /// `EmoteProvider.channelEmotes(broadcasterId:broadcasterLogin:)`
+        /// takes both — 7TV/BTTV use the id, FFZ uses the login.
+        public static func roomByLogin(_ login: String) -> URL {
+            URL(string: "https://api.frankerfacez.com/v1/room/\(login)")!
+        }
+    }
+}

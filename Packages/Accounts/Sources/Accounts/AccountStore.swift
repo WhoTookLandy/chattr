@@ -267,9 +267,11 @@ public final class AccountStore {
 
 extension AccountStore {
 
-    /// URL of chattr-auth's refresh endpoint. Mirrors the auth-flow constants in SignInView.
+    /// URL of chattr-auth's refresh endpoint. Centralized in `Core.Endpoints`
+    /// alongside the corresponding `callback` URL that `SignInView` uses;
+    /// both live on the same Vercel bridge that holds the client_secret.
     private static var refreshURL: URL {
-        URL(string: "https://chattr-auth.vercel.app/oauth/refresh")!
+        Endpoints.ChattrAuth.refresh
     }
 
     /// Refreshes the OAuth tokens for the given account via the Vercel bridge.

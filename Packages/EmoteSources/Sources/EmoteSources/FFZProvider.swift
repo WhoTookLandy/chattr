@@ -26,8 +26,7 @@ public struct FFZProvider: EmoteProvider {
     }
 
     public func globalEmotes() async throws -> [Emote] {
-        let url = URL(string: "https://api.frankerfacez.com/v1/set/global")!
-        let (data, _) = try await urlSession.data(from: url)
+        let (data, _) = try await urlSession.data(from: Endpoints.FFZ.globalSet)
         let response = try JSONDecoder().decode(GlobalResponse.self, from: data)
         // `sets` is a dict keyed by set ID — flatten emoticons across all sets.
         // FFZ may use multiple global sets for organization, but for chat
@@ -39,8 +38,7 @@ public struct FFZProvider: EmoteProvider {
 
     public func channelEmotes(broadcasterId: String, broadcasterLogin: String) async throws -> [Emote] {
         // FFZ requires login (lowercase Twitch username), not id.
-        let url = URL(string: "https://api.frankerfacez.com/v1/room/\(broadcasterLogin)")!
-        let (data, response) = try await urlSession.data(from: url)
+        let (data, response) = try await urlSession.data(from: Endpoints.FFZ.roomByLogin(broadcasterLogin))
         // FFZ returns 404 if the channel hasn't been registered with FFZ —
         // common, like BTTV's 404 case.
         if (response as? HTTPURLResponse)?.statusCode == 404 { return [] }

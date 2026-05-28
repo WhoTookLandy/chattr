@@ -1,5 +1,6 @@
 import SwiftUI
 import TwitchKit
+import Core   // For Endpoints.TwitchCDN.emote(...)
 
 // Slice-2 interlude: AsyncImage-backed. Slice-2 T16 replaces this with a
 // Nuke-backed `InlineEmoteView` for animated WebP + emote prefetch.
@@ -28,7 +29,11 @@ struct TwitchEmoteImage: View {
     }
 
     private var emoteURL: URL? {
+        // Twitch CDN auto-falls-back to static when an emote has no animated
+        // variant, so requesting "animated" is always safe; sticking with
+        // "static" avoids the (small) extra processing for emotes we know
+        // don't have animation metadata.
         let format = (emote.format ?? []).contains("animated") ? "animated" : "static"
-        return URL(string: "https://static-cdn.jtvnw.net/emoticons/v2/\(emote.id)/\(format)/dark/2.0")
+        return Endpoints.TwitchCDN.emote(id: emote.id, format: format)
     }
 }
