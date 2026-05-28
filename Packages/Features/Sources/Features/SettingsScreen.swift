@@ -109,7 +109,11 @@ public struct SettingsScreen: View {
         // iOS keeps the tab bar visible during NavigationStack pushes by
         // default; for a "leaf" view like Settings we want full-width
         // chrome without competing tab/back affordances.
+        // `.tabBar` placement is iOS-only (SwiftUI marks it unavailable
+        // on macOS), so we gate the modifier for cross-platform builds.
+        #if os(iOS)
         .toolbar(.hidden, for: .tabBar)
+        #endif
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,

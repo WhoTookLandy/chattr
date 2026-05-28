@@ -153,24 +153,33 @@ public final class TabChatModel {
 
         attachState = .attaching
 
-        var combined: [ChatMessage] = []
+        var combined: [ChannelSession.ChannelEvent] = []
         for session in sessions {
             // Atomic prime + subscribe — see ChannelSession.subscribe docs.
-            let (token, snapshot) = await session.subscribe { [weak self] message in
+            let (token, snapshot) = await session.subscribe { [weak self] event in
                 // Handler runs in whichever actor the Task happens to be on.
-                // Hop to MainActor to normalize + append.
-                await self?.append(message)
+                // Hop to MainActor to convert + apply.
+                await self?.apply(event)
             }
             subscriptions.append((session, token))
             combined.append(contentsOf: snapshot)
         }
 
-        // Normalize the priming snapshot. For single-session tabs `combined`
+        // Apply the priming snapshot. For single-session tabs `combined`
         // is already in arrival order; the ring buffer maintains insertion
-        // order. For multi-session tabs we'd sort by message timestamp here
+        // order. For multi-session tabs we'd sort by event timestamp here
         // — TODO when N > 1 ships.
-        let normalizedSnapshot = combined.map { Self.normalize($0, model: self) }
-        lines = Self.cap(normalizedSnapshot)
+        //
+        // We rebuild `lines` from scratch by replaying each ChannelEvent
+        // through the same apply() that handles live events. This means
+        // priming uses identical code paths to live ingestion — no
+        // separate "initial state" logic to drift.
+        var primed: [ChatLine] = []
+        primed.reserveCapacity(combined.count)
+        for event in combined {
+            Self.appendLines(for: event, into: &primed, normalizationContext: self)
+        }
+        lines = Self.cap(primed)
         attachState = .attached
         logger.info("TabChatModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
     }
@@ -193,41 +202,92 @@ public final class TabChatModel {
 
     // MARK: - Internals
 
-    /// Called by the per-session subscriber handler when a new message arrives.
-    /// Normalizes via `Normalizer.normalize` against the current EmoteIndex
-    /// snapshot, then appends to `lines` and slides the cap window. The
-    /// @MainActor isolation is implicit — this method is on a @MainActor
-    /// class.
+    /// Apply one `ChannelEvent` to the `lines` array. Called from the
+    /// per-session subscriber handler when a new event arrives, and (via
+    /// the appendLines helper) on each event in the priming snapshot.
+    ///
+    /// Dispatch:
+    ///   - `.message`  → normalize + append a `.message` ChatLine
+    ///   - `.notification` / `.raid` → convert via Normalizer.line(from:),
+    ///     append a bubble ChatLine
+    ///   - `.messageDeleted(id)` → find by id, flip kind to .deletedPlaceholder
+    ///   - `.chatCleared` → flip every line to .deletedPlaceholder
+    ///   - `.messagesClearedFromUser(userId)` → flip matching lines
     ///
     /// **Race tolerance**: if the EmoteIndex hasn't loaded yet (snapshot is
     /// empty), the message normalizes with no third-party emote
-    /// resolution — emote-name tokens stay as plain text. The Normalizer
-    /// handles this gracefully. Subsequent messages received after the
-    /// load completes will resolve their emotes correctly. Re-normalizing
-    /// pre-load messages is deferred to a future iteration.
-    private func append(_ message: ChatMessage) {
-        let line = Self.normalize(message, model: self)
-        lines.append(line)
+    /// resolution — emote-name tokens stay as plain text. Subsequent
+    /// messages received after the load completes will resolve their
+    /// emotes correctly. Re-normalizing pre-load messages is deferred to
+    /// a future iteration.
+    private func apply(_ event: ChannelSession.ChannelEvent) {
+        Self.appendLines(for: event, into: &lines, normalizationContext: self)
         if lines.count > Self.lineCap {
             lines.removeFirst(lines.count - Self.lineCap)
         }
     }
 
-    /// Normalize one `ChatMessage` using the model's current emote-index
-    /// snapshot + login + keywords. Pulled out as a static so the priming
-    /// loop in `attach` can reuse it without capturing `self` into the
-    /// `map` closure (which would require Sendable gymnastics).
-    private static func normalize(_ message: ChatMessage, model: TabChatModel) -> ChatLine {
-        // EmoteIndex.snapshot() is nonisolated + lock-protected (see the
-        // actor's docs), so this is safe to call from @MainActor without
-        // an await.
-        let snapshot = model.emoteIndex?.snapshot() ?? [:]
-        return Normalizer.normalize(
-            message: message,
-            emoteSnapshot: snapshot,
-            currentUserLogin: model.currentUserLogin,
-            highlightKeywords: model.highlightKeywords
-        )
+    /// Convert one `ChannelEvent` into zero-or-more ChatLine mutations and
+    /// apply them to the given lines array. Pulled out as a static so the
+    /// priming loop in `attach()` can reuse it without capturing `self`
+    /// into closures (which would require Sendable gymnastics) and so
+    /// future tests can exercise the dispatch logic in isolation.
+    ///
+    /// `normalizationContext` carries the emote-index snapshot, current
+    /// user login, and highlight keywords — used for `.message` events.
+    /// Other event kinds don't depend on these.
+    private static func appendLines(
+        for event: ChannelSession.ChannelEvent,
+        into lines: inout [ChatLine],
+        normalizationContext: TabChatModel
+    ) {
+        switch event {
+        case .message(let chatMessage):
+            // EmoteIndex.snapshot() is nonisolated + lock-protected, so
+            // it's safe to call from @MainActor without an await.
+            let snapshot = normalizationContext.emoteIndex?.snapshot() ?? [:]
+            let line = Normalizer.normalize(
+                message: chatMessage,
+                emoteSnapshot: snapshot,
+                currentUserLogin: normalizationContext.currentUserLogin,
+                highlightKeywords: normalizationContext.highlightKeywords
+            )
+            lines.append(line)
+
+        case .notification(let n):
+            // The Normalizer skips notice types we don't render (returns
+            // nil) — those are dropped here. Logging the skip is the
+            // caller's job; the Normalizer stays sync-and-pure.
+            if let line = Normalizer.line(from: n) {
+                lines.append(line)
+            }
+
+        case .raid(let r):
+            lines.append(Normalizer.line(from: r))
+
+        case .messageDeleted(let targetMessageId):
+            // Mutation in place: find the row by id, replace with a
+            // deletedPlaceholder-kind copy. We DON'T remove the row —
+            // a vanishing line is disorienting mid-scroll, and keeping
+            // it as a strikethrough is the Twitch web convention.
+            if let idx = lines.firstIndex(where: { $0.id == targetMessageId }) {
+                lines[idx] = lines[idx].withDeletedPlaceholder()
+            }
+
+        case .chatCleared:
+            // Flip every existing line to deletedPlaceholder. Future
+            // messages still arrive normally — this only retroactively
+            // hides the scrollback.
+            lines = lines.map { $0.withDeletedPlaceholder() }
+
+        case .messagesClearedFromUser(let targetUserId):
+            // Flip every line whose author is the timed-out/banned user.
+            // Required field `authorUserId` on ChatLine is what makes
+            // this work — without it we'd have no key to match against.
+            lines = lines.map { line in
+                line.authorUserId == targetUserId ? line.withDeletedPlaceholder() : line
+            }
+        }
     }
 
     /// Trim a pre-built array to the cap. Used during the initial prime when

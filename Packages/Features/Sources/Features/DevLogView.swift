@@ -73,8 +73,10 @@ public struct DevLogView: View {
         .toolbarTitleDisplayMode(.inline)
         // Hide the parent TabView's tab bar while this view is on screen —
         // dev tooling shouldn't compete with the rest of the app's chrome.
-        // iOS keeps the tab bar by default during NavigationStack pushes.
+        // iOS-only modifier (`.tabBar` unavailable on macOS).
+        #if os(iOS)
         .toolbar(.hidden, for: .tabBar)
+        #endif
         .refreshable { await reload() }
         .task { await reload() }
         // Recompute the category chip set ONLY when the underlying data

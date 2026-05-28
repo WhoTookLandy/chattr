@@ -134,11 +134,161 @@ public enum Normalizer {
             kind: .message,
             authorBadges: badges,
             originalBadges: message.badges,
+            authorUserId: message.chatterUserId,
             authorDisplayName: message.chatterUserName,
             authorColor: message.color,
             runs: coalesced,
             isHighlighted: isHighlighted
         )
+    }
+
+    // MARK: - System notifications → ChatLine bubbles
+
+    /// Convert a `channel.chat.notification` EventSub payload into a
+    /// `ChatLine` with one of the bubble `Kind` cases. Returns nil for
+    /// notification types we don't yet render (kept narrow on purpose —
+    /// it's better to skip an unknown notice than render a half-formed
+    /// row).
+    ///
+    /// ## Notice-type dispatch
+    ///
+    /// `EventSubChatNotification.noticeType` is a string like "sub",
+    /// "resub", "sub_gift", "raid", "announcement", "charity_donation",
+    /// etc. Different optional fields are populated depending on the
+    /// type — we read whichever is present.
+    public static func line(
+        from notification: EventSubChatNotification
+    ) -> ChatLine? {
+        // Dispatch on noticeType to find the right payload and build the
+        // matching bubble kind.
+        let kind: ChatLine.Kind
+
+        switch notification.noticeType {
+        case "sub":
+            // First-time sub. The `sub` optional carries tier + duration.
+            guard let sub = notification.sub else { return nil }
+            kind = .subBubble(.init(
+                chatterDisplayName: notification.chatterUserName,
+                tier: tier(from: sub.subTier, isPrime: sub.isPrime),
+                monthsCount: sub.durationMonths,
+                isResub: false,
+                isGift: false,
+                isPrime: sub.isPrime,
+                systemMessage: notification.systemMessage,
+                userMessage: nil
+            ))
+
+        case "resub":
+            guard let resub = notification.resub else { return nil }
+            // Resubs sometimes carry the user's accompanying text in
+            // `message.text` (the part after the cumulative-months
+            // template). We pass it through as `userMessage` so the
+            // renderer can show it under the system text.
+            let userMsg = notification.message.text.isEmpty ? nil : notification.message.text
+            kind = .subBubble(.init(
+                chatterDisplayName: notification.chatterUserName,
+                tier: tier(from: resub.subTier, isPrime: resub.isPrime),
+                monthsCount: resub.cumulativeMonths,
+                isResub: true,
+                isGift: resub.isGift,
+                isPrime: resub.isPrime,
+                systemMessage: notification.systemMessage,
+                userMessage: userMsg
+            ))
+
+        case "sub_gift":
+            guard let gift = notification.subGift else { return nil }
+            kind = .subBubble(.init(
+                chatterDisplayName: notification.chatterUserName,
+                tier: tier(from: gift.subTier, isPrime: false),
+                monthsCount: gift.durationMonths,
+                isResub: false,
+                isGift: true,
+                isPrime: false,
+                systemMessage: notification.systemMessage,
+                userMessage: nil
+            ))
+
+        case "community_sub_gift":
+            // Community gift: "X gifted N subs to the community" — no
+            // individual recipient to call out. Treat as a generic sub
+            // bubble using the community payload.
+            guard let community = notification.communitySubGift else { return nil }
+            kind = .subBubble(.init(
+                chatterDisplayName: notification.chatterUserName,
+                tier: tier(from: community.subTier, isPrime: false),
+                monthsCount: nil,
+                isResub: false,
+                isGift: true,
+                isPrime: false,
+                systemMessage: notification.systemMessage,
+                userMessage: nil
+            ))
+
+        case "raid":
+            // Raid coming IN to the channel via the notification topic.
+            // (The separate channel.raid topic also exists — same data
+            // in a different shape; we render either as a raidBubble.)
+            guard let raid = notification.raid else { return nil }
+            kind = .raidBubble(.init(
+                fromBroadcasterDisplayName: raid.userName,
+                viewers: raid.viewerCount
+            ))
+
+        case "announcement", "charity_donation", "bits_badge_tier",
+             "prime_paid_upgrade", "gift_paid_upgrade", "pay_it_forward":
+            // Unstructured-but-still-visible notices. Render the
+            // Twitch-formatted text in a generic system bubble.
+            kind = .systemBubble(text: notification.systemMessage)
+
+        default:
+            // Unknown / future notice types — skip rather than render
+            // half-formed. Worth logging in the caller.
+            return nil
+        }
+
+        return ChatLine(
+            id: notification.messageId,
+            kind: kind,
+            authorUserId: notification.chatterUserId,
+            authorDisplayName: notification.chatterUserName,
+            authorColor: notification.color ?? "",
+            runs: []   // bubbles render from `kind`, not `runs`
+        )
+    }
+
+    /// Convert a `channel.raid` EventSub event (someone raiding INTO the
+    /// channel we're watching) into a raidBubble `ChatLine`. Distinct
+    /// from the `raid` notice inside `EventSubChatNotification` —
+    /// channel.raid is the dedicated topic with simpler payload.
+    public static func line(from raid: EventSubRaid) -> ChatLine {
+        ChatLine(
+            id: "raid-\(raid.fromBroadcasterUserId)-\(Int(Date().timeIntervalSince1970 * 1000))",
+            kind: .raidBubble(.init(
+                fromBroadcasterDisplayName: raid.fromBroadcasterUserName,
+                viewers: raid.viewers
+            )),
+            authorUserId: raid.fromBroadcasterUserId,
+            authorDisplayName: raid.fromBroadcasterUserName,
+            runs: []
+        )
+    }
+
+    /// Map TwitchKit's `SubscriptionTier` enum + `isPrime` flag → our
+    /// internal `Tier`. The `isPrime` flag wins over the tier value when
+    /// set, because Twitch reports Prime subs as Tier 1 via the tier
+    /// value alone (the prime designation is carried separately).
+    /// `.unknown` falls back to `.t1` — better to render *something*
+    /// than skip the bubble entirely.
+    private static func tier(from twitchTier: SubscriptionTier, isPrime: Bool) -> ChatLine.SubBubble.Tier {
+        if isPrime { return .prime }
+        switch twitchTier {
+        case .tier1: return .t1
+        case .tier2: return .t2
+        case .tier3: return .t3
+        case .prime: return .prime
+        case .unknown: return .t1
+        }
     }
 
     // MARK: - Tokenization

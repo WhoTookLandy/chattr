@@ -32,6 +32,42 @@ struct ChatRow: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        // Dispatch on the line's Kind. .message renders inline; bubble
+        // cases render as styled system rows; .deletedPlaceholder dims
+        // and strikethroughs the content in place.
+        switch line.kind {
+        case .message:
+            messageBody
+                .opacity(1.0)
+        case .deletedPlaceholder:
+            // Render the original content but dimmed + struck-through.
+            // We don't change the data shape — the original `runs` stays
+            // available — so future "moderator-only reveal" features
+            // can show the original content behind the strike.
+            messageBody
+                .foregroundStyle(.secondary)
+                .opacity(0.6)
+                .overlay(alignment: .leading) {
+                    // Subtle strikethrough line across the row's text run.
+                    Rectangle()
+                        .fill(.tertiary)
+                        .frame(height: 1)
+                        .offset(y: -2)
+                }
+        case .subBubble(let bubble):
+            SubBubbleRow(bubble: bubble)
+        case .raidBubble(let bubble):
+            RaidBubbleRow(bubble: bubble)
+        case .systemBubble(let text):
+            SystemBubbleRow(text: text)
+        }
+    }
+
+    /// The standard inline message body (badges + username + runs).
+    /// Pulled out as a property so .deletedPlaceholder can overlay it
+    /// without duplicating the layout.
+    @ViewBuilder
+    private var messageBody: some View {
         FlowLayout(spacing: 4, alignment: .firstTextBaseline) {
             // Badges (zero or more — broadcasters typically have 1, partners 2-3,
             // moderators 1, regular subscribers 1, etc.)
@@ -115,6 +151,124 @@ struct ChatRow: View {
     private var usernameColor: Color {
         guard !line.authorColor.isEmpty else { return .primary }
         return .twitchUsername(hex: line.authorColor, scheme: colorScheme)
+    }
+}
+
+// MARK: - System bubbles
+//
+// Three distinct row types for system events. Each shares a common visual
+// foundation: a tinted capsule background, a leading SF Symbol, and the
+// Twitch-formatted system message. They diverge in tint and icon so the
+// user can tell at a glance which kind of event happened.
+//
+// Design intent (from axiom-design's HIG guidance — see docs/conventions.md):
+//   - Use semantic colors that adapt to light/dark mode automatically.
+//   - Hierarchical symbol rendering for depth without explicit shadowing.
+//   - Subtle tinted backgrounds (`opacity(0.15)` on accent colors) — not
+//     opaque, not loud. The row is information, not an alert.
+
+/// Sub/resub/gift/Prime bubble. Tier drives the leading symbol's tint
+/// (Tier 1 / Prime → blue, Tier 2 → purple, Tier 3 → gold).
+private struct SubBubbleRow: View {
+    let bubble: ChatLine.SubBubble
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: bubble.isGift ? "gift.fill" : "star.fill")
+                .font(.body.weight(.semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(tierColor)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 4) {
+                // Twitch-formatted system message — the authoritative text.
+                // We don't rebuild it because Twitch's localization is
+                // already correct for the user's selected language.
+                Text(bubble.systemMessage)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.primary)
+
+                // If the resub included a user message, render it dimmed
+                // below — matches the Twitch web layout.
+                if let userMessage = bubble.userMessage, !userMessage.isEmpty {
+                    Text(userMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(tierColor.opacity(0.15))
+        )
+    }
+
+    /// Tier-driven accent color. Maps to Twitch's conventional tier tints
+    /// (T1 = blue / T2 = purple / T3 = gold / Prime = blue).
+    private var tierColor: Color {
+        switch bubble.tier {
+        case .prime, .t1: return .blue
+        case .t2:         return .purple
+        case .t3:         return .yellow
+        }
+    }
+}
+
+/// "Someone raided you with N viewers" bubble.
+private struct RaidBubbleRow: View {
+    let bubble: ChatLine.RaidBubble
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "person.3.fill")
+                .font(.body.weight(.semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.pink)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(bubble.fromBroadcasterDisplayName) raided!")
+                    .font(.callout.weight(.semibold))
+                Text("^[\(bubble.viewers) viewer](inflect: true)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.pink.opacity(0.15))
+        )
+    }
+}
+
+/// Generic system bubble — announcements, charity events, bits-badge-tier
+/// upgrades, etc. Same visual treatment as the typed bubbles but with a
+/// neutral icon and accent tint.
+private struct SystemBubbleRow: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "info.circle.fill")
+                .font(.body)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.primary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.secondary.opacity(0.1))
+        )
     }
 }
 
