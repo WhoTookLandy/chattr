@@ -42,6 +42,13 @@ public actor EmoteIndex {
     /// all three providers follow the same convention.
     private var byName: [String: Emote] = [:]
 
+    /// Idempotency key: the `broadcasterId` we most recently loaded for.
+    /// If `load(...)` is called again with the same id, it's a no-op.
+    /// This is what makes the index registry-friendly — multiple view
+    /// mounts of the same channel call `load(...)` but the network work
+    /// happens once.
+    private var loadedBroadcasterId: String?
+
     private let providers: [any EmoteProvider]
 
     /// Lock-protected mirror of `byName` for nonisolated reads. Renderer
@@ -80,9 +87,19 @@ public actor EmoteIndex {
     /// failures are logged and swallowed so a single dead provider doesn't
     /// fail the whole index.
     ///
-    /// Call this once per session start (and on user-initiated refresh).
-    /// Subsequent calls overwrite the previous snapshot atomically.
+    /// **Idempotent**: calling with the same `broadcasterId` we already
+    /// loaded for is a no-op. This is the key property that makes the
+    /// registry-owned pattern work — multiple ChatScreen mounts for the
+    /// same channel each call `load(...)` but the network round-trip
+    /// happens once.
+    ///
+    /// Call `forceReload(...)` if you need a refresh.
     public func load(broadcasterId: String, broadcasterLogin: String) async {
+        if loadedBroadcasterId == broadcasterId {
+            // Already loaded for this channel — re-mounts get the existing
+            // snapshot for free. Skip the 6 HTTP calls.
+            return
+        }
         var merged: [String: Emote] = [:]
 
         // Step 1: global emotes from all providers, in parallel.
@@ -124,6 +141,27 @@ public actor EmoteIndex {
             }
         }
 
+        // If the parent Task was cancelled mid-flight, every provider call
+        // returned `[]` (each provider's catch swallowed the CancellationError
+        // — see `withTaskGroup` blocks above). Publishing here would do two
+        // wrong things at once:
+        //
+        //   1. Set `byName` and the snapshot to empty, wiping any prior load
+        //      (would only happen if a freshly-mounted index raced its own
+        //      cancellation — defensive, but cheap to guard against).
+        //   2. Set `loadedBroadcasterId = broadcasterId`, which would cause
+        //      the next caller's idempotency check to return early *as if*
+        //      we successfully loaded zero emotes — breaking emote rendering
+        //      until the channel is closed and reopened.
+        //
+        // Bail without publishing. The next caller (typically a fresh
+        // `.task` from a remounted ChatScreen) sees `loadedBroadcasterId`
+        // still nil and retries the load cleanly.
+        guard !Task.isCancelled else {
+            logger.info("EmoteIndex load cancelled for \(broadcasterLogin); not publishing partial snapshot")
+            return
+        }
+
         // Atomic publish: actor-isolated mutation + lock-protected snapshot.
         //
         // `merged` is bound to a `let` here before being captured by the
@@ -134,6 +172,11 @@ public actor EmoteIndex {
         let finalSnapshot = merged
         self.byName = finalSnapshot
         snapshotLock.withLock { $0 = finalSnapshot }
+        // Mark as loaded for idempotency. Future load() calls with the same
+        // broadcasterId return immediately. Set AFTER the snapshot publish so
+        // a Task cancellation mid-load (rare) leaves the index in an unloaded
+        // state and the next attempt will retry.
+        loadedBroadcasterId = broadcasterId
         logger.info("EmoteIndex loaded for \(broadcasterLogin): \(finalSnapshot.count) emote(s)")
     }
 

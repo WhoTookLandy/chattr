@@ -11,6 +11,7 @@ let package = Package(
     dependencies: [
         .package(path: "../Core"),
         .package(path: "../Accounts"),
+        .package(path: "../EmoteSources"),
         .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", branch: "main"),
     ],
     targets: [
@@ -19,6 +20,7 @@ let package = Package(
             dependencies: [
                 "Core",
                 "Accounts",
+                "EmoteSources",
                 .product(name: "TwitchKit", package: "TwitchKit"),
             ],
             path: "Sources/Channels",

@@ -1,5 +1,6 @@
 import Foundation
 import Accounts
+import EmoteSources
 import TwitchKit
 import Core
 import os
@@ -69,6 +70,32 @@ public final class ChannelSessionRegistry {
     /// rendering can call `session(...)` repeatedly without inflating the
     /// count.
     private var refCounts: [String: Int] = [:]
+
+    // MARK: - Per-channel view stores (T11)
+    //
+    // EmoteIndex and ChatBadgeStore live HERE (registry-owned) instead of as
+    // `@State` on `ChatScreen`. The reason: ChatScreen is in a paged
+    // LazyHStack inside ChatTabsScreen — when the user swipes off-screen,
+    // the ChatScreen unmounts and its `@State` properties (and any in-flight
+    // loads / cached data inside them) die. Re-mounting the screen would
+    // re-fetch the 6 emote-provider HTTPS calls + 2 Helix-badge calls,
+    // every time.
+    //
+    // Putting these stores on the registry — which has the same lifetime
+    // as the `ChannelSession` (created on acquire, destroyed on the last
+    // release) — means:
+    //   - Multiple ChatScreen mounts for the same channel SHARE the same
+    //     loaded store. Re-mount cost drops from "6 HTTPS calls" to "0."
+    //   - When the user finally closes the channel tab (refcount hits 0),
+    //     all per-channel state goes away together — no memory leak.
+    //   - Re-opening the same channel later starts fresh (correct).
+    //
+    // Loads themselves are now idempotent (see EmoteIndex.load,
+    // ChatBadgeStore.load) — multiple callers asking for "load this
+    // channel" trigger network work only once.
+
+    private var emoteIndexes: [String: EmoteIndex] = [:]
+    private var badgeStores: [String: ChatBadgeStore] = [:]
 
     public init(accountStore: AccountStore) {
         self.accountStore = accountStore
@@ -225,6 +252,14 @@ public final class ChannelSessionRegistry {
                 // not interesting day-to-day.
                 logger.debug("release \(key, privacy: .public) → refcount 0; no session to stop (still constructing or already gone)")
             }
+            // T11: per-channel view stores share the session's lifetime.
+            // Drop them here so the next acquire for the same channel starts
+            // fresh — emote provider catalogs and channel badges might have
+            // changed between sessions (broadcaster added a new 7TV emote,
+            // promoted a subscriber tier, etc.). Holding stale stores would
+            // also waste memory across closed-then-reopened tabs.
+            emoteIndexes[key] = nil
+            badgeStores[key] = nil
             // After tearing down the session, check if THIS account has
             // any remaining sessions. If not, cancel the shared event
             // dispatcher Task — otherwise the WebSocket stays connected
@@ -251,6 +286,44 @@ public final class ChannelSessionRegistry {
     @available(*, deprecated, renamed: "release(accountUserId:channelId:)", message: "Use the acquire/release pair for proper reference counting.")
     public func leave(accountUserId: String, channelId: String) async {
         await release(accountUserId: accountUserId, channelId: channelId)
+    }
+
+    // MARK: - Per-channel view stores (T11)
+
+    /// Returns the shared `EmoteIndex` for this account × channel pair, creating
+    /// it on first access. Survives `ChatScreen` unmount/remount as long as the
+    /// registry's refcount for the channel stays > 0 — i.e. as long as any
+    /// `ChatTab` is keeping the channel alive.
+    ///
+    /// Idempotency: returns the same instance for repeated calls with the same
+    /// key. Callers can then call `load(...)` on it freely; `EmoteIndex.load`
+    /// short-circuits when it's already loaded for the given broadcaster.
+    ///
+    /// Lifetime: cleaned up automatically in `release(...)` when refcount hits
+    /// zero, alongside the underlying `ChannelSession`.
+    public func emoteIndex(forAccountUserId accountUserId: String, channelId: String) -> EmoteIndex {
+        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
+        if let existing = emoteIndexes[key] {
+            return existing
+        }
+        let new = EmoteIndex()
+        emoteIndexes[key] = new
+        return new
+    }
+
+    /// Returns the shared `ChatBadgeStore` for this account × channel pair,
+    /// creating it on first access. Same lifetime semantics as `emoteIndex(...)`.
+    ///
+    /// `ChatBadgeStore.load(...)` is also idempotent — second-mount cost for the
+    /// same channel is a no-op rather than two Helix calls.
+    public func badgeStore(forAccountUserId accountUserId: String, channelId: String) -> ChatBadgeStore {
+        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
+        if let existing = badgeStores[key] {
+            return existing
+        }
+        let new = ChatBadgeStore()
+        badgeStores[key] = new
+        return new
     }
 
     // MARK: - Event dispatch

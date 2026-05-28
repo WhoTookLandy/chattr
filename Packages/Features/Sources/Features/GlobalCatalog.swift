@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Accounts
+import Channels
 import TwitchKit
 import Core
 import os

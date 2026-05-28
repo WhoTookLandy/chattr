@@ -29,26 +29,43 @@ public struct ChatScreen: View {
 
     @State private var errorMessage: String?
 
-    /// Per-channel badge cache. Reset implicitly when the screen pushes a new
-    /// instance — each NavigationLink push creates a fresh `@State` so old
-    /// channel badges don't bleed into a different broadcaster's chat.
-    @State private var badgeStore = ChatBadgeStore()
+    // T11: badgeStore and emoteIndex are NOT `@State` here anymore — they
+    // live on `ChannelSessionRegistry`, keyed by (accountUserId, channelId).
+    // The registry's lifetime matches the channel tab's lifetime (refcount
+    // > 0), so these stores survive ChatScreen unmount/remount within the
+    // paged LazyHStack.
+    //
+    // Before T11: each ChatScreen unmount destroyed `@State badgeStore` and
+    // `@State emoteIndex`, forcing 6 emote provider HTTPS calls + 2 Helix
+    // badge calls every time the user swiped back to a tab they'd already
+    // visited. Now: re-mount reads the same store from the registry, and
+    // `load(...)` short-circuits via idempotency.
+    //
+    // The `emoteLoadTask` cancellation dance also goes away — `.task`
+    // cancellation is now safe because the load itself bails on
+    // `Task.isCancelled` before publishing (see EmoteIndex.load and
+    // ChatBadgeStore.load), so cancelled loads leave the store in an
+    // unloaded state and the next mount retries cleanly.
 
-    /// Per-channel third-party emote index (7TV / BTTV / FFZ). Same lifetime
-    /// pattern as `badgeStore` — created fresh per `ChatScreen` instance,
-    /// loaded in a sibling `.task` (see below). When Phase 2.3 Task 11
-    /// lands, ownership moves into `ChannelSession` (which has the right
-    /// lifetime — survives view-tree churn); until then we tolerate the
-    /// reload-on-swipe cost.
-    @State private var emoteIndex = EmoteIndex()
+    /// Convenience: pull the registry-owned badge store for this channel.
+    /// Returns nil only if the registry isn't in the environment (programming
+    /// error — RootView injects it at app start). The body's badge-renderer
+    /// call site falls back to `[]` in that pathological case.
+    private var badgeStore: ChatBadgeStore? {
+        channelSessionRegistry?.badgeStore(
+            forAccountUserId: account.userId,
+            channelId: channelId
+        )
+    }
 
-    /// Active emote-load Task, stored so we can cancel it on view
-    /// disappear. `.task` was the wrong primitive here (cancels on
-    /// transient identity flicker during channel-open transitions),
-    /// but a bare `Task { }` would leak past view tear-down. Storing
-    /// the handle gives us "ride out brief identity flickers without
-    /// cancelling, but cancel cleanly on real disappear."
-    @State private var emoteLoadTask: Task<Void, Never>?
+    /// Convenience: pull the registry-owned emote index for this channel.
+    /// Same nil semantics as `badgeStore` above.
+    private var emoteIndex: EmoteIndex? {
+        channelSessionRegistry?.emoteIndex(
+            forAccountUserId: account.userId,
+            channelId: channelId
+        )
+    }
 
     /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
     /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
@@ -104,19 +121,20 @@ public struct ChatScreen: View {
         // "Chat" and the active tab pill in the strip already identifies the
         // channel. Having ChatScreen also override the title to "#login"
         // would just duplicate the information already shown one row below.
-        // Two structured tasks. Both are bound to this view's lifetime —
-        // SwiftUI cancels them on tear-down (incl. when ChatTabsScreen swaps
-        // the active channel via `.id(...)`).
         //
-        // Splitting badge-load into its own .task means the session connect
-        // and the badge fetch run in parallel, AND we don't leak an
-        // unstructured Task per channel switch (the previous code spawned
-        // `Task { await badgeStore.load(...) }` inside startSession, which
-        // outlived the view).
+        // Three structured tasks, all bound to view lifetime. SwiftUI cancels
+        // them on tear-down (incl. when ChatTabsScreen swaps the active
+        // channel via `.id(...)`). T11 made this safe — see notes above the
+        // `badgeStore` / `emoteIndex` computed properties.
+        //
+        // Splitting the three loads across separate `.task` modifiers means
+        // session-connect, badge-fetch, and emote-fetch all run concurrently.
+        // None of them block the others.
         .task { await startSession() }
         .task {
+            guard let store = badgeStore else { return }
             let cachedGlobalBadges = globalCatalog?.globalBadges ?? [:]
-            await badgeStore.load(
+            await store.load(
                 account: account,
                 accountStore: accountStore,
                 channelId: channelId,
@@ -125,66 +143,54 @@ public struct ChatScreen: View {
         }
         // Load 7TV / BTTV / FFZ emote definitions for this channel.
         //
-        // ## Why `.onAppear { Task { ... } }` not `.task { ... }`
+        // ## Why `.task` is finally safe (T11)
         //
-        // `.task` cancels its body when the view "disappears" — including
-        // transient identity flickers during SwiftUI re-renders (e.g., when
-        // openChannel triggers `chatTabsModel.open + selectedTab = .chat`
-        // back-to-back, the paged-ScrollView LazyHStack briefly re-evaluates
-        // children, and ChatScreen's task identity drops mid-flight).
+        // Pre-T11 history: `.task` was the obvious primitive but it cancelled
+        // mid-flight during transient SwiftUI identity flickers (e.g. when
+        // openChannel ran `chatTabsModel.open + selectedTab = .chat` back-to-
+        // back, the paged-ScrollView LazyHStack briefly re-evaluated children
+        // and ChatScreen's task identity dropped). All 6 emote provider HTTP
+        // calls threw `URLError(.cancelled)` and the EmoteIndex was left
+        // populated with 0 emotes. We worked around it by using `.onAppear`
+        // + an unstructured Task — escaping view lifetime — but that leaked
+        // tasks past tear-down and required manual cancellation bookkeeping.
         //
-        // Observed symptom (before this fix): all 6 emote provider calls
-        // (3 globals + 3 channel-specifics) threw `URLError(.cancelled)`
-        // within the first frame of channel-open, leaving the EmoteIndex
-        // populated with 0 emotes and chat rendering all third-party emote
-        // names as plain text.
+        // T11 makes `.task` safe by changing what cancellation MEANS for the
+        // emote load:
+        //   - EmoteIndex is registry-owned, not view-state-owned. Its
+        //     lifetime survives view churn for as long as the channel tab
+        //     stays open.
+        //   - `EmoteIndex.load(...)` checks `Task.isCancelled` BEFORE
+        //     publishing. A cancelled load leaves `loadedBroadcasterId`
+        //     unset, so the next-mount's `.task` retries cleanly.
+        //   - `.task` cancellation under view churn no longer corrupts
+        //     anything — at worst we burn an HTTP round-trip and retry on
+        //     the next mount.
         //
-        // Unstructured `Task { ... }` started in `.onAppear` isn't bound to
-        // view lifetime — view tear-downs don't cancel its HTTP work. The
-        // Task captures `emoteIndex` (an actor, Sendable) strongly, so
-        // even if @State releases it on permanent view tear-down, the
-        // load completes and the actor deallocates cleanly afterward.
-        //
-        // Idempotency: if `.onAppear` fires multiple times (visibility
-        // transitions), each call starts another load. EmoteIndex.load
-        // is last-write-wins on the snapshot, so duplicate loads waste
-        // HTTP but don't corrupt state. Phase 2.3 Task 11 moves the
-        // EmoteIndex into ChannelSession (actor-owned, session-lifetime)
-        // which eliminates this entirely.
-        .onAppear {
-            // Idempotent guard: if a prior `.onAppear` already kicked
-            // a load (and it hasn't completed yet), don't start a
-            // duplicate. Avoids the convoy-of-loads issue under rapid
-            // mount/unmount cycles in the paged ScrollView.
-            guard emoteLoadTask == nil else { return }
-            emoteLoadTask = Task {
-                let id = signposter.makeSignpostID()
-                let state = signposter.beginInterval(
-                    "emote-load",
-                    id: id,
-                    "channel=\(channelLoginName)"
-                )
-                await emoteIndex.load(
-                    broadcasterId: channelId,
-                    broadcasterLogin: channelLoginName
-                )
-                let count = emoteIndex.snapshot().count
-                signposter.endInterval("emote-load", state, "count=\(count)")
-                logger.info("EmoteIndex loaded for #\(channelLoginName, privacy: .public): \(count) emotes")
-            }
+        // Result: structured concurrency is preserved (no orphan tasks
+        // outliving the view) AND the data layer is robust under remount.
+        .task {
+            guard let index = emoteIndex else { return }
+            let id = signposter.makeSignpostID()
+            let state = signposter.beginInterval(
+                "emote-load",
+                id: id,
+                "channel=\(channelLoginName)"
+            )
+            await index.load(
+                broadcasterId: channelId,
+                broadcasterLogin: channelLoginName
+            )
+            let count = index.snapshot().count
+            signposter.endInterval("emote-load", state, "count=\(count)")
+            logger.info("EmoteIndex loaded for #\(channelLoginName, privacy: .public): \(count) emotes")
         }
         // Detach pub-sub subscriptions when the view leaves the screen. The
         // underlying ChannelSession stays alive in the registry; this just
         // tears down THIS view's subscription. The Task captures `chatModel`
         // so the model survives long enough to complete detach() even after
         // SwiftUI releases its @State storage.
-        //
-        // Also cancel any in-flight emote-load Task. Without cancellation,
-        // rapid open/close cycles can leave a convoy of orphan loads
-        // running against an EmoteIndex no one will ever read.
         .onDisappear {
-            emoteLoadTask?.cancel()
-            emoteLoadTask = nil
             let model = chatModel
             Task { @MainActor in
                 await model.detach()
@@ -261,7 +267,13 @@ public struct ChatScreen: View {
                 ForEach(chatModel.lines) { line in
                     ChatRow(
                         line: line,
-                        badgeEntries: badgeStore.entries(for: line.originalBadges)
+                        // `?? []` is the safe fallback when the registry isn't
+                        // in the environment — but startSession() already
+                        // catches that case and surfaces an error UI, so in
+                        // practice we always have a store here. The fallback
+                        // just prevents force-unwrap explosions during weird
+                        // preview/test configurations.
+                        badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? []
                     )
                     .id(line.id)
                 }
@@ -373,9 +385,20 @@ public struct ChatScreen: View {
             // table. The index may not be loaded yet at this point — the
             // model tolerates a nil/empty snapshot and tokens stay as text
             // until the snapshot fills in.
+            //
+            // T11: index comes from the registry (same object across all
+            // ChatScreen mounts for this channel). Fall through to a
+            // throwaway EmoteIndex if registry is missing — startSession
+            // already errored out above in that case, so this branch is
+            // effectively unreachable; the fallback exists only to keep
+            // the type-checker happy without forcing a force-unwrap.
+            let index = registry.emoteIndex(
+                forAccountUserId: account.userId,
+                channelId: channelId
+            )
             await chatModel.attach(
                 sessions: [session],
-                emoteIndex: emoteIndex,
+                emoteIndex: index,
                 currentUserLogin: account.login,
                 highlightKeywords: []   // No user-configurable highlights yet.
             )

@@ -1,5 +1,6 @@
 import SwiftUI
 import TwitchKit
+import Channels
 import ChatModel
 import EmoteSources
 import DesignSystem
