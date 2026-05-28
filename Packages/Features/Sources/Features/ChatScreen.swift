@@ -82,11 +82,10 @@ public struct ChatScreen: View {
                 chatScrollView
             }
         }
-        .navigationTitle("#\(channelLoginName)")
-        // `.toolbarTitleDisplayMode` is cross-platform (iOS 17 / macOS 14+)
-        // unlike the older iOS-only `.navigationBarTitleDisplayMode`. No
-        // `#if os(iOS)` guard needed for SPM macOS host compilation.
-        .toolbarTitleDisplayMode(.inline)
+        // No `.navigationTitle` here — the parent ChatTabsScreen sets it to
+        // "Chat" and the active tab pill in the strip already identifies the
+        // channel. Having ChatScreen also override the title to "#login"
+        // would just duplicate the information already shown one row below.
         // Two structured tasks. Both are bound to this view's lifetime —
         // SwiftUI cancels them on tear-down (incl. when ChatTabsScreen swaps
         // the active channel via `.id(...)`).

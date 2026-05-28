@@ -1,4 +1,5 @@
 import SwiftUI
+import TwitchKit
 
 /// Horizontal pill strip showing one cell per open chat channel. Active cell
 /// is tinted with the accent color; both states use Liquid Glass capsules.
@@ -47,9 +48,28 @@ private struct TabCell: View {
     let onTap: () -> Void
     let onClose: () -> Void
 
+    /// Live FollowsStore lookup. The URL captured on the ChannelDescriptor at
+    /// open-time is a snapshot — if the profile wasn't yet enriched when the
+    /// tab opened, that snapshot is nil and stays nil. By reading from
+    /// followsStore.userProfiles dynamically, the avatar can appear once the
+    /// background enrichment fetch completes, even if the URL was nil at open.
+    @Environment(\.followsStore) private var followsStore
+
+    /// Best available avatar URL: prefer FollowsStore's live cache (which
+    /// updates over time as enrichment fetches complete), then fall back to
+    /// the snapshot taken at tab-open time.
+    private var avatarURL: URL? {
+        if let userId = tab.channels.first?.channelId,
+           let user = followsStore?.userProfiles[userId],
+           let url = URL(string: user.profileImageUrl) {
+            return url
+        }
+        return tab.profileImageURL
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            if let url = tab.profileImageURL {
+            if let url = avatarURL {
                 AsyncImage(url: url) { phase in
                     if let image = phase.image {
                         image.resizable().scaledToFill()
