@@ -77,22 +77,14 @@ public struct ChatScreen: View {
     /// newest message instead of animating.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// Compose-bar draft text. Per-screen `@State` so each chat tab keeps
-    /// its own in-progress message — switching tabs and coming back
-    /// preserves what you were typing. (T11 made the ChatScreen unmount
-    /// on swipe, so this state dies on swipe-away — acceptable for a
-    /// commit-1 MVP; persisting drafts is a future polish.)
-    @State private var composeText: String = ""
-
-    /// Disabled-state flag for the send button while a send is in flight.
-    /// Prevents tap-mashing from spawning concurrent sends — Twitch's
-    /// `msg_ratelimit` would catch most of them, but stopping at the UI
-    /// is cheaper and clearer feedback.
-    @State private var isSending: Bool = false
-
-    /// Focus state for the compose bar — bound to the TextField so we can
-    /// release focus (and the keyboard) after a successful send.
-    @FocusState private var composeFocused: Bool
+    // NOTE: compose-bar state (`composeText`, `isSending`, `composeFocused`)
+    // lives inside the extracted `ComposeBar` view below — NOT here on
+    // ChatScreen. That isolation matters: every keystroke in the
+    // TextField mutates the draft, and if the @State lived on ChatScreen
+    // each keystroke would re-evaluate the whole body (which contains
+    // the LazyVStack of chat rows). Pulling the state into a child View
+    // confines re-evaluation to the compose bar itself, eliminating a
+    // visible source of typing lag.
 
     /// Pre-cached global Twitch data (loaded once at app launch by RootView).
     /// We pass its global-badges slice into `badgeStore.load(...)` so the
@@ -141,7 +133,11 @@ public struct ChatScreen: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            composeBar
+            ComposeBar(
+                channelLoginName: channelLoginName,
+                channelDisplayName: channelDisplayName,
+                onSend: { draft in await chatModel.send(text: draft) }
+            )
         }
         // Send-failure toast. Bound to `chatModel.sendError` (set by
         // `TabChatModel.send` on Twitch drop / network error). The alert
@@ -333,6 +329,14 @@ public struct ChatScreen: View {
         // strip is a pinned accessory; `.top` because that's the edge
         // meeting the chrome.
         .scrollEdgeEffectStyle(.hard, for: .top)
+        // Pull-to-dismiss-keyboard: dragging the chat content downward
+        // dismisses the keyboard alongside the gesture. Matches Messages /
+        // most chat apps. Without this the only way to dismiss the
+        // keyboard is to send the message (which often you don't want to
+        // do — sometimes you just want to read while typing was a
+        // mistake). The compose bar's TextField stays focused if you
+        // pull only partially.
+        .scrollDismissesKeyboard(.interactively)
         // "tail -f" semantics for chat scroll:
         //
         //   - If the user is at the bottom of the feed (scroll position is
@@ -363,82 +367,6 @@ public struct ChatScreen: View {
                 scrolledMessageId = last.id
             }
         }
-    }
-
-    // MARK: - Compose bar
-
-    /// Bottom-pinned text input + send button. Liquid Glass treatment to
-    /// match the tab strip above; subdued when empty so the chat surface
-    /// stays visually dominant.
-    ///
-    /// `axis: .vertical` + `lineLimit(1...4)` lets multi-line messages
-    /// grow up to 4 lines before scrolling internally — covers most chat
-    /// use cases (longer essays go in a focused composer, future work).
-    ///
-    /// `.submitLabel(.send)` puts a Send glyph on the software keyboard's
-    /// return key. `onSubmit` then commits — but only for SINGLE-LINE
-    /// drafts; with `axis: .vertical` SwiftUI sends `onSubmit` from the
-    /// hardware keyboard's Return key, while soft-keyboard Return inserts
-    /// a newline. The send button is the reliable affordance either way.
-    @ViewBuilder
-    private var composeBar: some View {
-        HStack(spacing: 8) {
-            TextField("Send a message in #\(channelLoginName)", text: $composeText, axis: .vertical)
-                .lineLimit(1...4)
-                .textFieldStyle(.plain)
-                .focused($composeFocused)
-                .submitLabel(.send)
-                .onSubmit { Task { await sendCurrent() } }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                // Regular glass (not interactive) — typing happens
-                // inside, no glass-on-press animation needed.
-                .glassEffect(.regular, in: Capsule())
-                .accessibilityLabel("Message input")
-                .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
-
-            Button {
-                Task { await sendCurrent() }
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .font(.body.weight(.semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .frame(width: 36, height: 36)
-            }
-            .buttonStyle(.glass)
-            .disabled(composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
-            .accessibilityLabel("Send message")
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-    }
-
-    /// Send what's currently in the compose draft. Sets `isSending` for the
-    /// button-disabled state, calls `chatModel.send(...)`, clears the draft
-    /// on success.
-    ///
-    /// Why we always clear the draft regardless of send result:
-    ///   - On Twitch drop (`isSent=false`) the user's text would otherwise
-    ///     stay in the bar with no obvious "this came back," tempting them
-    ///     to immediately retry while still rate-limited. Clearing forces
-    ///     a deliberate retype.
-    ///   - On network error same logic.
-    /// If user feedback shows the clear-on-failure is too aggressive (e.g.
-    /// long messages), we can branch on `chatModel.sendError` to preserve.
-    private func sendCurrent() async {
-        let draft = composeText
-        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard !isSending else { return }
-
-        isSending = true
-        defer { isSending = false }
-
-        // Optimistic clear — the message immediately appears in chat as an
-        // optimistic row via chatModel.send, so leaving the bar populated
-        // would feel like the message is still in flight.
-        composeText = ""
-
-        await chatModel.send(text: draft)
     }
 
     // MARK: - Session lifecycle
@@ -527,5 +455,87 @@ public struct ChatScreen: View {
             errorMessage = "Couldn't open chat: \(error.localizedDescription)"
             logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")
         }
+    }
+}
+
+// MARK: - ComposeBar
+
+/// Bottom-pinned text input + send button for chat. Lives in its own
+/// `View` struct so the draft `@State` is isolated from the parent
+/// `ChatScreen`'s body — every keystroke mutates `composeText`, and
+/// keeping that mutation OUT of ChatScreen prevents the LazyVStack of
+/// chat rows from re-evaluating its body on every typed character.
+///
+/// Communicates with the parent only through:
+///   - `onSend`: async callback the parent uses to actually post via
+///     `chatModel.send(text:)`. Async-typed so the button can show a
+///     disabled state while a send is in flight.
+///
+/// Single-line by design: Twitch chat doesn't support newlines (the
+/// server strips them on receive). Using single-line also means the
+/// soft-keyboard's Return key acts as Send (with `.submitLabel(.send)`)
+/// instead of inserting a newline glyph — `axis: .vertical` would
+/// override `.submitLabel` and force Return to be newline.
+private struct ComposeBar: View {
+    let channelLoginName: String
+    let channelDisplayName: String
+    let onSend: @MainActor (String) async -> Void
+
+    @State private var composeText: String = ""
+    @State private var isSending: Bool = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("Send a message in #\(channelLoginName)", text: $composeText)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .submitLabel(.send)
+                .onSubmit { Task { await sendDraft() } }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                // Regular glass (not interactive) — typing happens inside
+                // the field, no glass-on-press animation needed.
+                .glassEffect(.regular, in: Capsule())
+                .accessibilityLabel("Message input")
+                .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
+
+            Button {
+                Task { await sendDraft() }
+            } label: {
+                // No explicit `.frame(...)` — `.buttonStyle(.glass)`
+                // sizes the glass capsule to its content + its own
+                // internal padding. The hardcoded 36×36 frame in the
+                // previous version added on top of that padding, making
+                // the button look bulky next to the field. The 17pt
+                // font + .padding(2) here lands at a button that
+                // matches the field's vertical rhythm.
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .padding(2)
+            }
+            .buttonStyle(.glass)
+            .disabled(composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
+            .accessibilityLabel("Send message")
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+
+    private func sendDraft() async {
+        let draft = composeText
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !isSending else { return }
+
+        isSending = true
+        defer { isSending = false }
+
+        // Optimistic clear — the message immediately appears in chat as an
+        // optimistic row via chatModel.send, so leaving the bar populated
+        // would feel like the message is still in flight.
+        composeText = ""
+
+        await onSend(draft)
     }
 }

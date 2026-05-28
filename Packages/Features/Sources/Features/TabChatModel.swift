@@ -318,44 +318,43 @@ public final class TabChatModel {
         do {
             let response = try await session.send(canonical)
 
-            // Race window: the EventSub echo might have ARRIVED during the
-            // await above. apply() would then have removed our text→id
-            // entry and swapped the optimistic row to the normalized
-            // echo. If so, there's nothing left for us to do here.
-            guard let stillPendingId = pendingSendIDByText.removeValue(forKey: canonical) else {
-                logger.debug("send: echo arrived before Helix response; nothing to reconcile")
+            if response.isSent {
+                // Success: leave the optimistic line untouched and let the
+                // EventSub echo upgrade it.
+                //
+                // Why NOT pre-swap the id to response.messageId here:
+                // a Twitch chat message includes the chatter's badges,
+                // user-picked color, and Twitch's server-parsed fragments
+                // (cheermotes, native emotes, mentions). The optimistic
+                // line has NONE of those — it just has the plain text. The
+                // echo path in `apply()` runs the chat message through
+                // `Normalizer.normalize(...)` and replaces the optimistic
+                // row wholesale, so the user's own message ends up
+                // visually identical to everyone else's.
+                //
+                // If we'd pre-swapped the id, the echo would match the
+                // dedup-by-id branch (drop) instead of the echo-of-pending
+                // branch (upgrade), and the row would stay badge-less for
+                // the rest of its life on screen.
+                //
+                // We don't need any local timeout/fallback: Twitch broadcasts
+                // to the WebSocket on the same code path that responds to
+                // the POST. If isSent=true came back, the echo is essentially
+                // guaranteed to arrive within milliseconds.
+                logger.debug("send: Helix accepted; awaiting EventSub echo to upgrade optimistic row")
                 return
             }
 
-            if response.isSent {
-                // Helix accepted and broadcast. Swap our optimistic id to
-                // the canonical messageId. The echo (still en route) will
-                // dedup-by-id when it arrives.
-                if let idx = lines.firstIndex(where: { $0.id == stillPendingId }) {
-                    let row = lines[idx]
-                    lines[idx] = ChatLine(
-                        id: response.messageId,
-                        kind: row.kind,
-                        authorBadges: row.authorBadges,
-                        originalBadges: row.originalBadges,
-                        authorUserId: row.authorUserId,
-                        authorDisplayName: row.authorDisplayName,
-                        authorColor: row.authorColor,
-                        runs: row.runs,
-                        isHighlighted: row.isHighlighted,
-                        timestamp: row.timestamp
-                    )
-                }
-            } else {
-                // Twitch returned 200 OK but didn't broadcast. Common drop
-                // reasons: `msg_ratelimit`, `automod_held`, `msg_banned`,
-                // `msg_emoteonly`, `msg_subsonly`, `msg_followersonly`,
-                // `msg_slowmode`. The human-readable `dropReason.message`
-                // is good enough for the toast.
-                lines.removeAll { $0.id == stillPendingId }
-                sendError = response.dropReason?.message ?? "Twitch didn't broadcast the message."
-                logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(response.dropReason?.message ?? "—", privacy: .public)")
+            // isSent=false: Twitch returned 200 OK but didn't broadcast.
+            // Common drop reasons: `msg_ratelimit`, `automod_held`,
+            // `msg_banned`, `msg_emoteonly`, `msg_subsonly`,
+            // `msg_followersonly`, `msg_slowmode`. The human-readable
+            // `dropReason.message` is good enough for the toast.
+            if pendingSendIDByText.removeValue(forKey: canonical) != nil {
+                lines.removeAll { $0.id == pendingId }
             }
+            sendError = response.dropReason?.message ?? "Twitch didn't broadcast the message."
+            logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(response.dropReason?.message ?? "—", privacy: .public)")
         } catch {
             // Network blip, unauthorized after refresh-and-retry, or
             // ChannelSession.send's own empty-string guard. Drop optimistic
