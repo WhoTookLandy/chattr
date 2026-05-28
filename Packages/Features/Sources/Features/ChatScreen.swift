@@ -659,6 +659,15 @@ private struct ComposeBar: View {
         return "Send a message in #\(channelLoginName)"
     }
 
+    /// True when the send button represents a meaningful action: the
+    /// draft has at least one non-whitespace character AND we're not
+    /// already mid-send. Drives both the tinting (accent vs muted)
+    /// AND the `.disabled(!isActive)` modifier so a single source of
+    /// truth governs both visual + behavior.
+    private var isActive: Bool {
+        !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
+    }
+
     /// The TextField + Send button row, pulled out of the body for
     /// readability now that the reply chip is also a sibling.
     @ViewBuilder
@@ -680,20 +689,34 @@ private struct ComposeBar: View {
             Button {
                 Task { await sendDraft() }
             } label: {
-                // No explicit `.frame(...)` — `.buttonStyle(.glass)`
-                // sizes the glass capsule to its content + its own
-                // internal padding. The hardcoded 36×36 frame in the
-                // previous version added on top of that padding, making
-                // the button look bulky next to the field. The 17pt
-                // font + .padding(2) here lands at a button that
-                // matches the field's vertical rhythm.
+                // Symbol effect `.bounce` fires when `isActive` toggles
+                // — gives the user a satisfying micro-interaction the
+                // first time they type a character. Reduce-Motion users
+                // get no animation (SF Symbols respect the system
+                // setting automatically). The button stays interactive
+                // either way.
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 17, weight: .semibold))
                     .symbolRenderingMode(.hierarchical)
+                    .symbolEffect(.bounce, value: isActive)
                     .padding(2)
             }
-            .buttonStyle(.glass)
-            .disabled(composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
+            // Style switch: `.glassProminent` when the draft is
+            // meaningful, plain `.glass` otherwise. Per axiom-design's
+            // Liquid Glass guidance: "Use `.tint()` only to convey
+            // meaning (call to action, next step), not for decoration."
+            // The tint is the call-to-action signal — empty draft → no
+            // signal, populated draft → "this action is now meaningful."
+            //
+            // SwiftUI's conditional buttonStyle creates a fresh button
+            // identity per branch, which would normally retrigger the
+            // symbol effect on every keystroke. Pulling the active flag
+            // out into a computed property + using `.tint()` (which
+            // doesn't reset identity) avoids that — `.tint(.accentColor)`
+            // when active, no tint when not.
+            .buttonStyle(.glassProminent)
+            .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
+            .disabled(!isActive)
             .accessibilityLabel("Send message")
         }
         // No padding modifiers here — the outer VStack in `body` owns
