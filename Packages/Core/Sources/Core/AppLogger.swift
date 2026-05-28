@@ -6,6 +6,55 @@ import os
 import OSLog
 
 /// Centralized logger subsystem identifier for all chattr packages.
+///
+/// ## Log level conventions
+///
+/// Pick the lowest level that still captures the intent. The `DevLogView`
+/// filter defaults to `.info` — anything `.debug` or below is hidden by
+/// default. Use that mental model: "would I want to see this line by
+/// default when investigating?" If yes, `.info` or above; if no, `.debug`.
+///
+/// | Level     | Use for                                                                 |
+/// |-----------|-------------------------------------------------------------------------|
+/// | `.debug`  | Verbose per-operation state changes (per-message, per-event).           |
+/// |           | Example: "append message \(messageId)", "refcount → 3"                  |
+/// | `.info`   | Milestones — operation completed, async work finished.                  |
+/// |           | Example: "EmoteIndex loaded for @login: 47 emotes"                      |
+/// | `.notice` | Boundary crossings — user action, account change, channel open/close.   |
+/// |           | Example: "Sign-in completed", "Active account → \(userId)"              |
+/// | `.warning`| Recoverable anomalies — fell back to a cache, double-release ignored.   |
+/// |           | Example: "TwitchKit store empty; recovering via chattr-side cache"      |
+/// | `.error`  | Operation failed — couldn't complete the work, surface to user/caller.  |
+/// |           | Example: "Bridge refresh failed (HTTP 503)"                             |
+/// | `.fault`  | Programming bug — invariant violated, assertion-level.                  |
+/// |           | Example: "ForEach ID collision detected"                                |
+///
+/// ## Privacy
+///
+/// `os.Logger` redacts string interpolations by default on device (the
+/// console shows `<private>`). Explicit annotations override:
+///
+///   - `logger.info("for @\(login, privacy: .public)")`  — visible on device
+///   - `logger.debug("token \(token, privacy: .private)")` — redacted always
+///   - `logger.info("count = \(count)")` — numeric, never redacted
+///
+/// Annotation policy for chattr:
+///   - User logins, channel IDs, message IDs, error codes → `.public`
+///     (they're not secrets; visibility helps debugging in production)
+///   - Tokens, refresh tokens, anything from Keychain → `.private`
+///   - Numeric counts, durations, status codes → no annotation (never redacted)
+///
+/// ## Examples
+///
+/// ```swift
+/// private let logger = AppLogger.make("Accounts.AccountStore")
+///
+/// logger.debug("Append cached refresh token entry: bytes=\(data.count)")
+/// logger.info("Refreshed tokens for @\(login, privacy: .public)")
+/// logger.notice("Active account → \(userId, privacy: .public)")
+/// logger.warning("Falling back to chattr-side refresh cache for @\(login, privacy: .public)")
+/// logger.error("Bridge refresh failed for @\(login, privacy: .public) (HTTP \(status))")
+/// ```
 public enum AppLogger {
     /// Bundle-identifier-style subsystem name used by every chattr logger.
     public static let subsystem = "com.andrewbeshay.chattr"

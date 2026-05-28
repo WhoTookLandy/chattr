@@ -120,7 +120,9 @@ public final class ChannelSessionRegistry {
             // already running. Idempotent — multiple session(...) calls for
             // the same account spin up at most one dispatcher Task.
             ensureEventDispatch(client: client, accountUserId: capturedUserId)
-            logger.info("Created session for @\(capturedLogin)/#\(channelLoginName)")
+            // .notice: session creation is a boundary event — when this fires
+            // we just opened a new WebSocket subscription to Twitch.
+            logger.notice("Created session for @\(capturedLogin, privacy: .public)/#\(channelLoginName, privacy: .public)")
             return started
         } catch {
             inFlight[key] = nil
@@ -151,7 +153,9 @@ public final class ChannelSessionRegistry {
     ) async throws -> ChannelSession {
         let key = Self.key(accountUserId: account.userId, channelId: channelId)
         refCounts[key, default: 0] += 1
-        logger.info("acquire \(key) → refcount \(self.refCounts[key] ?? 0)")
+        // .debug: refcount churn is per-tab-open/close — visible in DevLogView
+        // only when investigating session lifecycle issues, otherwise hidden.
+        logger.debug("acquire \(key, privacy: .public) → refcount \(self.refCounts[key] ?? 0)")
         // Delegate construction to the existing session(...) path. If
         // construction fails, roll the refcount back so a future caller
         // can retry from a clean state — otherwise an orphan refcount
@@ -179,7 +183,9 @@ public final class ChannelSessionRegistry {
     public func release(accountUserId: String, channelId: String) async {
         let key = Self.key(accountUserId: accountUserId, channelId: channelId)
         guard let count = refCounts[key], count > 0 else {
-            logger.info("release \(key) with no outstanding refcount — likely a double-release; ignoring")
+            // .warning: double-release is a programming smell. We tolerate
+            // it (idempotent), but surface it visibly so it's spotted.
+            logger.warning("release \(key, privacy: .public) with no outstanding refcount — likely a double-release; ignoring")
             return
         }
         refCounts[key] = count - 1
@@ -197,12 +203,19 @@ public final class ChannelSessionRegistry {
             if let session = sessions[key] {
                 await session.stop()
                 sessions[key] = nil
-                logger.info("release \(key) → refcount 0; session stopped")
+                // .notice: session teardown is a boundary event — counterpart
+                // to the "Created session" notice above.
+                logger.notice("release \(key, privacy: .public) → refcount 0; session stopped")
             } else {
-                logger.info("release \(key) → refcount 0; no session to stop (still constructing or already gone)")
+                // .debug: rare path (acquire raced release before session()
+                // returned). Useful when investigating race conditions but
+                // not interesting day-to-day.
+                logger.debug("release \(key, privacy: .public) → refcount 0; no session to stop (still constructing or already gone)")
             }
         } else {
-            logger.info("release \(key) → refcount \(self.refCounts[key] ?? 0)")
+            // .debug: refcount decrement when not the last reference.
+            // Pairs with the .debug "acquire" log on the opposite side.
+            logger.debug("release \(key, privacy: .public) → refcount \(self.refCounts[key] ?? 0)")
         }
     }
 
@@ -233,7 +246,7 @@ public final class ChannelSessionRegistry {
                 await self.dispatch(event: event, accountUserId: accountUserId)
             }
         }
-        logger.info("Started event dispatcher for account \(accountUserId)")
+        logger.info("Started event dispatcher for account \(accountUserId, privacy: .public)")
     }
 
     /// Routes a single event to the session whose `channelId` matches the

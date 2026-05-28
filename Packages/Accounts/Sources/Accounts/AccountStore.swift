@@ -56,7 +56,9 @@ public final class AccountStore {
     /// Set which account is active.
     public func setActive(userId: String) {
         self.activeUserId = userId
-        logger.info("Active account → \(userId)")
+        // .notice: account-switch is a boundary crossing — visible without
+        // raising the filter threshold during debugging.
+        logger.notice("Active account → \(userId, privacy: .public)")
     }
 
     /// Returns (constructing if needed) the TwitchClient for the given account.
@@ -115,7 +117,8 @@ public final class AccountStore {
         try context.save()
         activeUserId = user.id
 
-        logger.info("Added account @\(user.login) (\(user.id))")
+        // .notice: account added is a user-initiated boundary crossing.
+        logger.notice("Added account @\(user.login, privacy: .public) (\(user.id, privacy: .public))")
         return account
     }
 
@@ -156,7 +159,9 @@ public final class AccountStore {
         // case writes — user-initiated sign-out doesn't need to explain itself.
         if case .sessionExpired(let login) = reason {
             UserDefaults.standard.set(login, forKey: Self.lastSessionExpiredLoginKey)
-            logger.info("forceSignOut(.sessionExpired) for @\(login)")
+            // .notice: forced sign-out is a boundary event that drives UI
+            // state transitions — important to see in default log filtering.
+            logger.notice("forceSignOut(.sessionExpired) for @\(login, privacy: .public)")
         }
 
         // Find and delete the Account row. Use mainContext to keep RootView's
@@ -169,7 +174,10 @@ public final class AccountStore {
             do {
                 try await client(for: account).auth.logout()
             } catch {
-                logger.error("forceSignOut: TwitchKit logout failed for @\(account.login): \(error.localizedDescription)")
+                // .warning, not .error: forceSignOut is intentionally best-
+                // effort; a TwitchKit logout failure is expected if the
+                // token was already invalid. Worth seeing but not "broken."
+                logger.warning("forceSignOut: TwitchKit logout failed for @\(account.login, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
             OAuthRefreshTokenCache.delete(for: userId)
             clients[userId] = nil
@@ -216,7 +224,7 @@ public final class AccountStore {
         let context = modelContainer.mainContext
         context.delete(account)
         try context.save()
-        logger.info("Removed account @\(account.login)")
+        logger.notice("Removed account @\(account.login, privacy: .public)")
     }
 
     // MARK: - Helpers
@@ -324,7 +332,10 @@ extension AccountStore {
             if let t = currentToken.refreshToken, !t.isEmpty {
                 refreshToken = t
             } else if let cached = OAuthRefreshTokenCache.load(for: userId) {
-                logger.info("TwitchKit token has no refresh_token; using chattr-side cache for @\(login)")
+                // .warning: recoverable fallback path — we ARE working around
+            // a problem (TwitchKit lost its refresh_token), but the chattr
+            // cache saved us.
+            logger.warning("TwitchKit token has no refresh_token; using chattr-side cache for @\(login, privacy: .public)")
                 refreshToken = cached
             } else {
                 // Terminal: no refresh_token anywhere. Drive the
@@ -344,7 +355,9 @@ extension AccountStore {
                 await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
                 throw AppError.sessionExpired(login: login)
             }
-            logger.info("TwitchKit store empty for @\(login); recovering via chattr-side refresh cache")
+            // .warning: TwitchKit lost its store; we're saved by chattr's
+            // independent refresh cache. Recovery path — important to see.
+            logger.warning("TwitchKit store empty for @\(login, privacy: .public); recovering via chattr-side refresh cache")
             refreshToken = cached
         }
 
@@ -361,7 +374,8 @@ extension AccountStore {
 
         if http.statusCode != 200 {
             let body = String(data: data, encoding: .utf8) ?? "(no body)"
-            logger.error("Bridge refresh failed for @\(login) (HTTP \(http.statusCode)): \(body)")
+            // body is server-side debug text (no secrets) — public is fine.
+            logger.error("Bridge refresh failed for @\(login, privacy: .public) (HTTP \(http.statusCode)): \(body, privacy: .public)")
             // 4xx → Twitch rejected the refresh_token (revoked, expired, or
             //       associated with a different client_id). Terminal — the
             //       refresh credential we have can never work again, so
@@ -408,7 +422,7 @@ extension AccountStore {
         // Mirror to chattr-side cache so the next failure has somewhere
         // to recover from even if TwitchKit clears its store again.
         OAuthRefreshTokenCache.save(refreshToken: nextRefreshToken, for: userId)
-        logger.info("Refreshed tokens for @\(login) (expires_in=\(parsed.expiresIn ?? -1))")
+        logger.info("Refreshed tokens for @\(login, privacy: .public) (expires_in=\(parsed.expiresIn ?? -1))")
         return newToken
     }
 
