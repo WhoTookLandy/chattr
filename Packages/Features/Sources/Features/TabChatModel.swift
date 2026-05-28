@@ -314,7 +314,8 @@ public final class TabChatModel {
             runs: [.text(canonical)],   // no emote resolution on the optimistic row — echo will
                                         // overwrite with the Normalizer's tokenized version
             isHighlighted: false,
-            timestamp: .now
+            timestamp: .now,
+            deliveryState: .sending     // renderer dims the row so the user sees it as in-flight
         )
         lines.append(optimistic)
         // Cap as usual — sending while at 500 lines drops the oldest, same
@@ -364,21 +365,69 @@ public final class TabChatModel {
             // isSent=false: Twitch returned 200 OK but didn't broadcast.
             // Common drop reasons: `msg_ratelimit`, `automod_held`,
             // `msg_banned`, `msg_emoteonly`, `msg_subsonly`,
-            // `msg_followersonly`, `msg_slowmode`. The human-readable
-            // `dropReason.message` is good enough for the toast.
+            // `msg_followersonly`, `msg_slowmode`. Mark the row as
+            // .failed in place — non-modal, the user sees red text +
+            // retry icon directly on the row that didn't send. They
+            // get context for WHY (the dropReason) without losing what
+            // they typed.
             cleanupPending(pendingId: pendingId)
-            lines.removeAll { $0.id == pendingId }
-            sendError = response.dropReason?.message ?? "Twitch didn't broadcast the message."
-            logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(response.dropReason?.message ?? "—", privacy: .public)")
+            let reason = response.dropReason?.message ?? "Twitch didn't broadcast the message."
+            markFailed(pendingId: pendingId, reason: reason, retryText: canonical)
+            logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(reason, privacy: .public)")
         } catch {
             // Network blip, unauthorized after refresh-and-retry, or
-            // ChannelSession.send's own empty-string guard. Drop optimistic
-            // line + surface.
+            // ChannelSession.send's own empty-string guard. Same
+            // treatment as a Twitch drop — keep the row, mark it failed.
             cleanupPending(pendingId: pendingId)
-            lines.removeAll { $0.id == pendingId }
-            sendError = error.localizedDescription
+            markFailed(pendingId: pendingId, reason: error.localizedDescription, retryText: canonical)
             logger.error("send failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Re-send a previously-failed row's draft. Removes the failed row
+    /// (so we don't end up with two duplicate rows when the retry
+    /// succeeds and the echo arrives) and dispatches `send(text:)` with
+    /// the captured retry text. Called from the row's retry button.
+    ///
+    /// Silently no-ops if the row isn't actually in a `.failed` state —
+    /// could happen if the user triple-taps the retry button on a row
+    /// that's mid-retry.
+    public func retry(failedLineId: String) async {
+        guard let idx = lines.firstIndex(where: { $0.id == failedLineId }),
+              case .failed(_, let retryText) = lines[idx].deliveryState else {
+            return
+        }
+        // Remove the failed row first so the new optimistic insert
+        // takes its place at the bottom of `lines` — the user expects
+        // the retry to feel like a fresh send.
+        lines.remove(at: idx)
+        await send(text: retryText)
+    }
+
+    /// Transitions the pending row identified by `pendingId` to the
+    /// `.failed` state in place. Pulled out of `send` so both the
+    /// Helix-drop and thrown-error paths share the same code.
+    ///
+    /// If the row isn't in `lines` anymore (rare — could happen if a
+    /// moderator's `chatCleared` event raced our failure) we DON'T
+    /// re-insert it; the user already saw the row vanish via the
+    /// chat-clear handler, and resurrecting it would be jarring.
+    private func markFailed(pendingId: String, reason: String, retryText: String) {
+        guard let idx = lines.firstIndex(where: { $0.id == pendingId }) else { return }
+        let row = lines[idx]
+        lines[idx] = ChatLine(
+            id: row.id,
+            kind: row.kind,
+            authorBadges: row.authorBadges,
+            originalBadges: row.originalBadges,
+            authorUserId: row.authorUserId,
+            authorDisplayName: row.authorDisplayName,
+            authorColor: row.authorColor,
+            runs: row.runs,
+            isHighlighted: row.isHighlighted,
+            timestamp: row.timestamp,
+            deliveryState: .failed(reason: reason, retryText: retryText)
+        )
     }
 
     /// View-facing reset for the toast. Call after the toast finishes

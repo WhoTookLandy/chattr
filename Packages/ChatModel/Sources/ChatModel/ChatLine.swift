@@ -106,6 +106,34 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// sorted-merge logic.
     public let timestamp: Date
 
+    /// Per-line delivery lifecycle. Received messages are always
+    /// `.delivered` (the default — all existing Normalizer call sites
+    /// produce delivered lines without any code change). The other two
+    /// states only apply to messages WE sent:
+    ///
+    ///   - `.sending` — optimistic row inserted by `TabChatModel.send`,
+    ///     waiting for Twitch to broadcast the canonical echo.
+    ///   - `.failed` — Helix returned `isSent=false` or threw; the row
+    ///     stays on screen with a red treatment + tap-to-retry instead
+    ///     of vanishing. Carries the reason text (for the inline label)
+    ///     and the original draft text (so retry doesn't require
+    ///     remembering what was typed).
+    ///
+    /// Stored as a separate axis from `kind` because they're orthogonal:
+    /// you can in principle have a `.sending .subBubble` (we don't today,
+    /// but the type doesn't prevent it) and a `.failed .message` is the
+    /// common case for the retry UI.
+    public var deliveryState: DeliveryState
+
+    /// Three-state delivery lifecycle. See `deliveryState` for the
+    /// semantics; renderers can switch on this to produce dimmed/error
+    /// treatments without inspecting any other field.
+    public enum DeliveryState: Sendable, Equatable, Hashable {
+        case delivered
+        case sending
+        case failed(reason: String, retryText: String)
+    }
+
     /// What types of line we can render. The renderer dispatches on this
     /// to choose between an inline chat row and a styled bubble row.
     ///
@@ -233,7 +261,12 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
             authorColor: authorColor,
             runs: runs,                       // keep content for strikethrough display
             isHighlighted: false,             // deleted messages aren't highlighted
-            timestamp: timestamp
+            timestamp: timestamp,
+            deliveryState: deliveryState     // preserve send-state across delete
+                                              // (a row that was .failed when a mod
+                                              // deleted it stays failed — though
+                                              // the strikethrough takes visual
+                                              // priority over the retry icon)
         )
     }
 
@@ -247,7 +280,8 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         authorColor: String = "",
         runs: [LineRun],
         isHighlighted: Bool = false,
-        timestamp: Date = .now
+        timestamp: Date = .now,
+        deliveryState: DeliveryState = .delivered
     ) {
         self.id = id
         self.kind = kind
@@ -259,5 +293,6 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         self.runs = runs
         self.isHighlighted = isHighlighted
         self.timestamp = timestamp
+        self.deliveryState = deliveryState
     }
 }

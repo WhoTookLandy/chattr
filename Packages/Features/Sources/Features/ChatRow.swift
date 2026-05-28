@@ -27,6 +27,10 @@ import DesignSystem
 struct ChatRow: View {
     let line: ChatLine
     let badgeEntries: [ChatBadgeEntry]
+    /// Called when the user taps the retry control on a `.failed` row.
+    /// Optional so call sites without a retry path (priming, previews,
+    /// future read-only chat) don't have to manufacture a callback.
+    var onRetry: (() -> Void)? = nil
 
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
@@ -38,8 +42,29 @@ struct ChatRow: View {
         // and strikethroughs the content in place.
         switch line.kind {
         case .message:
-            messageBody
-                .opacity(1.0)
+            // Delivery-state dispatch only applies to .message rows —
+            // sub/raid/system bubbles can't be in `.sending` or
+            // `.failed` since we don't send those (they always arrive
+            // via EventSub already-delivered).
+            switch line.deliveryState {
+            case .delivered:
+                messageBody
+            case .sending:
+                // Dimmed treatment so the user reads "this is in flight."
+                // We don't add a spinner — chat updates fast enough
+                // (~150ms to echo) that a spinner would barely render.
+                // The opacity dip is more legible than animation churn.
+                messageBody
+                    .opacity(0.55)
+            case .failed(let reason, _):
+                // Stack the row + a compact failure footer. Tap the
+                // whole failure footer to retry.
+                VStack(alignment: .leading, spacing: 4) {
+                    messageBody
+                        .opacity(0.7)
+                    failureFooter(reason: reason)
+                }
+            }
         case .deletedPlaceholder:
             // Render the original content but dimmed + struck-through.
             // We don't change the data shape — the original `runs` stays
@@ -107,6 +132,55 @@ struct ChatRow: View {
                     .fill(Color.accentColor.opacity(0.12))
             }
         }
+    }
+
+    /// Failure-state footer rendered below a `.failed` message row.
+    /// Shows the drop reason from Twitch / the network error, and the
+    /// whole strip is tappable to retry the send.
+    ///
+    /// Design choices:
+    ///   - `exclamationmark.triangle.fill` with hierarchical rendering
+    ///     in `.red` reads as "error" at any size without needing a
+    ///     filled background — the symbol carries the meaning.
+    ///   - "Tap to retry" reads better than a separate icon-button.
+    ///     The whole strip is one tap target → bigger hit area, less
+    ///     visual clutter than a 44pt circle next to the row.
+    ///   - Disabling the tap when `onRetry` is nil keeps the same
+    ///     visual for read-only contexts (priming, previews) without
+    ///     a broken affordance.
+    @ViewBuilder
+    private func failureFooter(reason: String) -> some View {
+        Button {
+            onRetry?()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.red)
+                    .imageScale(.small)
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                Spacer(minLength: 4)
+                if onRetry != nil {
+                    Image(systemName: "arrow.clockwise")
+                        .imageScale(.small)
+                        .foregroundStyle(.red)
+                    Text("Retry")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.red.opacity(0.10))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(onRetry == nil)
+        .accessibilityLabel("Failed to send: \(reason). Tap to retry.")
     }
 
     /// Dispatch a single run to its inline view. Each case is a one-liner —

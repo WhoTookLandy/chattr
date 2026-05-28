@@ -139,10 +139,15 @@ public struct ChatScreen: View {
                 onSend: { draft in await chatModel.send(text: draft) }
             )
         }
-        // Send-failure toast. Bound to `chatModel.sendError` (set by
-        // `TabChatModel.send` on Twitch drop / network error). The alert
-        // auto-clears the error when dismissed so a second failure
-        // re-triggers the alert instead of being suppressed by stale state.
+        // Send-failure alert is gone — drops and network errors now
+        // surface inline on the failed row itself (red exclamation +
+        // tap-to-retry; see ChatRow's failed-state treatment).
+        //
+        // We keep `chatModel.sendError` for the one remaining case
+        // where there's no row to attach the error to: the user tries
+        // to send but there's no attached session (rare — usually means
+        // the channel session failed to construct). For that we still
+        // show the alert.
         .alert("Couldn't send", isPresented: Binding(
             get: { chatModel.sendError != nil },
             set: { isPresented in if !isPresented { chatModel.clearSendError() } }
@@ -307,7 +312,13 @@ public struct ChatScreen: View {
                         // practice we always have a store here. The fallback
                         // just prevents force-unwrap explosions during weird
                         // preview/test configurations.
-                        badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? []
+                        badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? [],
+                        // Per-row retry handler — only triggers when the
+                        // ChatRow shows its failure footer (delivery state
+                        // is `.failed`). The Task indirection escapes
+                        // the synchronous Button action into the
+                        // @MainActor model's async retry method.
+                        onRetry: { Task { await chatModel.retry(failedLineId: line.id) } }
                     )
                     .id(line.id)
                 }
