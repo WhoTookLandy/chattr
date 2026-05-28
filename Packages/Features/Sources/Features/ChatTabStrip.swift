@@ -18,24 +18,42 @@ struct ChatTabStrip: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(model.tabs) { tab in
-                    TabCell(
-                        tab: tab,
-                        isActive: model.activeTabId == tab.id,
-                        onTap: { model.activeTabId = tab.id },
-                        onClose: { model.close(tabId: tab.id) }
-                    )
-                }
+            // `GlassEffectContainer` groups the adjacent glass elements
+            // (each TabCell + AddTabButton has its own `.glassEffect`) so
+            // they:
+            //   - morph together when tabs are added/closed (iOS 26's
+            //     signature liquid-glass behavior — pills smoothly slide
+            //     and re-shape rather than popping in and out),
+            //   - render as a single composited surface (cheaper than N
+            //     independent glass passes),
+            //   - share lighting/lensing so highlights and shadows are
+            //     coherent across the whole strip rather than each pill
+            //     computing its own.
+            //
+            // Per axiom-design's liquid-glass-ref: "Use for nearby glass
+            // elements, morphing animations, and performance-critical
+            // interfaces." The tab strip ticks all three boxes.
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    ForEach(model.tabs) { tab in
+                        TabCell(
+                            tab: tab,
+                            isActive: model.activeTabId == tab.id,
+                            onTap: { model.activeTabId = tab.id },
+                            onClose: { model.close(tabId: tab.id) }
+                        )
+                    }
 
-                AddTabButton(action: onAddTab)
+                    AddTabButton(action: onAddTab)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        // No background — each pill is its own Liquid Glass element so the
-        // chat content beneath subtly shows through the gaps. Nesting glass
-        // inside `.bar` (the previous design) is explicitly discouraged.
+        // No background on the ScrollView — each pill is its own Liquid
+        // Glass element so the chat content beneath subtly shows through
+        // the gaps. The container above (not a background) lets the
+        // pills cluster their lensing/morphing without nesting glass.
     }
 }
 

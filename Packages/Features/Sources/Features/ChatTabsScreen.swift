@@ -78,7 +78,12 @@ public struct ChatTabsScreen: View {
             if let chatTabs, !chatTabs.tabs.isEmpty {
                 VStack(spacing: 0) {
                     ChatTabStrip(model: chatTabs, onAddTab: onAddTab)
-                    Divider()
+                    // Divider removed — the chat scroll's `.scrollEdgeEffectStyle`
+                    // (set inside ChatScreen's ScrollView) produces a soft
+                    // visual shelf where content dissolves into the
+                    // background under the tab strip. Liquid Glass design
+                    // prefers this dissolve over a hard line — feels more
+                    // continuous with the floating-pill aesthetic.
                     pagedChatContent(chatTabs: chatTabs)
                 }
                 // Restore the active tab from scene storage. Only applies if

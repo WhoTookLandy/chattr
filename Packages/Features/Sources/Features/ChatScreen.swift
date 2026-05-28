@@ -246,6 +246,14 @@ public struct ChatScreen: View {
     /// message — keeps the empty-state cleanly separated and avoids feeding
     /// an empty LazyVStack into `.scrollPosition` (which would no-op until
     /// rows arrive but log-spams about a missing target).
+    ///
+    /// **Scroll edge effect**: `.hard` style is the right pick here because
+    /// our parent (`ChatTabsScreen`) renders a pinned glass tab strip
+    /// directly above this scroll. Per axiom-design's liquid-glass guidance:
+    /// "use `.hard` style for pinned accessory views" — that's exactly what
+    /// the tab strip is. The hard variant dissolves scrolling content into
+    /// the background just under the strip, giving a crisp visual shelf
+    /// without the old explicit Divider we used to have here.
     @ViewBuilder
     private var chatScrollView: some View {
         ScrollView {
@@ -270,6 +278,11 @@ public struct ChatScreen: View {
         // the user scrolls manually, opening the door to "snap to bottom only
         // when already at bottom" UX later without changing today's behavior.
         .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
+        // Scroll-edge dissolution under the pinned tab strip — see
+        // `chatScrollView` doc-comment above. `.hard` because the tab
+        // strip is a pinned accessory; `.top` because that's the edge
+        // meeting the chrome.
+        .scrollEdgeEffectStyle(.hard, for: .top)
         // "tail -f" semantics for chat scroll:
         //
         //   - If the user is at the bottom of the feed (scroll position is
