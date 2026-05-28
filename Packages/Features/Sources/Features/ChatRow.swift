@@ -72,21 +72,28 @@ struct ChatRow: View {
             // sub/raid/system bubbles can't be in `.sending` or
             // `.failed` since we don't send those (they always arrive
             // via EventSub already-delivered).
+            //
+            // If this row is a reply (`line.replyParent != nil`), we
+            // stack a quoted-preview block above the message body so
+            // the reader sees what's being responded to. Twitch web
+            // does the same thing — replaces the "@parentUser " prefix
+            // Twitch normally puts in the message body with a distinct
+            // visual treatment.
             switch line.deliveryState {
             case .delivered:
-                messageBody
+                messageWithOptionalQuote
             case .sending:
                 // Dimmed treatment so the user reads "this is in flight."
                 // We don't add a spinner — chat updates fast enough
                 // (~150ms to echo) that a spinner would barely render.
                 // The opacity dip is more legible than animation churn.
-                messageBody
+                messageWithOptionalQuote
                     .opacity(0.55)
             case .failed(let reason, _):
                 // Stack the row + a compact failure footer. Tap the
                 // whole failure footer to retry.
                 VStack(alignment: .leading, spacing: 4) {
-                    messageBody
+                    messageWithOptionalQuote
                         .opacity(0.7)
                     failureFooter(reason: reason)
                 }
@@ -113,6 +120,55 @@ struct ChatRow: View {
         case .systemBubble(let text):
             SystemBubbleRow(text: text)
         }
+    }
+
+    /// Wraps `messageBody` with a quoted-preview block above it when
+    /// the line is a reply. For non-reply messages, this is just
+    /// `messageBody` unchanged — no layout cost.
+    ///
+    /// The quoted block visually borrows from Twitch web's reply
+    /// rendering: a thin leading bar (the "quote" affordance) +
+    /// dimmed parent author name + truncated parent body. One line,
+    /// truncated tail.
+    @ViewBuilder
+    private var messageWithOptionalQuote: some View {
+        if let reply = line.replyParent {
+            VStack(alignment: .leading, spacing: 2) {
+                quotedPreview(reply)
+                messageBody
+            }
+        } else {
+            messageBody
+        }
+    }
+
+    /// Quoted-parent block. Two stacked lines: parent author + body.
+    /// Uses caption2 / footnote weights so it visually subordinates to
+    /// the real message body below.
+    @ViewBuilder
+    private func quotedPreview(_ reply: ChatLine.ReplyParent) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            // Leading "quote" bar — 2pt-wide rounded rect using the
+            // tertiary system fill so it adapts to light/dark
+            // automatically. Reads as "this is a quoted block"
+            // without needing a separate icon.
+            Capsule()
+                .fill(.tertiary)
+                .frame(width: 2)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(reply.parentAuthorDisplayName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(reply.parentBody)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .padding(.leading, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Replying to \(reply.parentAuthorDisplayName): \(reply.parentBody)")
     }
 
     /// The standard inline message body (badges + username + runs).

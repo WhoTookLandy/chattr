@@ -367,6 +367,23 @@ public final class TabChatModel {
         // distinct from anything Twitch can mint (their messageIds are
         // UUIDv4s without a prefix), so there's no risk of a real echo
         // colliding with a pending id.
+        // Build a ReplyParent for the optimistic row if this is a reply.
+        // The thread root mirrors `parentMessageId` for the common
+        // "reply to a non-reply" case; when the user is replying to a
+        // message that's itself a reply, the *correct* thread root is
+        // the original chain root, which we'd have to walk via the
+        // parent's own replyParent. We approximate it as the immediate
+        // parent for now — the echo overwrites this with Twitch's
+        // canonical `threadMessageId` when it arrives.
+        let optimisticReplyParent: ChatLine.ReplyParent? = replyAttachment.map { attachment in
+            ChatLine.ReplyParent(
+                parentMessageId: attachment.parentMessageId,
+                parentAuthorDisplayName: attachment.parentAuthorDisplayName,
+                parentBody: attachment.parentSnippet,
+                threadRootMessageId: attachment.parentMessageId
+            )
+        }
+
         let pendingId = "pending-\(UUID().uuidString)"
         let optimistic = ChatLine(
             id: pendingId,
@@ -380,7 +397,8 @@ public final class TabChatModel {
                                         // overwrite with the Normalizer's tokenized version
             isHighlighted: false,
             timestamp: .now,
-            deliveryState: .sending     // renderer dims the row so the user sees it as in-flight
+            deliveryState: .sending,    // renderer dims the row so the user sees it as in-flight
+            replyParent: optimisticReplyParent
         )
         lines.append(optimistic)
         // Cap as usual — sending while at 500 lines drops the oldest, same
@@ -491,7 +509,8 @@ public final class TabChatModel {
             runs: row.runs,
             isHighlighted: row.isHighlighted,
             timestamp: row.timestamp,
-            deliveryState: .failed(reason: reason, retryText: retryText)
+            deliveryState: .failed(reason: reason, retryText: retryText),
+            replyParent: row.replyParent       // preserve thread membership on failed
         )
     }
 

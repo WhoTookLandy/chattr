@@ -106,6 +106,59 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// sorted-merge logic.
     public let timestamp: Date
 
+    /// Reply attachment, populated when this message is itself a reply
+    /// to another message. The renderer uses it to draw a quoted
+    /// preview above the message body (similar to Twitch web's
+    /// threaded display); `viewThread` machinery uses
+    /// `threadRootMessageId` to group lines by thread.
+    ///
+    /// `nil` for non-reply messages (the vast majority of chat) and
+    /// for the `.subBubble` / `.raidBubble` / `.systemBubble` /
+    /// `.deletedPlaceholder` kinds. Renderers should treat the field
+    /// as purely informational — no behavior depends on it being set
+    /// or unset for any specific kind.
+    public let replyParent: ReplyParent?
+
+    /// Twitch reply metadata: which message this is responding to AND
+    /// what thread it belongs to. Twitch distinguishes between the
+    /// immediate parent (the line you tapped Reply on) and the thread
+    /// root (the message that started the whole thread). For
+    /// A → B → C, B's parent is A and C's parent is B; both B and C
+    /// share thread-root A.
+    public struct ReplyParent: Sendable, Equatable, Hashable {
+        /// The message ID of the immediate parent — the one whose
+        /// "Reply" button the sender tapped. Used for rendering "in
+        /// reply to <X>" context AND for opening the thread view at
+        /// the right scroll position.
+        public let parentMessageId: String
+
+        /// Display name of the parent message's author.
+        public let parentAuthorDisplayName: String
+
+        /// The parent message's body text (Twitch sends a plain-text
+        /// excerpt — we render it as-is in the quoted preview without
+        /// re-tokenizing through the Normalizer).
+        public let parentBody: String
+
+        /// The thread's root message ID. Equal to `parentMessageId`
+        /// when this is a direct reply to a non-reply; differs when
+        /// it's a reply-to-a-reply. Used by `viewThread` to group all
+        /// messages in the same chain.
+        public let threadRootMessageId: String
+
+        public init(
+            parentMessageId: String,
+            parentAuthorDisplayName: String,
+            parentBody: String,
+            threadRootMessageId: String
+        ) {
+            self.parentMessageId = parentMessageId
+            self.parentAuthorDisplayName = parentAuthorDisplayName
+            self.parentBody = parentBody
+            self.threadRootMessageId = threadRootMessageId
+        }
+    }
+
     /// Per-line delivery lifecycle. Received messages are always
     /// `.delivered` (the default — all existing Normalizer call sites
     /// produce delivered lines without any code change). The other two
@@ -262,11 +315,14 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
             runs: runs,                       // keep content for strikethrough display
             isHighlighted: false,             // deleted messages aren't highlighted
             timestamp: timestamp,
-            deliveryState: deliveryState     // preserve send-state across delete
+            deliveryState: deliveryState,    // preserve send-state across delete
                                               // (a row that was .failed when a mod
                                               // deleted it stays failed — though
                                               // the strikethrough takes visual
                                               // priority over the retry icon)
+            replyParent: replyParent          // preserve thread membership too —
+                                              // a deleted reply still belongs to
+                                              // its thread for view-thread purposes
         )
     }
 
@@ -281,7 +337,8 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         runs: [LineRun],
         isHighlighted: Bool = false,
         timestamp: Date = .now,
-        deliveryState: DeliveryState = .delivered
+        deliveryState: DeliveryState = .delivered,
+        replyParent: ReplyParent? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -294,5 +351,6 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         self.isHighlighted = isHighlighted
         self.timestamp = timestamp
         self.deliveryState = deliveryState
+        self.replyParent = replyParent
     }
 }

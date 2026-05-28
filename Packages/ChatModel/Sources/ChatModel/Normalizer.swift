@@ -118,7 +118,25 @@ public enum Normalizer {
         // per text-chunk, not one per word. Improves baseline alignment
         // when text/emote sequences mix (each Text view has its own
         // baseline anchor — fewer Text views = fewer anchor adjustments).
-        let coalesced = Self.coalesceAdjacentText(runs)
+        var coalesced = Self.coalesceAdjacentText(runs)
+
+        // Twitch's IRC convention prefixes reply bodies with
+        // "@parentLogin " so legacy chat clients see who's being replied
+        // to even without UI support. We render the quoted-parent block
+        // separately above the message body now, so that leading
+        // mention is redundant + visually noisy. Strip it here so the
+        // body reads as just the user's actual reply text.
+        //
+        // We only strip when the runs START with the matching mention
+        // (followed optionally by a space-only text run) — keeps the
+        // strip surgical instead of removing every leading @ in any
+        // reply.
+        if message.reply != nil {
+            coalesced = Self.stripLeadingReplyMention(
+                runs: coalesced,
+                parentLogin: message.reply?.parentUserLogin ?? ""
+            )
+        }
 
         // Highlight detection — message is highlighted if it mentions me
         // OR if any text run contains a configured keyword (case-insensitive
@@ -129,6 +147,19 @@ public enum Normalizer {
             keywords: highlightKeywords
         )
 
+        // Extract reply metadata if Twitch tagged this message as a reply.
+        // Stored on the ChatLine so the renderer can show a quoted-preview
+        // block above the message body AND so the thread-view sheet
+        // (`viewThread`) can filter lines by `threadRootMessageId`.
+        let replyParent = message.reply.map { reply in
+            ChatLine.ReplyParent(
+                parentMessageId: reply.parentMessageId,
+                parentAuthorDisplayName: reply.parentUserName,
+                parentBody: reply.parentMessageBody,
+                threadRootMessageId: reply.threadMessageId
+            )
+        }
+
         return ChatLine(
             id: message.messageId,
             kind: .message,
@@ -138,7 +169,8 @@ public enum Normalizer {
             authorDisplayName: message.chatterUserName,
             authorColor: message.color,
             runs: coalesced,
-            isHighlighted: isHighlighted
+            isHighlighted: isHighlighted,
+            replyParent: replyParent
         )
     }
 
@@ -371,6 +403,44 @@ public enum Normalizer {
     /// non-emote-broken segment, and a fragment-level walk can produce
     /// adjacent text runs across fragment boundaries (e.g., a `.text`
     /// fragment followed by a `.text` fragment for some reason).
+    /// If `runs` starts with a `.mention` of the parent's login (Twitch's
+    /// legacy "@parentLogin " prefix that backs up the reply metadata for
+    /// clients without UI support), strip it — including a single
+    /// trailing whitespace text run, so the user-facing body starts
+    /// at the actual response text.
+    ///
+    /// Examples (parentLogin = "xqc"):
+    ///   [.mention("xqc"), .text(" hello there")]  → [.text("hello there")]
+    ///   [.mention("xqc"), .text(" "), .emote(...)] → [.emote(...)]
+    ///   [.text("hey "), .mention("xqc"), ...]      → unchanged (mention isn't leading)
+    ///   [.mention("ninja"), .text(" hi")]          → unchanged (mention isn't the parent)
+    ///
+    /// Conservative: only strips when the mention is THE first run
+    /// and matches the parent. Avoids accidentally stripping a
+    /// deliberate "@someoneElse" the user wrote on purpose.
+    private static func stripLeadingReplyMention(runs: [LineRun], parentLogin: String) -> [LineRun] {
+        guard !parentLogin.isEmpty,
+              let first = runs.first,
+              case .mention(let login, _) = first,
+              login.caseInsensitiveCompare(parentLogin) == .orderedSame else {
+            return runs
+        }
+        var trimmed = Array(runs.dropFirst())
+        // Drop the leading-whitespace text run that follows the mention
+        // (Twitch always inserts one). If the FIRST remaining run is a
+        // text run consisting only of whitespace, drop it; otherwise
+        // strip leading whitespace from it.
+        if case .text(let body) = trimmed.first {
+            let lstripped = String(body.drop(while: { $0.isWhitespace }))
+            if lstripped.isEmpty {
+                trimmed.removeFirst()
+            } else {
+                trimmed[0] = .text(lstripped)
+            }
+        }
+        return trimmed
+    }
+
     private static func coalesceAdjacentText(_ runs: [LineRun]) -> [LineRun] {
         var result: [LineRun] = []
         result.reserveCapacity(runs.count)
