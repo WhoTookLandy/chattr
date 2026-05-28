@@ -79,6 +79,27 @@ public struct SettingsScreen: View {
                         .font(.footnote)
                 }
             }
+
+            // Developer tools — always visible for now. When the app ships
+            // for real users we'll gate behind `#if DEBUG` or a hidden
+            // tap-counter gesture; today there's no production audience so
+            // a discoverable nav row is fine.
+            //
+            // The DevLogView reads from OSLogStore so it captures EVERY
+            // log line emitted by chattr's subsystem since launch — no
+            // additional instrumentation needed. Long-press a row to copy
+            // its message to clipboard for sharing.
+            Section {
+                NavigationLink {
+                    DevLogView()
+                } label: {
+                    Label("Recent Logs", systemImage: "doc.text.magnifyingglass")
+                }
+            } header: {
+                Text("Developer")
+            } footer: {
+                Text("Live view of chattr's runtime logs (from OSLogStore). Useful for diagnosing why something didn't work.")
+            }
         }
         .navigationTitle("Settings")
         // `.toolbarTitleDisplayMode` is cross-platform (iOS 17 / macOS 14+) —
