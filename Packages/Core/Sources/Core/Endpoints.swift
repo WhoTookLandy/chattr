@@ -100,6 +100,27 @@ public enum Endpoints {
         }
     }
 
+    // MARK: - rustlog (community chat archive)
+    //
+    // Public read-only API that archives Twitch chat 24/7 via IRC. We use
+    // it for "backfill" — fetching recent messages when a user joins a
+    // channel so chat isn't empty for the first minute. Twitch's own API
+    // does NOT expose chat history; rustlog is the standard
+    // community-run solution.
+    //
+    // Failure handling: backfill is nice-to-have, not must-have. If
+    // rustlog is down or slow, we skip and the channel still joins —
+    // the user just doesn't see history.
+
+    public enum Rustlog {
+        /// Fetch the most recent N messages for a channel, by login
+        /// (lowercase Twitch username). Returns JSON with a `messages`
+        /// array of raw IRC-format strings.
+        public static func recentMessages(channelLogin: String, limit: Int = 150) -> URL {
+            URL(string: "https://recent-messages.robotty.de/api/v2/recent-messages/\(channelLogin)?limit=\(limit)")!
+        }
+    }
+
     // MARK: - FrankerFaceZ (FFZ)
 
     public enum FFZ {

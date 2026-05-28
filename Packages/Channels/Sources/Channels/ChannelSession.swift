@@ -91,8 +91,37 @@ public actor ChannelSession {
     public func start() async throws {
         logger.info("Starting session for #\(self.channelLoginName) (channelId=\(self.channelId))")
 
+        // Kick off rustlog backfill in parallel with the WebSocket connect.
+        // Both are independent network operations (~500ms each) and the user-
+        // visible chat-load latency benefits from running them concurrently.
+        //
+        // Order matters: backfill MUST complete + populate the ring BEFORE
+        // we subscribe to EventSub. Otherwise:
+        //   - Live messages start arriving and fan out to subscribers
+        //   - Backfill returns later and prepends to ring
+        //   - But subscribers already received the live messages and
+        //     never see the older history (because subscribe(_:) returns
+        //     the snapshot only once, at registration time)
+        //
+        // Sequencing: async-let the backfill, await connect, await
+        // backfill, install ring, then subscribe. Backfill failures are
+        // swallowed by BackfillProvider — chat still works without
+        // history.
+        async let backfillTask = BackfillProvider.fetchRecentMessages(channelLogin: channelLoginName)
+
         // EventSub.connect() waits for session_welcome before returning.
         try await client.eventSub.connect()
+
+        // Now drain the backfill. BackfillProvider returns [] on any error
+        // (logged as warning inside the provider) — we never propagate.
+        let backfill = await backfillTask
+        if !backfill.isEmpty {
+            // Cap at the same ring capacity as live messages. Backfill is
+            // chronological (oldest → newest); we keep the most recent
+            // backfill entries if there are more than ringCapacity.
+            ring = Array(backfill.suffix(Self.ringCapacity))
+            logger.info("Primed ring with \(self.ring.count) backfilled message(s) for #\(self.channelLoginName, privacy: .public)")
+        }
 
         // Subscribe to channel.chat.message for this channel + our identity.
         let subscription = EventSubSubscription.Chat.message(
