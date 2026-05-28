@@ -142,17 +142,9 @@ public struct ChannelListScreen: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                NavigationLink {
-                    SettingsScreen(account: account, accountStore: accountStore)
-                } label: {
-                    Image(systemName: "gearshape")
-                        .symbolRenderingMode(.hierarchical)
-                        .accessibilityLabel("Settings")
-                }
-            }
-        }
+        // Gear icon removed — Settings moved to the new Profile tab.
+        // ChannelListScreen's toolbar is now clean (just the title menu
+        // for Live/All selection via `.toolbarTitleMenu` above).
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,

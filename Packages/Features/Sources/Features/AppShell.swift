@@ -67,7 +67,7 @@ public struct AppShell: View {
     /// 18+). With both in scope inside `body`, unqualified `Tab(...)` would
     /// otherwise resolve to this nested enum and the new init wouldn't compile.
     enum AppTab: Hashable, Sendable {
-        case follows, chat
+        case follows, chat, profile
     }
 
     public init(account: Account, accountStore: AccountStore) {
@@ -97,6 +97,22 @@ public struct AppShell: View {
             // The conditional yields 0 (which renders no badge) when no
             // tabs are open — Tab.badge interprets 0 as "hidden".
             .badge(chatTabsModel.tabs.isEmpty ? 0 : chatTabsModel.tabs.count)
+
+            // Profile tab. Replaces the previous "gear in ChannelListScreen
+            // toolbar → SettingsScreen push" pattern. Three reasons we
+            // promoted it to a tab:
+            //   1. Settings is account-level, not follows-level — it
+            //      belongs at the same nav depth as the main feeds.
+            //   2. The gear was visually isolated in the toolbar (the
+            //      audit's "lonely island" finding).
+            //   3. With 2 tabs, iOS 26's floating-capsule tab bar looked
+            //      thin/floaty. A third tab gives it the proper
+            //      navigation-chrome weight.
+            Tab("Profile", systemImage: "person.crop.circle.fill", value: AppTab.profile) {
+                NavigationStack {
+                    ProfileScreen(account: account, accountStore: accountStore)
+                }
+            }
         }
         // Removed `.tabBarMinimizeBehavior(.onScrollDown)`. iOS 26's minimize
         // behavior collapses the tab bar into a small floating pill on
