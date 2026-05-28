@@ -12,6 +12,27 @@ import Channels
 ///
 /// Each tab's NavigationStack is independent — they don't share back-stacks.
 ///
+/// ## Modern Tab struct syntax (iOS 18+)
+///
+/// Uses the `Tab(_:systemImage:value:content:)` initializer rather than the
+/// pre-iOS-18 "subview + .tabItem + .tag" pattern. Benefits:
+///   - Unlocks `Tab(role: .search)` for future search-specific tabs (gets
+///     iOS 26's morph-from-tab-icon-to-search-field animation automatically).
+///   - Unlocks `.sidebarAdaptable` for iPad layouts (sidebar in landscape,
+///     bottom tabs in portrait) with `TabSection` groupings.
+///   - Unlocks `.hidden(_:)` with state preservation, `.customizationID(_:)`
+///     for user-rearrangeable tab orders persisted via `TabViewCustomization`.
+///   - Composes cleanly with `.tabBarMinimizeBehavior(_:)` (iOS 26+).
+///
+/// ## Auto-minimize on scroll
+///
+/// `.tabBarMinimizeBehavior(.onScrollDown)` collapses the bottom tab bar to
+/// a compact form when the user scrolls down through tab content, and
+/// re-expands on scroll up. Both our tabs have meaningful scroll content
+/// (Follows = channel list, Chat = paged ChatScreens with their own scroll
+/// views), so the behavior is contextual: more vertical real estate while
+/// reading; chrome reappears when the user goes back to the top.
+///
 /// AppShell owns:
 ///   - `selectedTab`: which tab is visible.
 ///   - `chatTabsModel`: the open-channel tab strip state.
@@ -24,13 +45,16 @@ public struct AppShell: View {
     private let account: Account
     private let accountStore: AccountStore
 
-    @State private var selectedTab: Tab = .follows
+    @State private var selectedTab: AppTab = .follows
     @State private var chatTabsModel = ChatTabsModel()
 
     /// Read from environment so we can wire close-X → registry.leave below.
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
 
-    enum Tab: Hashable, Sendable {
+    /// Renamed from `Tab` to disambiguate from SwiftUI's `Tab` struct (iOS
+    /// 18+). With both in scope inside `body`, unqualified `Tab(...)` would
+    /// otherwise resolve to this nested enum and the new init wouldn't compile.
+    enum AppTab: Hashable, Sendable {
         case follows, chat
     }
 
@@ -41,29 +65,38 @@ public struct AppShell: View {
 
     public var body: some View {
         TabView(selection: $selectedTab) {
-            // Follows tab
-            NavigationStack {
-                ChannelListScreen(account: account, accountStore: accountStore)
+            Tab("Follows", systemImage: "person.2.fill", value: AppTab.follows) {
+                NavigationStack {
+                    ChannelListScreen(account: account, accountStore: accountStore)
+                }
             }
-            .tabItem {
-                Label("Follows", systemImage: "person.2.fill")
-            }
-            .tag(Tab.follows)
 
-            // Chat tab
-            NavigationStack {
-                ChatTabsScreen(
-                    account: account,
-                    accountStore: accountStore,
-                    onAddTab: { selectedTab = .follows }
-                )
+            Tab("Chat", systemImage: "bubble.left.and.bubble.right.fill", value: AppTab.chat) {
+                NavigationStack {
+                    ChatTabsScreen(
+                        account: account,
+                        accountStore: accountStore,
+                        onAddTab: { selectedTab = .follows }
+                    )
+                }
             }
-            .tabItem {
-                Label("Chat", systemImage: "bubble.left.and.bubble.right.fill")
-            }
+            // Badge attaches directly to the Tab struct (vs the old
+            // `.tabItem { ... }.badge(...)` chain). Same semantics.
+            // The conditional yields 0 (which renders no badge) when no
+            // tabs are open — Tab.badge interprets 0 as "hidden".
             .badge(chatTabsModel.tabs.isEmpty ? 0 : chatTabsModel.tabs.count)
-            .tag(Tab.chat)
         }
+        // iOS 26+: tab bar auto-collapses on scroll-down within a tab's
+        // content, expands back on scroll-up. Gives the user more vertical
+        // room when reading chat / scrolling channel lists.
+        //
+        // `.onScrollDown` is iOS-only (explicitly unavailable on macOS via
+        // SwiftUI's @available annotation), so we gate the modifier here.
+        // The SPM cross-platform compile targets macOS for type-checking;
+        // without the gate it errors at build time.
+        #if os(iOS)
+        .tabBarMinimizeBehavior(.onScrollDown)
+        #endif
         .environment(\.chatTabs, chatTabsModel)
         // The openChannel action both updates the tab strip model AND switches
         // the visible tab. Concentrating both side effects behind one verb
