@@ -31,12 +31,38 @@ struct ChatRow: View {
     /// Optional so call sites without a retry path (priming, previews,
     /// future read-only chat) don't have to manufacture a callback.
     var onRetry: (() -> Void)? = nil
+    /// Called when the user picks "Reply" from the long-press menu on
+    /// a `.message` row. Optional for the same reason as `onRetry`.
+    var onReply: (() -> Void)? = nil
 
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        // Wrap the actual content in a Group so we can attach modifiers
+        // (.contextMenu) once at the outer level without duplicating
+        // them across each case in the switch. The Group is layout-
+        // transparent — it doesn't affect sizing or stacking.
+        rowContent
+            .contextMenu {
+                // Reply only makes sense on actual chat messages — not
+                // on sub/raid/system bubbles or deleted placeholders.
+                // The menu is empty for those rows, which makes the
+                // long-press a no-op (no menu pops), matching the
+                // platform default.
+                if case .message = line.kind, onReply != nil {
+                    Button {
+                        onReply?()
+                    } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
         // Dispatch on the line's Kind. .message renders inline; bubble
         // cases render as styled system rows; .deletedPlaceholder dims
         // and strikethroughs the content in place.

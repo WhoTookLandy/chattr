@@ -295,7 +295,10 @@ public actor ChannelSession {
     /// drives every other chat event. The send call is fire-then-let-EventSub-
     /// confirm — see `TabChatModel.send(...)` for the optimistic-insert /
     /// dedup orchestration on top of that.
-    public func send(_ text: String) async throws -> SendChatMessageResponse {
+    public func send(
+        _ text: String,
+        replyParentMessageId: String? = nil
+    ) async throws -> SendChatMessageResponse {
         // Trim leading/trailing whitespace only — preserve internal whitespace
         // so users can put their `:` between word and emote in
         // ":wave: hello :wave:" style messages. Twitch handles the rest.
@@ -307,7 +310,8 @@ public actor ChannelSession {
             return try await client.api.sendChatMessage(
                 broadcasterId: channelId,
                 senderId: accountUserId,
-                message: payload
+                message: payload,
+                replyParentMessageId: replyParentMessageId
             )
         } catch HelixError.unauthorized {
             // Same shape as subscribeToChat's recovery: refresh tokens once,
@@ -319,7 +323,8 @@ public actor ChannelSession {
             return try await client.api.sendChatMessage(
                 broadcasterId: channelId,
                 senderId: accountUserId,
-                message: payload
+                message: payload,
+                replyParentMessageId: replyParentMessageId
             )
         }
     }

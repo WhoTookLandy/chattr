@@ -143,6 +143,31 @@ public final class TabChatModel {
     /// HelixError surfaced, network blip). nil clears the toast.
     public var sendError: String?
 
+    /// When non-nil, the compose bar renders a "Replying to …" chip and
+    /// the next send is threaded onto this message. Set by `beginReply(to:)`,
+    /// cleared by `cancelReply()` (user dismissed the chip) or
+    /// automatically inside `send(...)` after a reply ships.
+    ///
+    /// We carry both the message ID (what Twitch needs to thread) and
+    /// the author + a snippet of the body (what the user needs to
+    /// remember which message they're replying to).
+    public var replyContext: ReplyContext?
+
+    /// Payload for an in-flight reply intent. Held by `replyContext`;
+    /// passed to `ChannelSession.send` as `replyParentMessageId` when
+    /// the user finally taps Send.
+    public struct ReplyContext: Sendable, Equatable {
+        public let parentMessageId: String
+        public let parentAuthorDisplayName: String
+        public let parentSnippet: String      // already-truncated so the view doesn't need to
+
+        public init(parentMessageId: String, parentAuthorDisplayName: String, parentSnippet: String) {
+            self.parentMessageId = parentMessageId
+            self.parentAuthorDisplayName = parentAuthorDisplayName
+            self.parentSnippet = parentSnippet
+        }
+    }
+
     /// Synchronous re-entry guard for `attach(sessions:)`. Without it, two
     /// concurrent attach() calls can both pass the "subscriptions empty"
     /// check before either commits — classic actor reentrancy state-staleness
@@ -298,6 +323,20 @@ public final class TabChatModel {
             return
         }
 
+        // Snapshot the reply context now and clear it immediately. We
+        // clear up-front so the chip disappears from the compose bar at
+        // the same time the optimistic row appears — feels deliberate,
+        // and prevents the user from "double-attaching" a reply by
+        // hitting send twice fast.
+        //
+        // If send fails, the parent message is still in chat so the
+        // user can long-press → reply again. We don't try to restore
+        // the chip on failure because that would require carrying
+        // reply state on the .failed line, which is more complexity
+        // than the rare retry-a-reply case justifies.
+        let replyAttachment = replyContext
+        replyContext = nil
+
         // Build and append the optimistic line. `pending-…` IDs are
         // distinct from anything Twitch can mint (their messageIds are
         // UUIDv4s without a prefix), so there's no risk of a real echo
@@ -326,7 +365,7 @@ public final class TabChatModel {
         pendingSendIDByText[canonical] = pendingId
 
         do {
-            let response = try await session.send(canonical)
+            let response = try await session.send(canonical, replyParentMessageId: replyAttachment?.parentMessageId)
 
             if response.isSent {
                 // Success: leave the optimistic line untouched and let the
@@ -434,6 +473,65 @@ public final class TabChatModel {
     /// auto-dismissing so a second send error re-triggers the animation.
     public func clearSendError() {
         sendError = nil
+    }
+
+    /// Attaches a reply to the next send. Builds the chip snippet from
+    /// the line's runs — text runs concatenated up to ~80 chars, emote
+    /// runs collapsed to their name (so the chip still reads sensibly
+    /// when the parent was mostly emotes).
+    ///
+    /// `.subBubble` / `.raidBubble` / `.systemBubble` / `.deletedPlaceholder`
+    /// lines are ignored — replying to a system message isn't a thing
+    /// Twitch supports, and the long-press menu in `ChatRow` only
+    /// surfaces the Reply affordance for `.message` rows anyway. The
+    /// guard is defensive.
+    public func beginReply(to line: ChatLine) {
+        guard case .message = line.kind else { return }
+        let snippet = Self.snippet(from: line.runs, cap: 80)
+        replyContext = ReplyContext(
+            parentMessageId: line.id,
+            parentAuthorDisplayName: line.authorDisplayName,
+            parentSnippet: snippet
+        )
+    }
+
+    /// User dismissed the reply chip without sending. Clears the
+    /// pending attachment.
+    public func cancelReply() {
+        replyContext = nil
+    }
+
+    /// Build a short, single-line preview of a message's runs for the
+    /// reply chip. Emote and twitchEmote runs become their name (in
+    /// angle brackets so the user sees "<KEKW>" rather than blank space
+    /// where the emote image would have rendered). URL and cheermote
+    /// runs render as their text. The total is capped with an ellipsis.
+    private static func snippet(from runs: [LineRun], cap: Int) -> String {
+        var out = ""
+        for run in runs {
+            switch run {
+            case .text(let s):
+                out += s
+            case .emote(let e):
+                out += e.name
+            case .twitchEmote(_, let display):
+                out += display
+            case .mention(let login, _):
+                out += "@\(login)"
+            case .url(let s):
+                out += s
+            case .cheermote(let prefix, let bits, _):
+                out += "\(prefix)\(bits)"
+            }
+            if out.count >= cap { break }
+        }
+        if out.count > cap {
+            // Cut at character boundary — using `prefix(cap)` returns a
+            // Substring of Characters, safe for Grapheme clusters
+            // (emoji, combined marks). String(...) re-bridges.
+            return String(out.prefix(cap)) + "…"
+        }
+        return out
     }
 
     // MARK: - Internals

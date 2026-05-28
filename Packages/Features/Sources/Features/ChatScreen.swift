@@ -136,6 +136,8 @@ public struct ChatScreen: View {
             ComposeBar(
                 channelLoginName: channelLoginName,
                 channelDisplayName: channelDisplayName,
+                replyContext: chatModel.replyContext,
+                onCancelReply: { chatModel.cancelReply() },
                 onSend: { draft in await chatModel.send(text: draft) }
             )
         }
@@ -318,7 +320,11 @@ public struct ChatScreen: View {
                         // is `.failed`). The Task indirection escapes
                         // the synchronous Button action into the
                         // @MainActor model's async retry method.
-                        onRetry: { Task { await chatModel.retry(failedLineId: line.id) } }
+                        onRetry: { Task { await chatModel.retry(failedLineId: line.id) } },
+                        // Long-press → Reply. Sync-only — beginReply
+                        // just mutates @Observable state on the model,
+                        // no Task needed.
+                        onReply: { chatModel.beginReply(to: line) }
                     )
                     .id(line.id)
                 }
@@ -490,6 +496,14 @@ public struct ChatScreen: View {
 private struct ComposeBar: View {
     let channelLoginName: String
     let channelDisplayName: String
+    /// When non-nil, the bar shows a "Replying to …" chip above the
+    /// field and the next send threads against this parent. Owned by
+    /// `TabChatModel.replyContext` upstream — the bar is purely
+    /// presentational.
+    let replyContext: TabChatModel.ReplyContext?
+    /// Tapped on the chip's X — dismisses the reply attachment without
+    /// sending. The parent (`ChatScreen`) calls `chatModel.cancelReply()`.
+    let onCancelReply: () -> Void
     let onSend: @MainActor (String) async -> Void
 
     @State private var composeText: String = ""
@@ -497,8 +511,83 @@ private struct ComposeBar: View {
     @FocusState private var focused: Bool
 
     var body: some View {
+        VStack(spacing: 6) {
+            if let reply = replyContext {
+                replyChip(reply)
+            }
+
+            inputRow
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        // Animate the chip's appearance/disappearance. `.animation`
+        // observing `replyContext != nil` (rather than `replyContext`
+        // itself, which isn't Equatable via @Observable's tracking
+        // model) keeps the animation triggered by chip-presence
+        // toggling, not by every property change inside the context.
+        .animation(.snappy(duration: 0.2), value: replyContext != nil)
+    }
+
+    /// "Replying to @author: snippet" chip with an X button. Tinted
+    /// with the accent color at low opacity so it reads as informative,
+    /// not alarming. Uses `arrowshape.turn.up.left.fill` to mirror the
+    /// long-press menu icon — visual continuity between "I chose
+    /// Reply" and "I'm now in reply mode."
+    @ViewBuilder
+    private func replyChip(_ reply: TabChatModel.ReplyContext) -> some View {
         HStack(spacing: 8) {
-            TextField("Send a message in #\(channelLoginName)", text: $composeText)
+            Image(systemName: "arrowshape.turn.up.left.fill")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color.accentColor)
+                .imageScale(.small)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Replying to \(reply.parentAuthorDisplayName)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(reply.parentSnippet)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 4)
+            Button {
+                onCancelReply()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                    .imageScale(.medium)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel reply")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.accentColor.opacity(0.12))
+        )
+        // Subtle transition so the chip appearing isn't jarring.
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    /// Placeholder text — switches to "Reply to @author" when a reply
+    /// is attached so the user has a second visual cue (beyond the
+    /// chip) that their next send will be threaded.
+    private var textFieldPrompt: String {
+        if let reply = replyContext {
+            return "Reply to \(reply.parentAuthorDisplayName)"
+        }
+        return "Send a message in #\(channelLoginName)"
+    }
+
+    /// The TextField + Send button row, pulled out of the body for
+    /// readability now that the reply chip is also a sibling.
+    @ViewBuilder
+    private var inputRow: some View {
+        HStack(spacing: 8) {
+            TextField(textFieldPrompt, text: $composeText)
                 .textFieldStyle(.plain)
                 .focused($focused)
                 .submitLabel(.send)
@@ -530,8 +619,9 @@ private struct ComposeBar: View {
             .disabled(composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
             .accessibilityLabel("Send message")
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        // No padding modifiers here — the outer VStack in `body` owns
+        // the horizontal + vertical padding for the whole compose bar
+        // including the reply chip.
     }
 
     private func sendDraft() async {
