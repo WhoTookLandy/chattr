@@ -279,14 +279,26 @@ public final class TabChatModel {
             // Flip every existing line to deletedPlaceholder. Future
             // messages still arrive normally — this only retroactively
             // hides the scrollback.
-            lines = lines.map { $0.withDeletedPlaceholder() }
+            //
+            // In-place mutation (vs `lines.map { ... }`) avoids
+            // allocating a fresh 500-element array per chat-clear event.
+            // The @Observable property still publishes one change per
+            // element-write, but storage stays in place.
+            for idx in lines.indices {
+                lines[idx] = lines[idx].withDeletedPlaceholder()
+            }
 
         case .messagesClearedFromUser(let targetUserId):
             // Flip every line whose author is the timed-out/banned user.
             // Required field `authorUserId` on ChatLine is what makes
             // this work — without it we'd have no key to match against.
-            lines = lines.map { line in
-                line.authorUserId == targetUserId ? line.withDeletedPlaceholder() : line
+            //
+            // In-place mutation: only touches lines that match the
+            // target. Busy channels can see several timeouts per minute;
+            // avoiding the full-array .map per event is meaningful at
+            // 500-line ring buffers.
+            for idx in lines.indices where lines[idx].authorUserId == targetUserId {
+                lines[idx] = lines[idx].withDeletedPlaceholder()
             }
         }
     }

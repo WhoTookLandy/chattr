@@ -11,6 +11,22 @@ import Core   // For Endpoints.TwitchCDN.emote(...)
 struct TwitchEmoteImage: View {
     let emote: EmoteReference
     let displayName: String
+    /// Pre-resolved CDN URL, computed once in `init`. Storing as `let`
+    /// (vs computed `var`) ensures `AsyncImage(url:)` sees a stable URL
+    /// across re-renders — protects the in-flight image load from being
+    /// abandoned due to identity churn on the URL value.
+    private let emoteURL: URL?
+
+    init(emote: EmoteReference, displayName: String) {
+        self.emote = emote
+        self.displayName = displayName
+        // Twitch CDN auto-falls-back to static when an emote has no animated
+        // variant, so requesting "animated" is always safe; sticking with
+        // "static" avoids the (small) extra processing for emotes we know
+        // don't have animation metadata.
+        let format = (emote.format ?? []).contains("animated") ? "animated" : "static"
+        self.emoteURL = Endpoints.TwitchCDN.emote(id: emote.id, format: format)
+    }
 
     var body: some View {
         AsyncImage(url: emoteURL) { phase in
@@ -26,14 +42,5 @@ struct TwitchEmoteImage: View {
             }
         }
         .accessibilityLabel(Text(displayName))
-    }
-
-    private var emoteURL: URL? {
-        // Twitch CDN auto-falls-back to static when an emote has no animated
-        // variant, so requesting "animated" is always safe; sticking with
-        // "static" avoids the (small) extra processing for emotes we know
-        // don't have animation metadata.
-        let format = (emote.format ?? []).contains("animated") ? "animated" : "static"
-        return Endpoints.TwitchCDN.emote(id: emote.id, format: format)
     }
 }

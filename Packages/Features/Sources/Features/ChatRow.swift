@@ -290,13 +290,20 @@ private struct SystemBubbleRow: View {
 /// Phase 2.2 ships static rendering; animation lands in a follow-up.
 private struct EmoteImage: View {
     let emote: Emote
+    /// Pre-resolved CDN URL, computed once in `init`. Storing as `let`
+    /// (vs a `var` computed property) ensures `AsyncImage(url:)` sees a
+    /// stable URL across re-renders — without this, the computed
+    /// expression can appear different to SwiftUI between body calls
+    /// and cause AsyncImage to abandon its in-flight load.
+    private let imageURL: URL?
 
-    /// Pick the 2x size (the middle of x1/x2/x4) — matches chat row line
-    /// height closely on 1x/2x/3x displays, with the CDN doing the
-    /// upscaling/downscaling. Fall back to whatever size we have if 2x
-    /// isn't present (rare but possible for partial-variant emotes).
-    private var imageURL: URL? {
-        emote.urls[.x2] ?? emote.urls[.x1] ?? emote.urls[.x4]
+    init(emote: Emote) {
+        self.emote = emote
+        // Pick the 2x size (the middle of x1/x2/x4) — matches chat row
+        // line height on @2x/@3x displays. Fall back to whatever size
+        // we have if 2x is missing (rare but possible for partial-
+        // variant emotes).
+        self.imageURL = emote.urls[.x2] ?? emote.urls[.x1] ?? emote.urls[.x4]
     }
 
     var body: some View {
