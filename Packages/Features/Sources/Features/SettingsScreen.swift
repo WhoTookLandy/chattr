@@ -105,6 +105,11 @@ public struct SettingsScreen: View {
         // `.toolbarTitleDisplayMode` is cross-platform (iOS 17 / macOS 14+) —
         // newer replacement for the iOS-only `.navigationBarTitleDisplayMode`.
         .toolbarTitleDisplayMode(.inline)
+        // Hide the parent TabView's tab bar while Settings is on screen.
+        // iOS keeps the tab bar visible during NavigationStack pushes by
+        // default; for a "leaf" view like Settings we want full-width
+        // chrome without competing tab/back affordances.
+        .toolbar(.hidden, for: .tabBar)
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,

@@ -7,56 +7,57 @@ import Core
 ///
 /// ## Where this is reachable from
 ///
-/// Long-press the Settings screen header (see `SettingsScreen.swift`).
-/// Not in the normal nav graph — intentional. Casual users shouldn't
-/// see this; it's for diagnosing "why doesn't X work?" situations from
-/// inside the app without needing Xcode attached.
+/// Settings → Developer → Recent Logs. Not in the normal nav graph —
+/// intentional. Casual users shouldn't see this; it's for diagnosing
+/// "why doesn't X work?" situations from inside the app without
+/// needing Xcode attached.
 ///
-/// ## What you can do here
+/// ## Performance notes
 ///
-///   - Browse the most recent ~200 log lines, newest first
-///   - Filter by severity (info / notice / warning / error / fault)
-///   - Filter by category (Accounts / Channels / Features / etc.)
-///   - Tap an entry to copy its `composedMessage` to clipboard
-///   - Pull to refresh (re-reads from OSLogStore)
+/// Earlier version queried OSLogStore on every severity change (~10-50ms
+/// per query) and used non-stable UUIDs (forcing SwiftUI to re-create
+/// every row on every refresh). Current shape:
 ///
-/// ## What it doesn't do (yet)
-///
-///   - Persist across launches (OSLogStore retains entries for hours/days
-///     but is process-scoped on iOS — we read what the system has).
-///   - Export as a file (could add later — for now, copy-tap a line).
-///   - Live-update (we re-read on appear and on refresh; no streaming).
+///   - **One query**, fetches everything at `.debug` and above into
+///     `allEntries`. Severity changes filter the in-memory array — instant.
+///   - **Deterministic Entry.id** (hash of date+category+message) so SwiftUI
+///     can diff rows across reloads instead of re-creating all 200.
+///   - **Memoized `availableCategories`** in @State, updated only when
+///     `allEntries` changes — not on every body recomputation.
 public struct DevLogView: View {
-    @State private var entries: [AppLogger.Entry] = []
+    /// All entries from the last OSLogStore read, regardless of severity.
+    /// We apply the severity filter in memory rather than re-querying.
+    @State private var allEntries: [AppLogger.Entry] = []
+
+    /// Memoized category set + sort. Recomputed only when `allEntries`
+    /// changes (via the `.onChange` below), not on every body call.
+    @State private var availableCategories: [String] = []
+
     @State private var minLevel: AppLogger.Entry.Level = .info
     @State private var selectedCategory: String? = nil
     @State private var isLoading = false
 
-    /// Categories present in the currently-loaded entries, alphabetized.
-    /// Recomputed when entries change so the filter chip set stays
-    /// representative of what's actually visible.
-    private var availableCategories: [String] {
-        Array(Set(entries.map(\.category))).sorted()
-    }
-
-    /// Entries filtered through the active category chip. Severity is
-    /// already applied by the OSLogStore read (no need to re-filter).
-    private var filteredEntries: [AppLogger.Entry] {
-        guard let cat = selectedCategory else { return entries }
-        return entries.filter { $0.category == cat }
+    /// Entries visible after both severity + category filters. Computed
+    /// fresh on each body recomputation, but that's cheap (~200 element
+    /// array scan with two cheap predicates) — far cheaper than re-querying
+    /// OSLogStore.
+    private var visibleEntries: [AppLogger.Entry] {
+        allEntries.filter { entry in
+            guard entry.level.severity >= minLevel.severity else { return false }
+            if let cat = selectedCategory, entry.category != cat { return false }
+            return true
+        }
     }
 
     public init() {}
 
     public var body: some View {
         List {
-            // Filter controls live in a Section header so they pin while
-            // scrolling — important when the log list is long.
             Section {
-                ForEach(filteredEntries) { entry in
+                ForEach(visibleEntries) { entry in
                     DevLogRow(entry: entry)
                 }
-                if filteredEntries.isEmpty && !isLoading {
+                if visibleEntries.isEmpty && !isLoading {
                     ContentUnavailableView(
                         "No log entries",
                         systemImage: "doc.text",
@@ -70,18 +71,25 @@ public struct DevLogView: View {
         .listStyle(.plain)
         .navigationTitle("Recent Logs")
         .toolbarTitleDisplayMode(.inline)
+        // Hide the parent TabView's tab bar while this view is on screen —
+        // dev tooling shouldn't compete with the rest of the app's chrome.
+        // iOS keeps the tab bar by default during NavigationStack pushes.
+        .toolbar(.hidden, for: .tabBar)
         .refreshable { await reload() }
         .task { await reload() }
+        // Recompute the category chip set ONLY when the underlying data
+        // changes. Without this guard, the Set+sort would re-run on every
+        // body recomputation (severity slider, filter chip tap, etc.).
+        .onChange(of: allEntries) { _, new in
+            availableCategories = Array(Set(new.map(\.category))).sorted()
+        }
     }
 
-    /// Severity picker + category chips. Wrapped in a VStack with explicit
-    /// background so the sticky section header gets a solid material
-    /// underneath (List section headers are transparent by default).
     @ViewBuilder
     private var filterControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Severity picker — segmented so all five options are visible
-            // at a glance without a sheet/menu.
+            // Severity picker. Changing it just filters `allEntries` in
+            // memory — no OSLogStore re-query needed.
             Picker("Severity", selection: $minLevel) {
                 ForEach([
                     AppLogger.Entry.Level.debug,
@@ -94,11 +102,8 @@ public struct DevLogView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .onChange(of: minLevel) { _, _ in Task { await reload() } }
 
-            // Category filter as horizontal chips. "All" first, then
-            // alphabetized categories. Each chip is a small tinted capsule
-            // to match the existing channel-pill aesthetic.
+            // Category chips. Reads from `availableCategories` (memoized).
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     chip(label: "All", isActive: selectedCategory == nil) {
@@ -113,7 +118,7 @@ public struct DevLogView: View {
             }
         }
         .padding(.vertical, 8)
-        .textCase(nil)  // Otherwise List uppercases section headers.
+        .textCase(nil)  // List section headers uppercase by default; opt out.
     }
 
     @ViewBuilder
@@ -131,36 +136,37 @@ public struct DevLogView: View {
         .buttonStyle(.plain)
     }
 
-    /// Re-read from OSLogStore. The read happens on a background-priority
-    /// Task because OSLogStore can take 10-50ms for a few hundred entries.
+    /// Re-read from OSLogStore. Fetches at `.debug` and above so any
+    /// severity filter is satisfiable in memory without a re-query.
     private func reload() async {
         isLoading = true
         defer { isLoading = false }
-        // Hop off-main for the read. OSLogStore is sync but slow; hopping
-        // keeps the UI responsive during the refresh-pull animation.
-        let snapshot = await Task.detached(priority: .userInitiated) { [minLevel] in
-            AppLogger.recentEntries(limit: 200, minLevel: minLevel)
+        // Off-main read: OSLogStore is sync but slow (~10-50ms). Hopping
+        // keeps the refresh-pull animation smooth.
+        let snapshot = await Task.detached(priority: .userInitiated) {
+            // Fetch at the lowest level so picker changes don't need to
+            // re-query. 500 entries is plenty for one debug session and
+            // keeps the in-memory filter snappy.
+            AppLogger.recentEntries(limit: 500, minLevel: .debug)
         }.value
-        self.entries = snapshot
+        self.allEntries = snapshot
     }
 }
 
 /// One row in the log list. Color-codes by severity, monospaced font for
-/// scannable category/message, tap-to-copy for the composed message.
+/// scannable category/message, swipe-to-copy for sharing.
 private struct DevLogRow: View {
     let entry: AppLogger.Entry
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                // Color-coded severity badge.
                 Text(entry.level.rawValue.uppercased())
                     .font(.caption2.weight(.bold).monospaced())
                     .foregroundStyle(.white)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(severityColor, in: RoundedRectangle(cornerRadius: 4))
-                // Category — the part after "chattr." subsystem prefix.
                 Text(entry.category)
                     .font(.caption.weight(.medium).monospaced())
                     .foregroundStyle(.secondary)
@@ -187,9 +193,6 @@ private struct DevLogRow: View {
         }
     }
 
-    /// Map severity → color. Red for error/fault, orange for warning,
-    /// yellow for notice, gray for info/debug. Matches the "more severe
-    /// = more attention-grabbing" convention used by Console.app.
     private var severityColor: Color {
         switch entry.level {
         case .debug:     return .gray

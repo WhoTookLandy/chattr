@@ -108,7 +108,17 @@ public enum AppLogger {
     /// value-type identity, conforms to `Sendable`, and is safe to hold
     /// in @State or pass across `await` boundaries.
     public struct Entry: Sendable, Identifiable, Equatable, Hashable {
-        public let id: UUID
+        /// Deterministic id: same (date + category + message) → same id
+        /// across reloads. This is critical for SwiftUI diffing — without
+        /// stable identity, every refresh of the DevLogView would re-create
+        /// all row views (slow at 200 entries each with multi-line text).
+        ///
+        /// Implementation: a hash of the entry's display fields. Collisions
+        /// are vanishingly unlikely in practice (two distinct log lines
+        /// would need an identical timestamp down to the nanosecond, plus
+        /// identical category and message) and only cause a row not to
+        /// re-diff — never user-visible.
+        public let id: Int
         public let date: Date
         public let level: Level
         public let category: String
@@ -188,8 +198,15 @@ public enum AppLogger {
                 guard let log = entry as? OSLogEntryLog else { continue }
                 let level = Self.mapLevel(log.level)
                 guard level.severity >= minLevel.severity else { continue }
+                // Deterministic id from display fields. Same content →
+                // same id across reloads → stable SwiftUI row identity →
+                // no re-create on refresh.
+                var hasher = Hasher()
+                hasher.combine(log.date)
+                hasher.combine(log.category)
+                hasher.combine(log.composedMessage)
                 collected.append(Entry(
-                    id: UUID(),
+                    id: hasher.finalize(),
                     date: log.date,
                     level: level,
                     category: log.category,
