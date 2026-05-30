@@ -138,6 +138,31 @@ public final class TabChatModel {
     /// — covers the race window before Helix responds.
     private var pendingSendIDByText: [String: String] = [:]
 
+    /// Per-pending-send fallback timer. Started after Helix accepts (`isSent=true`)
+    /// — if the EventSub echo doesn't arrive within
+    /// `sendFallbackTimeout` seconds, the timer fires and synthesizes a
+    /// local upgrade so the row doesn't sit dim in `.sending` forever.
+    ///
+    /// **Why we need this**: Twitch's EventSub WebSocket is usually
+    /// reliable, but if the connection drops between Helix accept and
+    /// the broadcast (or Twitch's edge has a hiccup), our optimistic
+    /// row stays dim with no recovery path. The Helix response
+    /// guarantees the message DID go out — we just don't have the
+    /// rich echo data (badges, color, fragments) to upgrade with. The
+    /// fallback synthesizes "good enough" data using what we have.
+    ///
+    /// Cancelled by `cleanupPending` when an echo arrives normally,
+    /// and by `detach` when the model goes away.
+    private var sendFallbackTimers: [String: Task<Void, Never>] = [:]
+
+    /// How long to wait for the EventSub echo after Helix accepts a
+    /// send. 5 seconds is a tradeoff: long enough to cover normal
+    /// echo latency (median ~150ms, p99 ~1s on busy channels) plus a
+    /// generous buffer for transient WebSocket re-handshakes; short
+    /// enough that the user sees their message "land" before they
+    /// give up and retry.
+    private static let sendFallbackTimeout: Duration = .seconds(5)
+
     /// Surfaced to the view via @Observable so the compose bar can show a
     /// transient error toast when a send fails (Twitch dropped it,
     /// HelixError surfaced, network blip). nil clears the toast.
@@ -335,6 +360,15 @@ public final class TabChatModel {
     /// Unsubscribes from every session and clears local state. Safe to call
     /// multiple times; each call no-ops if already detached.
     public func detach() async {
+        // Cancel any in-flight fallback timers BEFORE the empty-guard
+        // so a model with pending sends but no subscriptions (rare)
+        // still gets its timers cleaned. Calling cancel on a completed
+        // Task is harmless.
+        for (_, task) in sendFallbackTimers {
+            task.cancel()
+        }
+        sendFallbackTimers.removeAll()
+
         guard !subscriptions.isEmpty else { return }
 
         // Snapshot before mutation — actor calls below are awaits.
@@ -503,6 +537,13 @@ public final class TabChatModel {
                 // a future event with the same messageId.
                 if lines.contains(where: { $0.id == pendingId }) {
                     helixMessageIdByPendingId[pendingId] = response.messageId
+                    // Defensive: start a fallback timer that fires if
+                    // the echo never arrives. See `synthesizeStuckUpgrade`
+                    // for what it does. The timer is cancelled by
+                    // cleanupPending the moment an echo reconciles the
+                    // row through Path 0 or Path 2, so in the normal
+                    // case it never fires.
+                    startSendFallbackTimer(pendingId: pendingId, canonicalMessageId: response.messageId)
                 } else {
                     // Echo already reconciled — defensive sweep in case the
                     // text-map entry didn't get cleaned by the echo path
@@ -576,6 +617,78 @@ public final class TabChatModel {
     /// moderator's `chatCleared` event raced our failure) we DON'T
     /// re-insert it; the user already saw the row vanish via the
     /// chat-clear handler, and resurrecting it would be jarring.
+    /// Kick a one-shot 5-second timer Task that synthesizes a local
+    /// "delivered" upgrade if the EventSub echo never arrives. Stored
+    /// in `sendFallbackTimers` so `cleanupPending` can cancel it the
+    /// moment a real echo reconciles the row.
+    ///
+    /// The Task is `@MainActor`-isolated via `[weak self]` capture —
+    /// when the model deinits (view torn down for good) the weak self
+    /// is nil and the synthesize step bails. Belt-and-braces with the
+    /// explicit `detach()` cancellation.
+    private func startSendFallbackTimer(pendingId: String, canonicalMessageId: String) {
+        // Cancel any prior timer for this pendingId (shouldn't happen
+        // in normal flow, but defensive).
+        sendFallbackTimers[pendingId]?.cancel()
+
+        let task = Task { @MainActor [weak self] in
+            // `try?` swallows the CancellationError that propagates
+            // when cleanupPending or detach cancels us. After the
+            // sleep returns (either timed out OR cancelled), we
+            // check `isCancelled` to decide whether to fire.
+            try? await Task.sleep(for: Self.sendFallbackTimeout)
+            guard !Task.isCancelled, let self else { return }
+            self.synthesizeStuckUpgrade(pendingId: pendingId, canonicalMessageId: canonicalMessageId)
+        }
+        sendFallbackTimers[pendingId] = task
+    }
+
+    /// Synthesizes a `.delivered` upgrade for a row that's still in
+    /// `.sending` 5s after Helix accepted. We don't have the echo's
+    /// rich payload (badges, color, server-parsed fragments) so the
+    /// row's content stays as the optimistic version — but its id
+    /// becomes the canonical messageId from Helix, so:
+    ///   - The dim "in-flight" treatment goes away (user sees their
+    ///     message landed).
+    ///   - If the echo eventually arrives, it hits Path 1 (dedup-by-id)
+    ///     and is silently dropped — no duplicate row.
+    ///
+    /// Bails if the row is no longer in `.sending` (e.g. echo raced
+    /// the timer and reconciled normally between our sleep returning
+    /// and this code running).
+    private func synthesizeStuckUpgrade(pendingId: String, canonicalMessageId: String) {
+        sendFallbackTimers.removeValue(forKey: pendingId)
+
+        guard let idx = lines.firstIndex(where: { $0.id == pendingId }),
+              case .sending = lines[idx].deliveryState else {
+            // Already upgraded via echo, or removed — nothing to do.
+            return
+        }
+
+        logger.warning("Echo never arrived for messageId=\(canonicalMessageId, privacy: .public); synthesizing local upgrade after \(Self.sendFallbackTimeout)")
+
+        let row = lines[idx]
+        lines[idx] = ChatLine(
+            id: canonicalMessageId,
+            kind: row.kind,
+            authorBadges: row.authorBadges,
+            originalBadges: row.originalBadges,
+            authorUserId: row.authorUserId,
+            authorDisplayName: row.authorDisplayName,
+            authorColor: row.authorColor,
+            runs: row.runs,
+            isHighlighted: row.isHighlighted,
+            timestamp: row.timestamp,
+            deliveryState: .delivered,
+            replyParent: row.replyParent
+        )
+
+        // Clean up correlation maps — we won't be reconciling this id
+        // from an echo anymore (the synthesized id is what a future
+        // echo would dedup against via Path 1).
+        cleanupPending(pendingId: pendingId)
+    }
+
     private func markFailed(pendingId: String, reason: String, retryText: String) {
         guard let idx = lines.firstIndex(where: { $0.id == pendingId }) else { return }
         let row = lines[idx]
@@ -895,6 +1008,11 @@ public final class TabChatModel {
         if let textKey = pendingSendIDByText.first(where: { $0.value == pendingId })?.key {
             pendingSendIDByText.removeValue(forKey: textKey)
         }
+        // Cancel + remove the fallback timer. Echo arrived (or row was
+        // explicitly removed), so the timer's stuck-upgrade no longer
+        // applies. Calling cancel on a completed Task is harmless.
+        sendFallbackTimers[pendingId]?.cancel()
+        sendFallbackTimers.removeValue(forKey: pendingId)
     }
 
     /// Convert one `ChannelEvent` into zero-or-more ChatLine mutations and
