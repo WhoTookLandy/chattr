@@ -328,15 +328,37 @@ public actor ChannelSession {
 
     // MARK: - Chat restrictions
 
-    /// Cached restrictions snapshot from the most recent `fetchChatRestrictions()`
-    /// call. nil before we've fetched (briefly, in the first ~300ms of a new
-    /// session). Updated in place each time the helper runs.
+    /// Cached restrictions snapshot from the most recent
+    /// `refreshChatRestrictions()` call OR `channel.chat_settings.update`
+    /// EventSub event. nil before we've seen either.
     ///
     /// Storing inside the actor (rather than passing through Helix every
     /// time the compose bar wants to render) means the compose bar reads
-    /// from a stable snapshot — re-fetches happen on a deliberate trigger
-    /// (currently only session.start; future: EventSub chat_settings_update).
+    /// from a stable snapshot. EventSub updates flow in via `handle()`'s
+    /// `.restrictionsUpdated` side-effect; the start-time Helix fetch
+    /// populates the initial value.
     private var cachedRestrictions: ChatRestrictions?
+
+    /// True once we've received at least one `chat_settings.update`
+    /// EventSub event. Used by `refreshChatRestrictions()` to AVOID
+    /// overwriting a fresh live update with a late-resolving Helix
+    /// fetch.
+    ///
+    /// The race this prevents (CR MEDIUM 4):
+    ///   1. `start()` kicks `refreshChatRestrictions()` (Helix in flight).
+    ///   2. EventSub subscribe completes, broadcaster toggles slow mode,
+    ///      a `chat_settings.update` event arrives BEFORE the Helix fetch
+    ///      resolves.
+    ///   3. `handle()` sets cachedRestrictions = X (new state).
+    ///   4. Helix fetch completes with OLD state (snapshot taken before
+    ///      the broadcaster's toggle).
+    ///   5. Without the flag, refreshChatRestrictions overwrites
+    ///      cachedRestrictions with stale Helix data → strip shows
+    ///      pre-toggle state until the next event.
+    ///
+    /// With the flag, Helix backs off once an EventSub update has
+    /// arrived. EventSub is the authoritative live source after that.
+    private var cachedRestrictionsAreLive: Bool = false
 
     /// Returns the current chat restrictions for this channel, fetching
     /// from Helix on first access and returning the cached value
@@ -359,6 +381,13 @@ public actor ChannelSession {
     private func refreshChatRestrictions() async {
         do {
             let settings = try await accountStoreSafeFetch()
+            // Race guard: if an EventSub `chat_settings.update` arrived
+            // while we were waiting on the Helix response, the Helix
+            // data is older than what we already have. Don't overwrite.
+            guard !cachedRestrictionsAreLive else {
+                logger.debug("Skipping Helix restrictions overwrite — EventSub update already populated cache")
+                return
+            }
             cachedRestrictions = ChatRestrictions(from: settings)
             logger.debug("Refreshed chat restrictions for #\(self.channelLoginName, privacy: .public)")
         } catch is CancellationError {
@@ -591,8 +620,13 @@ public actor ChannelSession {
         // TabChatModel that reads `currentChatRestrictions()` AFTER the
         // event arrived gets the up-to-date value, not the stale
         // session-start fetch.
+        //
+        // Also set the live-update flag — refreshChatRestrictions() uses
+        // this to back off if its Helix fetch is still in flight when
+        // we arrive (the EventSub state is fresher).
         if case .restrictionsUpdated(let restrictions) = channelEvent {
             cachedRestrictions = restrictions
+            cachedRestrictionsAreLive = true
         }
 
         if backfillPending {
@@ -613,7 +647,15 @@ public actor ChannelSession {
 
         // Snapshot subscribers so subscribe/unsubscribe during the loop's
         // suspension points don't cause concurrent-modification issues.
-        let snapshot = subscribers
+        //
+        // `Array(subscribers.values)` instead of `let snapshot = subscribers`:
+        // the dict copy used to allocate an entire hash table (keys + buckets
+        // + values) per event. The values-array form allocates a flat array
+        // of N closures and no hash overhead. With N=1 (single-tab MVP) the
+        // diff is invisible; with multi-channel + multi-tab the win grows
+        // linearly — and this is the hottest path in the app under raid
+        // storms.
+        let handlers = Array(subscribers.values)
 
         // Fan out to handlers in parallel via TaskGroup. The group is
         // awaited as a unit, so `handle(event:)` still runs to completion
@@ -628,7 +670,7 @@ public actor ChannelSession {
         // fanout collapses to O(slowest handler) instead of O(sum of all
         // handlers), eliminating the queue pileup.
         await withTaskGroup(of: Void.self) { group in
-            for (_, handler) in snapshot {
+            for handler in handlers {
                 group.addTask { await handler(channelEvent) }
             }
         }
