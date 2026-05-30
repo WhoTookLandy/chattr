@@ -120,6 +120,11 @@ public struct ChatScreen: View {
     }
 
     public var body: some View {
+        // `@Bindable` projection of the @Observable model — gives us
+        // `$bindableChatModel.isShowingSendError` for the .alert binding
+        // without writing a `Binding(get:set:)` inline (Swift 5.9+ allows
+        // declaring @Bindable inside body for view-scoped projections).
+        @Bindable var bindableChatModel = chatModel
         // VStack lets the compose bar pin to the bottom while the
         // ScrollView takes the rest. The bar lives INSIDE ChatScreen
         // (not in ChatTabsScreen) because each tab has its own draft —
@@ -176,10 +181,18 @@ public struct ChatScreen: View {
         // to send but there's no attached session (rare — usually means
         // the channel session failed to construct). For that we still
         // show the alert.
-        .alert("Couldn't send", isPresented: Binding(
-            get: { chatModel.sendError != nil },
-            set: { isPresented in if !isPresented { chatModel.clearSendError() } }
-        ), presenting: chatModel.sendError) { _ in
+        //
+        // Audit fix (axiom HIGH 1): previously this used
+        // `Binding(get:set:)` inline, which reallocates the binding's
+        // closure pair on every body re-eval (every chat message
+        // arriving). Now we go through `@Bindable` + the model's
+        // `isShowingSendError` computed property — the binding comes
+        // from the projected `$` value, no per-body allocation.
+        .alert(
+            "Couldn't send",
+            isPresented: $bindableChatModel.isShowingSendError,
+            presenting: chatModel.sendError
+        ) { _ in
             Button("OK", role: .cancel) { chatModel.clearSendError() }
         } message: { reason in
             Text(reason)
@@ -611,11 +624,18 @@ private struct ComposeBar: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
-        // Animate the chip's appearance/disappearance. `.animation`
-        // observing `replyContext != nil` (rather than `replyContext`
-        // itself, which isn't Equatable via @Observable's tracking
-        // model) keeps the animation triggered by chip-presence
-        // toggling, not by every property change inside the context.
+        // Animate the chip's appearance/disappearance. We trigger on
+        // `replyContext != nil` (not the full context value) because
+        // we only want the animation on chip appear/disappear, NOT on
+        // mid-compose target switches (long-press another message to
+        // reply to it instead). The chip's content updates in place
+        // without an animation — which feels right for "I changed my
+        // mind about who to reply to."
+        //
+        // `ReplyContext` is fully `Equatable` (all stored fields are
+        // String), so we could use `value: replyContext` if we wanted
+        // the chip to animate when the target changes. Not chosen
+        // today — feels jumpier.
         .animation(.snappy(duration: 0.2), value: replyContext != nil)
     }
 
@@ -868,50 +888,29 @@ private struct ThreadView: View {
     @Environment(\.dismiss) private var dismiss
 
     let rootMessageId: String
-    @Bindable var chatModel: TabChatModel
+    // Audit fix (axiom MEDIUM): was `@Bindable var chatModel` but no
+    // bindings are created from it. @Observable references don't need
+    // any wrapper to be observed — `let` is correct since ThreadView
+    // never reassigns it, and dropping @Bindable removes the false
+    // "this view uses bindings" signal.
+    let chatModel: TabChatModel
     let badgeStore: ChatBadgeStore?
     let channelLoginName: String
     let channelDisplayName: String
 
-    /// The full filtered thread, recomputed each body call. Cheap —
-    /// see `TabChatModel.lines(inThreadRootedAt:)` doc-comment.
-    private var threadLines: [ChatLine] {
-        chatModel.lines(inThreadRootedAt: rootMessageId)
-    }
-
-    /// The reply target for the thread's compose bar — last message
-    /// in the thread (chronological), or the root if the thread is
-    /// just the seed.
-    private var threadReplyTarget: TabChatModel.ReplyContext? {
-        guard let lastLine = threadLines.last else { return nil }
-        // Build the override context. The snippet is the line's
-        // already-normalized runs collapsed to text; we use the same
-        // formatter the main reply chip uses for visual consistency.
-        // Borrowing the formatter from TabChatModel would need a
-        // public exposure; for the MVP we render runs inline-ish.
-        let snippet: String = {
-            var out = ""
-            for run in lastLine.runs {
-                switch run {
-                case .text(let s): out += s
-                case .emote(let e): out += e.name
-                case .twitchEmote(_, let display): out += display
-                case .mention(let login, _): out += "@\(login)"
-                case .url(let s): out += s
-                case .cheermote(let prefix, let bits, _): out += "\(prefix)\(bits)"
-                }
-                if out.count >= 80 { break }
-            }
-            return out.count > 80 ? String(out.prefix(80)) + "…" : out
-        }()
-        return TabChatModel.ReplyContext(
-            parentMessageId: lastLine.id,
-            parentAuthorDisplayName: lastLine.authorDisplayName,
-            parentSnippet: snippet
-        )
-    }
-
     var body: some View {
+        // Audit fix (axiom LOW): compute the filter result ONCE per body
+        // and reuse it for both `ForEach` and the reply-target factory.
+        // Previously each body call evaluated `lines(inThreadRootedAt:)`
+        // twice (via the `threadLines` and `threadReplyTarget`
+        // computed properties).
+        let threadLines = chatModel.lines(inThreadRootedAt: rootMessageId)
+        // Reply target for the thread compose bar — latest message in
+        // the thread, built via the centralized factory so it matches
+        // the main compose bar's reply chip formatting exactly.
+        let threadReplyTarget: TabChatModel.ReplyContext? = threadLines.last.map {
+            TabChatModel.replyContext(for: $0)
+        }
         NavigationStack {
             VStack(spacing: 0) {
                 if threadLines.isEmpty {

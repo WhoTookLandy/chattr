@@ -143,6 +143,21 @@ public final class TabChatModel {
     /// HelixError surfaced, network blip). nil clears the toast.
     public var sendError: String?
 
+    /// Bindable Bool view of `sendError` for `.alert(isPresented:)`.
+    /// Pulled into a computed bindable property so `ChatScreen.body`
+    /// doesn't construct an inline `Binding(get:set:)` on every render
+    /// pass — that pattern recreates the binding on every observed
+    /// property change (i.e., every incoming chat message), allocating
+    /// a fresh closure pair per body re-eval.
+    ///
+    /// The setter only acts on `false` (alert dismiss); setting `true`
+    /// from a view doesn't surface an error (no message to attach).
+    /// Real errors flow through `sendError = ...` in `send`.
+    public var isShowingSendError: Bool {
+        get { sendError != nil }
+        set { if !newValue { sendError = nil } }
+    }
+
     /// When non-nil, the compose bar renders a "Replying to …" chip and
     /// the next send is threaded onto this message. Set by `beginReply(to:)`,
     /// cleared by `cancelReply()` (user dismissed the chip) or
@@ -506,11 +521,23 @@ public final class TabChatModel {
               case .failed(_, let retryText) = lines[idx].deliveryState else {
             return
         }
+        // Capture the failed row's reply context BEFORE removing it so
+        // the retry threads against the same parent. Without this fix,
+        // a failed reply that the user taps Retry on would land as a
+        // top-level message — silently breaking the thread relationship
+        // the user explicitly chose with Reply.
+        let preservedReply: ReplyContext? = lines[idx].replyParent.map { rp in
+            ReplyContext(
+                parentMessageId: rp.parentMessageId,
+                parentAuthorDisplayName: rp.parentAuthorDisplayName,
+                parentSnippet: rp.parentBody
+            )
+        }
         // Remove the failed row first so the new optimistic insert
         // takes its place at the bottom of `lines` — the user expects
         // the retry to feel like a fresh send.
         lines.remove(at: idx)
-        await send(text: retryText)
+        await send(text: retryText, replyOverride: preservedReply)
     }
 
     /// Transitions the pending row identified by `pendingId` to the
@@ -558,12 +585,7 @@ public final class TabChatModel {
     /// guard is defensive.
     public func beginReply(to line: ChatLine) {
         guard case .message = line.kind else { return }
-        let snippet = Self.snippet(from: line.runs, cap: 80)
-        replyContext = ReplyContext(
-            parentMessageId: line.id,
-            parentAuthorDisplayName: line.authorDisplayName,
-            parentSnippet: snippet
-        )
+        replyContext = Self.replyContext(for: line)
     }
 
     /// User dismissed the reply chip without sending. Clears the
@@ -605,12 +627,29 @@ public final class TabChatModel {
         line.replyParent?.threadRootMessageId ?? line.id
     }
 
+    /// Factory: build a `ReplyContext` from any line. Used by
+    /// `beginReply` (main compose bar) AND by `ThreadView` (thread
+    /// sheet's compose bar — replies to the latest thread message).
+    /// Centralizing the construction here means callers don't have to
+    /// know how to build the snippet, and the snippet logic only
+    /// exists in one place.
+    public static func replyContext(for line: ChatLine) -> ReplyContext {
+        ReplyContext(
+            parentMessageId: line.id,
+            parentAuthorDisplayName: line.authorDisplayName,
+            parentSnippet: snippet(from: line.runs, cap: 80)
+        )
+    }
+
     /// Build a short, single-line preview of a message's runs for the
     /// reply chip. Emote and twitchEmote runs become their name (in
     /// angle brackets so the user sees "<KEKW>" rather than blank space
     /// where the emote image would have rendered). URL and cheermote
     /// runs render as their text. The total is capped with an ellipsis.
-    private static func snippet(from runs: [LineRun], cap: Int) -> String {
+    ///
+    /// Internal (not private) so `ThreadView` can reuse it via
+    /// `replyContext(for:)` without duplicating the dispatch logic.
+    static func snippet(from runs: [LineRun], cap: Int) -> String {
         var out = ""
         for run in runs {
             switch run {
@@ -725,8 +764,15 @@ public final class TabChatModel {
             // doesn't offer a client-correlation field — fixing this
             // edge case fully requires either client-side serialization
             // of identical-text sends or a custom IRC bridge.
+            //
+            // CR-MEDIUM-1: the text-map key is canonicalized
+            // (whitespace-trimmed) at send time — the echo lookup must
+            // apply the same trim so Twitch-side whitespace handling
+            // (e.g. trailing newlines stripped server-side) doesn't
+            // cause a miss.
+            let echoLookupKey = chatMessage.message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if chatMessage.chatterUserId == currentUserId,
-               let matchedPendingId = pendingSendIDByText[chatMessage.message.text] {
+               let matchedPendingId = pendingSendIDByText[echoLookupKey] {
                 cleanupPending(pendingId: matchedPendingId)
                 if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
                 // Optimistic row was removed under us — fall through to
