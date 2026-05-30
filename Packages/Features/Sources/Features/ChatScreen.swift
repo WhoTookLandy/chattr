@@ -885,6 +885,16 @@ private struct ThreadView: View {
                         .padding(.vertical, 8)
                     }
                     .scrollDismissesKeyboard(.interactively)
+                    // Open at the most recent message instead of the
+                    // root. Threads grow over time and the conversation
+                    // context the user wants is at the bottom — opening
+                    // at the top would require manual scrolling every
+                    // time. `.defaultScrollAnchor(.bottom)` (iOS 17+)
+                    // only affects the INITIAL anchor; subsequent
+                    // scrolling behaves normally, so the user can swipe
+                    // up to read the thread's history without fighting
+                    // any auto-snap.
+                    .defaultScrollAnchor(.bottom)
                 }
 
                 // Dedicated compose bar. The replyOverride is built
