@@ -259,18 +259,15 @@ public final class TabChatModel {
             combined.append(contentsOf: snapshot)
         }
 
-        // Snapshot chat restrictions from the (typically just one)
-        // attached session. ChannelSession.start() kicks an async
-        // restrictions fetch — if we beat it here, we'll get nil and
-        // the compose bar renders without the restrictions strip.
-        // That's correct UX: "no restrictions visible" is a better
-        // initial state than "the strip flickers in late."
-        //
-        // Future commit can subscribe to `channel.chat_settings.update`
-        // and call `refreshChatRestrictions()` to keep this live;
-        // today it's snapshot-at-attach-time.
+        // Snapshot chat restrictions + capture the channel id used by
+        // `send(...)` to clear the persisted draft on successful send.
+        // Single-channel-per-tab MVP — we use the first session's id;
+        // multi-channel will need a per-channel draft mapping.
         if let firstSession = sessions.first {
             chatRestrictions = await firstSession.currentChatRestrictions()
+            // channelId is nonisolated on ChannelSession — no await
+            // hop needed for this set-once property.
+            draftStorageChannelId = firstSession.channelId
         }
 
         // Apply the priming snapshot. For single-session tabs `combined`
@@ -336,6 +333,12 @@ public final class TabChatModel {
     ///
     /// Returns nothing — observable side effects (`lines`, `sendError`)
     /// drive the UI.
+    /// Channel id used by `send(...)` to clear the persisted draft once
+    /// a send commits. Set at attach time from the first session's
+    /// channelId (single-channel-per-tab MVP — multi-channel sends will
+    /// need a per-channel draft mapping, deferred until that ships).
+    private var draftStorageChannelId: String = ""
+
     public func send(text: String, replyOverride: ReplyContext? = nil) async {
         // Trim here too (in addition to ChannelSession.send) — we don't
         // want to enqueue an optimistic row with leading whitespace that
@@ -390,6 +393,21 @@ public final class TabChatModel {
                 parentBody: attachment.parentSnippet,
                 threadRootMessageId: attachment.parentMessageId
             )
+        }
+
+        // Clear the persisted draft now (synchronously, before any
+        // awaits). The optimistic row appears immediately below; from
+        // the user's perspective the compose bar is "empty + the
+        // message is in flight" — restoring the draft from disk on a
+        // failure would be confusing, so we treat send-initiated as
+        // the deliberate clear point.
+        //
+        // If the send ends up in the `.failed` state, the user can
+        // long-press the failed row → Retry (which re-sends the
+        // captured `retryText`) — they don't need the draft restored
+        // for that path.
+        if !draftStorageChannelId.isEmpty {
+            DraftStorage.clear(forChannelId: draftStorageChannelId)
         }
 
         let pendingId = "pending-\(UUID().uuidString)"

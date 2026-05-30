@@ -90,13 +90,30 @@ public actor ChannelSession {
     public typealias EventHandler = @Sendable (ChannelEvent) async -> Void
 
     private let client: TwitchClient
-    private let channelId: String
+    /// Public + `nonisolated` because it's set once at init and never
+    /// changes. Callers outside the actor (e.g. `TabChatModel` reading
+    /// it to key `DraftStorage` lookups) can read without hopping the
+    /// actor boundary.
+    public nonisolated let channelId: String
     private let channelLoginName: String
     private let accountUserId: String
 
     /// Ring buffer of received events, capped at 500.
     private var ring: [ChannelEvent] = []
     private static let ringCapacity = 500
+
+    /// Live events that arrived via `handle(event:)` while `backfillPending`
+    /// is true — i.e. after we subscribed to EventSub but before the rustlog
+    /// backfill resolved. `applyBackfill` drains this into the ring (merged +
+    /// deduped against history) and clears it. Empty for the rest of the
+    /// session's life once backfill has been applied.
+    private var pendingLive: [ChannelEvent] = []
+
+    /// True from construction until `applyBackfill` runs. While true,
+    /// `handle(event:)` parks events in `pendingLive` instead of appending to
+    /// the ring, so backfill history can still be inserted ahead of them
+    /// without clobbering live events. Flipped to false exactly once.
+    private var backfillPending = true
 
     /// Active subscribers keyed by an opaque token returned from `subscribe(_:)`.
     /// Replaces the previous `AsyncStream<[ChatMessage]>` + coalesce machinery.
@@ -145,27 +162,31 @@ public actor ChannelSession {
         logger.info("Starting session for #\(self.channelLoginName) (channelId=\(self.channelId))")
 
         // Kick off rustlog backfill in parallel with the WebSocket connect.
-        // See BackfillProvider for the design rationale. Order matters:
-        // backfill MUST complete + populate the ring BEFORE any EventSub
-        // subscribe succeeds, otherwise live messages start arriving and
-        // fan out to subscribers before the history is in the ring.
+        // See BackfillProvider for the design rationale.
+        //
+        // Ordering (option 2 — subscribe-first + buffer): EventSub is the
+        // URGENT thing — we subscribe to live chat BEFORE awaiting the
+        // community-history fetch, so live chat connects without waiting on
+        // rustlog. While `backfillPending` is true, `handle(event:)` parks
+        // incoming live events in `pendingLive` instead of the ring. Once
+        // backfill resolves, `applyBackfill` merges history + buffered-live
+        // (dedup by messageId) into the ring in one synchronous step.
+        //
+        // Safety rests on the registry's "expose-late" contract: a session is
+        // not returned from `session(...)` (and so cannot be `subscribe(_:)`d
+        // by any tab) until `start()` returns. The entire pending window is
+        // therefore internal — no subscriber ever observes the empty/partial
+        // ring, preserving the atomic prime+subscribe invariant.
         async let backfillTask = BackfillProvider.fetchRecentMessages(channelLogin: channelLoginName)
 
         try await client.eventSub.connect()
 
-        // Drain backfill. Failures are absorbed by BackfillProvider — we
-        // never propagate. If backfill returned nothing, the ring stays
-        // empty and we proceed with live-only subscriptions.
-        let backfill = await backfillTask
-        if !backfill.isEmpty {
-            ring = Array(backfill.suffix(Self.ringCapacity)).map { ChannelEvent.message($0) }
-            logger.info("Primed ring with \(self.ring.count) backfilled message(s) for #\(self.channelLoginName, privacy: .public)")
-        }
-
-        // Subscribe to the five EventSub topics we render. Each subscribe
-        // call is independent — a failure on one shouldn't block the
-        // others. We log per-topic errors but only THROW if the core chat
-        // subscription fails (no chat = unusable session).
+        // Subscribe to the EventSub topics we render. The core chat.message
+        // subscription throws on failure (no chat = unusable session); the
+        // others swallow errors (enrichment, not core function). From the
+        // moment chat.message succeeds, the registry's dispatcher routes
+        // events to `handle(event:)`, which buffers them while backfill is
+        // pending.
         try await subscribeToChat()
         await subscribeToNotificationTopic(.notification, label: "notification")
         await subscribeToNotificationTopic(.messageDelete, label: "message_delete")
@@ -173,6 +194,14 @@ public actor ChannelSession {
         await subscribeToNotificationTopic(.clearUserMessages, label: "clear_user_messages")
         await subscribeToNotificationTopic(.settingsUpdate, label: "settings_update")
         await subscribeToRaid()
+
+        // Drain backfill and merge. Failures are absorbed by BackfillProvider —
+        // we never propagate; an empty backfill just flushes whatever buffered
+        // live events accumulated. `applyBackfill` is synchronous (no `await`)
+        // so the read-of-pendingLive → build-ring → clear-buffer → flip-flag
+        // sequence is atomic with respect to `handle(event:)`.
+        let backfill = await backfillTask
+        applyBackfill(backfill)
 
         // Fetch chat-settings restrictions before returning from start().
         // We DO await this (rather than firing a background Task) because
@@ -443,6 +472,65 @@ public actor ChannelSession {
         ring
     }
 
+    // MARK: - Backfill merge
+
+    /// Merges rustlog `history` with `pendingLive` (events buffered while the
+    /// backfill fetch was in flight), deduplicating by `messageId` and capping
+    /// to `capacity`.
+    ///
+    /// `static` + pure so it's unit-testable without a `TwitchClient`. The
+    /// instance wrapper `applyBackfill(_:)` calls this and commits the result
+    /// to `ring`.
+    static func mergeBackfill(
+        history: [ChannelEvent],
+        pendingLive: [ChannelEvent],
+        capacity: Int
+    ) -> [ChannelEvent] {
+        var seenMessageIds = Set<String>()
+        var merged: [ChannelEvent] = []
+        merged.reserveCapacity(history.count + pendingLive.count)
+
+        // History first (oldest scrollback), then buffered-live in arrival
+        // order. Chat messages dedup by canonical `messageId` — the same
+        // message can land in BOTH rustlog history and the live buffer during
+        // the fetch-overlap window. First occurrence wins, so a duplicate keeps
+        // its chronological history position rather than jumping to the live tail.
+        // Non-message events (notifications/raids/clears) never appear in
+        // backfill and carry no shared id, so they pass through untouched.
+        for event in history + pendingLive {
+            if case .message(let message) = event {
+                guard seenMessageIds.insert(message.messageId).inserted else { continue }
+            }
+            merged.append(event)
+        }
+
+        return merged.count > capacity ? Array(merged.suffix(capacity)) : merged
+    }
+
+    /// Commits the backfill merge to the ring and ends the buffering window.
+    ///
+    /// MUST stay synchronous (no `await`): the actor holds its isolation for
+    /// the whole call, so reading `pendingLive`, building `ring`, clearing the
+    /// buffer, and flipping `backfillPending` happen as one atomic step with
+    /// respect to `handle(event:)`. An `await` here would reopen the actor and
+    /// let a live event slip in between "merge" and "clear" — it would be lost
+    /// or double-counted.
+    private func applyBackfill(_ backfill: [ChatMessage]) {
+        let history = backfill.map { ChannelEvent.message($0) }
+        ring = Self.mergeBackfill(
+            history: history,
+            pendingLive: pendingLive,
+            capacity: Self.ringCapacity
+        )
+        let bufferedCount = pendingLive.count
+        pendingLive = []
+        backfillPending = false
+
+        if !ring.isEmpty {
+            logger.info("Primed ring with \(self.ring.count) event(s) for #\(self.channelLoginName, privacy: .public) — \(history.count) backfilled, \(bufferedCount) buffered-live")
+        }
+    }
+
     // MARK: - Event handling (driven by registry's dispatcher)
 
     /// Driven by `ChannelSessionRegistry`'s shared event dispatcher — the
@@ -464,11 +552,21 @@ public actor ChannelSession {
             cachedRestrictions = restrictions
         }
 
-        // Append to ring buffer with cap.
-        if ring.count >= Self.ringCapacity {
-            ring.removeFirst(ring.count - Self.ringCapacity + 1)
+        if backfillPending {
+            // Backfill hasn't landed yet — park the event so history can still
+            // be merged ahead of it. `applyBackfill` drains this into the ring.
+            // No subscriber exists during this window (the registry exposes the
+            // session only after `start()` returns), so skipping the fan-out
+            // below would be harmless — but the empty subscriber set makes it a
+            // no-op anyway, so we fall through for uniformity.
+            pendingLive.append(channelEvent)
+        } else {
+            // Append to ring buffer with cap.
+            if ring.count >= Self.ringCapacity {
+                ring.removeFirst(ring.count - Self.ringCapacity + 1)
+            }
+            ring.append(channelEvent)
         }
-        ring.append(channelEvent)
 
         // Snapshot subscribers so subscribe/unsubscribe during the loop's
         // suspension points don't cause concurrent-modification issues.

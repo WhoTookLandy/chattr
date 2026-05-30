@@ -145,7 +145,25 @@ public struct ChatScreen: View {
                 channelDisplayName: channelDisplayName,
                 replyContext: chatModel.replyContext,
                 chatRestrictions: chatModel.chatRestrictions,
+                // Load the persisted draft synchronously here in body.
+                // UserDefaults reads are fast + iOS caches them, so
+                // doing this on every body re-eval is cheap. The seed
+                // only matters at first mount thanks to @State
+                // semantics; subsequent re-evals pass new seeds but
+                // they're ignored once @State is established.
+                seedDraft: DraftStorage.load(forChannelId: channelId),
                 onCancelReply: { chatModel.cancelReply() },
+                // Persist on every keystroke. The user's drafts survive:
+                //   - swiping to another channel-tab and back (the
+                //     paged ScrollView unmounts/remounts ChatScreen on
+                //     swipe; UserDefaults bridges that gap)
+                //   - quitting and relaunching the app (UserDefaults is
+                //     plist-backed and survives cold start)
+                //   - the user's draft is cleared on successful send
+                //     by `chatModel.send` via DraftStorage.clear
+                onDraftChange: { newDraft in
+                    DraftStorage.save(forChannelId: channelId, text: newDraft)
+                },
                 onSend: { draft in await chatModel.send(text: draft) }
             )
         }
@@ -540,11 +558,44 @@ private struct ComposeBar: View {
     /// Tapped on the chip's X — dismisses the reply attachment without
     /// sending. The parent (`ChatScreen`) calls `chatModel.cancelReply()`.
     let onCancelReply: () -> Void
+    /// Fired on every text change so the parent (`ChatScreen`) can
+    /// persist the draft to `DraftStorage`. We don't expose @State or
+    /// a Binding<String> — that would re-trigger ChatScreen.body on
+    /// every keystroke (the typing-lag regression commit 2 fixed).
+    /// Instead the bar owns its @State internally and notifies via
+    /// callback, which doesn't propagate as a dependency change.
+    let onDraftChange: (String) -> Void
     let onSend: @MainActor (String) async -> Void
 
-    @State private var composeText: String = ""
+    @State private var composeText: String
     @State private var isSending: Bool = false
     @FocusState private var focused: Bool
+
+    /// Custom init that seeds `composeText`'s @State with the persisted
+    /// draft. SwiftUI's `@State` semantics ensure the seed value is
+    /// only used at first mount for a given view identity — subsequent
+    /// re-renders ignore the seed and keep whatever the user typed.
+    /// This gives us "load on first mount, never clobber typing"
+    /// without a Binding.
+    init(
+        channelLoginName: String,
+        channelDisplayName: String,
+        replyContext: TabChatModel.ReplyContext?,
+        chatRestrictions: ChatRestrictions?,
+        seedDraft: String,
+        onCancelReply: @escaping () -> Void,
+        onDraftChange: @escaping (String) -> Void,
+        onSend: @escaping @MainActor (String) async -> Void
+    ) {
+        self.channelLoginName = channelLoginName
+        self.channelDisplayName = channelDisplayName
+        self.replyContext = replyContext
+        self.chatRestrictions = chatRestrictions
+        self.onCancelReply = onCancelReply
+        self.onDraftChange = onDraftChange
+        self.onSend = onSend
+        self._composeText = State(initialValue: seedDraft)
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -708,6 +759,14 @@ private struct ComposeBar: View {
                 .focused($focused)
                 .submitLabel(.send)
                 .onSubmit { Task { await sendDraft() } }
+                // Forward every text change to the parent so it can
+                // persist via DraftStorage. UserDefaults batches writes
+                // so per-keystroke saves don't actually hit disk on
+                // every call — observed throughput is roughly the same
+                // as a debounced save without the .task(id:) sleep.
+                .onChange(of: composeText) { _, newValue in
+                    onDraftChange(newValue)
+                }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 // Regular glass (not interactive) — typing happens inside
