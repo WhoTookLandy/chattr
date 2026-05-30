@@ -24,7 +24,7 @@ import DesignSystem
 /// `ChatBadgeStore`) and passed in as already-looked-up `ChatBadgeEntry`s
 /// — keeps `ChatRow` purely presentational and avoids re-doing the
 /// dictionary lookup on every body recomputation.
-struct ChatRow: View {
+struct ChatRow: View, Equatable {
     let line: ChatLine
     let badgeEntries: [ChatBadgeEntry]
     /// Called when the user taps the retry control on a `.failed` row.
@@ -49,6 +49,42 @@ struct ChatRow: View {
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
     @Environment(\.colorScheme) private var colorScheme
+
+    // MARK: - Equatable (profile-guided perf fix)
+    //
+    // Without explicit Equatable, SwiftUI's default View diffing compares
+    // stored properties by Swift's structural equality — but `ChatScreen`
+    // passes freshly-allocated arrays (`badgeEntries`) and closures
+    // (`onRetry`/`onReply`/`onViewThread`/`onDelete`) per body
+    // re-evaluation. Closures aren't Equatable in Swift, so SwiftUI gives
+    // up and treats every parent re-eval as "params changed" → re-runs
+    // ChatRow.body even when nothing visible changed.
+    //
+    // Profile measured: 93,732 ChatRow body evaluations in a 68-second
+    // recording (~1,378/sec) — far beyond what visible-row × 60Hz could
+    // justify. Each individual eval was fast (~15µs), but the volume
+    // accumulated to 1.48s of CPU on the main thread.
+    //
+    // With explicit Equatable comparing the semantically-significant
+    // fields (line + badgeEntries), SwiftUI's diff short-circuits when
+    // the underlying data is unchanged:
+    //   - `line`: ChatLine is itself Equatable; identical line → equal
+    //   - `badgeEntries`: array element-wise compare; identical
+    //     ChatBadgeEntry sequence → equal (typically stable per line)
+    //   - Closures: deliberately IGNORED. They're functionally identical
+    //     across body re-evals (capture the same `line.id`, `chatModel`,
+    //     etc.), and treating them as equal lets the short-circuit fire.
+    //
+    // SwiftUI applies this comparison automatically when a View conforms
+    // to Equatable — no need to wrap in `EquatableView()` at call sites.
+    //
+    // `nonisolated` because Equatable conformance from a @MainActor View
+    // requires `==` to be callable from any actor. The args are Sendable
+    // (ChatLine + [ChatBadgeEntry]) so this is safe — no instance state
+    // is accessed.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.line == rhs.line && lhs.badgeEntries == rhs.badgeEntries
+    }
 
     var body: some View {
         // Wrap the actual content in a Group so we can attach modifiers

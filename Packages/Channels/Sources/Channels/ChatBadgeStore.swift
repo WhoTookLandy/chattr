@@ -21,7 +21,7 @@ public struct ChatBadgeKey: Hashable, Sendable {
 /// Image URL + human-readable title (used as the VoiceOver label so screen
 /// readers say "Moderator" instead of "image, image, image"). Public for
 /// the same reason as `ChatBadgeKey`.
-public struct ChatBadgeEntry: Sendable {
+public struct ChatBadgeEntry: Sendable, Equatable {
     public let url: URL
     public let title: String?
     public init(url: URL, title: String?) {
