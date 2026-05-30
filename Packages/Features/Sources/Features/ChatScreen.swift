@@ -223,7 +223,41 @@ public struct ChatScreen: View {
         // Splitting the three loads across separate `.task` modifiers means
         // session-connect, badge-fetch, and emote-fetch all run concurrently.
         // None of them block the others.
-        .task { await startSession() }
+        //
+        // The session-lifecycle .task uses `.task(id: channelId)` instead of
+        // bare `.task`:
+        //   - Runs startSession on first mount (and on channelId change,
+        //     though channelId is stable per ChatScreen instance).
+        //   - Body sleeps indefinitely after startSession completes, holding
+        //     the task alive until SwiftUI cancels it.
+        //   - Cancellation comes from view tear-down (paged ScrollView
+        //     unmounts off-screen ChatScreens during swipes) OR an id change.
+        //   - On cancellation, the `try?` swallows the CancellationError and
+        //     `await chatModel.detach()` runs synchronously in the task's
+        //     final breath — structurally bound to view lifetime instead of
+        //     fired-and-forgotten from `.onDisappear`.
+        //
+        // The audit (CR HIGH 5) flagged the previous `.onDisappear { Task {
+        // await detach() } }` pattern as racing rapid A→B→A swipes: the
+        // unstructured Task could run AFTER the next ChatScreen's attach,
+        // leaving a brief window of ghost subscribers on the registry-owned
+        // session. The structured pattern eliminates the race because
+        // SwiftUI's task cancellation completes before the next view's
+        // `.task` body starts.
+        .task(id: channelId) {
+            await startSession()
+            // Hold the task open until SwiftUI cancels us (view torn down
+            // or channelId changes). Sleeping for a year is the canonical
+            // SwiftUI idiom — Task.sleep is implemented as a scheduler
+            // primitive, not a busy-loop, so the cost is zero CPU.
+            try? await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
+            // Cancellation reaches here via CancellationError from sleep.
+            // detach awaits the model's pub-sub teardown (unsubscribe from
+            // the registry-owned session, cancel any sendFallbackTimers).
+            // The chatModel reference survives because @State storage
+            // persists until the task fully exits.
+            await chatModel.detach()
+        }
         .task {
             guard let store = badgeStore else { return }
             let cachedGlobalBadges = globalCatalog?.globalBadges ?? [:]
@@ -278,17 +312,10 @@ public struct ChatScreen: View {
             signposter.endInterval("emote-load", state, "count=\(count)")
             logger.info("EmoteIndex loaded for #\(channelLoginName, privacy: .public): \(count) emotes")
         }
-        // Detach pub-sub subscriptions when the view leaves the screen. The
-        // underlying ChannelSession stays alive in the registry; this just
-        // tears down THIS view's subscription. The Task captures `chatModel`
-        // so the model survives long enough to complete detach() even after
-        // SwiftUI releases its @State storage.
-        .onDisappear {
-            let model = chatModel
-            Task { @MainActor in
-                await model.detach()
-            }
-        }
+        // Detach is now handled inside the .task(id: channelId) above —
+        // structurally bound to view lifetime via CancellationError, no
+        // unstructured Task needed. See the doc-comment on that .task
+        // for why.
     }
 
     // MARK: - Subviews
