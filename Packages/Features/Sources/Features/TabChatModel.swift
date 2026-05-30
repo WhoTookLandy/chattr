@@ -136,7 +136,25 @@ public final class TabChatModel {
 
     /// Fallback echo-correlation map. Populated synchronously in `send(...)`
     /// — covers the race window before Helix responds.
-    private var pendingSendIDByText: [String: String] = [:]
+    ///
+    /// **FIFO queue** (not a single value) because identical-text
+    /// double-sends within the race window would otherwise overwrite
+    /// the older entry. Echoes match the oldest pending (Twitch
+    /// broadcasts in send-order); cleanup removes a specific id by
+    /// scanning the array.
+    ///
+    /// Without the queue, this scenario corrupts state:
+    ///   1. Send "lol" → pendingSendIDByText["lol"] = pending-A
+    ///   2. Send "lol" again → overwrites to pending-B (A orphaned!)
+    ///   3. Both echoes arrive before either Helix response. The
+    ///      Path 2 lookup resolves "lol" to B and upgrades the wrong
+    ///      row. Later, the timer-fallback for A synthesizes an
+    ///      upgrade using msg-1 — but msg-1 is already in `lines`
+    ///      (from echo #1) → DUPLICATE ID → ForEach assertion crash.
+    ///
+    /// The queue guarantees: echo #N reconciles row #N for all N,
+    /// regardless of which arrives first.
+    private var pendingSendIDByText: [String: [String]] = [:]
 
     /// Per-pending-send fallback timer. Started after Helix accepts (`isSent=true`)
     /// — if the EventSub echo doesn't arrive within
@@ -509,7 +527,8 @@ public final class TabChatModel {
         if lines.count > Self.lineCap {
             lines.removeFirst(lines.count - Self.lineCap)
         }
-        pendingSendIDByText[canonical] = pendingId
+        // FIFO append — see pendingSendIDByText doc-comment.
+        pendingSendIDByText[canonical, default: []].append(pendingId)
 
         do {
             let response = try await session.send(canonical, replyParentMessageId: replyAttachment?.parentMessageId)
@@ -545,11 +564,16 @@ public final class TabChatModel {
                     // case it never fires.
                     startSendFallbackTimer(pendingId: pendingId, canonicalMessageId: response.messageId)
                 } else {
-                    // Echo already reconciled — defensive sweep in case the
-                    // text-map entry didn't get cleaned by the echo path
-                    // (it should have via cleanupPending, but the cost of
-                    // a no-op removal is zero).
-                    pendingSendIDByText.removeValue(forKey: canonical)
+                    // Echo already reconciled — defensive sweep. With
+                    // the FIFO queue, removing the whole text key would
+                    // be wrong (it could nuke unrelated pending sends
+                    // of the same text). Instead, remove only OUR
+                    // pendingId from the queue and clear the key only
+                    // if the queue is empty afterwards.
+                    pendingSendIDByText[canonical]?.removeAll { $0 == pendingId }
+                    if pendingSendIDByText[canonical]?.isEmpty == true {
+                        pendingSendIDByText.removeValue(forKey: canonical)
+                    }
                 }
                 logger.debug("send: Helix accepted; awaiting EventSub echo to upgrade optimistic row")
                 return
@@ -662,6 +686,22 @@ public final class TabChatModel {
         guard let idx = lines.firstIndex(where: { $0.id == pendingId }),
               case .sending = lines[idx].deliveryState else {
             // Already upgraded via echo, or removed — nothing to do.
+            return
+        }
+
+        // Defensive duplicate-id check. With the FIFO queue (commit 17)
+        // this shouldn't happen in normal flow, but if Path 2 ever
+        // upgraded an unrelated row to `canonicalMessageId` (legacy
+        // bug, future regression, etc.), replacing pendingId with
+        // canonicalMessageId would produce two rows with the same id
+        // and crash the ForEach.
+        //
+        // If we'd create a dupe, just remove the optimistic row instead
+        // of replacing — the echo's row already covers it.
+        if lines.contains(where: { $0.id == canonicalMessageId }) {
+            logger.warning("Synthesize would duplicate id \(canonicalMessageId, privacy: .public); removing optimistic row only")
+            lines.remove(at: idx)
+            cleanupPending(pendingId: pendingId)
             return
         }
 
@@ -959,7 +999,9 @@ public final class TabChatModel {
             // cause a miss.
             let echoLookupKey = chatMessage.message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if chatMessage.chatterUserId == currentUserId,
-               let matchedPendingId = pendingSendIDByText[echoLookupKey] {
+               let matchedPendingId = pendingSendIDByText[echoLookupKey]?.first {
+                // FIFO: oldest pending matches first echo, matching
+                // Twitch's broadcast order.
                 cleanupPending(pendingId: matchedPendingId)
                 if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
                 // Optimistic row was removed under us — fall through to
@@ -1005,8 +1047,15 @@ public final class TabChatModel {
     /// sends, typically 0–1.
     private func cleanupPending(pendingId: String) {
         helixMessageIdByPendingId.removeValue(forKey: pendingId)
-        if let textKey = pendingSendIDByText.first(where: { $0.value == pendingId })?.key {
-            pendingSendIDByText.removeValue(forKey: textKey)
+        // FIFO-aware removal: find which text key contains this
+        // pendingId in its queue, remove it from the queue, and drop
+        // the key entirely if the queue is now empty. Two-step scan
+        // is O(n) over pending sends — n is tiny (typically 0–1).
+        if let textKey = pendingSendIDByText.first(where: { $0.value.contains(pendingId) })?.key {
+            pendingSendIDByText[textKey]?.removeAll { $0 == pendingId }
+            if pendingSendIDByText[textKey]?.isEmpty == true {
+                pendingSendIDByText.removeValue(forKey: textKey)
+            }
         }
         // Cancel + remove the fallback timer. Echo arrived (or row was
         // explicitly removed), so the timer's stuck-upgrade no longer
