@@ -439,6 +439,49 @@ public actor ChannelSession {
         }
     }
 
+    // MARK: - Moderation
+
+    /// Deletes a single chat message in this channel. The signed-in
+    /// account acts as the moderator — Twitch verifies that the account
+    /// is actually a mod (or the broadcaster) of `channelId` before
+    /// proceeding; non-mods get `HelixError.unauthorized`.
+    ///
+    /// Does NOT mutate local state directly. The deletion arrives
+    /// through the existing `channel.chat.message_delete` EventSub
+    /// subscription as a `messageDeleted` ChannelEvent — `apply()` in
+    /// `TabChatModel` already flips the corresponding row to
+    /// `.deletedPlaceholder` when that arrives, so the visual update
+    /// flows through the same path as a moderator's web-UI delete.
+    ///
+    /// Refresh-and-retry on unauthorized matches the other Helix calls
+    /// (send, fetchChatSettings).
+    public func deleteMessage(messageId: String) async throws {
+        do {
+            try await client.api.deleteChatMessages(
+                broadcasterID: channelId,
+                moderatorID: accountUserId,
+                messageID: messageId
+            )
+        } catch HelixError.unauthorized {
+            logger.info("deleteChatMessages unauthorized; refreshing tokens and retrying once")
+            try await refreshTokenHandler()
+            try await client.api.deleteChatMessages(
+                broadcasterID: channelId,
+                moderatorID: accountUserId,
+                messageID: messageId
+            )
+        }
+    }
+
+    /// Returns true if `accountUserId == channelId` — i.e., the
+    /// signed-in user IS the broadcaster of this channel. This is an
+    /// instant, no-network mod-check that's true for broadcasters
+    /// before they've sent any message. For mods-who-aren't-the-
+    /// broadcaster, we infer from echoed badges (see `TabChatModel`).
+    public nonisolated var isAccountBroadcaster: Bool {
+        accountUserId == channelId
+    }
+
     // MARK: - Pub-sub API
 
     /// Registers a handler that receives every channel event arriving after

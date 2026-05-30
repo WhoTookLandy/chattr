@@ -39,6 +39,12 @@ struct ChatRow: View {
     /// thread-sheet view itself, which doesn't recurse, sets it nil
     /// to suppress the entry).
     var onViewThread: (() -> Void)? = nil
+    /// Called when a moderator picks "Delete Message" from the
+    /// long-press menu. Optional — when nil, the menu item is hidden.
+    /// `ChatScreen` only passes a non-nil closure when
+    /// `chatModel.currentUserCanModerate` is true, so non-mods never
+    /// see the affordance.
+    var onDelete: (() -> Void)? = nil
 
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
@@ -69,6 +75,24 @@ struct ChatRow: View {
                             onViewThread()
                         } label: {
                             Label("View Thread", systemImage: "bubble.left.and.bubble.right")
+                        }
+                    }
+                    // Moderation action — visually separated from the
+                    // benign read-only actions above by .destructive
+                    // role (red icon + label, slight visual gap in
+                    // the menu). Only present when `onDelete` is
+                    // non-nil, which `ChatScreen` only does for
+                    // moderators.
+                    //
+                    // Doesn't show on `.deletedPlaceholder` rows
+                    // (the outer `if case .message` covers that — a
+                    // placeholder's kind is `.deletedPlaceholder`,
+                    // not `.message`).
+                    if let onDelete {
+                        Button(role: .destructive) {
+                            onDelete()
+                        } label: {
+                            Label("Delete Message", systemImage: "trash")
                         }
                     }
                 }

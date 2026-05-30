@@ -386,7 +386,21 @@ public struct ChatScreen: View {
                         // matching replies).
                         onViewThread: {
                             viewingThreadRootId = ThreadRootID(id: TabChatModel.threadRoot(of: line))
-                        }
+                        },
+                        // Mod-only delete affordance. The closure is
+                        // nil for non-mods and for messages already in
+                        // a deleted state, so the menu entry is
+                        // hidden in those cases. We also hide it for
+                        // our OWN messages — `DELETE /moderation/chat`
+                        // rejects the broadcaster trying to delete
+                        // their own messages anyway, and for a regular
+                        // mod the affordance is nonsensical: just
+                        // edit your own text instead of pretending to
+                        // moderate yourself.
+                        onDelete: (chatModel.currentUserCanModerate
+                                   && line.authorUserId != account.userId)
+                            ? { Task { await chatModel.deleteMessage(line.id) } }
+                            : nil
                     )
                     .id(line.id)
                 }

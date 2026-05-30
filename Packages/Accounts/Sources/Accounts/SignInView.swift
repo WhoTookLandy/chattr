@@ -35,11 +35,21 @@ public struct SignInView: View {
     @State private var sessionExpiredLogin: String?
 
     /// The viewer-facing scopes chattr needs.
+    ///
+    /// `moderatorManageChatMessages` is required for the mod-only
+    /// delete affordance — non-mod users will never exercise it, but
+    /// requesting it up-front avoids forcing a re-auth flow the first
+    /// time a moderator tries to delete a message. Twitch's consent
+    /// screen lists every scope; mods see it and approve it, non-mods
+    /// see it and approve it harmlessly (the token can request the
+    /// delete endpoint but it'll fail with `unauthorized` from Twitch
+    /// if the user isn't actually a mod in the target channel).
     private static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,
         .userWriteChat,
         .userReadFollows,
+        .moderatorManageChatMessages,
     ]
 
     /// The redirect URI we instruct Twitch to send the auth code to. Must match the URL

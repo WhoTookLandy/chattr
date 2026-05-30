@@ -180,6 +180,25 @@ public final class TabChatModel {
     /// and stale if the broadcaster toggles a setting mid-session.
     public private(set) var chatRestrictions: ChatRestrictions?
 
+    /// True when the signed-in account can moderate (delete messages,
+    /// timeout users, etc.) in the attached channel. Drives the
+    /// `Delete Message` affordance in ChatRow's context menu.
+    ///
+    /// Set true via two paths:
+    ///   1. **Broadcaster instant**: at attach time, if the account
+    ///      userId equals the channelId, we know we're the broadcaster
+    ///      — true immediately, no waiting.
+    ///   2. **Moderator observation**: as our own chat-message echoes
+    ///      arrive, we look at `chatMessage.badges` for "moderator" or
+    ///      "broadcaster". Found → true.
+    ///
+    /// The moderator path requires the user to chat at least once for
+    /// the affordance to appear. Acceptable for MVP — pre-fetching
+    /// `/moderation/moderators` requires an additional scope
+    /// (`moderation:read`) and Helix call per channel-open. The badge-
+    /// observation path is free.
+    public private(set) var currentUserCanModerate: Bool = false
+
     /// Payload for an in-flight reply intent. Held by `replyContext`;
     /// passed to `ChannelSession.send` as `replyParentMessageId` when
     /// the user finally taps Send.
@@ -283,6 +302,15 @@ public final class TabChatModel {
             // channelId is nonisolated on ChannelSession — no await
             // hop needed for this set-once property.
             draftStorageChannelId = firstSession.channelId
+            // Instant broadcaster check — `isAccountBroadcaster` is
+            // nonisolated and just compares the two ids. For broadcasters
+            // this gives us mod-power before any chat has happened.
+            // For viewers and mods, this stays false; the
+            // mod-observation path below upgrades it on first own
+            // message echo carrying mod/broadcaster badges.
+            if firstSession.isAccountBroadcaster {
+                currentUserCanModerate = true
+            }
         }
 
         // Apply the priming snapshot. For single-session tabs `combined`
@@ -573,6 +601,33 @@ public final class TabChatModel {
         sendError = nil
     }
 
+    /// Asks Twitch to delete one message in the attached channel.
+    /// Guard-rails are minimal — the caller (ChatRow's context menu)
+    /// only surfaces the affordance when `currentUserCanModerate` is
+    /// true. The actual authorization is on the server: if the user
+    /// isn't actually a mod (or is no longer one), Helix returns
+    /// `HelixError.unauthorized` and we surface that as a toast.
+    ///
+    /// Does NOT mutate `lines` locally. The chat.message_delete
+    /// EventSub echo will arrive shortly after the Helix call returns
+    /// and our existing `apply()` for `.messageDeleted(targetMessageId:)`
+    /// flips the row to `.deletedPlaceholder`. The visual update
+    /// therefore flows through the SAME path as a moderator's web-UI
+    /// delete — no special-case rendering needed.
+    public func deleteMessage(_ messageId: String) async {
+        guard let session = subscriptions.first?.session else {
+            sendError = "Not connected to chat."
+            return
+        }
+        do {
+            try await session.deleteMessage(messageId: messageId)
+            logger.info("Requested delete for message \(messageId, privacy: .public)")
+        } catch {
+            sendError = "Couldn't delete message: \(error.localizedDescription)"
+            logger.error("deleteMessage failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Attaches a reply to the next send. Builds the chip snippet from
     /// the line's runs — text runs concatenated up to ~80 chars, emote
     /// runs collapsed to their name (so the chip still reads sensibly
@@ -724,6 +779,25 @@ public final class TabChatModel {
         // which the static (used for priming, where no pending sends
         // exist) has.
         if case .message(let chatMessage) = event {
+            // Mod-status side-observation. We look at the badges
+            // attached to OUR own echoed messages. If we see a
+            // "moderator" or "broadcaster" set_id, we're a mod here.
+            // Cheap (badge array is usually <5 entries), runs only on
+            // our own messages, and once `currentUserCanModerate` is
+            // true we don't re-check.
+            //
+            // This is a free upgrade — runs alongside the existing echo
+            // reconciliation paths below.
+            if !currentUserCanModerate && chatMessage.chatterUserId == currentUserId {
+                let hasModBadge = chatMessage.badges.contains { badge in
+                    badge.setId == "moderator" || badge.setId == "broadcaster"
+                }
+                if hasModBadge {
+                    currentUserCanModerate = true
+                    logger.info("Detected mod status from echoed badges for #\(self.draftStorageChannelId, privacy: .public)")
+                }
+            }
+
             // ─── Path 0 (primary): Helix-id match ────────────────────
             //
             // We learned this messageId from `sendChatMessage`'s response.
