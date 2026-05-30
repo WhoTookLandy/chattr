@@ -249,11 +249,30 @@ public final class TabChatModel {
         public let parentMessageId: String
         public let parentAuthorDisplayName: String
         public let parentSnippet: String      // already-truncated so the view doesn't need to
+        /// The root of the thread this reply belongs to. For replies
+        /// to a top-level message, this equals `parentMessageId`. For
+        /// replies-to-replies mid-thread, this equals the original
+        /// thread root (walked from the parent's own `replyParent`).
+        ///
+        /// Used to stamp the optimistic `ChatLine.ReplyParent` so the
+        /// thread sheet can group the optimistic row correctly
+        /// BEFORE the echo arrives and replaces it with Twitch's
+        /// authoritative `threadMessageId`. Without this, an
+        /// optimistic mid-thread reply would render as a singleton
+        /// (its own "thread") in the View Thread sheet until the
+        /// echo lands.
+        public let threadRootMessageId: String
 
-        public init(parentMessageId: String, parentAuthorDisplayName: String, parentSnippet: String) {
+        public init(
+            parentMessageId: String,
+            parentAuthorDisplayName: String,
+            parentSnippet: String,
+            threadRootMessageId: String
+        ) {
             self.parentMessageId = parentMessageId
             self.parentAuthorDisplayName = parentAuthorDisplayName
             self.parentSnippet = parentSnippet
+            self.threadRootMessageId = threadRootMessageId
         }
     }
 
@@ -474,19 +493,19 @@ public final class TabChatModel {
         // UUIDv4s without a prefix), so there's no risk of a real echo
         // colliding with a pending id.
         // Build a ReplyParent for the optimistic row if this is a reply.
-        // The thread root mirrors `parentMessageId` for the common
-        // "reply to a non-reply" case; when the user is replying to a
-        // message that's itself a reply, the *correct* thread root is
-        // the original chain root, which we'd have to walk via the
-        // parent's own replyParent. We approximate it as the immediate
-        // parent for now — the echo overwrites this with Twitch's
-        // canonical `threadMessageId` when it arrives.
+        // ReplyContext now carries the authoritative threadRootMessageId
+        // (walked in `replyContext(for:)`), so we can stamp the
+        // optimistic line with the correct root. This matters for
+        // replies-to-replies: opening the thread sheet during the
+        // race window (after send, before echo) would otherwise see
+        // the optimistic row as a singleton thread instead of part of
+        // the chain.
         let optimisticReplyParent: ChatLine.ReplyParent? = replyAttachment.map { attachment in
             ChatLine.ReplyParent(
                 parentMessageId: attachment.parentMessageId,
                 parentAuthorDisplayName: attachment.parentAuthorDisplayName,
                 parentBody: attachment.parentSnippet,
-                threadRootMessageId: attachment.parentMessageId
+                threadRootMessageId: attachment.threadRootMessageId
             )
         }
 
@@ -619,11 +638,16 @@ public final class TabChatModel {
         // a failed reply that the user taps Retry on would land as a
         // top-level message — silently breaking the thread relationship
         // the user explicitly chose with Reply.
+        //
+        // ReplyParent already carries the resolved threadRootMessageId
+        // (set when the original send was made), so we use it directly
+        // — no need to re-walk.
         let preservedReply: ReplyContext? = lines[idx].replyParent.map { rp in
             ReplyContext(
                 parentMessageId: rp.parentMessageId,
                 parentAuthorDisplayName: rp.parentAuthorDisplayName,
-                parentSnippet: rp.parentBody
+                parentSnippet: rp.parentBody,
+                threadRootMessageId: rp.threadRootMessageId
             )
         }
         // Remove the failed row first so the new optimistic insert
@@ -842,10 +866,17 @@ public final class TabChatModel {
     /// know how to build the snippet, and the snippet logic only
     /// exists in one place.
     public static func replyContext(for line: ChatLine) -> ReplyContext {
-        ReplyContext(
+        // Resolve the thread root: if the line we're replying to is
+        // itself a reply, the thread root is the SAME root the line
+        // already points to (mid-thread continuation). Otherwise the
+        // line itself is the root candidate (first reply, or a
+        // singleton thread).
+        let threadRoot = line.replyParent?.threadRootMessageId ?? line.id
+        return ReplyContext(
             parentMessageId: line.id,
             parentAuthorDisplayName: line.authorDisplayName,
-            parentSnippet: snippet(from: line.runs, cap: 80)
+            parentSnippet: snippet(from: line.runs, cap: 80),
+            threadRootMessageId: threadRoot
         )
     }
 
