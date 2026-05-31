@@ -26,6 +26,11 @@ public final class AccountStore {
     /// Cached per-account TwitchClient instances. Keyed by `userId`.
     private var clients: [String: TwitchClient] = [:]
 
+    /// Shared "any channel open?" flag. The registry increments/decrements it;
+    /// the persistent EventSub clients read it via their `isLive` closure so
+    /// reconnect stays aggressive while a channel is open. (See SessionActivitySignal.)
+    public let sessionActivity = SessionActivitySignal()
+
     /// Currently active account's userId. Drives which client/identity drives the UI.
     private var activeUserId: String?
 
@@ -101,9 +106,13 @@ public final class AccountStore {
         if let existing = clients[userId] {
             return existing
         }
+        // Capture the Sendable signal (NOT `self`, which is non-Sendable
+        // @MainActor) so the @Sendable isLive closure stays isolation-clean.
+        let signal = sessionActivity
         let client = TwitchClient(
             clientId: clientId,
-            tokenNamespace: Self.namespace(for: userId)
+            tokenNamespace: Self.namespace(for: userId),
+            isLive: { signal.hasActiveSessions }
         )
         clients[userId] = client
         return client
@@ -125,9 +134,11 @@ public final class AccountStore {
         let namespace = Self.namespace(for: user.id)
 
         // 3. Build the persistent client (Keychain-backed) and seed it with the token.
+        let signal = sessionActivity
         let persistent = TwitchClient(
             clientId: clientId,
-            tokenNamespace: namespace
+            tokenNamespace: namespace,
+            isLive: { signal.hasActiveSessions }
         )
         try await persistent.auth.setToken(token)
         clients[user.id] = persistent
