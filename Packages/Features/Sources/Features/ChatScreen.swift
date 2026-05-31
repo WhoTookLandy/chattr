@@ -164,41 +164,7 @@ public struct ChatScreen: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            ComposeBar(
-                channelLoginName: channelLoginName,
-                channelDisplayName: channelDisplayName,
-                replyContext: chatModel.replyContext,
-                chatRestrictions: chatModel.chatRestrictions,
-                // Load the persisted draft synchronously here in body.
-                // UserDefaults reads are fast + iOS caches them, so
-                // doing this on every body re-eval is cheap. The seed
-                // only matters at first mount thanks to @State
-                // semantics; subsequent re-evals pass new seeds but
-                // they're ignored once @State is established.
-                seedDraft: DraftStorage.load(forChannelId: channelId),
-                onCancelReply: { chatModel.cancelReply() },
-                // Persist on every keystroke. The user's drafts survive:
-                //   - swiping to another channel-tab and back (the
-                //     paged ScrollView unmounts/remounts ChatScreen on
-                //     swipe; UserDefaults bridges that gap)
-                //   - quitting and relaunching the app (UserDefaults is
-                //     plist-backed and survives cold start)
-                //   - the user's draft is cleared on successful send
-                //     by `chatModel.send` via DraftStorage.clear
-                onDraftChange: { newDraft in
-                    DraftStorage.save(forChannelId: channelId, text: newDraft)
-                },
-                // Built on demand when the emote button is tapped (not
-                // every body eval) — reads the registry-owned EmoteIndex
-                // snapshot + the cached Twitch global emotes.
-                emoteSectionsProvider: {
-                    EmoteCatalog.buildSections(
-                        thirdParty: emoteIndex?.snapshot() ?? [:],
-                        twitchGlobal: globalCatalog?.globalEmotes ?? [:]
-                    )
-                },
-                onSend: { draft in await chatModel.send(text: draft) }
-            )
+            composeBarView
         }
         // Send-failure alert is gone — drops and network errors now
         // surface inline on the failed row itself (red exclamation +
@@ -355,6 +321,54 @@ public struct ChatScreen: View {
         // structurally bound to view lifetime via CancellationError, no
         // unstructured Task needed. See the doc-comment on that .task
         // for why.
+    }
+
+    /// The compose bar, extracted so we can resolve `@Environment`-derived
+    /// values (`emoteIndex`, `globalCatalog`) DURING body evaluation and
+    /// capture the concrete results into the emote-section provider closure.
+    ///
+    /// ## Why this matters
+    ///
+    /// `@Environment` values are only reliably resolved during `body`. If
+    /// the provider closure captured `self` and read `self.globalCatalog` /
+    /// `self.emoteIndex` (both `@Environment`-derived) when the closure runs
+    /// LATER — on the emote-button tap — they return their DEFAULT (nil),
+    /// producing an empty picker.
+    ///
+    /// Resolving them here, into local `let`s, captures the concrete
+    /// `EmoteIndex` actor instance + the Twitch-globals dict. The closure
+    /// reads those instead of `@Environment`, so it works whenever it runs.
+    /// The dict snapshot is current because `body` re-evaluates when
+    /// `globalCatalog` (`@Observable`) changes, recreating the closure.
+    @ViewBuilder
+    private var composeBarView: some View {
+        let resolvedEmoteIndex = emoteIndex
+        let resolvedTwitchGlobals = globalCatalog?.globalEmotes ?? [:]
+        ComposeBar(
+            channelLoginName: channelLoginName,
+            channelDisplayName: channelDisplayName,
+            replyContext: chatModel.replyContext,
+            chatRestrictions: chatModel.chatRestrictions,
+            // Load the persisted draft synchronously here in body.
+            // UserDefaults reads are fast + iOS caches them; the seed
+            // only matters at first mount thanks to @State semantics.
+            seedDraft: DraftStorage.load(forChannelId: channelId),
+            onCancelReply: { chatModel.cancelReply() },
+            onDraftChange: { newDraft in
+                DraftStorage.save(forChannelId: channelId, text: newDraft)
+            },
+            // Captures the concrete EmoteIndex instance + globals dict
+            // (resolved above), NOT @Environment — so it returns real
+            // emotes when invoked on the button tap. Built on demand
+            // (the snapshot read + section build runs only when tapped).
+            emoteSectionsProvider: {
+                EmoteCatalog.buildSections(
+                    thirdParty: resolvedEmoteIndex?.snapshot() ?? [:],
+                    twitchGlobal: resolvedTwitchGlobals
+                )
+            },
+            onSend: { draft in await chatModel.send(text: draft) }
+        )
     }
 
     // MARK: - Subviews
