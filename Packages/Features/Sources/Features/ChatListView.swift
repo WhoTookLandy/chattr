@@ -113,6 +113,28 @@ final class ChatListViewController: UIViewController {
         }
     }
 
+    /// The topmost visible item's id and its offset from the viewport top —
+    /// captured before a data change so we can restore the same reading
+    /// position afterward.
+    private func currentTopAnchor() -> (id: String, distanceFromTop: CGFloat)? {
+        let visible = collectionView.indexPathsForVisibleItems.sorted()
+        guard let top = visible.first,
+              let id = dataSource.itemIdentifier(for: top),
+              let attrs = collectionView.layoutAttributesForItem(at: top) else { return nil }
+        return (id, attrs.frame.minY - collectionView.contentOffset.y)
+    }
+
+    /// Restore the viewport so `anchor.id` sits at the same distance from the
+    /// top as before — cancels the jump a front-trim would otherwise cause.
+    private func restoreTopAnchor(_ anchor: (id: String, distanceFromTop: CGFloat)) {
+        collectionView.layoutIfNeeded()
+        guard let indexPath = dataSource.indexPath(for: anchor.id),
+              let attrs = collectionView.layoutAttributesForItem(at: indexPath) else { return }
+        var offset = collectionView.contentOffset
+        offset.y = attrs.frame.minY - anchor.distanceFromTop
+        collectionView.setContentOffset(offset, animated: false)
+    }
+
     /// Scroll the newest message to the bottom edge. No animation — under burst
     /// traffic queued animations stutter (the same reason `ChatScreen` snapped
     /// instantly).
@@ -130,6 +152,10 @@ final class ChatListViewController: UIViewController {
         let delta = ChatListDiff.compute(old: lastLines, new: newLines)
         let wasAtBottom = lastReportedAtBottom
 
+        // Only needed when scrolled up AND rows are leaving above us.
+        let anchor: (id: String, distanceFromTop: CGFloat)? =
+            (!wasAtBottom && !delta.removed.isEmpty) ? currentTopAnchor() : nil
+
         lastLines = newLines
         linesByID = newLines.reduce(into: [:]) { $0[$1.id] = $1 }
 
@@ -146,6 +172,8 @@ final class ChatListViewController: UIViewController {
 
         if wasAtBottom {
             scrollToBottom(animated: false)
+        } else if let anchor {
+            restoreTopAnchor(anchor)
         }
     }
 }
