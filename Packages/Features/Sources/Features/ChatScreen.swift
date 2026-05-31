@@ -581,7 +581,12 @@ public struct ChatScreen: View {
                 currentUserId: account.userId,
                 currentUserLogin: account.login,
                 currentUserDisplayName: account.displayName,
-                highlightKeywords: []   // No user-configurable highlights yet.
+                // User-configured highlight keywords (Profile → Highlight
+                // Keywords). Read at attach time — changing them mid-session
+                // applies on the next channel attach (reopen / relaunch).
+                // Self-mentions are always highlighted regardless of this
+                // list; keywords are additive.
+                highlightKeywords: HighlightSettings.keywords()
             )
         } catch is CancellationError {
             // Expected on view tear-down / channel-tab switch. The outgoing

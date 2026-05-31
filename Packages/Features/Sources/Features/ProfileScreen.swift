@@ -46,6 +46,13 @@ public struct ProfileScreen: View {
     @State private var showingSignOutConfirm = false
     @State private var errorMessage: String?
 
+    /// Mirror of `HighlightSettings.soundEnabled()`, seeded at init so the
+    /// toggle reflects the persisted value. Writes go through both this
+    /// @State (for instant UI) AND `HighlightSettings.setSoundEnabled`
+    /// (for persistence). We don't use @AppStorage because the key lives
+    /// in `HighlightSettings`'s namespace, not a SwiftUI-owned default.
+    @State private var highlightSoundEnabled: Bool = HighlightSettings.soundEnabled()
+
     public init(account: Account, accountStore: AccountStore) {
         self.account = account
         self.accountStore = accountStore
@@ -85,6 +92,28 @@ public struct ProfileScreen: View {
                 Text("Appearance")
             } footer: {
                 Text("System follows your device's appearance setting.")
+            }
+
+            // Chat preferences — highlight keywords + the sound toggle.
+            Section {
+                NavigationLink {
+                    HighlightKeywordsScreen()
+                } label: {
+                    Label("Highlight Keywords", systemImage: "text.magnifyingglass")
+                }
+                Toggle(isOn: Binding(
+                    get: { highlightSoundEnabled },
+                    set: {
+                        highlightSoundEnabled = $0
+                        HighlightSettings.setSoundEnabled($0)
+                    }
+                )) {
+                    Label("Highlight Sound", systemImage: "speaker.wave.2.fill")
+                }
+            } header: {
+                Text("Chat")
+            } footer: {
+                Text("Messages that @-mention you or match a keyword are highlighted. Turn on the sound for an audible ping on highlights.")
             }
 
             // Developer tools — always visible for now. When the app ships

@@ -1041,6 +1041,33 @@ public final class TabChatModel {
         }
 
         Self.appendLines(for: event, into: &lines, normalizationContext: self)
+
+        // Highlight sound: fire for a freshly-appended FOREIGN live
+        // message that's highlighted, if the user has sounds on.
+        //
+        // Why this is the right gate:
+        //   - apply() is the LIVE path; priming/backfill uses
+        //     appendLines directly in attach(), so historical messages
+        //     never reach here. (No ping for messages that arrived
+        //     while you were away.)
+        //   - The echo-reconciliation paths above (0/1/2) already
+        //     `return`ed for our OWN messages, so a `.message` reaching
+        //     this fall-through is someone else's. The explicit
+        //     `chatterUserId != currentUserId` guard covers the rare
+        //     own-message-fell-through edge (failed send + late echo).
+        //   - `lines.last?.isHighlighted` reads the just-appended row —
+        //     true when it's a self-mention OR matches a configured
+        //     keyword (the Normalizer set the flag).
+        //   - `soundEnabled()` is checked LAST so the UserDefaults read
+        //     only happens for an actual highlighted foreign message
+        //     (rare), not every message.
+        if case .message(let m) = event,
+           m.chatterUserId != currentUserId,
+           lines.last?.isHighlighted == true,
+           HighlightSettings.soundEnabled() {
+            HighlightSoundPlayer.shared.play()
+        }
+
         if lines.count > Self.lineCap {
             lines.removeFirst(lines.count - Self.lineCap)
         }
