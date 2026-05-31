@@ -21,18 +21,28 @@ struct EmotePickerView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
 
+    /// Filtered result, or `nil` when no search is active (show everything).
+    /// Kept as state rather than a body-computed property so the (debounced)
+    /// filter work happens on a search-change trigger, not on every body
+    /// re-evaluation.
+    @State private var filtered: [EmoteSection]?
+
+    /// In-flight debounce task, cancelled when the query changes again.
+    @State private var searchTask: Task<Void, Never>?
+
     /// Adaptive grid — as many ~40pt emote cells per row as fit.
     private let columns = [GridItem(.adaptive(minimum: 44), spacing: 8)]
 
-    /// Filter every section by the search text, dropping sections that
-    /// end up empty. Case-insensitive substring on the emote name.
-    private var visibleSections: [EmoteSection] {
-        let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return sections }
-        return sections.compactMap { section in
-            let matches = section.emotes.filter {
-                $0.name.localizedCaseInsensitiveContains(trimmed)
-            }
+    /// What the grid actually renders: the filtered subset when searching,
+    /// otherwise the full section list.
+    private var displayedSections: [EmoteSection] { filtered ?? sections }
+
+    /// Pure filter — pre-lowercased `searchKey` + plain `contains`, dropping
+    /// sections that end up empty. Static so the debounce task can call it
+    /// without capturing `self`.
+    private static func filter(_ sections: [EmoteSection], needle: String) -> [EmoteSection] {
+        sections.compactMap { section in
+            let matches = section.emotes.filter { $0.searchKey.contains(needle) }
             guard !matches.isEmpty else { return nil }
             return EmoteSection(id: section.id, title: section.title, emotes: matches)
         }
@@ -47,7 +57,7 @@ struct EmotePickerView: View {
                         systemImage: "face.smiling",
                         description: Text("Channel and global emotes load shortly after you open a channel.")
                     )
-                } else if visibleSections.isEmpty {
+                } else if displayedSections.isEmpty {
                     ContentUnavailableView.search(text: search)
                 } else {
                     grid
@@ -58,6 +68,25 @@ struct EmotePickerView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .searchable(text: $search, prompt: "Search emotes")
+            // Debounce: filtering thousands of emotes on every keystroke is
+            // what made search feel laggy. Clearing the field resets to the
+            // full list immediately (no debounce); a non-empty query waits
+            // ~120ms after the last keystroke before filtering, so a fast
+            // typist triggers one filter pass instead of one per character.
+            .onChange(of: search) { _, raw in
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                searchTask?.cancel()
+                guard !trimmed.isEmpty else {
+                    filtered = nil
+                    return
+                }
+                let snapshot = sections
+                searchTask = Task {
+                    try? await Task.sleep(for: .milliseconds(120))
+                    guard !Task.isCancelled else { return }
+                    filtered = Self.filter(snapshot, needle: trimmed.lowercased())
+                }
+            }
             #if os(iOS)
             .textInputAutocapitalization(.never)
             #endif
@@ -74,7 +103,7 @@ struct EmotePickerView: View {
     private var grid: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
-                ForEach(visibleSections) { section in
+                ForEach(displayedSections) { section in
                     Section {
                         LazyVGrid(columns: columns, spacing: 8) {
                             ForEach(section.emotes) { emote in

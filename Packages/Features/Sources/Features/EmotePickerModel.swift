@@ -19,6 +19,13 @@ public struct PickerEmote: Identifiable, Hashable, Sendable {
     /// animated rendering; today the grid renders the static frame.
     public let isAnimated: Bool
 
+    /// Pre-lowercased `name`, computed once at build time. The picker's
+    /// search filters on this with a plain `contains`, avoiding a
+    /// `localizedCaseInsensitiveContains` call across the whole emote set
+    /// on every keystroke (locale-aware matching is far more expensive,
+    /// and big channels carry thousands of emotes).
+    public let searchKey: String
+
     /// Build from a third-party (7TV/BTTV/FFZ) emote.
     init(_ emote: Emote) {
         self.id = "\(emote.source.rawValue)-\(emote.id)"
@@ -26,6 +33,7 @@ public struct PickerEmote: Identifiable, Hashable, Sendable {
         // Prefer 2x (chat-row scale); fall back across available sizes.
         self.imageURL = emote.urls[.x2] ?? emote.urls[.x1] ?? emote.urls[.x4]
         self.isAnimated = emote.isAnimated
+        self.searchKey = emote.name.lowercased()
     }
 
     /// Build from a Twitch native emote.
@@ -38,6 +46,7 @@ public struct PickerEmote: Identifiable, Hashable, Sendable {
             format: animated ? "animated" : "static"
         )
         self.isAnimated = animated
+        self.searchKey = emote.name.lowercased()
     }
 }
 

@@ -56,6 +56,25 @@ public final class ChatBadgeStore {
     /// `(setId, id) → entry`. Mutated once on `load()` completion.
     public private(set) var entries: [ChatBadgeKey: ChatBadgeEntry] = [:]
 
+    /// Memoizes `entries(for:)` results keyed by the message's badge set.
+    ///
+    /// Most messages share an identical badge combination (empty, or e.g.
+    /// "subscriber + moderator"), and `ChatScreen.body` re-evaluates on every
+    /// new message — so the same set was being re-resolved (dictionary
+    /// lookups + a fresh array allocation) for every visible row on every
+    /// append. Caching collapses repeats to one resolution per distinct set
+    /// and hands back a copy-on-write-shared array.
+    ///
+    /// `@ObservationIgnored` is load-bearing: `entries(for:)` is called *during*
+    /// view-body evaluation (`ChatRow`), so if this cache were observation-
+    /// tracked, mutating it on a miss would be "modifying state during view
+    /// update." It's a pure memo, not model state, so it's correctly excluded.
+    ///
+    /// Distinct badge combinations are naturally bounded (a finite set of badge
+    /// types, each user shows a handful), so the cache stays small; it's
+    /// cleared whenever `entries` is republished by `load(...)`.
+    @ObservationIgnored private var resolvedCache: [[ChatBadgeKey]: [ChatBadgeEntry]] = [:]
+
     /// Idempotency key — the channel id we last successfully loaded for.
     /// Multiple ChatScreen mounts for the same channel each call `load(...)`,
     /// but only the first triggers Helix calls. Public reset via
@@ -122,6 +141,9 @@ public final class ChatBadgeStore {
             merged[key] = entry
         }
         entries = merged
+        // Resolution results depend on `entries`; drop them so the next
+        // `entries(for:)` re-resolves against the freshly merged table.
+        resolvedCache.removeAll(keepingCapacity: true)
         loadedChannelId = channelId
         logger.info("Loaded \(merged.count) badge entries for channel \(channelId) (global=\(global.count), channel=\(channel.count))")
     }
@@ -130,7 +152,11 @@ public final class ChatBadgeStore {
     /// and dropping any whose `(setId, id)` aren't in our cached sets (rare —
     /// happens when Twitch ships a new badge type after our last fetch).
     public func entries(for badges: [ChatBadge]) -> [ChatBadgeEntry] {
-        badges.compactMap { entries[ChatBadgeKey(setId: $0.setId, id: $0.id)] }
+        let key = badges.map { ChatBadgeKey(setId: $0.setId, id: $0.id) }
+        if let cached = resolvedCache[key] { return cached }
+        let resolved = key.compactMap { entries[$0] }
+        resolvedCache[key] = resolved
+        return resolved
     }
 
     // MARK: - Private fetch helpers
