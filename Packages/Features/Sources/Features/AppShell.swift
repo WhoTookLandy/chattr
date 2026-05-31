@@ -49,6 +49,9 @@ private let logger = AppLogger.make("Features.AppShell")
 public struct AppShell: View {
     private let account: Account
     private let accountStore: AccountStore
+    /// Twitch client id, threaded down to ProfileScreen → the account
+    /// switcher so "Add Account" can run the OAuth flow.
+    private let clientId: String
 
     @State private var selectedTab: AppTab = .follows
     @State private var chatTabsModel = ChatTabsModel()
@@ -70,9 +73,10 @@ public struct AppShell: View {
         case follows, chat, profile
     }
 
-    public init(account: Account, accountStore: AccountStore) {
+    public init(account: Account, accountStore: AccountStore, clientId: String) {
         self.account = account
         self.accountStore = accountStore
+        self.clientId = clientId
     }
 
     public var body: some View {
@@ -110,7 +114,7 @@ public struct AppShell: View {
             //      navigation-chrome weight.
             Tab("Profile", systemImage: "person.crop.circle.fill", value: AppTab.profile) {
                 NavigationStack {
-                    ProfileScreen(account: account, accountStore: accountStore)
+                    ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
                 }
             }
         }

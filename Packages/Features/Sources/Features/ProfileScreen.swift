@@ -40,6 +40,8 @@ private let logger = AppLogger.make("Features.Profile")
 public struct ProfileScreen: View {
     private let account: Account
     private let accountStore: AccountStore
+    /// Twitch client id, used by the account switcher's "Add Account".
+    private let clientId: String
 
     @AppStorage(AppearanceMode.storageKey) private var appearanceModeRaw: String = AppearanceMode.system.rawValue
     @State private var isSigningOut = false
@@ -53,9 +55,13 @@ public struct ProfileScreen: View {
     /// in `HighlightSettings`'s namespace, not a SwiftUI-owned default.
     @State private var highlightSoundEnabled: Bool = HighlightSettings.soundEnabled()
 
-    public init(account: Account, accountStore: AccountStore) {
+    /// Whether the account-switcher sheet is presented.
+    @State private var showingAccountSwitcher = false
+
+    public init(account: Account, accountStore: AccountStore, clientId: String) {
         self.account = account
         self.accountStore = accountStore
+        self.clientId = clientId
     }
 
     /// Parsed appearance mode with safe fallback when the raw value drifts
@@ -71,9 +77,24 @@ public struct ProfileScreen: View {
             // form. Uses `.listRowInsets` to remove the standard Form padding
             // so the header reads as a hero element, not a regular settings row.
             Section {
-                AccountHeaderRow(account: account)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
+                // Tappable header → account switcher. The chevron signals
+                // "there's more here." Plain button style so the row keeps
+                // its custom layout instead of taking the system blue
+                // tint treatment.
+                Button {
+                    showingAccountSwitcher = true
+                } label: {
+                    HStack {
+                        AccountHeaderRow(account: account)
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
             }
 
             Section {
@@ -160,6 +181,9 @@ public struct ProfileScreen: View {
         // title) — consistent with the ChannelListScreen treatment. Saves
         // ~60pt of vertical space vs the default large-title mode.
         .toolbarTitleDisplayMode(.inlineLarge)
+        .sheet(isPresented: $showingAccountSwitcher) {
+            AccountSwitcherView(accountStore: accountStore, clientId: clientId)
+        }
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,

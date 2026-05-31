@@ -34,44 +34,10 @@ public struct SignInView: View {
     /// background, and the user may not relaunch until much later.
     @State private var sessionExpiredLogin: String?
 
-    /// The viewer-facing scopes chattr needs.
-    ///
-    /// `moderatorManageChatMessages` is required for the mod-only
-    /// delete affordance — non-mod users will never exercise it, but
-    /// requesting it up-front avoids forcing a re-auth flow the first
-    /// time a moderator tries to delete a message. Twitch's consent
-    /// screen lists every scope; mods see it and approve it, non-mods
-    /// see it and approve it harmlessly (the token can request the
-    /// delete endpoint but it'll fail with `unauthorized` from Twitch
-    /// if the user isn't actually a mod in the target channel).
-    ///
-    /// `userReadEmotes` powers the launch-time emote-image prefetch:
-    /// `EmoteImagePrefetcher` calls `GET /chat/emotes/user` to enumerate
-    /// every emote the user has access to (subscribed channels, Prime,
-    /// Turbo) and warms Nuke's disk cache so the images are ready when
-    /// the user opens chat. Without the scope, that fetch returns
-    /// `unauthorized` and we silently skip — the app degrades to
-    /// "fetch on first display" without breaking.
-    private static let scopes: [TwitchScope] = [
-        .userReadEmail,
-        .userReadChat,
-        .userWriteChat,
-        .userReadFollows,
-        .userReadEmotes,
-        .moderatorManageChatMessages,
-    ]
-
-    /// The redirect URI we instruct Twitch to send the auth code to. Must match the URL
-    /// registered at the Twitch dev portal and the URL the Vercel bridge expects at
-    /// `/oauth/callback`. Centralized in `Core.Endpoints` alongside the refresh URL
-    /// that `AccountStore.refreshTokens(...)` uses — both live on the same bridge.
-    private static let redirectURI = Endpoints.ChattrAuth.callback.absoluteString
-
-    /// Custom URL scheme the bridge 302-redirects to after exchanging the code for tokens.
-    /// Must be registered in the app's `Info.plist` under `CFBundleURLTypes`.
-    /// `ASWebAuthenticationSession.callbackURLScheme` accepts this and intercepts the
-    /// `chattr://` navigation before iOS would show "Open in chattr?".
-    private static let callbackScheme = "chattr"
+    // Scopes, redirect URI, and callback scheme now live in the shared
+    // `TwitchSignIn` flow — used by both this view and the in-app account
+    // switcher's "Add Account" — so there's one source of truth for what
+    // "sign in to chattr" means.
 
     public init(accountStore: AccountStore, clientId: String) {
         self.accountStore = accountStore
@@ -196,42 +162,12 @@ public struct SignInView: View {
         defer { isSigningIn = false }
 
         do {
-            // Build the OAuth URL. We only use TwitchOAuthClient for URL construction —
-            // the actual code-for-token exchange happens server-side on the Vercel bridge,
-            // so we never pass (or store) a client_secret here.
-            let oauthClient = TwitchOAuthClient(
-                clientId: clientId,
-                redirectUri: Self.redirectURI
-            )
-            let authURL = oauthClient.authorizationCodeURL(scopes: Self.scopes)
-
-#if canImport(UIKit)
-            // Find an active window to anchor the ASWebAuthenticationSession sheet.
-            guard
-                let scene = UIApplication.shared.connectedScenes
-                    .first(where: { $0 is UIWindowScene }) as? UIWindowScene,
-                let anchor = scene.windows.first
-            else {
-                errorMessage = "Couldn't find a window to present sign-in from."
-                return
-            }
-
-            // Present the sheet, await the chattr:// callback carrying the exchanged tokens.
-            let token = try await OAuthFlow.run(
-                authURL: authURL,
-                callbackScheme: Self.callbackScheme,
-                presentationAnchor: anchor
-            )
-
-            // Hand off to AccountStore — it does the /users probe + Keychain persistence
-            // + SwiftData insert. RootView's @Query will observe the new Account row
-            // and transition away from this view automatically.
-            _ = try await accountStore.add(token: token, scopes: Self.scopes)
-            logger.info("Sign-in succeeded")
-#else
-            // Slice 1 is iOS-only; macOS host reaches this path only in unit tests.
-            errorMessage = "Sign-in is not supported on this platform."
-#endif
+            // Delegate to the shared flow. It builds the OAuth URL,
+            // presents the auth sheet (exchange happens server-side so
+            // the client_secret stays off-device), and hands the token
+            // to AccountStore.add. RootView's @Query observes the new
+            // row and transitions away from this view automatically.
+            _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
         } catch {
             logger.error("Sign-in failed: \(error.localizedDescription)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription

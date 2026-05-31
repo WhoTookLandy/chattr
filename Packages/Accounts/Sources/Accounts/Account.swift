@@ -25,8 +25,23 @@ public final class Account {
     /// Constructed once at sign-in and never changes.
     public var tokenNamespace: String
 
-    /// When this account was added. Used for sorting in the account switcher.
+    /// When this account was added. Used as a tiebreaker in the account
+    /// switcher when `lastSelectedAt` values collide (e.g. all existing
+    /// accounts got the same default after the migration).
     public var addedAt: Date
+
+    /// When this account was last made active (tapped in the switcher, or
+    /// added). The "active" account is the one with the most recent
+    /// `lastSelectedAt` — RootView's `@Query` sorts by this descending and
+    /// shows `accounts.first`. Switching accounts is just "bump this
+    /// timestamp and let `@Query` reactivity float the row to the top."
+    ///
+    /// Lightweight-migration-safe: new required property WITH a default
+    /// (`.now`). Existing rows auto-populate with the default on first
+    /// load after the update — they all get roughly the same timestamp,
+    /// so `addedAt` becomes the effective tiebreaker for pre-existing
+    /// accounts (most-recently-added stays active, matching prior behavior).
+    public var lastSelectedAt: Date
 
     /// When true, the account's refresh token failed and the user must re-auth.
     public var needsReauth: Bool
@@ -38,6 +53,7 @@ public final class Account {
         profileImageURL: String,
         tokenNamespace: String,
         addedAt: Date = .now,
+        lastSelectedAt: Date = .now,
         needsReauth: Bool = false
     ) {
         self.userId = userId
@@ -46,6 +62,7 @@ public final class Account {
         self.profileImageURL = profileImageURL
         self.tokenNamespace = tokenNamespace
         self.addedAt = addedAt
+        self.lastSelectedAt = lastSelectedAt
         self.needsReauth = needsReauth
     }
 }

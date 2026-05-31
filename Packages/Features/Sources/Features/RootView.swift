@@ -20,7 +20,12 @@ public struct RootView: View {
     /// chat sessions.
     private let channelSessionRegistry: ChannelSessionRegistry
 
-    @Query(sort: \Account.addedAt, order: .reverse)
+    // Sort by `lastSelectedAt` descending so `accounts.first` IS the
+    // active account. Switching accounts (account switcher → bump
+    // lastSelectedAt) re-sorts this query, floats the chosen account to
+    // first, and the `if let active = accounts.first` below re-renders
+    // AppShell with it. No imperative switch plumbing needed.
+    @Query(sort: \Account.lastSelectedAt, order: .reverse)
     private var accounts: [Account]
 
     /// App-wide cache of global badges + emotes. Owned here so it survives
@@ -61,7 +66,14 @@ public struct RootView: View {
         let _ = { ImagePipelineSetup.configure() }()
         Group {
             if let active = accounts.first {
-                AppShell(account: active, accountStore: accountStore)
+                AppShell(account: active, accountStore: accountStore, clientId: clientId)
+                    // `.id(userId)` forces a fresh AppShell when the active
+                    // account changes (switch / add / remove). A new account
+                    // means new chat sessions, a new follow list, new
+                    // emote+badge prefetch — a clean slate is correct, and
+                    // far simpler than threading account-change invalidation
+                    // through every child store.
+                    .id(active.userId)
             } else {
                 SignInView(accountStore: accountStore, clientId: clientId)
             }

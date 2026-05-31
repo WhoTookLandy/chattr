@@ -61,6 +61,30 @@ public final class AccountStore {
         logger.notice("Active account → \(userId, privacy: .public)")
     }
 
+    /// Make the account with `userId` the active one by bumping its
+    /// `lastSelectedAt` to now. RootView's `@Query(sort: lastSelectedAt,
+    /// .reverse)` re-sorts so this account becomes `accounts.first`, which
+    /// drives the AppShell re-render + the `setActive` call via RootView's
+    /// `.onChange`. So this method only needs to mutate + persist the
+    /// timestamp — the rest flows through SwiftData reactivity.
+    ///
+    /// No-op if the userId doesn't resolve to a stored account.
+    public func selectAccount(userId: String) async {
+        let context = ModelContext(modelContainer)
+        var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == userId })
+        descriptor.fetchLimit = 1
+        guard let account = try? context.fetch(descriptor).first else {
+            logger.warning("selectAccount: no stored account for \(userId, privacy: .public)")
+            return
+        }
+        account.lastSelectedAt = .now
+        try? context.save()
+        // setActive too, so the in-memory activeUserId is correct even
+        // before RootView's @Query reactivity fires.
+        setActive(userId: userId)
+        logger.notice("Selected account \(userId, privacy: .public)")
+    }
+
     /// Returns (constructing if needed) the TwitchClient for the given account.
     public func client(for account: Account) -> TwitchClient {
         client(forUserId: account.userId)
