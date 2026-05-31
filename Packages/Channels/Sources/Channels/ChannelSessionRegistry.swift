@@ -76,6 +76,14 @@ public final class ChannelSessionRegistry {
     /// Started lazily on first session creation for an account.
     private var eventDispatchTasks: [String: Task<Void, Never>] = [:]
 
+    /// Per-account connection-state mirrors, keyed by `accountUserId`. One per
+    /// account because the EventSub socket is per account.
+    private var connectionStatusStores: [String: ConnectionStatusStore] = [:]
+
+    /// Per-account tasks consuming `client.eventSub.connectionState`. Started
+    /// alongside the event dispatcher; cancelled in `stopDispatcherIfIdle`.
+    private var connectionDispatchTasks: [String: Task<Void, Never>] = [:]
+
     /// Reference counts per session key. Each `acquire(...)` increments;
     /// each `release(...)` decrements. When a count hits 0, the underlying
     /// `ChannelSession` is stopped and removed.
@@ -368,6 +376,18 @@ public final class ChannelSessionRegistry {
         return new
     }
 
+    /// Returns (creating if needed) the per-account connection-state store. A
+    /// `ChatScreen` observes this to drive its "Reconnecting… / Live again"
+    /// pill. Same lifetime as the account's event dispatcher.
+    public func connectionStatus(forAccountUserId accountUserId: String) -> ConnectionStatusStore {
+        if let existing = connectionStatusStores[accountUserId] {
+            return existing
+        }
+        let new = ConnectionStatusStore()
+        connectionStatusStores[accountUserId] = new
+        return new
+    }
+
     // MARK: - Event dispatch
 
     /// Cancel + remove the shared event dispatcher Task for an account if
@@ -393,6 +413,11 @@ public final class ChannelSessionRegistry {
         guard let task = eventDispatchTasks[accountUserId] else { return }
         task.cancel()
         eventDispatchTasks[accountUserId] = nil
+        // Tear down the connection-state pump + drop the store alongside the
+        // event dispatcher — they share the account's lifetime.
+        connectionDispatchTasks[accountUserId]?.cancel()
+        connectionDispatchTasks[accountUserId] = nil
+        connectionStatusStores[accountUserId] = nil
         logger.notice("Stopped event dispatcher for account \(accountUserId, privacy: .public) — no remaining sessions")
     }
 
@@ -411,6 +436,22 @@ public final class ChannelSessionRegistry {
             }
         }
         logger.info("Started event dispatcher for account \(accountUserId, privacy: .public)")
+
+        // Per-account connection-state pump. Consumes the single-consumer
+        // `connectionState` stream and mirrors it into the @Observable store the
+        // ChatScreen reads. Started here (with the event dispatcher) so it begins
+        // before connect() and observes the initial .connecting/.connected
+        // transitions — the stream has no value replay for late subscribers. The
+        // inner `== nil` guard keeps the block safe regardless of placement.
+        if connectionDispatchTasks[accountUserId] == nil {
+            let store = connectionStatus(forAccountUserId: accountUserId)
+            connectionDispatchTasks[accountUserId] = Task { @MainActor in
+                for await state in client.eventSub.connectionState {
+                    guard !Task.isCancelled else { return }
+                    store.update(state)
+                }
+            }
+        }
     }
 
     /// Routes a single event to the session whose `channelId` matches the
