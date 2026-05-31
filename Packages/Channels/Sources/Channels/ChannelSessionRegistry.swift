@@ -219,6 +219,10 @@ public final class ChannelSessionRegistry {
     ) async throws -> ChannelSession {
         let key = Self.key(accountUserId: accountUserId, channelId: channelId)
         refCounts[key, default: 0] += 1
+        // Mark the account "live" so its EventSub client reconnects aggressively
+        // while this channel is open. Balanced by the decrement in release()
+        // (and the rollback below if construction fails).
+        accountStore.sessionActivity.increment()
         // .debug: refcount churn is per-tab-open/close — visible in DevLogView
         // only when investigating session lifecycle issues, otherwise hidden.
         logger.debug("acquire \(key, privacy: .public) → refcount \(self.refCounts[key] ?? 0)")
@@ -236,6 +240,9 @@ public final class ChannelSessionRegistry {
         } catch {
             refCounts[key, default: 1] -= 1
             if refCounts[key] == 0 { refCounts[key] = nil }
+            // Roll back the activity increment from the top so a failed acquire
+            // doesn't leave the account permanently "live".
+            accountStore.sessionActivity.decrement()
             throw error
         }
     }
@@ -256,6 +263,10 @@ public final class ChannelSessionRegistry {
             return
         }
         refCounts[key] = count - 1
+        // Balance the increment from acquire(). The early-return guard above
+        // (no outstanding refcount) intentionally does NOT decrement — that
+        // release has no matching acquire.
+        accountStore.sessionActivity.decrement()
 
         if refCounts[key] == 0 {
             refCounts[key] = nil
