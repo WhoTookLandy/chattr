@@ -62,6 +62,10 @@ final class ChatListViewController: UIViewController {
     /// a flip, never per scroll frame (matches the old onScrollGeometryChange).
     private var lastReportedAtBottom = true
 
+    /// Last-seen scroll-to-bottom token — the jump-to-bottom pill increments the
+    /// value to request a scroll; we act only when it changes.
+    private var lastScrollToBottomToken = 0
+
     /// Last-applied lines, keyed by id for the cell provider's O(1) lookup.
     private var linesByID: [String: ChatLine] = [:]
     /// Last-applied lines in order — the `old` side of the next diff.
@@ -78,6 +82,9 @@ final class ChatListViewController: UIViewController {
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
         collectionView.keyboardDismissMode = .interactive
+        // Hard scroll-edge dissolve under the pinned glass tab strip — the
+        // UIKit equivalent of SwiftUI's `.scrollEdgeEffectStyle(.hard, for: .top)`.
+        collectionView.topEdgeEffect.style = .hard
         collectionView.delegate = self
         view.addSubview(collectionView)
     }
@@ -171,9 +178,16 @@ final class ChatListViewController: UIViewController {
         }
 
         if wasAtBottom {
+            // scrollToItem mutates contentOffset, which fires scrollViewDidScroll
+            // synchronously; the flip-only guard there prevents any feedback loop.
             scrollToBottom(animated: false)
         } else if let anchor {
             restoreTopAnchor(anchor)
+        }
+
+        if scrollToBottomToken != lastScrollToBottomToken {
+            lastScrollToBottomToken = scrollToBottomToken
+            scrollToBottom(animated: false)
         }
     }
 }
