@@ -73,6 +73,19 @@ public struct ChatScreen: View {
     /// the binding also updates as the user scrolls manually (iOS 17+ API).
     @State private var scrolledMessageId: String?
 
+    /// True when the scroll is at (or near) the bottom — i.e. the user is
+    /// "tailing" live chat. Driven by `.onScrollGeometryChange` reading
+    /// real scroll geometry. Gates the auto-scroll-on-new-message and
+    /// controls the jump-to-bottom pill's visibility (pill shows when
+    /// false).
+    @State private var isAtBottom = true
+
+    /// Count of messages that arrived while the user was scrolled up
+    /// (not tailing). Shown in the jump-to-bottom pill ("3 new
+    /// messages") so the user knows how much they're missing. Reset to
+    /// 0 whenever they return to the bottom.
+    @State private var unreadWhileScrolledUp = 0
+
     /// Non-nil when the thread sheet is open; carries the thread's root
     /// message ID. `.sheet(item:)` could use `Identifiable`, but the
     /// String here is identifiable already (each root id is unique) so
@@ -458,9 +471,16 @@ public struct ChatScreen: View {
         }
         // Declarative replacement for `ScrollViewReader { proxy.scrollTo(...) }`.
         // Writing to `scrolledMessageId` scrolls; the binding also updates as
-        // the user scrolls manually, opening the door to "snap to bottom only
-        // when already at bottom" UX later without changing today's behavior.
+        // the user scrolls manually.
         .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
+        // Start at the bottom (most recent message) when the scroll view
+        // first appears — i.e. when chat connects and the primed backfill
+        // + first live messages land. Without this, a freshly-mounted
+        // ScrollView starts at the TOP, showing the oldest backfilled
+        // message and forcing the user to scroll down. `.defaultScrollAnchor`
+        // only governs the INITIAL anchor; `.scrollPosition` takes over
+        // once it has a non-nil value, so ongoing scrolling is unaffected.
+        .defaultScrollAnchor(.bottom)
         // Scroll-edge dissolution under the pinned tab strip — see
         // `chatScrollView` doc-comment above. `.hard` because the tab
         // strip is a pinned accessory; `.top` because that's the edge
@@ -468,42 +488,102 @@ public struct ChatScreen: View {
         .scrollEdgeEffectStyle(.hard, for: .top)
         // Pull-to-dismiss-keyboard: dragging the chat content downward
         // dismisses the keyboard alongside the gesture. Matches Messages /
-        // most chat apps. Without this the only way to dismiss the
-        // keyboard is to send the message (which often you don't want to
-        // do — sometimes you just want to read while typing was a
-        // mistake). The compose bar's TextField stays focused if you
-        // pull only partially.
+        // most chat apps.
         .scrollDismissesKeyboard(.interactively)
-        // "tail -f" semantics for chat scroll:
+        // Track whether we're at (near) the bottom using REAL scroll
+        // geometry (iOS 18+). More robust than comparing scrolledMessageId
+        // to lines.last — that breaks when the last message is taller than
+        // the viewport. The transform returns a Bool; `action` fires only
+        // when the Bool flips, so this isn't a per-frame cost during a
+        // tailing scroll.
         //
-        //   - If the user is at the bottom of the feed (scroll position is
-        //     on the previous-last message, or scroll is unset), auto-snap
-        //     to the new last message.
-        //   - If the user has scrolled UP to read history (scroll position
-        //     is on some earlier message), DO NOT snap them down. They're
-        //     reading; respect that.
+        // "Near the bottom" within 44pt absorbs the small offset jitter
+        // during rapid appends and means the pill doesn't flicker on at
+        // the exact bottom edge.
+        .onScrollGeometryChange(for: Bool.self) { geo in
+            let distanceFromBottom = geo.contentSize.height
+                - geo.contentOffset.y
+                - geo.containerSize.height
+                + geo.contentInsets.bottom
+            return distanceFromBottom <= 44
+        } action: { _, atBottom in
+            isAtBottom = atBottom
+        }
+        // "tail -f" semantics, now gated on the geometry-derived
+        // `isAtBottom` instead of a scrolledMessageId comparison:
+        //   - At bottom → auto-snap to the new last message + reset unread.
+        //   - Scrolled up → don't snap; tally the new message into the
+        //     unread count so the pill can show "N new."
         //
-        // We also drop the 0.1s easeOut animation entirely. Under burst
-        // traffic (50-200 msgs/sec during raid storms), each animation
-        // requires 100ms but new messages arrive every 5-20ms — SwiftUI
-        // queues animation requests faster than it drains them, creating
-        // visible stutter. Instant snap is more legible at high throughput,
-        // and at low throughput the snap is so small the missing animation
-        // is invisible.
-        .onChange(of: chatModel.lines.count) { _, _ in
-            guard let last = chatModel.lines.last else { return }
-            // Determine if user was at the bottom *before* this append.
-            // The new last is `last`; the previous last is the
-            // second-to-last in the current array. If `scrolledMessageId`
-            // matches that, we were tailing. nil means "no scroll yet"
-            // — treat as at-bottom so the first messages trigger scroll.
-            let previousLast = chatModel.lines.dropLast().last
-            let wasTailing = scrolledMessageId == nil
-                || scrolledMessageId == previousLast?.id
-            if wasTailing {
-                scrolledMessageId = last.id
+        // No animation on the snap — under burst traffic (50-200 msg/sec
+        // during raids) queued animations stutter; instant snap is more
+        // legible and at low throughput the missing animation is invisible.
+        .onChange(of: chatModel.lines.count) { oldCount, newCount in
+            if isAtBottom {
+                if let last = chatModel.lines.last {
+                    scrolledMessageId = last.id
+                }
+                unreadWhileScrolledUp = 0
+            } else if newCount > oldCount {
+                unreadWhileScrolledUp += (newCount - oldCount)
             }
         }
+        // Returning to the bottom (manual scroll down, or via the pill)
+        // clears the unread tally.
+        .onChange(of: isAtBottom) { _, atBottom in
+            if atBottom { unreadWhileScrolledUp = 0 }
+        }
+        // Jump-to-bottom pill. Floats at the bottom of the scroll area
+        // (just above the compose bar) whenever the user has scrolled up
+        // off the live edge. Tapping snaps to the newest message and
+        // resumes tailing.
+        .overlay(alignment: .bottom) {
+            if !isAtBottom {
+                jumpToBottomPill
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: isAtBottom)
+    }
+
+    /// Floating "jump to latest" pill. Shows an unread count when
+    /// messages arrived while scrolled up, otherwise a plain "Latest"
+    /// label. Liquid Glass capsule to match the app's chrome.
+    @ViewBuilder
+    private var jumpToBottomPill: some View {
+        Button {
+            // Snap to the newest message. Writing scrolledMessageId with
+            // anchor:.bottom positions the last message at the viewport
+            // bottom = fully at the live edge. The geometry observer then
+            // flips isAtBottom true, hiding the pill + clearing unread.
+            if let last = chatModel.lines.last {
+                scrolledMessageId = last.id
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.bold))
+                if unreadWhileScrolledUp > 0 {
+                    // Apple's inflection markdown pluralizes "message"
+                    // automatically (1 message / 2 messages).
+                    Text("^[\(unreadWhileScrolledUp) new message](inflect: true)")
+                        .font(.caption.weight(.semibold))
+                } else {
+                    Text("Latest")
+                        .font(.caption.weight(.semibold))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.glassProminent)
+        .tint(Color.accentColor)
+        .accessibilityLabel(
+            unreadWhileScrolledUp > 0
+                ? "Jump to latest, \(unreadWhileScrolledUp) new messages"
+                : "Jump to latest"
+        )
     }
 
     // MARK: - Session lifecycle
