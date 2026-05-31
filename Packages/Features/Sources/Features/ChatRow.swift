@@ -4,6 +4,7 @@ import Channels
 import ChatModel
 import EmoteSources
 import DesignSystem
+import NukeUI
 
 /// One chat-message row: badges → bold username → inline-rendered runs
 /// (text, third-party emote images, Twitch native emote images, @mention
@@ -538,21 +539,28 @@ private struct EmoteImage: View {
     }
 
     var body: some View {
-        AsyncImage(url: imageURL) { phase in
-            switch phase {
-            case .success(let image):
+        // LazyImage from NukeUI replaces AsyncImage. Key differences:
+        //   - Synchronous memory-cache hit on first frame — no
+        //     placeholder flash when the same emote scrolls into view
+        //     for a second time.
+        //   - Decode happens off the main thread.
+        //   - Decoded images are cached automatically (memory + disk),
+        //     evicted under pressure.
+        //   - The `state` enum mirrors AsyncImage's phase but exposes
+        //     the resolved Image directly (no extra Image init at
+        //     call site).
+        LazyImage(url: imageURL) { state in
+            if let image = state.image {
                 image
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-            case .empty, .failure:
+            } else {
                 // While loading or on failure, show the emote name as
                 // text — better than a blank space, and the name often
                 // hints at what the emote is ("KEKW", "POGGERS").
                 Text(emote.name)
                     .font(.callout)
-            @unknown default:
-                Text(emote.name).font(.callout)
             }
         }
         .frame(maxWidth: 28, maxHeight: 24)
@@ -574,17 +582,14 @@ private struct BadgeImage: View {
     let entry: ChatBadgeEntry
 
     var body: some View {
-        AsyncImage(url: entry.url) { phase in
-            switch phase {
-            case .success(let image):
+        LazyImage(url: entry.url) { state in
+            if let image = state.image {
                 image
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-            case .empty, .failure:
+            } else {
                 // Don't reserve space — let layout flow as if the badge weren't there.
-                Color.clear.frame(width: 0, height: 0)
-            @unknown default:
                 Color.clear.frame(width: 0, height: 0)
             }
         }

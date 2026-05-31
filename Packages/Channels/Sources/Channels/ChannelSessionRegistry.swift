@@ -42,7 +42,24 @@ public final class ChannelSessionRegistry {
     private let accountStore: AccountStore
 
     /// Active sessions, keyed by composite "accountUserId/channelId".
+    ///
+    /// A key appears here only AFTER `session.start()` succeeds — this map is
+    /// both the fast-path cache and the "ready to hand to a tab" set. Keeping
+    /// it post-start is what guarantees no tab can `subscribe(_:)` to a session
+    /// mid-startup (the "expose-late" half of option 2's backfill buffering).
     private var sessions: [String: ChannelSession] = [:]
+
+    /// Event-routing targets, keyed the same way as `sessions`. A session is
+    /// registered here BEFORE `start()` runs, so the shared dispatcher can
+    /// deliver live events to `handle(event:)` (which buffers them) during the
+    /// subscribe + backfill window. Without this, `dispatch(event:)` would drop
+    /// those events because the session isn't in `sessions` yet.
+    ///
+    /// Distinct from `sessions` on purpose: routing must begin early, but
+    /// exposure (fast-path + coalescing result) must stay late. Conflating them
+    /// would let a concurrent caller grab a not-yet-started session. Cleared on
+    /// teardown and on failed start.
+    private var dispatchTargets: [String: ChannelSession] = [:]
 
     /// In-flight session-construction Tasks, keyed the same way as `sessions`.
     /// Two views opening the same channel concurrently each see no entry in
@@ -145,6 +162,15 @@ public final class ChannelSessionRegistry {
             }
         )
 
+        // Register for event routing + ensure the shared dispatcher is live
+        // BEFORE start(), so live events arriving during subscribe/backfill are
+        // delivered to handle() (which buffers them) instead of being dropped.
+        // `sessions[key]` stays unset until start() succeeds, so this does NOT
+        // expose the session to the fast path or to subscribers yet.
+        // Idempotent: ensureEventDispatch spins up at most one Task per account.
+        dispatchTargets[key] = session
+        ensureEventDispatch(client: client, accountUserId: accountUserId)
+
         let task = Task<ChannelSession, Error> { [session] in
             try await session.start()
             return session
@@ -154,16 +180,17 @@ public final class ChannelSessionRegistry {
             let started = try await task.value
             sessions[key] = started
             inFlight[key] = nil
-            // Kick the shared event dispatcher for this account if it isn't
-            // already running. Idempotent — multiple session(...) calls for
-            // the same account spin up at most one dispatcher Task.
-            ensureEventDispatch(client: client, accountUserId: accountUserId)
             // .notice: session creation is a boundary event — when this fires
             // we just opened a new WebSocket subscription to Twitch.
             logger.notice("Created session for @\(accountLogin, privacy: .public)/#\(channelLoginName, privacy: .public)")
             return started
         } catch {
             inFlight[key] = nil
+            // Failed start: stop routing to this session and tear down the
+            // dispatcher if it now has nothing to serve (it may have been
+            // started just above for this very session).
+            dispatchTargets[key] = nil
+            stopDispatcherIfIdle(accountUserId: accountUserId)
             throw error
         }
     }
@@ -240,6 +267,10 @@ public final class ChannelSessionRegistry {
                 task.cancel()
                 inFlight[key] = nil
             }
+            // Stop routing events to this session regardless of whether it
+            // finished starting (it may still be in `dispatchTargets` but not
+            // yet in `sessions` if release races a slow start).
+            dispatchTargets[key] = nil
             if let session = sessions[key] {
                 await session.stop()
                 sessions[key] = nil
@@ -341,7 +372,12 @@ public final class ChannelSessionRegistry {
     /// O(N) over total sessions, but N is tiny (~tabs the user has open).
     private func stopDispatcherIfIdle(accountUserId: String) {
         let prefix = "\(accountUserId)/"
-        let hasActiveSessions = sessions.keys.contains { $0.hasPrefix(prefix) }
+        // Consider both started sessions AND in-flight routing targets — a
+        // session mid-start still needs the dispatcher to deliver (and buffer)
+        // its live events, so it must keep the dispatcher alive.
+        let hasActiveSessions =
+            sessions.keys.contains { $0.hasPrefix(prefix) } ||
+            dispatchTargets.keys.contains { $0.hasPrefix(prefix) }
         guard !hasActiveSessions else { return }
         guard let task = eventDispatchTasks[accountUserId] else { return }
         task.cancel()
@@ -374,7 +410,11 @@ public final class ChannelSessionRegistry {
             return
         }
         let key = Self.key(accountUserId: accountUserId, channelId: broadcasterId)
-        guard let session = sessions[key] else {
+        // Route via `dispatchTargets`, not `sessions`: a session is routable
+        // (registered here) from before `start()` runs, so events arriving
+        // during the subscribe + backfill window reach `handle(event:)` and get
+        // buffered rather than dropped.
+        guard let session = dispatchTargets[key] else {
             return
         }
         await session.handle(event: event)

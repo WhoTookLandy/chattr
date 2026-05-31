@@ -1,5 +1,6 @@
 import SwiftUI
 import TwitchKit
+import NukeUI
 
 /// Horizontal pill strip showing one cell per open chat channel. Active cell
 /// is tinted with the accent color; both states use Liquid Glass capsules.
@@ -88,8 +89,8 @@ private struct TabCell: View {
     var body: some View {
         HStack(spacing: 6) {
             if let url = avatarURL {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
+                LazyImage(url: url) { state in
+                    if let image = state.image {
                         image.resizable().scaledToFill()
                     } else {
                         Color.secondary.opacity(0.2)

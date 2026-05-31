@@ -2,6 +2,7 @@ import SwiftUI
 import Accounts
 import Core
 import DesignSystem
+import NukeUI
 import os
 
 private let logger = AppLogger.make("Features.Profile")
@@ -169,19 +170,16 @@ private struct AccountHeaderRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            AsyncImage(url: URL(string: account.profileImageURL)) { phase in
-                switch phase {
-                case .success(let image):
+            LazyImage(url: URL(string: account.profileImageURL)) { state in
+                if let image = state.image {
                     image.resizable().scaledToFill()
-                case .empty, .failure:
+                } else {
                     // Placeholder while loading or when the URL is nil
                     // (first sign-in before profile fetch completes).
                     Image(systemName: "person.crop.circle.fill")
                         .resizable()
                         .scaledToFit()
                         .foregroundStyle(.secondary.opacity(0.5))
-                @unknown default:
-                    Color.clear
                 }
             }
             .frame(width: 64, height: 64)

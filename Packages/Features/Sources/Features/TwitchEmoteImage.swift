@@ -1,20 +1,23 @@
 import SwiftUI
 import TwitchKit
-import Core   // For Endpoints.TwitchCDN.emote(...)
+import Core      // For Endpoints.TwitchCDN.emote(...)
+import NukeUI
 
-// Slice-2 interlude: AsyncImage-backed. Slice-2 T16 replaces this with a
-// Nuke-backed `InlineEmoteView` for animated WebP + emote prefetch.
-// See docs/superpowers/specs/2026-05-24-chattr-design.md (Image / emote loading).
-
-/// Loads and displays a single Twitch native emote from the CDN.
+/// Loads and displays a single Twitch native emote from the CDN, using
+/// Nuke's `LazyImage` for memory + disk caching and prefetching.
 /// Falls back to the literal text name while loading or on failure.
+///
+/// **iOS 26 perf note**: under chat scroll, the same emote tends to
+/// repeat dozens of times within the visible buffer. LazyImage's
+/// synchronous memory-cache hit means once we've decoded an emote
+/// once, every subsequent occurrence renders with no fetch and no
+/// placeholder flash.
 struct TwitchEmoteImage: View {
     let emote: EmoteReference
     let displayName: String
     /// Pre-resolved CDN URL, computed once in `init`. Storing as `let`
-    /// (vs computed `var`) ensures `AsyncImage(url:)` sees a stable URL
-    /// across re-renders — protects the in-flight image load from being
-    /// abandoned due to identity churn on the URL value.
+    /// ensures a stable URL across re-renders — Nuke deduplicates
+    /// fetches by URL, so stability matters for cache-hit efficiency.
     private let emoteURL: URL?
 
     init(emote: EmoteReference, displayName: String) {
@@ -29,15 +32,13 @@ struct TwitchEmoteImage: View {
     }
 
     var body: some View {
-        AsyncImage(url: emoteURL) { phase in
-            switch phase {
-            case .empty:
-                Text(displayName).font(.callout).foregroundStyle(.secondary)
-            case .success(let image):
+        LazyImage(url: emoteURL) { state in
+            if let image = state.image {
                 image.resizable().scaledToFit().frame(height: 24)
-            case .failure:
-                Text(displayName).font(.callout)
-            @unknown default:
+            } else if state.isLoading {
+                Text(displayName).font(.callout).foregroundStyle(.secondary)
+            } else {
+                // .error or .empty fall here — same text fallback.
                 Text(displayName).font(.callout)
             }
         }

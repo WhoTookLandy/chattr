@@ -1,5 +1,6 @@
 import SwiftUI
 import TwitchKit
+import NukeUI
 
 /// Rich row for the Follows tab's Live segment. Models Twitch mobile's
 /// Following → Live layout:
@@ -58,14 +59,10 @@ struct LiveStreamRow: View {
     /// stream content.
     @ViewBuilder
     private var thumbnail: some View {
-        AsyncImage(url: thumbnailURL) { phase in
-            switch phase {
-            case .success(let image):
+        LazyImage(url: thumbnailURL) { state in
+            if let image = state.image {
                 image.resizable().scaledToFill()
-            case .empty:
-                // Subtle placeholder during load.
-                Color.secondary.opacity(0.15)
-            case .failure:
+            } else if state.error != nil {
                 // No thumbnail (rare — Twitch's CDN is fast). Show a neutral
                 // placeholder rather than nothing so layout doesn't shift.
                 ZStack {
@@ -73,7 +70,8 @@ struct LiveStreamRow: View {
                     Image(systemName: "tv")
                         .foregroundStyle(.secondary)
                 }
-            @unknown default:
+            } else {
+                // Subtle placeholder during load.
                 Color.secondary.opacity(0.15)
             }
         }
@@ -185,17 +183,14 @@ struct LiveStreamRow: View {
     /// 20pt circle avatar. Placeholder while the profile fetch is in flight.
     @ViewBuilder
     private var avatar: some View {
-        AsyncImage(url: profile.flatMap { URL(string: $0.profileImageUrl) }) { phase in
-            switch phase {
-            case .success(let image):
+        LazyImage(url: profile.flatMap { URL(string: $0.profileImageUrl) }) { state in
+            if let image = state.image {
                 image.resizable().scaledToFill()
-            case .empty, .failure:
+            } else {
                 Image(systemName: "person.crop.circle.fill")
                     .resizable()
                     .scaledToFit()
                     .foregroundStyle(.secondary.opacity(0.5))
-            @unknown default:
-                Color.clear
             }
         }
         .frame(width: 20, height: 20)

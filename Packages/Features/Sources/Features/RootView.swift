@@ -46,6 +46,11 @@ public struct RootView: View {
     }
 
     public var body: some View {
+        // Configure Nuke's shared image pipeline with chattr-tuned
+        // memory/disk cache limits. Synchronous, idempotent — first call
+        // wins; subsequent calls are no-ops. Done here so it lands
+        // before any LazyImage materializes (badges/emotes/avatars).
+        let _ = { ImagePipelineSetup.configure() }()
         Group {
             if let active = accounts.first {
                 AppShell(account: active, accountStore: accountStore)

@@ -1,5 +1,6 @@
 import SwiftUI
 import TwitchKit
+import NukeUI
 
 /// Single row in the followed-channels list. Shows the broadcaster's avatar,
 /// display name, login, and — if the channel is currently live — a "LIVE"
@@ -57,18 +58,15 @@ struct ChannelRow: View {
     /// 40pt circle avatar.
     @ViewBuilder
     private var avatar: some View {
-        AsyncImage(url: profileImageURL) { phase in
-            switch phase {
-            case .success(let image):
+        LazyImage(url: profileImageURL) { state in
+            if let image = state.image {
                 image.resizable().scaledToFill()
-            case .empty, .failure:
+            } else {
                 Image(systemName: "person.crop.circle.fill")
                     .resizable()
                     .scaledToFit()
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.secondary)
-            @unknown default:
-                Color.clear
             }
         }
         .frame(width: 40, height: 40)
