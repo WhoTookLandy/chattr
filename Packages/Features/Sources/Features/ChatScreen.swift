@@ -473,14 +473,23 @@ public struct ChatScreen: View {
         // Writing to `scrolledMessageId` scrolls; the binding also updates as
         // the user scrolls manually.
         .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
-        // Start at the bottom (most recent message) when the scroll view
-        // first appears — i.e. when chat connects and the primed backfill
-        // + first live messages land. Without this, a freshly-mounted
-        // ScrollView starts at the TOP, showing the oldest backfilled
-        // message and forcing the user to scroll down. `.defaultScrollAnchor`
-        // only governs the INITIAL anchor; `.scrollPosition` takes over
-        // once it has a non-nil value, so ongoing scrolling is unaffected.
-        .defaultScrollAnchor(.bottom)
+        // Start at the bottom (most recent message) on fresh channel join.
+        //
+        // `.defaultScrollAnchor(.bottom)` alone doesn't reliably win
+        // against `.scrollPosition(id:)` — the combination is finicky and
+        // the scroll often starts at the TOP, which then reads as
+        // "not at bottom" and pops the jump-to-latest pill immediately.
+        //
+        // Instead we drive the initial scroll explicitly: on first appear
+        // (the chatScrollView only mounts once lines are non-empty, so the
+        // backfill is already present), write the last message's id to
+        // `scrolledMessageId`. With `anchor: .bottom` that pins the newest
+        // message to the viewport bottom. `isAtBottom` is seeded true so
+        // the pill never flashes during the initial settle.
+        .onAppear {
+            scrolledMessageId = chatModel.lines.last?.id
+            isAtBottom = true
+        }
         // Scroll-edge dissolution under the pinned tab strip — see
         // `chatScrollView` doc-comment above. `.hard` because the tab
         // strip is a pinned accessory; `.top` because that's the edge
@@ -547,9 +556,10 @@ public struct ChatScreen: View {
         .animation(.snappy(duration: 0.2), value: isAtBottom)
     }
 
-    /// Floating "jump to latest" pill. Shows an unread count when
-    /// messages arrived while scrolled up, otherwise a plain "Latest"
-    /// label. Liquid Glass capsule to match the app's chrome.
+    /// Floating "jump to latest" pill. Subtle by design — a thin glass
+    /// capsule with secondary-grey text so it reads as a quiet hint, not
+    /// a call-to-action competing with the chat. Shows an unread count
+    /// when messages arrived while scrolled up, else just "Latest".
     @ViewBuilder
     private var jumpToBottomPill: some View {
         Button {
@@ -561,24 +571,28 @@ public struct ChatScreen: View {
                 scrolledMessageId = last.id
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Image(systemName: "chevron.down")
-                    .font(.caption.weight(.bold))
+                    .font(.caption2.weight(.semibold))
                 if unreadWhileScrolledUp > 0 {
                     // Apple's inflection markdown pluralizes "message"
                     // automatically (1 message / 2 messages).
                     Text("^[\(unreadWhileScrolledUp) new message](inflect: true)")
-                        .font(.caption.weight(.semibold))
+                        .font(.caption2.weight(.medium))
                 } else {
                     Text("Latest")
-                        .font(.caption.weight(.semibold))
+                        .font(.caption2.weight(.medium))
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            // Clear grey type so the pill stays quiet against chat.
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            // Glass capsule (regular, not prominent/tinted) for the
+            // subtle floating-hint aesthetic.
+            .glassEffect(.regular, in: Capsule())
         }
-        .buttonStyle(.glassProminent)
-        .tint(Color.accentColor)
+        .buttonStyle(.plain)
         .accessibilityLabel(
             unreadWhileScrolledUp > 0
                 ? "Jump to latest, \(unreadWhileScrolledUp) new messages"
