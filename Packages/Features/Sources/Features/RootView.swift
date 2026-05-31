@@ -35,12 +35,13 @@ public struct RootView: View {
     /// lived in ChannelListScreen's `@State` and `.task` re-fired on appear.
     @State private var followsStore = FollowsStore()
 
-    /// Launch-time emote image prefetcher. Warms Nuke's memory + disk
-    /// caches with Twitch global emotes AND the user's subscribed-
-    /// channel emote set, so chat-row renders hit a warm cache instead
-    /// of fetching on first display. Runs in parallel with the other
-    /// global-data tasks via two `.task(id:)` modifiers below.
-    @State private var emotePrefetcher = EmoteImagePrefetcher()
+    /// Launch-time chat image prefetcher. Warms Nuke's memory + disk
+    /// caches with Twitch global emotes + global badges (memory),
+    /// AND the user's subscribed-channel emote set (disk). Per-channel
+    /// badges are prefetched separately by `ChatScreen` on channel
+    /// entry, also via this prefetcher (so they share Nuke pipeline
+    /// concurrency limits).
+    @State private var chatImagePrefetcher = ChatImagePrefetcher()
 
     public init(
         accountStore: AccountStore,
@@ -68,6 +69,7 @@ public struct RootView: View {
         .environment(\.globalCatalog, globalCatalog)
         .environment(\.followsStore, followsStore)
         .environment(\.channelSessionRegistry, channelSessionRegistry)
+        .environment(\.chatImagePrefetcher, chatImagePrefetcher)
         .onChange(of: accounts.first?.userId) { _, newId in
             // AccountStore is @MainActor; setActive is sync — no Task wrapper / await needed.
             // (The plan template had Task { await ... } from the older actor design.)
@@ -89,7 +91,12 @@ public struct RootView: View {
         .task(id: accounts.first?.userId) {
             guard let active = accounts.first else { return }
             await globalCatalog.load(account: active, accountStore: accountStore)
-            emotePrefetcher.prefetchGlobalEmotes(Array(globalCatalog.globalEmotes.values))
+            // After GlobalCatalog populates, kick image prefetches for
+            // BOTH global emotes AND global badges. Both go into Nuke's
+            // memory cache (they appear in nearly every chat message,
+            // so the decoded image is worth the RAM).
+            chatImagePrefetcher.prefetchGlobalEmotes(Array(globalCatalog.globalEmotes.values))
+            chatImagePrefetcher.prefetchGlobalBadges(globalCatalog.globalBadges)
         }
         // User-subscribed emote image prefetch. Walks Helix's paginated
         // `/chat/emotes/user` endpoint and disk-caches every URL. Runs
@@ -103,7 +110,7 @@ public struct RootView: View {
         // fetch-on-first-display.
         .task(id: accounts.first?.userId) {
             guard let active = accounts.first else { return }
-            await emotePrefetcher.prefetchUserSubscribedEmotes(
+            await chatImagePrefetcher.prefetchUserSubscribedEmotes(
                 account: active,
                 accountStore: accountStore
             )

@@ -105,6 +105,12 @@ public struct ChatScreen: View {
     /// re-subscribe (Twitch rejects re-subscribe with "already subscribed").
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
 
+    /// App-wide image prefetcher — `ChatScreen` uses it to warm Nuke's
+    /// disk cache for this channel's badge URLs once `ChatBadgeStore.load`
+    /// completes. Optional because the environment value is Optional;
+    /// nil during previews / detached views just skips the prefetch.
+    @Environment(\.chatImagePrefetcher) private var chatImagePrefetcher
+
     public init(
         account: Account,
         accountStore: AccountStore,
@@ -267,6 +273,17 @@ public struct ChatScreen: View {
                 channelId: channelId,
                 globalBadges: cachedGlobalBadges
             )
+            // After the badge store finishes loading, warm Nuke's
+            // disk cache for THIS channel's badge URLs. The merged
+            // dict includes global + channel-specific entries; we
+            // hand them all over and let Nuke's cache short-circuit
+            // any already-memory-cached globals.
+            //
+            // This means by the time a user with a tier-2 sub badge
+            // chats in this channel, the badge image is already on
+            // disk — first display decodes from disk (~5ms) instead
+            // of fetching from CDN (~150-500ms).
+            chatImagePrefetcher?.prefetchChannelBadges(store.entries)
         }
         // Load 7TV / BTTV / FFZ emote definitions for this channel.
         //
