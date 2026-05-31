@@ -68,6 +68,13 @@ public struct ChatScreen: View {
         )
     }
 
+    /// Convenience: pull the registry-owned per-account connection-state store.
+    /// Same nil semantics as `badgeStore` / `emoteIndex` above. Observed to
+    /// drive the "Reconnecting… / Live again" pill.
+    private var connectionStatus: ConnectionStatusStore? {
+        channelSessionRegistry?.connectionStatus(forAccountUserId: account.userId)
+    }
+
     /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
     /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
     /// the binding also updates as the user scrolls manually (iOS 17+ API).
@@ -85,6 +92,13 @@ public struct ChatScreen: View {
     /// messages") so the user knows how much they're missing. Reset to
     /// 0 whenever they return to the bottom.
     @State private var unreadWhileScrolledUp = 0
+
+    /// Current connection pill, derived from connection-state transitions via
+    /// `ConnectionBanner.next`. Driven by the `.onChange` below.
+    @State private var connectionBanner: ConnectionBanner = .hidden
+
+    /// Cancels the in-flight "Live again" auto-dismiss when state changes again.
+    @State private var liveAgainDismiss: Task<Void, Never>?
 
     /// Non-nil when the thread sheet is open; carries the thread's root
     /// message ID. `.sheet(item:)` could use `Identifiable`, but the
@@ -613,6 +627,49 @@ public struct ChatScreen: View {
             }
         }
         .animation(.snappy(duration: 0.2), value: isAtBottom)
+        // Transient connection indicator floats at the top of the chat area.
+        .overlay(alignment: .top) {
+            connectionPill
+                .padding(.top, 8)
+                .animation(.snappy, value: connectionBanner)
+        }
+        // Drive the pill from connection-state transitions. `previous`/`current`
+        // are both `ConnectionState?` (the observed expression is one optional);
+        // pass `previous` straight through — the reducer treats nil as "no prior
+        // state → no Live-again flash."
+        .onChange(of: connectionStatus?.state) { previous, current in
+            guard let current else { return }
+            connectionBanner = ConnectionBanner.next(previous: previous, current: current)
+            liveAgainDismiss?.cancel()
+            if connectionBanner == .liveAgain {
+                liveAgainDismiss = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    if connectionBanner == .liveAgain { connectionBanner = .hidden }
+                }
+            }
+        }
+    }
+
+    /// Transient connection indicator. "Reconnecting…" while the socket is down,
+    /// a brief "Live again" on recovery, hidden otherwise. Same quiet glass
+    /// capsule as the jump-to-latest pill.
+    @ViewBuilder
+    private var connectionPill: some View {
+        if connectionBanner != .hidden {
+            HStack(spacing: 4) {
+                Image(systemName: connectionBanner == .liveAgain ? "checkmark" : "wifi.exclamationmark")
+                    .font(.caption2.weight(.semibold))
+                Text(connectionBanner == .liveAgain ? "Live again" : "Reconnecting…")
+                    .font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .glassEffect(.regular, in: Capsule())
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .accessibilityLabel(connectionBanner == .liveAgain ? "Connection restored" : "Reconnecting")
+        }
     }
 
     /// Floating "jump to latest" pill. Subtle by design — a thin glass
