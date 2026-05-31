@@ -50,5 +50,11 @@ let package = Package(
             path: "Sources/Features",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .testTarget(
+            name: "FeaturesTests",
+            dependencies: ["Features", "ChatModel"],
+            path: "Tests/FeaturesTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
     ]
 )
