@@ -188,6 +188,15 @@ public struct ChatScreen: View {
                 onDraftChange: { newDraft in
                     DraftStorage.save(forChannelId: channelId, text: newDraft)
                 },
+                // Built on demand when the emote button is tapped (not
+                // every body eval) — reads the registry-owned EmoteIndex
+                // snapshot + the cached Twitch global emotes.
+                emoteSectionsProvider: {
+                    EmoteCatalog.buildSections(
+                        thirdParty: emoteIndex?.snapshot() ?? [:],
+                        twitchGlobal: globalCatalog?.globalEmotes ?? [:]
+                    )
+                },
                 onSend: { draft in await chatModel.send(text: draft) }
             )
         }
@@ -735,11 +744,19 @@ private struct ComposeBar: View {
     /// Instead the bar owns its @State internally and notifies via
     /// callback, which doesn't propagate as a dependency change.
     let onDraftChange: (String) -> Void
+    /// Builds the emote-picker sections on demand (when the emote button
+    /// is tapped) so we don't recompute them on every body eval.
+    let emoteSectionsProvider: () -> [EmoteSection]
     let onSend: @MainActor (String) async -> Void
 
     @State private var composeText: String
     @State private var isSending: Bool = false
     @FocusState private var focused: Bool
+
+    /// Picker presentation + its snapshot of sections (captured when the
+    /// emote button is tapped, so the grid is stable while open).
+    @State private var showingEmotePicker = false
+    @State private var pickerSections: [EmoteSection] = []
 
     /// Custom init that seeds `composeText`'s @State with the persisted
     /// draft. SwiftUI's `@State` semantics ensure the seed value is
@@ -755,6 +772,7 @@ private struct ComposeBar: View {
         seedDraft: String,
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
+        emoteSectionsProvider: @escaping () -> [EmoteSection],
         onSend: @escaping @MainActor (String) async -> Void
     ) {
         self.channelLoginName = channelLoginName
@@ -763,6 +781,7 @@ private struct ComposeBar: View {
         self.chatRestrictions = chatRestrictions
         self.onCancelReply = onCancelReply
         self.onDraftChange = onDraftChange
+        self.emoteSectionsProvider = emoteSectionsProvider
         self.onSend = onSend
         self._composeText = State(initialValue: seedDraft)
     }
@@ -794,6 +813,30 @@ private struct ComposeBar: View {
         // the chip to animate when the target changes. Not chosen
         // today — feels jumpier.
         .animation(.snappy(duration: 0.2), value: replyContext != nil)
+        // Emote picker. Stays open while you tap (so you can stack
+        // several emotes); inserts each emote's name into the composer.
+        .sheet(isPresented: $showingEmotePicker) {
+            EmotePickerView(sections: pickerSections) { name in
+                insertEmote(name)
+            }
+        }
+    }
+
+    /// Append a tapped emote's name to the draft, ensuring a single
+    /// space separates it from prior text (and a trailing space so the
+    /// next token / emote doesn't fuse to it). Chat emotes are
+    /// whitespace-delimited tokens, so the spacing is load-bearing —
+    /// "KappaPride" is a different (or non-existent) emote vs
+    /// "Kappa Pride".
+    private func insertEmote(_ name: String) {
+        if composeText.isEmpty || composeText.hasSuffix(" ") {
+            composeText += "\(name) "
+        } else {
+            composeText += " \(name) "
+        }
+        // onChange(of: composeText) fires from the mutation above, so
+        // the draft persists automatically — no explicit onDraftChange
+        // call needed here.
     }
 
     /// Inline informational strip above the input, listing chat
@@ -931,6 +974,21 @@ private struct ComposeBar: View {
     @ViewBuilder
     private var inputRow: some View {
         HStack(spacing: 8) {
+            // Emote-picker button. Snapshots the sections (built on
+            // demand) and presents the grid sheet. Glass circle to match
+            // the send button's chrome.
+            Button {
+                pickerSections = emoteSectionsProvider()
+                showingEmotePicker = true
+            } label: {
+                Image(systemName: "face.smiling")
+                    .font(.system(size: 17, weight: .regular))
+                    .symbolRenderingMode(.hierarchical)
+                    .padding(2)
+            }
+            .buttonStyle(.glass)
+            .accessibilityLabel("Emotes")
+
             TextField(textFieldPrompt, text: $composeText)
                 .textFieldStyle(.plain)
                 .focused($focused)
