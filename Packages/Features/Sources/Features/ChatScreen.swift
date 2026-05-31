@@ -421,6 +421,42 @@ public struct ChatScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Selects between the UICollectionView bridge (iOS) and the legacy
+    /// SwiftUI ScrollView (macOS / non-UIKit). The UIKit path is the spike
+    /// under validation; the legacy path is the known-good fallback.
+    @ViewBuilder
+    private var chatScrollView: some View {
+        #if canImport(UIKit)
+        ChatListView(
+            lines: chatModel.lines,
+            rowContent: { line in chatRow(for: line) },
+            isAtBottom: $isAtBottom,
+            scrollToBottomToken: 0
+        )
+        #else
+        legacyScrollView
+        #endif
+    }
+
+    /// Builds the row for one line — same badge lookup + callbacks the
+    /// `ForEach` used, lifted into a helper so both the collection-view cell
+    /// provider and the legacy `LazyVStack` can call it.
+    private func chatRow(for line: ChatLine) -> ChatRow {
+        ChatRow(
+            line: line,
+            badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? [],
+            onRetry: { Task { await chatModel.retry(failedLineId: line.id) } },
+            onReply: { chatModel.beginReply(to: line) },
+            onViewThread: {
+                viewingThreadRootId = ThreadRootID(id: TabChatModel.threadRoot(of: line))
+            },
+            onDelete: (chatModel.currentUserCanModerate
+                       && line.authorUserId != account.userId)
+                ? { Task { await chatModel.deleteMessage(line.id) } }
+                : nil
+        )
+    }
+
     /// The scrolling chat content. Only mounted once we have at least one
     /// message — keeps the empty-state cleanly separated and avoids feeding
     /// an empty LazyVStack into `.scrollPosition` (which would no-op until
@@ -434,7 +470,7 @@ public struct ChatScreen: View {
     /// the background just under the strip, giving a crisp visual shelf
     /// without the old explicit Divider we used to have here.
     @ViewBuilder
-    private var chatScrollView: some View {
+    private var legacyScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(chatModel.lines) { line in
