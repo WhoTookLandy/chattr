@@ -12,10 +12,10 @@ private let logger = AppLogger.make("EmoteSources.SevenTV")
 ///              whose `emote_set.emotes` is the channel set.
 ///
 /// 7TV serves emotes primarily as WebP (animated) with AVIF as a fallback.
-/// We pick the WebP variants for x1/x2/x4 sizes and rely on iOS's native
-/// ImageIO WebP decoding (static-only on iOS — the first frame is shown).
-/// Animation lands in a follow-up; the `isAnimated` flag is preserved on
-/// the `Emote` for the renderer to act on later.
+/// We pick the WebP variants for x1/x2/x4 sizes. The same URL serves the
+/// animated WebP — there is no separate static variant — so the `isAnimated`
+/// flag (from the API's `animated` field) drives whether the renderer cycles
+/// frames via ImageIO (`AnimatedImageView`) or shows a static first frame.
 public struct SevenTVProvider: EmoteProvider {
     private let urlSession: URLSession
 
