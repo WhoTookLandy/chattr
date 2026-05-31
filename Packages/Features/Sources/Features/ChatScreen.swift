@@ -93,6 +93,10 @@ public struct ChatScreen: View {
     /// 0 whenever they return to the bottom.
     @State private var unreadWhileScrolledUp = 0
 
+    /// Incremented to ask the UIKit chat list to scroll to the newest message
+    /// (jump-to-bottom pill). The collection view acts on each change.
+    @State private var scrollToBottomToken = 0
+
     /// Current connection pill, derived from connection-state transitions via
     /// `ConnectionBanner.next`. Driven by the `.onChange` below.
     @State private var connectionBanner: ConnectionBanner = .hidden
@@ -445,10 +449,62 @@ public struct ChatScreen: View {
             lines: chatModel.lines,
             rowContent: { line in chatRow(for: line) },
             isAtBottom: $isAtBottom,
-            scrollToBottomToken: 0
+            scrollToBottomToken: scrollToBottomToken
         )
+        // New messages while scrolled up tally into the unread pill; while
+        // tailing, the collection view auto-scrolls and we reset the count.
+        .onChange(of: chatModel.lines.count) { oldCount, newCount in
+            if isAtBottom {
+                unreadWhileScrolledUp = 0
+            } else if newCount > oldCount {
+                unreadWhileScrolledUp += (newCount - oldCount)
+            }
+        }
+        .onChange(of: isAtBottom) { _, atBottom in
+            if atBottom { unreadWhileScrolledUp = 0 }
+        }
+        // Jump-to-bottom pill (bottom edge).
+        .overlay(alignment: .bottom) {
+            if !isAtBottom {
+                jumpToBottomPill
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: isAtBottom)
+        // Transient connection indicator (top edge) — carried over from the
+        // legacy path so the iOS collection-view list keeps the connection pill
+        // the concurrent connection-status workstream added.
+        .overlay(alignment: .top) {
+            connectionPill
+                .padding(.top, 8)
+                .animation(.snappy, value: connectionBanner)
+        }
+        .onChange(of: connectionStatus?.state) { previous, current in
+            guard let current else { return }
+            connectionBanner = ConnectionBanner.next(previous: previous, current: current)
+            liveAgainDismiss?.cancel()
+            if connectionBanner == .liveAgain {
+                liveAgainDismiss = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    if connectionBanner == .liveAgain { connectionBanner = .hidden }
+                }
+            }
+        }
         #else
         legacyScrollView
+        #endif
+    }
+
+    /// Jump the transcript to the newest message. On UIKit the collection view
+    /// owns scrolling (token bump); on other platforms the legacy ScrollView
+    /// scrolls via `scrolledMessageId`.
+    private func jumpToLatest() {
+        #if canImport(UIKit)
+        scrollToBottomToken += 1
+        #else
+        if let last = chatModel.lines.last { scrolledMessageId = last.id }
         #endif
     }
 
@@ -679,13 +735,7 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var jumpToBottomPill: some View {
         Button {
-            // Snap to the newest message. Writing scrolledMessageId with
-            // anchor:.bottom positions the last message at the viewport
-            // bottom = fully at the live edge. The geometry observer then
-            // flips isAtBottom true, hiding the pill + clearing unread.
-            if let last = chatModel.lines.last {
-                scrolledMessageId = last.id
-            }
+            jumpToLatest()
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "chevron.down")
