@@ -108,15 +108,25 @@ final class ChatListViewController: UIViewController {
         }
     }
 
-    /// SPIKE version: rebuild the whole snapshot every update. Replaced by the
-    /// diff-based path in Task 4.
+    /// Diff the new lines against the last-applied set, apply the structural
+    /// snapshot (insert/delete/move derived from the id order), then explicitly
+    /// reconfigure cells whose `ChatLine` value changed but whose id did not.
     func update(lines newLines: [ChatLine], scrollToBottomToken: Int) {
+        let delta = ChatListDiff.compute(old: lastLines, new: newLines)
+
         lastLines = newLines
-        linesByID = Dictionary(uniqueKeysWithValues: newLines.map { ($0.id, $0) })
+        linesByID = newLines.reduce(into: [:]) { $0[$1.id] = $1 }
+
         var snapshot = NSDiffableDataSourceSnapshot<Section, String>()
         snapshot.appendSections([.main])
-        snapshot.appendItems(newLines.map(\.id), toSection: .main)
+        snapshot.appendItems(delta.orderedIDs, toSection: .main)
         dataSource.apply(snapshot, animatingDifferences: false)
+
+        if !delta.reconfigured.isEmpty {
+            var reconfig = dataSource.snapshot()
+            reconfig.reconfigureItems(delta.reconfigured)
+            dataSource.apply(reconfig, animatingDifferences: false)
+        }
     }
 }
 #endif

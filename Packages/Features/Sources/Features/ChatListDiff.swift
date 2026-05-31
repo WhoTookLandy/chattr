@@ -24,8 +24,8 @@ enum ChatListDiff {
     }
 
     static func compute(old: [ChatLine], new: [ChatLine]) -> Delta {
-        let oldByID = Dictionary(uniqueKeysWithValues: old.map { ($0.id, $0) })
-        let newByID = Dictionary(uniqueKeysWithValues: new.map { ($0.id, $0) })
+        let oldByID = old.reduce(into: [String: ChatLine]()) { $0[$1.id] = $1 }
+        let newByID = new.reduce(into: [String: ChatLine]()) { $0[$1.id] = $1 }
 
         var inserted: [String] = []
         var reconfigured: [String] = []
