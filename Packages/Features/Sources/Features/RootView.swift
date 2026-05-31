@@ -35,6 +35,13 @@ public struct RootView: View {
     /// lived in ChannelListScreen's `@State` and `.task` re-fired on appear.
     @State private var followsStore = FollowsStore()
 
+    /// Launch-time emote image prefetcher. Warms Nuke's memory + disk
+    /// caches with Twitch global emotes AND the user's subscribed-
+    /// channel emote set, so chat-row renders hit a warm cache instead
+    /// of fetching on first display. Runs in parallel with the other
+    /// global-data tasks via two `.task(id:)` modifiers below.
+    @State private var emotePrefetcher = EmoteImagePrefetcher()
+
     public init(
         accountStore: AccountStore,
         clientId: String,
@@ -72,9 +79,34 @@ public struct RootView: View {
         // when the active userId changes (nil → userId, or A → B on account swap);
         // the catalog's `hasLoaded` guard makes subsequent fires no-ops, so we
         // don't refetch on account swap. Cancellation is automatic on view tear-down.
+        //
+        // We CHAIN the global emote image prefetch onto this task —
+        // GlobalCatalog populates `globalEmotes` (metadata only) and we
+        // immediately hand the URL list to Nuke's ImagePrefetcher for
+        // memory-cache warming. Sequential because the prefetch needs
+        // the catalog's emote IDs; both await calls run on @MainActor,
+        // no concurrency cost vs splitting into two tasks.
         .task(id: accounts.first?.userId) {
             guard let active = accounts.first else { return }
             await globalCatalog.load(account: active, accountStore: accountStore)
+            emotePrefetcher.prefetchGlobalEmotes(Array(globalCatalog.globalEmotes.values))
+        }
+        // User-subscribed emote image prefetch. Walks Helix's paginated
+        // `/chat/emotes/user` endpoint and disk-caches every URL. Runs
+        // INDEPENDENTLY from the global catalog load — they're two
+        // different endpoints with no data dependency between them.
+        //
+        // Requires the `user:read:emotes` scope (added to SignInView).
+        // Accounts that signed in before we added the scope will get
+        // an `unauthorized` error which the prefetcher handles
+        // silently — the app keeps working, just falls back to
+        // fetch-on-first-display.
+        .task(id: accounts.first?.userId) {
+            guard let active = accounts.first else { return }
+            await emotePrefetcher.prefetchUserSubscribedEmotes(
+                account: active,
+                accountStore: accountStore
+            )
         }
         // One-shot Keychain mirror: if the user has a valid TwitchKit
         // token but nothing in our chattr-side refresh cache (i.e. they

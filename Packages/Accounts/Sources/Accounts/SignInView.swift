@@ -44,11 +44,20 @@ public struct SignInView: View {
     /// see it and approve it harmlessly (the token can request the
     /// delete endpoint but it'll fail with `unauthorized` from Twitch
     /// if the user isn't actually a mod in the target channel).
+    ///
+    /// `userReadEmotes` powers the launch-time emote-image prefetch:
+    /// `EmoteImagePrefetcher` calls `GET /chat/emotes/user` to enumerate
+    /// every emote the user has access to (subscribed channels, Prime,
+    /// Turbo) and warms Nuke's disk cache so the images are ready when
+    /// the user opens chat. Without the scope, that fetch returns
+    /// `unauthorized` and we silently skip — the app degrades to
+    /// "fetch on first display" without breaking.
     private static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,
         .userWriteChat,
         .userReadFollows,
+        .userReadEmotes,
         .moderatorManageChatMessages,
     ]
 
