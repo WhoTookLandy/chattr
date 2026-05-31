@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- chattr does not track users across apps/websites owned by other
+	     companies. No analytics SDK, no ad network, no cross-app identifiers. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!-- Required-reason API declarations (iOS 17+ App Store requirement).
+	     Only APIs actually used by chattr's first-party code + local SPM
+	     packages are listed. Scan source: only UserDefaults is used. -->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<!-- UserDefaults: chattr reads/writes ONLY its own app state —
+			     active-account userId, appearance mode, last-session-expired
+			     login flag. Never another app's defaults, never an app group
+			     shared with a third party. Reason CA92.1 = "access info from
+			     the same app, per the app's container." -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- Data collected by the developer and linked off-device. chattr stores
+	     OAuth tokens in the Keychain ON-DEVICE only (not "collection" per
+	     Apple's definition). It has no analytics and persists no user data on
+	     developer-controlled servers beyond the transient OAuth token-exchange
+	     handled by the ChattrAuth bridge.
+	     ⚠️ CONFIRM: if the ChattrAuth bridge logs/retains anything (IP, login,
+	     tokens) server-side, add the matching NSPrivacyCollectedDataType entry
+	     here AND declare it on App Store Connect's privacy questionnaire. -->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+</dict>
+</plist>
