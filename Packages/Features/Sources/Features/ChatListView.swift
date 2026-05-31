@@ -187,7 +187,9 @@ final class ChatListViewController: UIViewController {
 
         if scrollToBottomToken != lastScrollToBottomToken {
             lastScrollToBottomToken = scrollToBottomToken
-            scrollToBottom(animated: false)
+            // The `wasAtBottom` branch above already scrolled — only act on the
+            // token when it didn't, so a single update never scrolls twice.
+            if !wasAtBottom { scrollToBottom(animated: false) }
         }
     }
 }
