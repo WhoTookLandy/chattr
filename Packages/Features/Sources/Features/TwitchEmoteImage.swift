@@ -19,6 +19,9 @@ struct TwitchEmoteImage: View {
     /// ensures a stable URL across re-renders — Nuke deduplicates
     /// fetches by URL, so stability matters for cache-hit efficiency.
     private let emoteURL: URL?
+    /// Whether this Twitch emote has an animated variant — drives the
+    /// ImageIO-based animated renderer vs the cheap static LazyImage.
+    private let isAnimated: Bool
 
     init(emote: EmoteReference, displayName: String) {
         self.emote = emote
@@ -27,19 +30,27 @@ struct TwitchEmoteImage: View {
         // variant, so requesting "animated" is always safe; sticking with
         // "static" avoids the (small) extra processing for emotes we know
         // don't have animation metadata.
-        let format = (emote.format ?? []).contains("animated") ? "animated" : "static"
-        self.emoteURL = Endpoints.TwitchCDN.emote(id: emote.id, format: format)
+        let animated = (emote.format ?? []).contains("animated")
+        self.isAnimated = animated
+        self.emoteURL = Endpoints.TwitchCDN.emote(id: emote.id, format: animated ? "animated" : "static")
     }
 
     var body: some View {
-        LazyImage(url: emoteURL) { state in
-            if let image = state.image {
-                image.resizable().scaledToFit().frame(height: 24)
-            } else if state.isLoading {
-                Text(displayName).font(.callout).foregroundStyle(.secondary)
+        Group {
+            if isAnimated {
+                AnimatedImageView(url: emoteURL, width: 28, height: 24) {
+                    Text(displayName).font(.callout).foregroundStyle(.secondary)
+                }
             } else {
-                // .error or .empty fall here — same text fallback.
-                Text(displayName).font(.callout)
+                LazyImage(url: emoteURL) { state in
+                    if let image = state.image {
+                        image.resizable().scaledToFit().frame(height: 24)
+                    } else if state.isLoading {
+                        Text(displayName).font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        Text(displayName).font(.callout)
+                    }
+                }
             }
         }
         .accessibilityLabel(Text(displayName))

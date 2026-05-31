@@ -110,17 +110,25 @@ private struct EmoteCell: View {
     let emote: PickerEmote
 
     var body: some View {
-        LazyImage(url: emote.imageURL) { state in
-            if let image = state.image {
-                image
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
+        Group {
+            if emote.isAnimated {
+                AnimatedImageView(url: emote.imageURL, width: 40, height: 40) {
+                    RoundedRectangle(cornerRadius: 6).fill(.quaternary)
+                }
             } else {
-                // Placeholder keeps the grid cell from collapsing while
-                // the image loads.
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(.quaternary)
+                LazyImage(url: emote.imageURL) { state in
+                    if let image = state.image {
+                        image
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                    } else {
+                        // Placeholder keeps the grid cell from collapsing
+                        // while the image loads.
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.quaternary)
+                    }
+                }
             }
         }
         .frame(width: 40, height: 40)

@@ -539,31 +539,35 @@ private struct EmoteImage: View {
     }
 
     var body: some View {
-        // LazyImage from NukeUI replaces AsyncImage. Key differences:
-        //   - Synchronous memory-cache hit on first frame — no
-        //     placeholder flash when the same emote scrolls into view
-        //     for a second time.
-        //   - Decode happens off the main thread.
-        //   - Decoded images are cached automatically (memory + disk),
-        //     evicted under pressure.
-        //   - The `state` enum mirrors AsyncImage's phase but exposes
-        //     the resolved Image directly (no extra Image init at
-        //     call site).
-        LazyImage(url: imageURL) { state in
-            if let image = state.image {
-                image
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
+        Group {
+            if emote.isAnimated {
+                // Animated 7TV WebP / BTTV GIF / FFZ APNG — decode frames
+                // via ImageIO and cycle them. Only animated emotes pay
+                // this cost; the static majority use the cheap LazyImage
+                // path below.
+                AnimatedImageView(url: imageURL, width: 28, height: 24) {
+                    Text(emote.name).font(.callout)
+                }
             } else {
-                // While loading or on failure, show the emote name as
-                // text — better than a blank space, and the name often
-                // hints at what the emote is ("KEKW", "POGGERS").
-                Text(emote.name)
-                    .font(.callout)
+                // Static emote. LazyImage: sync memory-cache hit on first
+                // frame (no flash on re-scroll), off-main decode, auto
+                // memory+disk cache.
+                LazyImage(url: imageURL) { state in
+                    if let image = state.image {
+                        image
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                    } else {
+                        // While loading or on failure, show the emote name
+                        // as text — the name often hints at the emote.
+                        Text(emote.name)
+                            .font(.callout)
+                    }
+                }
+                .frame(maxWidth: 28, maxHeight: 24)
             }
         }
-        .frame(maxWidth: 28, maxHeight: 24)
         .accessibilityLabel(emote.name)
     }
 }
