@@ -20,13 +20,15 @@ public struct RootView: View {
     /// chat sessions.
     private let channelSessionRegistry: ChannelSessionRegistry
 
-    // Sort by `lastSelectedAt` descending so `accounts.first` IS the
-    // active account. Switching accounts (account switcher → bump
-    // lastSelectedAt) re-sorts this query, floats the chosen account to
-    // first, and the `if let active = accounts.first` below re-renders
-    // AppShell with it. No imperative switch plumbing needed.
-    @Query(sort: \Account.lastSelectedAt, order: .reverse)
+    @Query(sort: \Account.addedAt, order: .reverse)
     private var accounts: [Account]
+
+    /// The device's active-account selection, stored in UserDefaults by
+    /// `AccountStore.selectAccount` / `.add` / `.remove`. `@AppStorage`
+    /// observes the key via KVO, so writing it from AccountStore
+    /// re-renders this view. Empty string = no explicit selection →
+    /// `activeAccount` falls back to most-recently-added.
+    @AppStorage(AccountStore.activeAccountUserIdKey) private var activeAccountUserId: String = ""
 
     /// App-wide cache of global badges + emotes. Owned here so it survives
     /// channel-list / chat-screen navigation but gets re-instantiated if the
@@ -58,6 +60,18 @@ public struct RootView: View {
         self.channelSessionRegistry = channelSessionRegistry
     }
 
+    /// The account to show. Resolves the stored active-account selection
+    /// against the current account list; falls back to most-recently-added
+    /// (`accounts.first`, since the @Query sorts by addedAt desc) when
+    /// there's no stored selection or it points at a removed account.
+    private var activeAccount: Account? {
+        if !activeAccountUserId.isEmpty,
+           let match = accounts.first(where: { $0.userId == activeAccountUserId }) {
+            return match
+        }
+        return accounts.first
+    }
+
     public var body: some View {
         // Configure Nuke's shared image pipeline with chattr-tuned
         // memory/disk cache limits. Synchronous, idempotent — first call
@@ -65,7 +79,7 @@ public struct RootView: View {
         // before any LazyImage materializes (badges/emotes/avatars).
         let _ = { ImagePipelineSetup.configure() }()
         Group {
-            if let active = accounts.first {
+            if let active = activeAccount {
                 AppShell(account: active, accountStore: accountStore, clientId: clientId)
                     // `.id(userId)` forces a fresh AppShell when the active
                     // account changes (switch / add / remove). A new account
@@ -82,9 +96,11 @@ public struct RootView: View {
         .environment(\.followsStore, followsStore)
         .environment(\.channelSessionRegistry, channelSessionRegistry)
         .environment(\.chatImagePrefetcher, chatImagePrefetcher)
-        .onChange(of: accounts.first?.userId) { _, newId in
-            // AccountStore is @MainActor; setActive is sync — no Task wrapper / await needed.
-            // (The plan template had Task { await ... } from the older actor design.)
+        .onChange(of: activeAccount?.userId) { _, newId in
+            // Keep AccountStore's in-memory activeUserId in sync with the
+            // rendered account — covers the cold-start case where the
+            // @AppStorage value was restored from UserDefaults but
+            // setActive hasn't been called yet this launch.
             if let newId {
                 accountStore.setActive(userId: newId)
             }
@@ -100,8 +116,8 @@ public struct RootView: View {
         // memory-cache warming. Sequential because the prefetch needs
         // the catalog's emote IDs; both await calls run on @MainActor,
         // no concurrency cost vs splitting into two tasks.
-        .task(id: accounts.first?.userId) {
-            guard let active = accounts.first else { return }
+        .task(id: activeAccount?.userId) {
+            guard let active = activeAccount else { return }
             await globalCatalog.load(account: active, accountStore: accountStore)
             // After GlobalCatalog populates, kick image prefetches for
             // BOTH global emotes AND global badges. Both go into Nuke's
@@ -120,8 +136,8 @@ public struct RootView: View {
         // an `unauthorized` error which the prefetcher handles
         // silently — the app keeps working, just falls back to
         // fetch-on-first-display.
-        .task(id: accounts.first?.userId) {
-            guard let active = accounts.first else { return }
+        .task(id: activeAccount?.userId) {
+            guard let active = activeAccount else { return }
             await chatImagePrefetcher.prefetchUserSubscribedEmotes(
                 account: active,
                 accountStore: accountStore
@@ -133,8 +149,8 @@ public struct RootView: View {
         // refresh_token over so a future refresh failure can recover.
         // `warmRefreshTokenCacheIfNeeded` is a no-op once the cache is
         // populated, so this is cheap on subsequent launches.
-        .task(id: accounts.first?.userId) {
-            guard let active = accounts.first else { return }
+        .task(id: activeAccount?.userId) {
+            guard let active = activeAccount else { return }
             await accountStore.warmRefreshTokenCacheIfNeeded(for: active)
         }
         // Trigger initial loads on first sign-in (or account swap).
@@ -152,12 +168,12 @@ public struct RootView: View {
         // modifiers each run on @MainActor (no boundary crossing), but
         // suspend independently on network I/O — so the calls interleave
         // and effectively run in parallel anyway.
-        .task(id: accounts.first?.userId) {
-            guard let active = accounts.first else { return }
+        .task(id: activeAccount?.userId) {
+            guard let active = activeAccount else { return }
             await followsStore.refreshLive(account: active, accountStore: accountStore)
         }
-        .task(id: accounts.first?.userId) {
-            guard let active = accounts.first else { return }
+        .task(id: activeAccount?.userId) {
+            guard let active = activeAccount else { return }
             await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
         }
     }

@@ -26,19 +26,27 @@ struct AccountSwitcherView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    /// Same sort as RootView — most-recently-selected first. `accounts.first`
-    /// is therefore the active account (gets the checkmark).
-    @Query(sort: \Account.lastSelectedAt, order: .reverse)
+    /// Same sort as RootView — most-recently-added first.
+    @Query(sort: \Account.addedAt, order: .reverse)
     private var accounts: [Account]
+
+    /// The stored active-account selection (UserDefaults via @AppStorage,
+    /// same key RootView reads). Drives the checkmark.
+    @AppStorage(AccountStore.activeAccountUserIdKey) private var storedActiveUserId: String = ""
 
     @State private var isAddingAccount = false
     @State private var errorMessage: String?
 
-    /// The active account's userId — `accounts.first`. Drives the
-    /// checkmark. nil only in the degenerate empty-list case (which
-    /// shouldn't happen while this sheet is open, since you reach it
-    /// from a signed-in Profile).
-    private var activeUserId: String? { accounts.first?.userId }
+    /// The effective active account's userId: the stored selection if it
+    /// resolves to a real account, else the most-recently-added (fallback,
+    /// mirroring RootView's `activeAccount` logic).
+    private var activeUserId: String? {
+        if !storedActiveUserId.isEmpty,
+           accounts.contains(where: { $0.userId == storedActiveUserId }) {
+            return storedActiveUserId
+        }
+        return accounts.first?.userId
+    }
 
     var body: some View {
         NavigationStack {
@@ -89,23 +97,21 @@ struct AccountSwitcherView: View {
 
     // MARK: - Actions
 
-    /// Switch to `account` and dismiss. selectAccount bumps lastSelectedAt;
-    /// the reactive chain in RootView handles the actual swap.
+    /// Switch to `account` and dismiss. selectAccount writes the active
+    /// userId to UserDefaults; RootView's @AppStorage observes it and
+    /// re-renders AppShell with the new account.
     private func switchTo(_ account: Account) {
         // Already active — just close.
         guard account.userId != activeUserId else {
             dismiss()
             return
         }
-        let userId = account.userId
-        Task {
-            await accountStore.selectAccount(userId: userId)
-            // dismiss here is belt-and-braces — if this was the active
-            // account swap, RootView's `.id(userId)` change tears down
-            // this whole sheet anyway. Dismissing first avoids a flash
-            // of the sheet over the re-rendered shell.
-            dismiss()
-        }
+        // selectAccount is sync (UserDefaults write + setActive). The
+        // @AppStorage in RootView reacts; the `.id(userId)` change tears
+        // down this sheet's host AppShell. Dismiss to avoid a flash of
+        // the sheet over the re-rendered shell.
+        accountStore.selectAccount(userId: account.userId)
+        dismiss()
     }
 
     /// Run the shared OAuth flow to add a new account. On success it

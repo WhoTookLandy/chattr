@@ -61,26 +61,22 @@ public final class AccountStore {
         logger.notice("Active account → \(userId, privacy: .public)")
     }
 
-    /// Make the account with `userId` the active one by bumping its
-    /// `lastSelectedAt` to now. RootView's `@Query(sort: lastSelectedAt,
-    /// .reverse)` re-sorts so this account becomes `accounts.first`, which
-    /// drives the AppShell re-render + the `setActive` call via RootView's
-    /// `.onChange`. So this method only needs to mutate + persist the
-    /// timestamp — the rest flows through SwiftData reactivity.
+    /// UserDefaults key holding the userId of the device's active account.
+    /// Read by RootView (`@AppStorage`) to pick which account's AppShell
+    /// to show, and by the account switcher to mark the active row.
+    /// Per-device by design — not a SwiftData field (see Account.swift).
+    public static let activeAccountUserIdKey = "chattr.activeAccountUserId"
+
+    /// Make the account with `userId` active. Writes the userId to
+    /// UserDefaults (which RootView's `@AppStorage` observes and reacts
+    /// to — re-rendering AppShell with the new account) and updates the
+    /// in-memory `activeUserId`.
     ///
-    /// No-op if the userId doesn't resolve to a stored account.
-    public func selectAccount(userId: String) async {
-        let context = ModelContext(modelContainer)
-        var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == userId })
-        descriptor.fetchLimit = 1
-        guard let account = try? context.fetch(descriptor).first else {
-            logger.warning("selectAccount: no stored account for \(userId, privacy: .public)")
-            return
-        }
-        account.lastSelectedAt = .now
-        try? context.save()
-        // setActive too, so the in-memory activeUserId is correct even
-        // before RootView's @Query reactivity fires.
+    /// No SwiftData write, so no migration and no per-device sync. The
+    /// `@AppStorage` in RootView picks up the UserDefaults change via KVO
+    /// and re-renders.
+    public func selectAccount(userId: String) {
+        UserDefaults.standard.set(userId, forKey: Self.activeAccountUserIdKey)
         setActive(userId: userId)
         logger.notice("Selected account \(userId, privacy: .public)")
     }
@@ -155,6 +151,9 @@ public final class AccountStore {
         context.insert(account)
         try context.save()
         activeUserId = user.id
+        // Make the newly-added account active on this device. RootView's
+        // @AppStorage observes this key and re-renders into the new account.
+        UserDefaults.standard.set(user.id, forKey: Self.activeAccountUserIdKey)
 
         // .notice: account added is a user-initiated boundary crossing.
         logger.notice("Added account @\(user.login, privacy: .public) (\(user.id, privacy: .public))")
@@ -259,6 +258,12 @@ public final class AccountStore {
         clients[account.userId] = nil
         if activeUserId == account.userId {
             activeUserId = nil
+        }
+        // If we removed the active account, clear the stored selection so
+        // RootView's @AppStorage fallback (accounts.first by addedAt) picks
+        // the next account — or SignInView if it was the last one.
+        if UserDefaults.standard.string(forKey: Self.activeAccountUserIdKey) == account.userId {
+            UserDefaults.standard.removeObject(forKey: Self.activeAccountUserIdKey)
         }
         let context = modelContainer.mainContext
         context.delete(account)

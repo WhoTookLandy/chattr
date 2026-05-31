@@ -25,23 +25,18 @@ public final class Account {
     /// Constructed once at sign-in and never changes.
     public var tokenNamespace: String
 
-    /// When this account was added. Used as a tiebreaker in the account
-    /// switcher when `lastSelectedAt` values collide (e.g. all existing
-    /// accounts got the same default after the migration).
-    public var addedAt: Date
-
-    /// When this account was last made active (tapped in the switcher, or
-    /// added). The "active" account is the one with the most recent
-    /// `lastSelectedAt` — RootView's `@Query` sorts by this descending and
-    /// shows `accounts.first`. Switching accounts is just "bump this
-    /// timestamp and let `@Query` reactivity float the row to the top."
+    /// When this account was added. Used as the default sort + the
+    /// fallback "active account" pick (most-recently-added) when no
+    /// active-account selection is stored.
     ///
-    /// Lightweight-migration-safe: new required property WITH a default
-    /// (`.now`). Existing rows auto-populate with the default on first
-    /// load after the update — they all get roughly the same timestamp,
-    /// so `addedAt` becomes the effective tiebreaker for pre-existing
-    /// accounts (most-recently-added stays active, matching prior behavior).
-    public var lastSelectedAt: Date
+    /// NOTE: the "active account" is intentionally NOT a field here.
+    /// It's per-device UI state (you might be on account A on iPhone, B
+    /// on iPad), so it lives in UserDefaults under
+    /// `AccountStore.activeAccountUserIdKey`. Putting it in SwiftData
+    /// would (a) wrongly sync across devices if CloudKit is ever added
+    /// and (b) require a custom migration — a runtime `.now` default
+    /// can't backfill an existing store's mandatory column.
+    public var addedAt: Date
 
     /// When true, the account's refresh token failed and the user must re-auth.
     public var needsReauth: Bool
@@ -53,7 +48,6 @@ public final class Account {
         profileImageURL: String,
         tokenNamespace: String,
         addedAt: Date = .now,
-        lastSelectedAt: Date = .now,
         needsReauth: Bool = false
     ) {
         self.userId = userId
@@ -62,7 +56,6 @@ public final class Account {
         self.profileImageURL = profileImageURL
         self.tokenNamespace = tokenNamespace
         self.addedAt = addedAt
-        self.lastSelectedAt = lastSelectedAt
         self.needsReauth = needsReauth
     }
 }
