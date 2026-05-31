@@ -58,6 +58,10 @@ final class ChatListViewController: UIViewController {
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<Section, String>!
 
+    /// Last `isAtBottom` value pushed to SwiftUI — we only call the callback on
+    /// a flip, never per scroll frame (matches the old onScrollGeometryChange).
+    private var lastReportedAtBottom = true
+
     /// Last-applied lines, keyed by id for the cell provider's O(1) lookup.
     private var linesByID: [String: ChatLine] = [:]
     /// Last-applied lines in order — the `old` side of the next diff.
@@ -74,6 +78,7 @@ final class ChatListViewController: UIViewController {
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
         collectionView.keyboardDismissMode = .interactive
+        collectionView.delegate = self
         view.addSubview(collectionView)
     }
 
@@ -108,11 +113,22 @@ final class ChatListViewController: UIViewController {
         }
     }
 
+    /// Scroll the newest message to the bottom edge. No animation — under burst
+    /// traffic queued animations stutter (the same reason `ChatScreen` snapped
+    /// instantly).
+    private func scrollToBottom(animated: Bool) {
+        let count = collectionView.numberOfItems(inSection: 0)
+        guard count > 0 else { return }
+        let indexPath = IndexPath(item: count - 1, section: 0)
+        collectionView.scrollToItem(at: indexPath, at: .bottom, animated: animated)
+    }
+
     /// Diff the new lines against the last-applied set, apply the structural
     /// snapshot (insert/delete/move derived from the id order), then explicitly
     /// reconfigure cells whose `ChatLine` value changed but whose id did not.
     func update(lines newLines: [ChatLine], scrollToBottomToken: Int) {
         let delta = ChatListDiff.compute(old: lastLines, new: newLines)
+        let wasAtBottom = lastReportedAtBottom
 
         lastLines = newLines
         linesByID = newLines.reduce(into: [:]) { $0[$1.id] = $1 }
@@ -127,6 +143,24 @@ final class ChatListViewController: UIViewController {
             reconfig.reconfigureItems(delta.reconfigured)
             dataSource.apply(reconfig, animatingDifferences: false)
         }
+
+        if wasAtBottom {
+            scrollToBottom(animated: false)
+        }
+    }
+}
+
+extension ChatListViewController: UICollectionViewDelegate {
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        let atBottom = ScrollAnchor.isNearBottom(
+            contentHeight: scrollView.contentSize.height,
+            offsetY: scrollView.contentOffset.y,
+            containerHeight: scrollView.bounds.height,
+            bottomInset: scrollView.adjustedContentInset.bottom
+        )
+        guard atBottom != lastReportedAtBottom else { return }
+        lastReportedAtBottom = atBottom
+        onAtBottomChanged?(atBottom)
     }
 }
 #endif
