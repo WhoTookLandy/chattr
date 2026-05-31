@@ -28,6 +28,9 @@ public struct ChannelListScreen: View {
     @State private var showingSignOutConfirm = false
     @State private var searchText: String = ""
     @State private var errorMessage: String?
+    /// Presents the add-channel sheet (search + manual entry) for opening
+    /// channels that aren't in the follow list.
+    @State private var showingAddChannel = false
     /// Guards the failed-state Sign Out button against double-taps during an
     /// in-flight signout. Mirrors SettingsScreen's same-named state — both
     /// sign-out entry points should behave identically.
@@ -142,9 +145,21 @@ public struct ChannelListScreen: View {
                 }
             }
         }
-        // Gear icon removed — Settings moved to the new Profile tab.
-        // ChannelListScreen's toolbar is now clean (just the title menu
-        // for Live/All selection via `.toolbarTitleMenu` above).
+        // "+" to open a channel that isn't followed (search + manual
+        // entry). `.primaryAction` lands trailing on iOS, cross-platform.
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingAddChannel = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Add a channel")
+            }
+        }
+        .sheet(isPresented: $showingAddChannel) {
+            AddChannelView(account: account, accountStore: accountStore)
+        }
         .confirmationDialog(
             "Sign out of @\(account.login)?",
             isPresented: $showingSignOutConfirm,
