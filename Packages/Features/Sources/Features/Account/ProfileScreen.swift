@@ -122,6 +122,11 @@ public struct ProfileScreen: View {
                 } label: {
                     Label("Highlight Keywords", systemImage: "text.magnifyingglass")
                 }
+                NavigationLink {
+                    BlockedUsersScreen()
+                } label: {
+                    Label("Blocked Users", systemImage: "hand.raised")
+                }
                 Toggle(isOn: Binding(
                     get: { highlightSoundEnabled },
                     set: {
