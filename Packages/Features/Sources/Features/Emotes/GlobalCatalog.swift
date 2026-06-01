@@ -87,16 +87,24 @@ public final class GlobalCatalog {
             return
         }
 
-        globalBadges = badges
-        globalEmotes = emotes
+        // Badges and emotes are independent fetches: on a revalidation pass one
+        // can succeed while the other transiently fails (returns empty). Carry
+        // forward the existing value (disk-restored or previously-loaded) for any
+        // empty result so a partial failure never clobbers good data — in memory
+        // or on disk.
+        let mergedBadges = badges.isEmpty ? globalBadges : badges
+        let mergedEmotes = emotes.isEmpty ? globalEmotes : emotes
+
+        globalBadges = mergedBadges
+        globalEmotes = mergedEmotes
         hasLoaded = true
 
         await cache.save(
             key: Self.cacheKey,
-            value: GlobalsCachePayload(badges: badges, emotes: emotes),
+            value: GlobalsCachePayload(badges: mergedBadges, emotes: mergedEmotes),
             version: GlobalsCachePayload.cacheVersion)
 
-        logger.info("GlobalCatalog loaded: \(badges.count) badges, \(emotes.count) emotes")
+        logger.info("GlobalCatalog loaded: \(mergedBadges.count) badges, \(mergedEmotes.count) emotes")
     }
 
     // MARK: - Private fetch helpers
