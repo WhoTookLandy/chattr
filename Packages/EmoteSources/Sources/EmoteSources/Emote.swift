@@ -38,10 +38,14 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
     /// channel emote set includes it. nil for global emotes.
     public let ownerChannelId: String?
 
+    /// Raw values are persisted in the on-disk emote cache — renaming a case or
+    /// changing a raw value is a breaking change; bump the cache version if you do.
     public enum Size: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
         case x1, x2, x4
     }
 
+    /// Raw values are persisted in the on-disk emote cache — renaming a case or
+    /// changing a raw value is a breaking change; bump the cache version if you do.
     public enum Source: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
         case sevenTV
         case bttv

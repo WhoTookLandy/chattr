@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import EmoteSources
+import EmoteSources
 
 @Suite("Emote Codable")
 struct EmoteCodableTests {
@@ -36,12 +36,13 @@ struct EmoteCodableTests {
             name: "KEKW",
             urls: [.x1: URL(string: "https://cdn.betterttv.net/zzz/1x")!],
             isAnimated: false,
-            isZeroWidth: false,
+            isZeroWidth: true,
             source: .bttv,
             ownerChannelId: nil
         )
         let decoded = try JSONDecoder().decode(Emote.self, from: try JSONEncoder().encode(original))
         #expect(decoded == original)
         #expect(decoded.ownerChannelId == nil)
+        #expect(decoded.isZeroWidth == true)
     }
 }
