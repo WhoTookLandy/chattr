@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import EmoteSources
+@testable import EmoteSources
 
 @Suite("Emote Codable")
 struct EmoteCodableTests {
@@ -44,5 +44,26 @@ struct EmoteCodableTests {
         #expect(decoded == original)
         #expect(decoded.ownerChannelId == nil)
         #expect(decoded.isZeroWidth == true)
+    }
+}
+
+@Suite("ChannelEmoteCachePayload")
+struct ChannelEmoteCachePayloadTests {
+    @Test("payload round-trips with a populated byName map")
+    func roundTrips() throws {
+        let emote = Emote(
+            id: "ffz:1", name: "ZULUL",
+            urls: [.x1: URL(string: "https://ffz/1")!],
+            isAnimated: false, isZeroWidth: false, source: .ffz, ownerChannelId: "99"
+        )
+        let payload = ChannelEmoteCachePayload(broadcasterId: "99", byName: ["ZULUL": emote])
+
+        let decoded = try JSONDecoder().decode(
+            ChannelEmoteCachePayload.self,
+            from: try JSONEncoder().encode(payload))
+
+        #expect(decoded.broadcasterId == "99")
+        #expect(decoded.byName["ZULUL"] == emote)
+        #expect(ChannelEmoteCachePayload.cacheVersion == 1)
     }
 }
