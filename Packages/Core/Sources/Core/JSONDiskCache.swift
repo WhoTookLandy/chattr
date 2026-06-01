@@ -35,7 +35,6 @@ extension CacheHit: Sendable where T: Sendable {}
 /// caller falls back to the network. Writes are best-effort and atomic.
 public actor JSONDiskCache {
     private let directory: URL
-    private let fileManager: FileManager
 
     /// - Parameters:
     ///   - subdirectory: path appended to the base (e.g. `CacheSubdirectory.emoteGlobals`).
@@ -44,7 +43,6 @@ public actor JSONDiskCache {
         let base = baseDirectory
             ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         self.directory = base.appendingPathComponent(subdirectory, isDirectory: true)
-        self.fileManager = .default
     }
 
     private func fileURL(for key: String) -> URL {
@@ -52,6 +50,7 @@ public actor JSONDiskCache {
     }
 
     /// Returns a hit (payload + freshness) or `nil` on any miss.
+    /// A version mismatch returns `nil` but leaves the stale file on disk; it is overwritten on the next successful `save`.
     public func load<T: Codable & Sendable>(
         key: String, as type: T.Type, version: Int, ttl: TimeInterval
     ) -> CacheHit<T>? {
@@ -70,17 +69,17 @@ public actor JSONDiskCache {
     /// Best-effort atomic write. Failures are logged and swallowed.
     public func save<T: Codable & Sendable>(key: String, value: T, version: Int) {
         do {
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(CacheEnvelope(version: version, payload: value))
             try data.write(to: fileURL(for: key), options: .atomic)
         } catch {
-            logger.debug("JSONDiskCache save failed for \(key, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("JSONDiskCache save failed for \(key, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
     /// Deletes files in this subdirectory whose modification date is older than `maxAge`.
     public func sweep(maxAge: TimeInterval) {
-        guard let urls = try? fileManager.contentsOfDirectory(
+        guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.contentModificationDateKey]
         ) else { return }
@@ -89,7 +88,7 @@ public actor JSONDiskCache {
             guard let mtime = try? url.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate else { continue }
             if now.timeIntervalSince(mtime) > maxAge {
-                try? fileManager.removeItem(at: url)
+                try? FileManager.default.removeItem(at: url)
             }
         }
     }

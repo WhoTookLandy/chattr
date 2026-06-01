@@ -72,6 +72,14 @@ struct JSONDiskCacheTests {
         #expect(hit?.isFresh == false)                          // but flagged stale
     }
 
+    @Test("sweep on an absent directory is a harmless no-op")
+    func sweepAbsentDirectory() async {
+        let cache = JSONDiskCache(subdirectory: "never-created", baseDirectory: tempBase())
+        await cache.sweep(maxAge: 60)   // must not crash or throw
+        // Nothing to assert beyond "did not trap" — a load still misses.
+        #expect(await cache.load(key: "x", as: Sample.self, version: 1, ttl: 60) == nil)
+    }
+
     @Test("sweep deletes files older than maxAge and keeps newer ones")
     func sweepDeletesOld() async throws {
         let base = tempBase()
