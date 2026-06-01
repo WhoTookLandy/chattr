@@ -46,6 +46,11 @@ struct ChatRow: View, Equatable {
     /// `chatModel.currentUserCanModerate` is true, so non-mods never
     /// see the affordance.
     var onDelete: (() -> Void)? = nil
+    /// Called when the user picks "Block" from the long-press menu. nil hides the
+    /// item (ChatScreen passes nil for the current user's own messages).
+    var onBlock: (() -> Void)? = nil
+    /// Called when the user picks a reason from "Report…". Same nil-hides rule.
+    var onReport: ((UserBlockReason) -> Void)? = nil
 
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
@@ -130,6 +135,21 @@ struct ChatRow: View, Equatable {
                             onDelete()
                         } label: {
                             Label("Delete Message", systemImage: "trash")
+                        }
+                    }
+                    if let onBlock {
+                        Button(role: .destructive) {
+                            onBlock()
+                        } label: {
+                            Label("Block", systemImage: "hand.raised")
+                        }
+                    }
+                    if let onReport {
+                        Menu {
+                            Button("Harassment") { onReport(.harassment) }
+                            Button("Spam") { onReport(.spam) }
+                        } label: {
+                            Label("Report…", systemImage: "exclamationmark.bubble")
                         }
                     }
                 }

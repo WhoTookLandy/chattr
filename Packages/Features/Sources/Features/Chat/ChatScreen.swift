@@ -104,6 +104,10 @@ public struct ChatScreen: View {
     /// Cancels the in-flight "Live again" auto-dismiss when state changes again.
     @State private var liveAgainDismiss: Task<Void, Never>?
 
+    /// Brief "Reported & blocked" confirmation; auto-clears after ~2s.
+    @State private var showReportConfirmation = false
+    @State private var reportConfirmationDismiss: Task<Void, Never>?
+
     /// Non-nil when the thread sheet is open; carries the thread's root
     /// message ID. `.sheet(item:)` could use `Identifiable`, but the
     /// String here is identifiable already (each root id is unique) so
@@ -484,6 +488,11 @@ public struct ChatScreen: View {
                 .padding(.top, 8)
                 .animation(.snappy, value: connectionBanner)
         }
+        .overlay(alignment: .top) {
+            reportConfirmationPill
+                .padding(.top, 8)
+                .animation(.snappy, value: showReportConfirmation)
+        }
         .onChange(of: connectionStatus?.state) { previous, current in
             guard let current else { return }
             connectionBanner = ConnectionBanner.next(previous: previous, current: current)
@@ -536,7 +545,34 @@ public struct ChatScreen: View {
             onDelete: (chatModel.currentUserCanModerate
                        && line.authorUserId != account.userId)
                 ? { Task { await chatModel.deleteMessage(line.id) } }
-                : nil
+                : nil,
+            onBlock: line.authorUserId == account.userId ? nil : {
+                Task {
+                    await blockStore?.block(
+                        userId: line.authorUserId,
+                        login: line.authorDisplayName,
+                        displayName: line.authorDisplayName,
+                        reason: .other
+                    )
+                }
+            },
+            onReport: line.authorUserId == account.userId ? nil : { reason in
+                Task {
+                    await blockStore?.block(
+                        userId: line.authorUserId,
+                        login: line.authorDisplayName,
+                        displayName: line.authorDisplayName,
+                        reason: reason
+                    )
+                    showReportConfirmation = true
+                    reportConfirmationDismiss?.cancel()
+                    reportConfirmationDismiss = Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(2))
+                        guard !Task.isCancelled else { return }
+                        showReportConfirmation = false
+                    }
+                }
+            }
         )
     }
 
@@ -557,51 +593,12 @@ public struct ChatScreen: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(chatModel.lines) { line in
-                    ChatRow(
-                        line: line,
-                        // `?? []` is the safe fallback when the registry isn't
-                        // in the environment — but startSession() already
-                        // catches that case and surfaces an error UI, so in
-                        // practice we always have a store here. The fallback
-                        // just prevents force-unwrap explosions during weird
-                        // preview/test configurations.
-                        badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? [],
-                        // Per-row retry handler — only triggers when the
-                        // ChatRow shows its failure footer (delivery state
-                        // is `.failed`). The Task indirection escapes
-                        // the synchronous Button action into the
-                        // @MainActor model's async retry method.
-                        onRetry: { Task { await chatModel.retry(failedLineId: line.id) } },
-                        // Long-press → Reply. Sync-only — beginReply
-                        // just mutates @Observable state on the model,
-                        // no Task needed.
-                        onReply: { chatModel.beginReply(to: line) },
-                        // Long-press → View Thread. Sets the sheet
-                        // state to this line's thread root. The same
-                        // sheet works for both a "reply leading to a
-                        // thread" (root = parent's threadRootMessageId)
-                        // and a "I might be the root of a thread"
-                        // (root = my own id, sheet shows me + any
-                        // matching replies).
-                        onViewThread: {
-                            viewingThreadRootId = ThreadRootID(id: TabChatModel.threadRoot(of: line))
-                        },
-                        // Mod-only delete affordance. The closure is
-                        // nil for non-mods and for messages already in
-                        // a deleted state, so the menu entry is
-                        // hidden in those cases. We also hide it for
-                        // our OWN messages — `DELETE /moderation/chat`
-                        // rejects the broadcaster trying to delete
-                        // their own messages anyway, and for a regular
-                        // mod the affordance is nonsensical: just
-                        // edit your own text instead of pretending to
-                        // moderate yourself.
-                        onDelete: (chatModel.currentUserCanModerate
-                                   && line.authorUserId != account.userId)
-                            ? { Task { await chatModel.deleteMessage(line.id) } }
-                            : nil
-                    )
-                    .id(line.id)
+                    // Delegates to the shared `chatRow(for:)` helper so
+                    // block/report callbacks, badge lookup, and all other
+                    // row construction stay in one place (same as the UIKit
+                    // collection-view cell provider above).
+                    chatRow(for: line)
+                        .id(line.id)
                 }
             }
             // `.scrollTargetLayout` tells the enclosing ScrollView to treat
@@ -702,6 +699,11 @@ public struct ChatScreen: View {
                 .padding(.top, 8)
                 .animation(.snappy, value: connectionBanner)
         }
+        .overlay(alignment: .top) {
+            reportConfirmationPill
+                .padding(.top, 8)
+                .animation(.snappy, value: showReportConfirmation)
+        }
         // Drive the pill from connection-state transitions. `previous`/`current`
         // are both `ConnectionState?` (the observed expression is one optional);
         // pass `previous` straight through — the reducer treats nil as "no prior
@@ -738,6 +740,25 @@ public struct ChatScreen: View {
             .glassEffect(.regular, in: Capsule())
             .transition(.move(edge: .top).combined(with: .opacity))
             .accessibilityLabel(connectionBanner == .liveAgain ? "Connection restored" : "Reconnecting")
+        }
+    }
+
+    /// Brief "Reported & blocked" confirmation pill. Appears after the user
+    /// reports a message and auto-dismisses after ~2s. Same quiet glass
+    /// capsule as the connection pill — reads as a transient status, not
+    /// a call-to-action.
+    @ViewBuilder
+    private var reportConfirmationPill: some View {
+        if showReportConfirmation {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.shield").font(.caption2.weight(.semibold))
+                Text("Reported & blocked").font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .glassEffect(.regular, in: Capsule())
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
