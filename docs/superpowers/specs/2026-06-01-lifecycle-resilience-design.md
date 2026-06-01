@@ -51,28 +51,44 @@ They share the theme of app-lifecycle resilience but are otherwise independent
 
 ## Feature 1 — Cold-start zombie cleanup
 
-### Decision: status-filtered bulk delete (not reconcile-against-tabs)
+### Decision: delete every non-`enabled` subscription (not reconcile-against-tabs)
 
 The original spec proposed listing all subscriptions and reconciling them against
-the joined-channel set. The simpler, equally-correct approach: delete only
-subscriptions in a **dead** state. We never delete `enabled` subscriptions, so
-this is safe to run at any time relative to session startup — a fresh subscribe
-creates `enabled` subs, which the sweep ignores.
+the joined-channel set. The simpler, equally-correct approach: delete every
+subscription whose status is **not `enabled`**.
+
+Why "all non-`enabled`" rather than a targeted list of dead statuses: Twitch's
+`deleteAllEventSubSubscriptions(filter:)` accepts only **one** status filter per
+call, and there are ~10 websocket-death statuses (`websocket_disconnected`,
+`websocket_failed_ping_pong`, `websocket_connection_unused`,
+`websocket_network_error`, `websocket_failed_to_reconnect`, …). Enumerating them
+would mean ~10 calls and would silently miss any status Twitch adds later.
+Instead, **list once and delete anything that isn't `enabled`**. For a
+websocket-only client `enabled` is the only "keep" status — every other status
+means the subscription is dead or dying — so this can never remove a live
+subscription, and it's future-proof. It's also safe to run at any time relative
+to session startup, because a fresh subscribe produces an `enabled` sub the sweep
+ignores.
 
 ### Behavior
 
-On launch, **once per active account**, call (best-effort):
+On launch, **once per active account**, best-effort:
 
 ```swift
-// HelixClient (TwitchKit 0.3.0). One filter per call (Twitch allows one).
-try await client.api.deleteAllEventSubSubscriptions(filter: .status(.websocketDisconnected))
-try await client.api.deleteAllEventSubSubscriptions(filter: .status(.websocketFailedPingPong))
+// HelixClient (TwitchKit 0.3.0). eventSubSubscriptions() → HelixPagedSequence
+// <EventSubSubscriptionRecord>; each record has `id: String` and
+// `status: EventSubSubscriptionStatus`.
+for try await record in client.api.eventSubSubscriptions() {
+    if case .enabled = record.status { continue }          // keep live subs
+    try? await client.api.deleteEventSubSubscription(id: record.id)   // reap the rest
+}
 ```
 
-- `.websocketDisconnected` is the dominant zombie (app killed → socket closed).
-  `.websocketFailedPingPong` covers the keepalive-death case.
-- Both calls are wrapped so any failure is logged and swallowed — cleanup must
-  never block or fail chat startup.
+- Pattern-matches `.enabled` (rather than `!=`) so it doesn't depend on
+  `EventSubSubscriptionStatus` Equatable conformance (it carries an
+  `unknown(String)` case).
+- The whole loop is wrapped in `do/catch`; any error (list or delete) is logged
+  and swallowed — cleanup must never block or fail chat startup.
 - Runs for the **active account** only (the one chattr launches into). Other
   accounts get cleaned when they become active. (Multi-account-on-launch sweep is
   a trivial future extension but YAGNI now.)
