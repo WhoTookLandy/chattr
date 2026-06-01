@@ -109,7 +109,23 @@ for try await record in client.api.eventSubSubscriptions() {
 
 ---
 
-## Feature 2 — Resume re-backfill (>60s background)
+## Feature 2 — Resume re-backfill (>60s background) — **DEFERRED**
+
+> **Status (2026-06-01): deferred, not being implemented now.** Planning revealed
+> the merge is not the trivial `mergeBackfill` reuse this spec assumed.
+> `ChatMessage`/`ChannelEvent` carry **no timestamp**, so ordering can only be
+> done by position — which is correct for the one-time startup merge (history is
+> wholly older than buffered-live) but **wrong** for re-backfill, where ~100
+> rustlog messages merge into an already-populated ~500-message ring with partial
+> overlap. A correct implementation needs an **overlap-join** (find the newest
+> shared `messageId` as the seam, splice in only the missing gap messages, no-op
+> when there's no overlap) — a bounded but non-trivial new algorithm.
+>
+> Given the network-transition reconnect (TwitchKit 0.3.0, already shipped)
+> already restores *live* chat on resume, the only thing re-backfill adds is the
+> historical gap (messages that arrived while backgrounded) — low-value for a
+> chat app. Deferred until it's worth the algorithmic surface. The design below
+> is retained for when we revisit it.
 
 ### Behavior
 
@@ -184,5 +200,6 @@ while fully disconnected).
 
 ## Implementation order
 
-1. Feature 1 (cleanup) — self-contained, no UI: registry method + AppShell launch call.
-2. Feature 2 (re-backfill) — `ResumeBackfill` helper + test → `ChannelSession.refreshBackfill` + merge test → `registry.reBackfillAllSessions()` → `AppShell` scene-phase observation.
+1. **Feature 1 (cleanup)** — self-contained, no UI: registry method + AppShell
+   launch call. **This is the only feature being implemented now.**
+2. ~~Feature 2 (re-backfill)~~ — **deferred** (see the Feature 2 status note).
