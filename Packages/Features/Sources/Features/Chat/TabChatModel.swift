@@ -53,7 +53,23 @@ public final class TabChatModel {
     /// before storing, so views consume the already-tokenized form
     /// (emote runs, mention runs, etc.) without re-tokenizing on every
     /// body recomputation.
+
+    /// All lines before block-filtering. The public `lines` is this filtered by
+    /// `blockedIds`.
+    private var allLines: [ChatLine] = []
+
+    /// Blocked user ids, pushed in by the view (which observes BlockStore).
+    /// Changing it re-filters `lines` immediately.
+    public var blockedIds: Set<String> = [] {
+        didSet { guard oldValue != blockedIds else { return }; rebuildLines() }
+    }
+
+    /// Block-filtered, display-ready lines. Drives the list.
     public private(set) var lines: [ChatLine] = []
+
+    private func rebuildLines() {
+        lines = BlockFilter.apply(lines: allLines, blockedIds: blockedIds)
+    }
 
     public private(set) var attachState: AttachState = .detached
 
@@ -389,7 +405,8 @@ public final class TabChatModel {
         for event in combined {
             Self.appendLines(for: event, into: &primed, normalizationContext: self)
         }
-        lines = Self.cap(primed)
+        allLines = Self.cap(primed)
+        rebuildLines()
         attachState = .attached
         logger.info("TabChatModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
     }
@@ -540,12 +557,13 @@ public final class TabChatModel {
             deliveryState: .sending,    // renderer dims the row so the user sees it as in-flight
             replyParent: optimisticReplyParent
         )
-        lines.append(optimistic)
+        allLines.append(optimistic)
         // Cap as usual — sending while at 500 lines drops the oldest, same
         // as a received message would.
-        if lines.count > Self.lineCap {
-            lines.removeFirst(lines.count - Self.lineCap)
+        if allLines.count > Self.lineCap {
+            allLines.removeFirst(allLines.count - Self.lineCap)
         }
+        rebuildLines()
         // FIFO append — see pendingSendIDByText doc-comment.
         pendingSendIDByText[canonical, default: []].append(pendingId)
 
@@ -566,14 +584,14 @@ public final class TabChatModel {
                 // where the echo arrives before we get here.
                 //
                 // Guard: only stash if the optimistic row is still in
-                // `lines`. The echo may have ALREADY arrived during our
+                // `allLines`. The echo may have ALREADY arrived during our
                 // await on session.send — it would have reconciled via
                 // the text fallback (Path 2), removed the optimistic
                 // row, and the entry we'd write here would be a dead
                 // letter. Skipping the write avoids a tiny memory leak
                 // and a stale entry that could (extremely unlikely) match
                 // a future event with the same messageId.
-                if lines.contains(where: { $0.id == pendingId }) {
+                if allLines.contains(where: { $0.id == pendingId }) {
                     helixMessageIdByPendingId[pendingId] = response.messageId
                     // Defensive: start a fallback timer that fires if
                     // the echo never arrives. See `synthesizeStuckUpgrade`
@@ -629,8 +647,8 @@ public final class TabChatModel {
     /// could happen if the user triple-taps the retry button on a row
     /// that's mid-retry.
     public func retry(failedLineId: String) async {
-        guard let idx = lines.firstIndex(where: { $0.id == failedLineId }),
-              case .failed(_, let retryText) = lines[idx].deliveryState else {
+        guard let idx = allLines.firstIndex(where: { $0.id == failedLineId }),
+              case .failed(_, let retryText) = allLines[idx].deliveryState else {
             return
         }
         // Capture the failed row's reply context BEFORE removing it so
@@ -642,7 +660,7 @@ public final class TabChatModel {
         // ReplyParent already carries the resolved threadRootMessageId
         // (set when the original send was made), so we use it directly
         // — no need to re-walk.
-        let preservedReply: ReplyContext? = lines[idx].replyParent.map { rp in
+        let preservedReply: ReplyContext? = allLines[idx].replyParent.map { rp in
             ReplyContext(
                 parentMessageId: rp.parentMessageId,
                 parentAuthorDisplayName: rp.parentAuthorDisplayName,
@@ -653,7 +671,8 @@ public final class TabChatModel {
         // Remove the failed row first so the new optimistic insert
         // takes its place at the bottom of `lines` — the user expects
         // the retry to feel like a fresh send.
-        lines.remove(at: idx)
+        allLines.remove(at: idx)
+        rebuildLines()
         await send(text: retryText, replyOverride: preservedReply)
     }
 
@@ -707,8 +726,8 @@ public final class TabChatModel {
     private func synthesizeStuckUpgrade(pendingId: String, canonicalMessageId: String) {
         sendFallbackTimers.removeValue(forKey: pendingId)
 
-        guard let idx = lines.firstIndex(where: { $0.id == pendingId }),
-              case .sending = lines[idx].deliveryState else {
+        guard let idx = allLines.firstIndex(where: { $0.id == pendingId }),
+              case .sending = allLines[idx].deliveryState else {
             // Already upgraded via echo, or removed — nothing to do.
             return
         }
@@ -722,17 +741,18 @@ public final class TabChatModel {
         //
         // If we'd create a dupe, just remove the optimistic row instead
         // of replacing — the echo's row already covers it.
-        if lines.contains(where: { $0.id == canonicalMessageId }) {
+        if allLines.contains(where: { $0.id == canonicalMessageId }) {
             logger.warning("Synthesize would duplicate id \(canonicalMessageId, privacy: .public); removing optimistic row only")
-            lines.remove(at: idx)
+            allLines.remove(at: idx)
+            rebuildLines()
             cleanupPending(pendingId: pendingId)
             return
         }
 
         logger.warning("Echo never arrived for messageId=\(canonicalMessageId, privacy: .public); synthesizing local upgrade after \(Self.sendFallbackTimeout)")
 
-        let row = lines[idx]
-        lines[idx] = ChatLine(
+        let row = allLines[idx]
+        allLines[idx] = ChatLine(
             id: canonicalMessageId,
             kind: row.kind,
             authorBadges: row.authorBadges,
@@ -746,6 +766,7 @@ public final class TabChatModel {
             deliveryState: .delivered,
             replyParent: row.replyParent
         )
+        rebuildLines()
 
         // Clean up correlation maps — we won't be reconciling this id
         // from an echo anymore (the synthesized id is what a future
@@ -754,9 +775,9 @@ public final class TabChatModel {
     }
 
     private func markFailed(pendingId: String, reason: String, retryText: String) {
-        guard let idx = lines.firstIndex(where: { $0.id == pendingId }) else { return }
-        let row = lines[idx]
-        lines[idx] = ChatLine(
+        guard let idx = allLines.firstIndex(where: { $0.id == pendingId }) else { return }
+        let row = allLines[idx]
+        allLines[idx] = ChatLine(
             id: row.id,
             kind: row.kind,
             authorBadges: row.authorBadges,
@@ -770,6 +791,7 @@ public final class TabChatModel {
             deliveryState: .failed(reason: reason, retryText: retryText),
             replyParent: row.replyParent       // preserve thread membership on failed
         )
+        rebuildLines()
     }
 
     /// View-facing reset for the toast. Call after the toast finishes
@@ -1004,7 +1026,9 @@ public final class TabChatModel {
             // This is a defensive check — the cleanup in Path 0 should
             // prevent the same echo from arriving twice in normal flow,
             // but Twitch occasionally re-sends events on reconnect.
-            if lines.contains(where: { $0.id == chatMessage.messageId }) {
+            // Check allLines (not the filtered `lines`) so a blocked
+            // user's prior message is still recognised as already stored.
+            if allLines.contains(where: { $0.id == chatMessage.messageId }) {
                 return
             }
 
@@ -1040,7 +1064,7 @@ public final class TabChatModel {
             }
         }
 
-        Self.appendLines(for: event, into: &lines, normalizationContext: self)
+        Self.appendLines(for: event, into: &allLines, normalizationContext: self)
 
         // Highlight sound: fire for a freshly-appended FOREIGN live
         // message that's highlighted, if the user has sounds on.
@@ -1055,7 +1079,7 @@ public final class TabChatModel {
         //     this fall-through is someone else's. The explicit
         //     `chatterUserId != currentUserId` guard covers the rare
         //     own-message-fell-through edge (failed send + late echo).
-        //   - `lines.last?.isHighlighted` reads the just-appended row —
+        //   - `allLines.last?.isHighlighted` reads the just-appended row —
         //     true when it's a self-mention OR matches a configured
         //     keyword (the Normalizer set the flag).
         //   - `soundEnabled()` is checked LAST so the UserDefaults read
@@ -1063,14 +1087,15 @@ public final class TabChatModel {
         //     (rare), not every message.
         if case .message(let m) = event,
            m.chatterUserId != currentUserId,
-           lines.last?.isHighlighted == true,
+           allLines.last?.isHighlighted == true,
            HighlightSettings.soundEnabled() {
             HighlightSoundPlayer.shared.play()
         }
 
-        if lines.count > Self.lineCap {
-            lines.removeFirst(lines.count - Self.lineCap)
+        if allLines.count > Self.lineCap {
+            allLines.removeFirst(allLines.count - Self.lineCap)
         }
+        rebuildLines()
     }
 
     /// Replaces the optimistic row at `pendingId` with a freshly-normalized
@@ -1082,7 +1107,7 @@ public final class TabChatModel {
     /// — without it the same six-line block would appear twice with the
     /// same content but different match-key sources, inviting drift.
     private func upgradeOptimistic(at pendingId: String, with chatMessage: ChatMessage) -> Bool {
-        guard let idx = lines.firstIndex(where: { $0.id == pendingId }) else {
+        guard let idx = allLines.firstIndex(where: { $0.id == pendingId }) else {
             return false
         }
         let snapshot = emoteIndex?.snapshot() ?? [:]
@@ -1092,7 +1117,8 @@ public final class TabChatModel {
             currentUserLogin: currentUserLogin,
             highlightKeywords: highlightKeywords
         )
-        lines[idx] = normalizedLine
+        allLines[idx] = normalizedLine
+        rebuildLines()
         return true
     }
 

@@ -129,6 +129,10 @@ public struct ChatScreen: View {
     /// per-channel load skips the redundant /chat/badges/global fetch.
     @Environment(\.globalCatalog) private var globalCatalog
 
+    /// Block list for the signed-in account. Pushed into `chatModel.blockedIds`
+    /// reactively so the list re-filters whenever the user blocks/unblocks someone.
+    @Environment(\.blockStore) private var blockStore
+
     /// App-wide session registry — `ChatScreen` *must* go through this to
     /// fetch a session rather than constructing one directly. The registry
     /// caches sessions by (userId, channelId), so re-entering a channel
@@ -491,6 +495,15 @@ public struct ChatScreen: View {
                     if connectionBanner == .liveAgain { connectionBanner = .hidden }
                 }
             }
+        }
+        // Keep the model's block filter in sync with the active account's
+        // BlockStore. `blockStore` is @Observable, so reading `.blockedIds` here
+        // re-fires this onChange whenever a block/unblock mutates the set.
+        .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
+            chatModel.blockedIds = ids
+        }
+        .task(id: blockStore?.blockedIds ?? []) {
+            chatModel.blockedIds = blockStore?.blockedIds ?? []
         }
         #else
         legacyScrollView
