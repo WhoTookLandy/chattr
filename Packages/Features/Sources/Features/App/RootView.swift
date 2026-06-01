@@ -36,6 +36,11 @@ public struct RootView: View {
     /// keeping the data across sign-outs is also fine since it's not auth-specific).
     @State private var globalCatalog = GlobalCatalog()
 
+    /// Per-active-account blocked-user store. Re-created when the active
+    /// account changes. Seeded in a launch .task and injected via the
+    /// environment, like globalCatalog.
+    @State private var blockStore: BlockStore?
+
     /// Cache of the active account's followed channels + enrichment data.
     /// Owned here so the data survives chat-screen push/pop — previously
     /// every back-nav refetched the entire follow list because the state
@@ -93,6 +98,7 @@ public struct RootView: View {
             }
         }
         .environment(\.globalCatalog, globalCatalog)
+        .environment(\.blockStore, blockStore)
         .environment(\.followsStore, followsStore)
         .environment(\.channelSessionRegistry, channelSessionRegistry)
         .environment(\.chatImagePrefetcher, chatImagePrefetcher)
@@ -184,6 +190,18 @@ public struct RootView: View {
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
             await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
+        }
+        // Create the active account's BlockStore (loads its persisted cache in
+        // init) and seed it from Twitch's authoritative block list. `.task(id:)`
+        // re-fires on account swap, replacing the store for the new account.
+        .task(id: activeAccount?.userId) {
+            guard let active = activeAccount else {
+                blockStore = nil
+                return
+            }
+            let store = BlockStore(accountUserId: active.userId, accountStore: accountStore)
+            blockStore = store
+            await store.load()
         }
     }
 }
