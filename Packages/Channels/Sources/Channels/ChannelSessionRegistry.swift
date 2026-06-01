@@ -388,6 +388,42 @@ public final class ChannelSessionRegistry {
         return new
     }
 
+    // MARK: - Cold-start zombie cleanup
+
+    /// Reaps dead EventSub subscriptions left behind by a previous
+    /// crash/force-quit. WebSocket subscriptions are session-bound: when the app
+    /// is killed and the socket isn't resumed in time, Twitch marks them
+    /// `websocket_disconnected` (and similar) and auto-removes them within ~1h —
+    /// but they count against the per-app subscription quota until then. This
+    /// frees that quota immediately on launch.
+    ///
+    /// Deletes every subscription whose status is **not** `.enabled`. For a
+    /// websocket-only client `enabled` is the only live status, so this can never
+    /// remove a subscription we're actually using — even if it races session
+    /// startup (a fresh subscribe produces an `.enabled` sub this skips). Covers
+    /// every dead status without enumerating them, and is future-proof.
+    ///
+    /// Best-effort: any error (list or delete) is logged and swallowed. Never
+    /// blocks or fails chat startup.
+    public func cleanupDisconnectedSubscriptions(forAccountUserId accountUserId: String) async {
+        let client = accountStore.client(forUserId: accountUserId)
+        do {
+            var reaped = 0
+            for try await record in client.api.eventSubSubscriptions() {
+                if case .enabled = record.status { continue }   // keep live subs
+                try? await client.api.deleteEventSubSubscription(id: record.id)
+                reaped += 1
+            }
+            if reaped > 0 {
+                logger.notice("Reaped \(reaped) dead EventSub subscription(s) for account \(accountUserId, privacy: .public)")
+            }
+        } catch {
+            // Listing failed (auth/network). Cleanup is best-effort — Twitch's
+            // own auto-removal is the backstop.
+            logger.debug("EventSub zombie cleanup skipped for \(accountUserId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Event dispatch
 
     /// Cancel + remove the shared event dispatcher Task for an account if
