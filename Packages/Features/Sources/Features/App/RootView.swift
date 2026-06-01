@@ -143,6 +143,15 @@ public struct RootView: View {
                 accountStore: accountStore
             )
         }
+        // Cold-start EventSub zombie cleanup. Reap dead subscriptions a previous
+        // crash/force-quit left behind so they stop counting against Twitch's
+        // per-app quota. Best-effort; runs concurrently with the prefetch tasks
+        // and with session startup (it only deletes non-enabled subs, so it can't
+        // touch a live subscription). `.task(id:)` re-fires on account swap.
+        .task(id: activeAccount?.userId) {
+            guard let active = activeAccount else { return }
+            await channelSessionRegistry.cleanupDisconnectedSubscriptions(forAccountUserId: active.userId)
+        }
         // One-shot Keychain mirror: if the user has a valid TwitchKit
         // token but nothing in our chattr-side refresh cache (i.e. they
         // upgraded across the OAuthRefreshTokenCache rollout), copy the
