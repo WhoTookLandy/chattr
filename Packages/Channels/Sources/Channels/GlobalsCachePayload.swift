@@ -3,11 +3,11 @@ import TwitchKit
 
 /// Disk-storable form of a single global badge entry. `[ChatBadgeKey: ChatBadgeEntry]`
 /// can't JSON-encode a struct key, so we flatten to an array and rebuild on load.
-public struct BadgeDTO: Codable, Sendable {
-    public let setId: String
-    public let id: String
-    public let url: URL
-    public let title: String?
+struct BadgeDTO: Codable, Sendable {
+    let setId: String
+    let id: String
+    let url: URL
+    let title: String?
 }
 
 /// On-disk representation of `GlobalCatalog`'s global badges + global emotes.
@@ -15,7 +15,7 @@ public struct GlobalsCachePayload: Codable, Sendable {
     /// Envelope version — bump when the badge/emote shape changes incompatibly.
     public static let cacheVersion = 1
 
-    public let badges: [BadgeDTO]
+    let badges: [BadgeDTO]
     public let emotes: [String: TwitchEmote]
 
     /// Build from the in-memory shapes `GlobalCatalog` holds.

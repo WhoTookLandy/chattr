@@ -83,7 +83,7 @@ public final class GlobalCatalog {
         // restored from disk rather than overwriting memory + cache with empties.
         guard !badges.isEmpty || !emotes.isEmpty else {
             hasLoaded = true
-            logger.info("GlobalCatalog fetch returned nothing; keeping disk/empty state")
+            logger.info("GlobalCatalog fetch returned nothing; keeping existing globals")
             return
         }
 
