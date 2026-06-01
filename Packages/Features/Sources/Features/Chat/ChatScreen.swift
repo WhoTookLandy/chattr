@@ -516,6 +516,14 @@ public struct ChatScreen: View {
         }
         #else
         legacyScrollView
+            // Same block-filter sync as the UIKit branch above — the legacy
+            // (macOS) path needs it too, else blocking has no effect there.
+            .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
+                chatModel.blockedIds = ids
+            }
+            .task(id: blockStore?.blockedIds ?? []) {
+                chatModel.blockedIds = blockStore?.blockedIds ?? []
+            }
         #endif
     }
 
