@@ -51,6 +51,13 @@ public actor EmoteIndex {
 
     private let providers: [any EmoteProvider]
 
+    /// Disk cache for this channel's merged snapshot. Keyed by broadcasterId.
+    private let cache: JSONDiskCache
+
+    /// Cross-launch freshness window. In-session refetch is already prevented
+    /// by `loadedBroadcasterId`; this TTL governs only disk-restored data.
+    private static let cacheTTL: TimeInterval = 24 * 60 * 60
+
     /// Lock-protected mirror of `byName` for nonisolated reads. Renderer
     /// code (e.g. a future `Normalizer` in Phase 2.2) reads this on the
     /// hot path and shouldn't have to cross the actor boundary for each
@@ -73,13 +80,18 @@ public actor EmoteIndex {
     /// Default initializer: stands up all three providers with a shared
     /// URLSession. Tests can inject custom providers (e.g., to test
     /// failure handling without hitting the network) via the second init.
-    public init() {
+    public init(cache: JSONDiskCache = JSONDiskCache(subdirectory: CacheSubdirectory.emoteChannels)) {
         self.providers = [SevenTVProvider(), BTTVProvider(), FFZProvider()]
+        self.cache = cache
     }
 
-    /// Inject-providers initializer for tests.
-    public init(providers: [any EmoteProvider]) {
+    /// Inject-providers (and cache) initializer for tests.
+    public init(
+        providers: [any EmoteProvider],
+        cache: JSONDiskCache = JSONDiskCache(subdirectory: CacheSubdirectory.emoteChannels)
+    ) {
         self.providers = providers
+        self.cache = cache
     }
 
     /// Loads global + per-channel emotes for the given (id, login) pair.
@@ -100,6 +112,23 @@ public actor EmoteIndex {
             // snapshot for free. Skip the 6 HTTP calls.
             return
         }
+
+        // Disk: restore + render instantly if present. If still fresh, skip the
+        // network entirely. If stale, fall through and revalidate below.
+        if let hit = await cache.load(
+            key: broadcasterId, as: ChannelEmoteCachePayload.self,
+            version: ChannelEmoteCachePayload.cacheVersion, ttl: Self.cacheTTL
+        ), hit.payload.broadcasterId == broadcasterId {
+            let restored = hit.payload.byName
+            self.byName = restored
+            snapshotLock.withLock { $0 = restored }
+            if hit.isFresh {
+                loadedBroadcasterId = broadcasterId
+                logger.info("EmoteIndex restored fresh from disk for \(broadcasterLogin): \(restored.count) emote(s)")
+                return
+            }
+        }
+
         var merged: [String: Emote] = [:]
 
         // Step 1: global emotes from all providers, in parallel.
@@ -170,8 +199,21 @@ public actor EmoteIndex {
         // synchronous and the lock provides exclusion. The immutable
         // alias satisfies the compiler with no runtime cost.
         let finalSnapshot = merged
+        // All providers failed or returned nothing. Don't clobber a
+        // disk-restored snapshot (or a prior load) with emptiness, and don't
+        // mark loaded — let the next mount retry.
+        guard !finalSnapshot.isEmpty else {
+            logger.info("EmoteIndex produced no emotes for \(broadcasterLogin); keeping existing snapshot")
+            return
+        }
         self.byName = finalSnapshot
         snapshotLock.withLock { $0 = finalSnapshot }
+
+        await cache.save(
+            key: broadcasterId,
+            value: ChannelEmoteCachePayload(broadcasterId: broadcasterId, byName: finalSnapshot),
+            version: ChannelEmoteCachePayload.cacheVersion)
+
         // Mark as loaded for idempotency. Future load() calls with the same
         // broadcasterId return immediately. Set AFTER the snapshot publish so
         // a Task cancellation mid-load (rare) leaves the index in an unloaded
