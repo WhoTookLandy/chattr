@@ -49,6 +49,13 @@ public actor EmoteIndex {
     /// happens once.
     private var loadedBroadcasterId: String?
 
+    /// In-flight guard: the `broadcasterId` a `load(...)` call is currently
+    /// fetching for. Set *before* the first `await` and cleared on every exit
+    /// path. This closes the reentrancy window where two concurrent callers
+    /// both pass the `loadedBroadcasterId` idempotency check (still nil during
+    /// the disk/network awaits) and each launch a full duplicate provider fetch.
+    private var loadingBroadcasterId: String?
+
     private let providers: [any EmoteProvider]
 
     /// Disk cache for this channel's merged snapshot. Keyed by broadcasterId.
@@ -112,6 +119,23 @@ public actor EmoteIndex {
             // snapshot for free. Skip the 6 HTTP calls.
             return
         }
+
+        // A concurrent caller for the same channel is already past the
+        // idempotency check and running the fetch (it set this before its
+        // first suspension, which is why we always observe it — the actor
+        // runs the first caller synchronously up to that point). Don't launch
+        // a parallel fetch; the in-flight caller will publish the snapshot.
+        if loadingBroadcasterId == broadcasterId {
+            return
+        }
+        // Set before the first `await` and clear on *every* exit path. A single
+        // `defer` over the whole method body covers the fresh-disk-hit return,
+        // the empty-result return, the cancellation guard, and success — so an
+        // empty/cancelled load still clears the flag, preserving the retry
+        // semantics (an empty result deliberately leaves `loadedBroadcasterId`
+        // nil so the next mount tries again).
+        loadingBroadcasterId = broadcasterId
+        defer { loadingBroadcasterId = nil }
 
         // Disk: restore + render instantly if present. If still fresh, skip the
         // network entirely. If stale, fall through and revalidate below.

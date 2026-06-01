@@ -99,6 +99,25 @@ struct EmoteIndexCacheTests {
                                  version: ChannelEmoteCachePayload.cacheVersion, ttl: 24 * 3600) == nil)
     }
 
+    @Test("concurrent loads for the same channel fetch providers once")
+    func concurrentLoadsCoalesce() async throws {
+        let base = tempBase()
+        let cache = JSONDiskCache(subdirectory: "ch", baseDirectory: base)
+        // No seeded cache → both callers miss disk and head for the network.
+        let provider = CountingProvider(returning: [sampleEmote("Kappa")])
+        let index = EmoteIndex(providers: [provider], cache: cache)
+
+        // Fire two loads for the same broadcaster concurrently. The first to
+        // enter the actor sets the in-flight guard before its first suspension;
+        // the second must observe it and skip the duplicate provider fetch.
+        async let first: Void = index.load(broadcasterId: "999", broadcasterLogin: "x")
+        async let second: Void = index.load(broadcasterId: "999", broadcasterLogin: "x")
+        _ = await (first, second)
+
+        #expect(provider.globalCallCount == 1)                 // providers ran once, not twice
+        #expect(index.snapshot()["Kappa"] != nil)              // snapshot still published
+    }
+
     @Test("stale hit + empty refetch keeps disk-restored snapshot")
     func staleHitEmptyRefetchKeepsDiskData() async throws {
         let base = tempBase()
