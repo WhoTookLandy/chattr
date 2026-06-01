@@ -120,8 +120,7 @@ public actor EmoteIndex {
             version: ChannelEmoteCachePayload.cacheVersion, ttl: Self.cacheTTL
         ), hit.payload.broadcasterId == broadcasterId {
             let restored = hit.payload.byName
-            self.byName = restored
-            snapshotLock.withLock { $0 = restored }
+            publish(restored)
             if hit.isFresh {
                 loadedBroadcasterId = broadcasterId
                 logger.info("EmoteIndex restored fresh from disk for \(broadcasterLogin): \(restored.count) emote(s)")
@@ -206,19 +205,16 @@ public actor EmoteIndex {
             logger.info("EmoteIndex produced no emotes for \(broadcasterLogin); keeping existing snapshot")
             return
         }
-        self.byName = finalSnapshot
-        snapshotLock.withLock { $0 = finalSnapshot }
-
+        publish(finalSnapshot)
+        // Mark loaded before the async cache write so that any re-entrant
+        // load() call arriving during the `await cache.save` suspension sees
+        // the idempotency guard and returns immediately rather than kicking
+        // off a duplicate network fetch.
+        loadedBroadcasterId = broadcasterId
         await cache.save(
             key: broadcasterId,
             value: ChannelEmoteCachePayload(broadcasterId: broadcasterId, byName: finalSnapshot),
             version: ChannelEmoteCachePayload.cacheVersion)
-
-        // Mark as loaded for idempotency. Future load() calls with the same
-        // broadcasterId return immediately. Set AFTER the snapshot publish so
-        // a Task cancellation mid-load (rare) leaves the index in an unloaded
-        // state and the next attempt will retry.
-        loadedBroadcasterId = broadcasterId
         logger.info("EmoteIndex loaded for \(broadcasterLogin): \(finalSnapshot.count) emote(s)")
     }
 
@@ -230,6 +226,13 @@ public actor EmoteIndex {
     }
 
     // MARK: - Private
+
+    /// Atomically publish a resolved snapshot: actor-isolated `byName` plus the
+    /// lock-protected mirror used by nonisolated readers.
+    private func publish(_ snapshot: [String: Emote]) {
+        self.byName = snapshot
+        snapshotLock.withLock { $0 = snapshot }
+    }
 
     /// Merge with precedence: channel > global; 7TV > BTTV > FFZ.
     private static func merge(

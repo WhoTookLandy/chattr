@@ -98,4 +98,30 @@ struct EmoteIndexCacheTests {
         #expect(await cache.load(key: "888", as: ChannelEmoteCachePayload.self,
                                  version: ChannelEmoteCachePayload.cacheVersion, ttl: 24 * 3600) == nil)
     }
+
+    @Test("stale hit + empty refetch keeps disk-restored snapshot")
+    func staleHitEmptyRefetchKeepsDiskData() async throws {
+        let base = tempBase()
+        let cache = JSONDiskCache(subdirectory: "ch", baseDirectory: base)
+        await cache.save(
+            key: "321",
+            value: ChannelEmoteCachePayload(broadcasterId: "321", byName: ["DiskEmote": sampleEmote("DiskEmote")]),
+            version: ChannelEmoteCachePayload.cacheVersion)
+
+        // Backdate past the 24h TTL so the disk hit is stale → triggers refetch.
+        let url = base.appendingPathComponent("ch", isDirectory: true)
+            .appendingPathComponent("321.json")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-2 * 24 * 3600)],
+            ofItemAtPath: url.path)
+
+        // Providers return nothing (simulating a transient network failure).
+        let provider = CountingProvider(returning: [])
+        let index = EmoteIndex(providers: [provider], cache: cache)
+
+        await index.load(broadcasterId: "321", broadcasterLogin: "x")
+
+        #expect(provider.globalCallCount == 1)                 // it did try the network
+        #expect(index.snapshot()["DiskEmote"] != nil)          // stale disk data preserved, not clobbered
+    }
 }
