@@ -85,13 +85,21 @@ environment (`\.blockStore`) — same wiring as `globalCatalog`.
    - **"Block @login"** → `onBlock()` → `BlockStore.block(reason: .other)`.
    - **"Report…"** → a `confirmationDialog` with **Harassment** / **Spam** →
      `onReport(reason)` → `BlockStore.block(reason:)` (report also blocks; only
-     API). A brief confirmation ("Reported & blocked") is acceptable but optional.
+     API). On success, show a **brief transient confirmation** ("Reported &
+     blocked") — a ~2s auto-dismissing glass capsule reusing the connection /
+     jump-to-latest pill pattern. **Block stays silent** (the message vanishing is
+     its own feedback); the confirmation differentiates the heavier Report action
+     and gives App Store review a visible report acknowledgement.
 2. **`TabChatModel` filtering** (`…/Chat/TabChatModel.swift`): the displayed
-   `lines` exclude messages whose author id is in `blockStore.blockedIds`.
-   Reactive — blocking a user removes their **existing** messages from the view
-   immediately. The pure core is `BlockFilter.apply(lines:, blockedIds:) -> [ChatLine]`,
-   unit-tested; the model calls it when building `lines` and re-runs it when the
-   set changes (TabChatModel observes the `BlockStore`).
+   `lines` exclude any line whose `authorUserId` is in `blockStore.blockedIds`.
+   The filter is **kind-agnostic** — it keys on `ChatLine.authorUserId`, which the
+   Normalizer populates for every kind, so a blocked user's **messages AND their
+   sub/raid bubbles** all disappear (the coherent "invisible to me" behavior) with
+   one predicate, no special-casing. Reactive — blocking removes their **existing**
+   lines from the view immediately. The pure core is
+   `BlockFilter.apply(lines:, blockedIds:) -> [ChatLine]`, unit-tested; the model
+   calls it when building `lines` and re-runs it when the set changes (TabChatModel
+   observes the `BlockStore`).
 3. **`BlockedUsersScreen`** (`Features`): a `List` of `blockStore.blocked`
    (display name + @login) each with an **Unblock** button → `BlockStore.unblock`.
    Empty state via `ContentUnavailableView`. This is the only place to unblock —
@@ -116,9 +124,10 @@ appear again.
 
 ## Testing
 
-- **`BlockFilter.apply(lines:, blockedIds:)`** (pure): a blocked author's lines
-  are removed; non-blocked pass through; empty set is identity; non-message lines
-  (sub/raid bubbles) are unaffected. Unit test (Features).
+- **`BlockFilter.apply(lines:, blockedIds:)`** (pure): a blocked author's lines of
+  **any** kind are removed (message AND sub/raid bubble — keyed on `authorUserId`);
+  lines from non-blocked authors pass through; an empty set is the identity. Unit
+  test (Features).
 - **`BlockStore` set logic** (the testable, non-I/O parts): optimistic insert
   then rollback restores the prior set; `load` reconcile **replaces** with the
   fetched list; `isBlocked` reflects the set. Inject a stub block/unblock/fetch
