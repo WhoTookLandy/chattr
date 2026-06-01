@@ -38,7 +38,15 @@ public final class GlobalCatalog {
     /// triggers from `.task(id:)` no-op so we don't refetch on every account swap.
     public private(set) var hasLoaded: Bool = false
 
-    public init() {}
+    /// Disk cache for the single global metadata blob.
+    private let cache: JSONDiskCache
+
+    private static let cacheKey = "global"
+    private static let cacheTTL: TimeInterval = 24 * 60 * 60
+
+    public init(cache: JSONDiskCache = JSONDiskCache(subdirectory: CacheSubdirectory.emoteGlobals)) {
+        self.cache = cache
+    }
 
     /// Fetches global badges + global emotes sequentially and caches them.
     /// Errors are logged but non-fatal — the per-channel ChatBadgeStore will
@@ -48,6 +56,21 @@ public final class GlobalCatalog {
     /// re-fires on account changes.
     public func load(account: Account, accountStore: AccountStore) async {
         guard !hasLoaded else { return }
+
+        // Disk: render instantly if present. If fresh, skip the network.
+        if let hit = await cache.load(
+            key: Self.cacheKey, as: GlobalsCachePayload.self,
+            version: GlobalsCachePayload.cacheVersion, ttl: Self.cacheTTL
+        ) {
+            globalBadges = hit.payload.badgeDictionary
+            globalEmotes = hit.payload.emotes
+            if hit.isFresh {
+                hasLoaded = true
+                logger.info("GlobalCatalog restored fresh from disk: \(self.globalBadges.count) badges, \(self.globalEmotes.count) emotes")
+                return
+            }
+        }
+
         let client = accountStore.client(for: account)
 
         // Sequential is fine — Account is non-Sendable so async let trips
@@ -56,11 +79,32 @@ public final class GlobalCatalog {
         let badges = await fetchBadges(client: client, accountStore: accountStore, account: account)
         let emotes = await fetchEmotes(client: client, accountStore: accountStore, account: account)
 
-        globalBadges = badges
-        globalEmotes = emotes
+        // Both fetches failed (network down / unauthorized). Keep whatever we
+        // restored from disk rather than overwriting memory + cache with empties.
+        guard !badges.isEmpty || !emotes.isEmpty else {
+            hasLoaded = true
+            logger.info("GlobalCatalog fetch returned nothing; keeping existing globals")
+            return
+        }
+
+        // Badges and emotes are independent fetches: on a revalidation pass one
+        // can succeed while the other transiently fails (returns empty). Carry
+        // forward the existing value (disk-restored or previously-loaded) for any
+        // empty result so a partial failure never clobbers good data — in memory
+        // or on disk.
+        let mergedBadges = badges.isEmpty ? globalBadges : badges
+        let mergedEmotes = emotes.isEmpty ? globalEmotes : emotes
+
+        globalBadges = mergedBadges
+        globalEmotes = mergedEmotes
         hasLoaded = true
 
-        logger.info("GlobalCatalog loaded: \(badges.count) badges, \(emotes.count) emotes")
+        await cache.save(
+            key: Self.cacheKey,
+            value: GlobalsCachePayload(badges: mergedBadges, emotes: mergedEmotes),
+            version: GlobalsCachePayload.cacheVersion)
+
+        logger.info("GlobalCatalog loaded: \(mergedBadges.count) badges, \(mergedEmotes.count) emotes")
     }
 
     // MARK: - Private fetch helpers

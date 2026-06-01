@@ -111,6 +111,13 @@ public struct RootView: View {
                 accountStore.setActive(userId: newId)
             }
         }
+        // Bound the per-channel emote cache: delete files not refreshed in 7
+        // days. Runs once at launch (not keyed to account). The 24h TTL governs
+        // freshness; this governs lifetime. OS purge of Caches/ is a backstop.
+        .task {
+            await JSONDiskCache(subdirectory: CacheSubdirectory.emoteChannels)
+                .sweep(maxAge: 7 * 24 * 60 * 60)
+        }
         // Pre-fetch global Twitch data once on first sign-in. `.task(id:)` re-fires
         // when the active userId changes (nil → userId, or A → B on account swap);
         // the catalog's `hasLoaded` guard makes subsequent fires no-ops, so we

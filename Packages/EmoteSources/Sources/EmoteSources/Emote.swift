@@ -6,7 +6,7 @@ import Foundation
 /// `TwitchKit.ChatMessage.fragments` as `.emote(EmoteReference)` already. This
 /// type is only for emote *names* that appear as plain text in Twitch's payload
 /// but should render as inline images from a third-party CDN.
-public struct Emote: Sendable, Equatable, Hashable, Identifiable {
+public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
     /// Provider-namespaced unique id (e.g., "7tv:6042089ce42d", "bttv:54fa90b80...").
     /// Uses a prefix so collisions across providers can't happen.
     public let id: String
@@ -38,11 +38,15 @@ public struct Emote: Sendable, Equatable, Hashable, Identifiable {
     /// channel emote set includes it. nil for global emotes.
     public let ownerChannelId: String?
 
-    public enum Size: String, Sendable, Equatable, Hashable, CaseIterable {
+    /// Raw values are persisted in the on-disk emote cache — renaming a case or
+    /// changing a raw value is a breaking change; bump the cache version if you do.
+    public enum Size: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
         case x1, x2, x4
     }
 
-    public enum Source: String, Sendable, Equatable, Hashable, CaseIterable {
+    /// Raw values are persisted in the on-disk emote cache — renaming a case or
+    /// changing a raw value is a breaking change; bump the cache version if you do.
+    public enum Source: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
         case sevenTV
         case bttv
         case ffz

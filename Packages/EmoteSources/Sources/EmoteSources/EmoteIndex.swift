@@ -49,7 +49,21 @@ public actor EmoteIndex {
     /// happens once.
     private var loadedBroadcasterId: String?
 
+    /// In-flight guard: the `broadcasterId` a `load(...)` call is currently
+    /// fetching for. Set *before* the first `await` and cleared on every exit
+    /// path. This closes the reentrancy window where two concurrent callers
+    /// both pass the `loadedBroadcasterId` idempotency check (still nil during
+    /// the disk/network awaits) and each launch a full duplicate provider fetch.
+    private var loadingBroadcasterId: String?
+
     private let providers: [any EmoteProvider]
+
+    /// Disk cache for this channel's merged snapshot. Keyed by broadcasterId.
+    private let cache: JSONDiskCache
+
+    /// Cross-launch freshness window. In-session refetch is already prevented
+    /// by `loadedBroadcasterId`; this TTL governs only disk-restored data.
+    private static let cacheTTL: TimeInterval = 24 * 60 * 60
 
     /// Lock-protected mirror of `byName` for nonisolated reads. Renderer
     /// code (e.g. a future `Normalizer` in Phase 2.2) reads this on the
@@ -73,13 +87,18 @@ public actor EmoteIndex {
     /// Default initializer: stands up all three providers with a shared
     /// URLSession. Tests can inject custom providers (e.g., to test
     /// failure handling without hitting the network) via the second init.
-    public init() {
+    public init(cache: JSONDiskCache = JSONDiskCache(subdirectory: CacheSubdirectory.emoteChannels)) {
         self.providers = [SevenTVProvider(), BTTVProvider(), FFZProvider()]
+        self.cache = cache
     }
 
-    /// Inject-providers initializer for tests.
-    public init(providers: [any EmoteProvider]) {
+    /// Inject-providers (and cache) initializer for tests.
+    public init(
+        providers: [any EmoteProvider],
+        cache: JSONDiskCache = JSONDiskCache(subdirectory: CacheSubdirectory.emoteChannels)
+    ) {
         self.providers = providers
+        self.cache = cache
     }
 
     /// Loads global + per-channel emotes for the given (id, login) pair.
@@ -100,6 +119,39 @@ public actor EmoteIndex {
             // snapshot for free. Skip the 6 HTTP calls.
             return
         }
+
+        // A concurrent caller for the same channel is already past the
+        // idempotency check and running the fetch (it set this before its
+        // first suspension, which is why we always observe it — the actor
+        // runs the first caller synchronously up to that point). Don't launch
+        // a parallel fetch; the in-flight caller will publish the snapshot.
+        if loadingBroadcasterId == broadcasterId {
+            return
+        }
+        // Set before the first `await` and clear on *every* exit path. A single
+        // `defer` over the whole method body covers the fresh-disk-hit return,
+        // the empty-result return, the cancellation guard, and success — so an
+        // empty/cancelled load still clears the flag, preserving the retry
+        // semantics (an empty result deliberately leaves `loadedBroadcasterId`
+        // nil so the next mount tries again).
+        loadingBroadcasterId = broadcasterId
+        defer { loadingBroadcasterId = nil }
+
+        // Disk: restore + render instantly if present. If still fresh, skip the
+        // network entirely. If stale, fall through and revalidate below.
+        if let hit = await cache.load(
+            key: broadcasterId, as: ChannelEmoteCachePayload.self,
+            version: ChannelEmoteCachePayload.cacheVersion, ttl: Self.cacheTTL
+        ), hit.payload.broadcasterId == broadcasterId {
+            let restored = hit.payload.byName
+            publish(restored)
+            if hit.isFresh {
+                loadedBroadcasterId = broadcasterId
+                logger.info("EmoteIndex restored fresh from disk for \(broadcasterLogin): \(restored.count) emote(s)")
+                return
+            }
+        }
+
         var merged: [String: Emote] = [:]
 
         // Step 1: global emotes from all providers, in parallel.
@@ -170,13 +222,23 @@ public actor EmoteIndex {
         // synchronous and the lock provides exclusion. The immutable
         // alias satisfies the compiler with no runtime cost.
         let finalSnapshot = merged
-        self.byName = finalSnapshot
-        snapshotLock.withLock { $0 = finalSnapshot }
-        // Mark as loaded for idempotency. Future load() calls with the same
-        // broadcasterId return immediately. Set AFTER the snapshot publish so
-        // a Task cancellation mid-load (rare) leaves the index in an unloaded
-        // state and the next attempt will retry.
+        // All providers failed or returned nothing. Don't clobber a
+        // disk-restored snapshot (or a prior load) with emptiness, and don't
+        // mark loaded — let the next mount retry.
+        guard !finalSnapshot.isEmpty else {
+            logger.info("EmoteIndex produced no emotes for \(broadcasterLogin); keeping existing snapshot")
+            return
+        }
+        publish(finalSnapshot)
+        // Mark loaded before the async cache write so that any re-entrant
+        // load() call arriving during the `await cache.save` suspension sees
+        // the idempotency guard and returns immediately rather than kicking
+        // off a duplicate network fetch.
         loadedBroadcasterId = broadcasterId
+        await cache.save(
+            key: broadcasterId,
+            value: ChannelEmoteCachePayload(broadcasterId: broadcasterId, byName: finalSnapshot),
+            version: ChannelEmoteCachePayload.cacheVersion)
         logger.info("EmoteIndex loaded for \(broadcasterLogin): \(finalSnapshot.count) emote(s)")
     }
 
@@ -188,6 +250,13 @@ public actor EmoteIndex {
     }
 
     // MARK: - Private
+
+    /// Atomically publish a resolved snapshot: actor-isolated `byName` plus the
+    /// lock-protected mirror used by nonisolated readers.
+    private func publish(_ snapshot: [String: Emote]) {
+        self.byName = snapshot
+        snapshotLock.withLock { $0 = snapshot }
+    }
 
     /// Merge with precedence: channel > global; 7TV > BTTV > FFZ.
     private static func merge(
