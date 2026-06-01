@@ -1085,8 +1085,12 @@ public final class TabChatModel {
         //   - `soundEnabled()` is checked LAST so the UserDefaults read
         //     only happens for an actual highlighted foreign message
         //     (rare), not every message.
+        //   - `!blockedIds.contains(...)` keeps a blocked user silent: blocking
+        //     means "invisible to me," so their (still-arriving) messages must
+        //     not ping the highlight sound even if they @-mention us.
         if case .message(let m) = event,
            m.chatterUserId != currentUserId,
+           !blockedIds.contains(m.chatterUserId),
            allLines.last?.isHighlighted == true,
            HighlightSettings.soundEnabled() {
             HighlightSoundPlayer.shared.play()
