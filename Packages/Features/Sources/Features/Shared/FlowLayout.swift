@@ -18,6 +18,8 @@ import SwiftUI
 struct FlowLayout: Layout {
     var spacing: CGFloat
     var alignment: VerticalAlignment
+    /// Indent applied to every wrapped (non-first) row. 0 = classic flow.
+    var hangingIndent: CGFloat
 
     /// Per-layout-pass cache of subview sizes. SwiftUI calls `makeCache` once
     /// when the Layout's view tree is built and reuses the storage across
@@ -31,9 +33,10 @@ struct FlowLayout: Layout {
         var containerWidth: CGFloat = .nan
     }
 
-    init(spacing: CGFloat = 4, alignment: VerticalAlignment = .firstTextBaseline) {
+    init(spacing: CGFloat = 4, alignment: VerticalAlignment = .firstTextBaseline, hangingIndent: CGFloat = 0) {
         self.spacing = spacing
         self.alignment = alignment
+        self.hangingIndent = hangingIndent
     }
 
     func makeCache(subviews: Subviews) -> Cache { Cache() }
@@ -51,71 +54,47 @@ struct FlowLayout: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         let containerWidth = proposal.width ?? .infinity
         ensureSizes(subviews: subviews, containerWidth: containerWidth, cache: &cache)
-
-        var totalHeight: CGFloat = 0
-        var currentX: CGFloat = 0
-        var currentRowHeight: CGFloat = 0
-
-        for size in cache.sizes {
-            if currentX + size.width > containerWidth, currentX > 0 {
-                totalHeight += currentRowHeight + spacing
-                currentX = 0
-                currentRowHeight = 0
-            }
-            currentX += size.width + spacing
-            currentRowHeight = max(currentRowHeight, size.height)
-        }
-        totalHeight += currentRowHeight
-        return CGSize(width: containerWidth, height: totalHeight)
+        return FlowLayoutEngine.layout(
+            sizes: cache.sizes,
+            containerWidth: containerWidth,
+            spacing: spacing,
+            hangingIndent: hangingIndent
+        ).size
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
         let containerWidth = bounds.width
         ensureSizes(subviews: subviews, containerWidth: containerWidth, cache: &cache)
-
-        var currentX: CGFloat = bounds.minX
-        var currentY: CGFloat = bounds.minY
-        var rowSubviews: [(subview: LayoutSubview, size: CGSize)] = []
-
-        func flushRow() {
-            guard !rowSubviews.isEmpty else { return }
-            let rowHeight = rowSubviews.map(\.size.height).max() ?? 0
-            var x = bounds.minX
-            for (subview, size) in rowSubviews {
-                // Align within row based on vertical alignment
-                let yOffset: CGFloat
-                switch alignment {
-                case .firstTextBaseline:
-                    // Approximate baseline alignment: bottom-align short items (emote images)
-                    // with text. Since we can't query baseline from LayoutSubview directly,
-                    // we bottom-align all items within the row height.
-                    yOffset = rowHeight - size.height
-                case .center:
-                    yOffset = (rowHeight - size.height) / 2
-                case .bottom:
-                    yOffset = rowHeight - size.height
-                default:
-                    yOffset = 0
-                }
-                subview.place(
-                    at: CGPoint(x: x, y: currentY + yOffset),
-                    proposal: ProposedViewSize(width: size.width, height: size.height)
-                )
-                x += size.width + spacing
+        let result = FlowLayoutEngine.layout(
+            sizes: cache.sizes,
+            containerWidth: containerWidth,
+            spacing: spacing,
+            hangingIndent: hangingIndent
+        )
+        // Group origins by row (same y) to apply per-row vertical alignment.
+        for (index, subview) in subviews.enumerated() {
+            let origin = result.origins[index]
+            let size = cache.sizes[index]
+            let rowHeight = rowHeightForY(origin.y, origins: result.origins, sizes: cache.sizes)
+            let yOffset: CGFloat
+            switch alignment {
+            case .center: yOffset = (rowHeight - size.height) / 2
+            default:      yOffset = rowHeight - size.height // baseline/bottom approx (unchanged)
             }
-            currentY += rowHeight + spacing
-            rowSubviews.removeAll()
+            subview.place(
+                at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y + yOffset),
+                proposal: ProposedViewSize(width: size.width, height: size.height)
+            )
         }
+    }
 
-        for (subview, size) in zip(subviews, cache.sizes) {
-            if currentX + size.width > bounds.maxX, currentX > bounds.minX {
-                flushRow()
-                currentX = bounds.minX
-            }
-            rowSubviews.append((subview, size))
-            currentX += size.width + spacing
+    /// Tallest subview height among those sharing the row at `y`.
+    private func rowHeightForY(_ y: CGFloat, origins: [CGPoint], sizes: [CGSize]) -> CGFloat {
+        var h: CGFloat = 0
+        for (i, o) in origins.enumerated() where o.y == y {
+            h = max(h, sizes[i].height)
         }
-        flushRow()
+        return h
     }
 
     /// Populate `cache.sizes` if empty OR if the containerWidth has changed
