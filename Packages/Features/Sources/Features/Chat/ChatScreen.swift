@@ -615,7 +615,7 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var legacyScrollView: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
+            LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(chatModel.lines) { line in
                     // Delegates to the shared `chatRow(for:)` helper so
                     // block/report callbacks, badge lookup, and all other
