@@ -25,7 +25,8 @@ enum FlowLayoutEngine {
         var currentX: CGFloat = 0
         var currentY: CGFloat = 0
         var rowHeight: CGFloat = 0
-        var isFirstRow = true
+        // First row starts flush at x=0; every wrapped row starts at the
+        // hanging indent.
         var rowStart: CGFloat = 0
 
         for size in sizes {
@@ -33,8 +34,7 @@ enum FlowLayoutEngine {
             if currentX + size.width > containerWidth, currentX > rowStart {
                 currentY += rowHeight + spacing
                 rowHeight = 0
-                isFirstRow = false
-                rowStart = isFirstRow ? 0 : hangingIndent
+                rowStart = hangingIndent
                 currentX = rowStart
             }
             origins.append(CGPoint(x: currentX, y: currentY))
