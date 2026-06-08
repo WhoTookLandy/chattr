@@ -1,12 +1,15 @@
 import SwiftUI
 import Accounts
 
-/// Root content of the Chat tab.
+/// Root content of the Chat surface — now also the app's home screen.
 ///
-/// Layout (top to bottom):
-///   1. The pill tab strip (`ChatTabStrip`) — hidden when no tabs are open.
+/// Layout:
+///   1. A single `NavigationStack` with a toolbar header that reflects the
+///      active tab (avatar leading → Profile, channel name principal →
+///      switcher, grid trailing → Follows).
 ///   2. A horizontally-paged `ScrollView` of `ChatScreen` pages — one page
-///      per open tab. Swipe left/right to switch tabs; tap a pill to jump.
+///      per open tab. Swipe left/right to switch tabs.
+///   3. Page-dots below the transcript (hidden for a single tab).
 ///
 /// ## How the paging works
 ///
@@ -18,9 +21,9 @@ import Accounts
 ///   - `.scrollTargetBehavior(.paging)` makes swipes snap one full page at
 ///     a time (vs free-scrolling).
 ///   - `.scrollPosition(id: $activeTabId)` two-way binds the currently-
-///     visible page to `ChatTabsModel.activeTabId`. Tap a pill → write
-///     `activeTabId` → ScrollView animates to that page. Swipe → ScrollView
-///     writes back to `activeTabId` → pill highlight updates.
+///     visible page to `ChatTabsModel.activeTabId`. Tap the name → switcher
+///     → activate → ScrollView animates to that page. Swipe → ScrollView
+///     writes back to `activeTabId` → header title + page-dot update.
 ///
 /// ## How sessions persist across swipes
 ///
@@ -33,14 +36,16 @@ import Accounts
 /// It keeps receiving events, keeps appending to its ring buffer. When the
 /// user swipes back and the ChatScreen remounts, `TabChatModel.attach`
 /// primes from the ring's current snapshot — so the user sees every message
-/// that arrived while the page was off-screen. The "always connected in the
-/// background" requirement is satisfied at the session layer, not the view.
+/// that arrived while the page was off-screen.
 public struct ChatTabsScreen: View {
     private let account: Account
     private let accountStore: AccountStore
-    /// Called when the user taps the "+" button on the tab strip. AppShell
-    /// wires this to "switch the TabView selection to Follows."
-    private let onAddTab: () -> Void
+    /// Twitch client id, forwarded to the Profile sheet's account switcher.
+    private let clientId: String
+
+    @State private var showSwitcher = false
+    @State private var showFollows = false
+    @State private var showProfile = false
 
     @Environment(\.chatTabs) private var chatTabs
 
@@ -52,11 +57,11 @@ public struct ChatTabsScreen: View {
     ///
     /// Lifecycle:
     ///   - On VStack appear, if a saved id matches an existing tab, write
-    ///     it back to `chatTabs.activeTabId`. The pill highlights, the
+    ///     it back to `chatTabs.activeTabId`. The header title updates; the
     ///     ScrollView snaps.
-    ///   - On every `activeTabId` change (tap a pill, swipe a page), mirror
-    ///     the new value back to `@SceneStorage`. The latest selection is
-    ///     always durable.
+    ///   - On every `activeTabId` change (swipe a page, activate via switcher),
+    ///     mirror the new value back to `@SceneStorage`. The latest selection
+    ///     is always durable.
     ///
     /// Tab list itself lives in SwiftData (account-scoped, see
     /// `PersistedChatTab`) — this storage is purely "which one was active
@@ -66,57 +71,155 @@ public struct ChatTabsScreen: View {
     public init(
         account: Account,
         accountStore: AccountStore,
-        onAddTab: @escaping () -> Void
+        clientId: String
     ) {
         self.account = account
         self.accountStore = accountStore
-        self.onAddTab = onAddTab
+        self.clientId = clientId
     }
 
     public var body: some View {
-        Group {
-            if let chatTabs, !chatTabs.tabs.isEmpty {
-                VStack(spacing: 0) {
-                    ChatTabStrip(model: chatTabs, onAddTab: onAddTab)
-                    // Divider removed — the chat scroll's `.scrollEdgeEffectStyle`
-                    // (set inside ChatScreen's ScrollView) produces a soft
-                    // visual shelf where content dissolves into the
-                    // background under the tab strip. Liquid Glass design
-                    // prefers this dissolve over a hard line — feels more
-                    // continuous with the floating-pill aesthetic.
-                    pagedChatContent(chatTabs: chatTabs)
-                }
-                // Restore the active tab from scene storage. Only applies if
-                // the saved id still matches an existing tab — if the user
-                // closed that tab in a previous session, fall through to
-                // whatever default `chatTabs.activeTabId` already holds
-                // (typically the first tab, since pagedChatContent's
-                // ScrollView auto-positions to the first child).
-                .onAppear {
-                    if let savedId = persistedActiveTabId,
-                       let uuid = UUID(uuidString: savedId),
-                       chatTabs.tabs.contains(where: { $0.id == uuid }) {
-                        chatTabs.activeTabId = uuid
+        NavigationStack {
+            Group {
+                if let chatTabs, !chatTabs.tabs.isEmpty {
+                    VStack(spacing: 0) {
+                        pagedChatContent(chatTabs: chatTabs)
+                        pageDots(chatTabs: chatTabs)
                     }
+                    .onAppear {
+                        if let savedId = persistedActiveTabId,
+                           let uuid = UUID(uuidString: savedId),
+                           chatTabs.tabs.contains(where: { $0.id == uuid }) {
+                            chatTabs.activeTabId = uuid
+                        }
+                    }
+                    .onChange(of: chatTabs.activeTabId) { _, newValue in
+                        persistedActiveTabId = newValue?.uuidString
+                    }
+                } else {
+                    emptyState
                 }
-                // Mirror every change back to scene storage. Includes both
-                // tap-a-pill writes (ChatTabStrip → model.activeTabId) AND
-                // swipe-a-page writes (.scrollPosition → model.activeTabId).
-                // nil is written verbatim — restoration tolerates it
-                // gracefully via the `if let savedId` guard above.
-                .onChange(of: chatTabs.activeTabId) { _, newValue in
-                    persistedActiveTabId = newValue?.uuidString
-                }
-            } else {
-                emptyState
+            }
+            .toolbar { headerToolbar(chatTabs: chatTabs) }
+            .toolbarTitleDisplayMode(.inline)
+        }
+        // Open-chats switcher.
+        .sheet(isPresented: $showSwitcher) {
+            if let chatTabs {
+                ChannelSwitcherView(
+                    model: chatTabs,
+                    onBrowseFollows: {
+                        showSwitcher = false
+                        showFollows = true
+                    }
+                )
             }
         }
-        .navigationTitle("Chat")
-        .toolbarTitleDisplayMode(.inline)
+        // Follows browse — its own NavigationStack inside the sheet.
+        .sheet(isPresented: $showFollows) {
+            NavigationStack {
+                ChannelListScreen(account: account, accountStore: accountStore)
+            }
+        }
+        // Profile / settings — its own NavigationStack inside the sheet.
+        .sheet(isPresented: $showProfile) {
+            NavigationStack {
+                ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
+            }
+        }
+    }
+
+    /// `.topBar*` placements are iOS-only; map to cross-platform equivalents
+    /// on macOS so the Features package still compiles for its declared
+    /// `.macOS` platform — matching the rest of the target's semantic-
+    /// placement convention.
+    private var leadingHeaderPlacement: ToolbarItemPlacement {
+        #if os(iOS)
+        .topBarLeading
+        #else
+        .navigation
+        #endif
+    }
+    private var trailingHeaderPlacement: ToolbarItemPlacement {
+        #if os(iOS)
+        .topBarTrailing
+        #else
+        .primaryAction
+        #endif
+    }
+
+    /// The toolbar header. Three STABLE items whose labels reflect the
+    /// active tab — never inserted/removed conditionally (that would rebuild
+    /// the bar and flicker; see axiom toolbars guidance).
+    @ToolbarContentBuilder
+    private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
+        ToolbarItem(placement: leadingHeaderPlacement) {
+            Button { showProfile = true } label: {
+                Image(systemName: "person.crop.circle")
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .accessibilityLabel("Profile")
+        }
+        ToolbarItem(placement: .principal) {
+            Button { showSwitcher = true } label: {
+                HStack(spacing: 5) {
+                    Text(activeTabTitle(chatTabs: chatTabs))
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityLabel("Switch channel")
+            .disabled(chatTabs?.tabs.isEmpty ?? true)
+        }
+        ToolbarItem(placement: trailingHeaderPlacement) {
+            Button { showFollows = true } label: {
+                Image(systemName: "square.grid.2x2")
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .accessibilityLabel("Follows")
+        }
+    }
+
+    /// Title for the principal item — the display name of the *visible* tab.
+    /// When `activeTabId` hasn't been set yet (e.g. cold launch before scene
+    /// restoration runs), the pager shows `tabs.first`, so the title resolves
+    /// to it too instead of a generic fallback. "Chat" shows only when no
+    /// tabs are open.
+    private func activeTabTitle(chatTabs: ChatTabsModel?) -> String {
+        guard let chatTabs,
+              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
+              let tab = chatTabs.tabs.first(where: { $0.id == visibleId })
+        else { return "Chat" }
+        return tab.displayName
+    }
+
+    /// Page-dots under the transcript — one per open tab, active highlighted.
+    /// Hidden for a single tab (no switching to indicate).
+    @ViewBuilder
+    private func pageDots(chatTabs: ChatTabsModel) -> some View {
+        if chatTabs.tabs.count > 1 {
+            HStack(spacing: 6) {
+                // Resolve the same way the title does: the pager shows
+                // `tabs.first` when `activeTabId` is still nil, so highlight
+                // that dot rather than leaving all of them dim.
+                let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
+                ForEach(chatTabs.tabs) { tab in
+                    Circle()
+                        .fill(tab.id == visibleId ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.35)))
+                        .frame(width: 6, height: 6)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .accessibilityHidden(true)
+        }
     }
 
     /// Horizontally-paged ScrollView with one ChatScreen per open tab.
-    /// Swipe left/right to switch tabs; tap a pill in the strip above to jump.
+    /// Swipe left/right to switch tabs; tap a row in the switcher to jump.
     ///
     /// The `@Bindable` projection of `chatTabs` lets us pass `$bindable.activeTabId`
     /// as the `.scrollPosition` binding — that's the two-way connector between
@@ -145,9 +248,9 @@ public struct ChatTabsScreen: View {
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
-        // Two-way bind to activeTabId. Tap-a-pill writes activeTabId in
-        // ChatTabsModel → ScrollView animates to that page. Swipe-to-page
-        // writes back here → pill highlight in ChatTabStrip updates.
+        // Two-way bind to activeTabId. Activating a tab via the switcher
+        // writes activeTabId in ChatTabsModel → ScrollView animates to that
+        // page. Swipe-to-page writes back here → header title + page-dot update.
         .scrollPosition(id: $bindable.activeTabId)
         .scrollIndicators(.hidden)
     }
@@ -183,16 +286,16 @@ public struct ChatTabsScreen: View {
         }
     }
 
-    /// Shown when no channel tabs are open. Calls out to the Follows tab.
+    /// Shown when no channel tabs are open. Invites the user to browse Follows.
     @ViewBuilder
     private var emptyState: some View {
         ContentUnavailableView {
             Label("No channels open", systemImage: "bubble.left.and.bubble.right")
         } description: {
-            Text("Tap a channel on the Follows tab to start watching its chat.")
+            Text("Browse your Follows to start watching a channel's chat.")
         } actions: {
             Button("Go to Follows") {
-                onAddTab()
+                showFollows = true
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)

@@ -271,7 +271,7 @@ struct ChatRow: View, Equatable {
     /// without duplicating the layout.
     @ViewBuilder
     private var messageBody: some View {
-        FlowLayout(spacing: 4, alignment: .firstTextBaseline) {
+        FlowLayout(spacing: 4, alignment: .firstTextBaseline, hangingIndent: 14) {
             // Badges keyed by `url` — stable per-badge identity across row
             // re-renders means SwiftUI doesn't destroy + re-create the
             // underlying AsyncImage (which would re-fetch the badge image).

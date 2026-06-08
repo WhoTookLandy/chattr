@@ -2,8 +2,8 @@ import SwiftUI
 import TwitchKit
 
 /// Environment action invoked when the user taps a channel anywhere in the
-/// app (Follows tab — Live OR All view). The receiver (AppShell) adds the
-/// channel to `ChatTabsModel` and switches the tab selection to Chat.
+/// app (Follows tab — Live OR All view). Opens the channel as a new chat
+/// tab and makes it active.
 ///
 /// Takes plain fields rather than a `FollowedChannel` so the Live view can
 /// dispatch from a `TwitchStream` source without synthesizing a fake
@@ -14,8 +14,7 @@ import TwitchKit
 /// Swift 6's mutable-global-variable check.
 ///
 /// The captured closure is `@MainActor` because AppShell's implementation
-/// mutates `selectedTab` and `chatTabsModel` — both `@MainActor`-isolated
-/// SwiftUI state.
+/// mutates `chatTabsModel` — `@MainActor`-isolated SwiftUI state.
 public struct OpenChannelAction: Sendable {
     private let perform: @MainActor @Sendable (
         _ channelId: String,

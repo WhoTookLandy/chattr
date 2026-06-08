@@ -24,6 +24,7 @@ public struct ChannelListScreen: View {
 
     @Environment(\.followsStore) private var followsStore
     @Environment(\.openChannel) private var openChannel
+    @Environment(\.dismiss) private var dismiss
 
     @State private var showingSignOutConfirm = false
     @State private var searchText: String = ""
@@ -239,6 +240,7 @@ public struct ChannelListScreen: View {
                         let profileURL = userProfiles[stream.userId]
                             .flatMap { URL(string: $0.profileImageUrl) }
                         openChannel?(stream: stream, profileImageURL: profileURL)
+                        dismiss()
                     } label: {
                         LiveStreamRow(
                             stream: stream,
@@ -341,6 +343,7 @@ public struct ChannelListScreen: View {
                         let profileURL = userProfiles[channel.broadcasterId]
                             .flatMap { URL(string: $0.profileImageUrl) }
                         openChannel?(channel: channel, profileImageURL: profileURL)
+                        dismiss()
                     } label: {
                         ChannelRow(
                             channel: channel,

@@ -185,26 +185,26 @@ public struct ChatScreen: View {
         // without writing a `Binding(get:set:)` inline (Swift 5.9+ allows
         // declaring @Bindable inside body for view-scoped projections).
         @Bindable var bindableChatModel = chatModel
-        // VStack lets the compose bar pin to the bottom while the
-        // ScrollView takes the rest. The bar lives INSIDE ChatScreen
-        // (not in ChatTabsScreen) because each tab has its own draft —
-        // sharing one bar across tabs would lose drafts on swipe.
-        VStack(spacing: 0) {
-            Group {
-                if let errorMessage {
-                    errorView(errorMessage)
-                } else if chatModel.lines.isEmpty {
-                    // Distinguish "attaching" (sessions not yet subscribed) from
-                    // "attached but quiet" (subscriptions live, but no messages
-                    // have arrived yet). Without explicit state UI a quiet channel
-                    // looks identical to a broken connection.
-                    emptyOrConnectingView
-                } else {
-                    chatScrollView
-                }
+        // `.safeAreaBar(edge: .bottom)` pins the compose bar below the
+        // scrolling content with integrated glass blur (iOS 26). The bar
+        // lives INSIDE ChatScreen (not in ChatTabsScreen) because each
+        // tab has its own draft — sharing one bar across tabs would lose
+        // drafts on swipe.
+        Group {
+            if let errorMessage {
+                errorView(errorMessage)
+            } else if chatModel.lines.isEmpty {
+                // Distinguish "attaching" (sessions not yet subscribed) from
+                // "attached but quiet" (subscriptions live, but no messages
+                // have arrived yet). Without explicit state UI a quiet channel
+                // looks identical to a broken connection.
+                emptyOrConnectingView
+            } else {
+                chatScrollView
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaBar(edge: .bottom) {
             composeBarView
         }
         // Send-failure alert is gone — drops and network errors now
@@ -320,9 +320,10 @@ public struct ChatScreen: View {
         //
         // Pre-T11 history: `.task` was the obvious primitive but it cancelled
         // mid-flight during transient SwiftUI identity flickers (e.g. when
-        // openChannel ran `chatTabsModel.open + selectedTab = .chat` back-to-
-        // back, the paged-ScrollView LazyHStack briefly re-evaluated children
-        // and ChatScreen's task identity dropped). All 6 emote provider HTTP
+        // openChannel ran `chatTabsModel.open` — and, in an earlier design,
+        // `selectedTab = .chat` — back-to-back, the paged-ScrollView LazyHStack
+        // briefly re-evaluated children and ChatScreen's task identity dropped).
+        // All 6 emote provider HTTP
         // calls threw `URLError(.cancelled)` and the EmoteIndex was left
         // populated with 0 emotes. We worked around it by using `.onAppear`
         // + an unstructured Task — escaping view lifetime — but that leaked
@@ -615,7 +616,7 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var legacyScrollView: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
+            LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(chatModel.lines) { line in
                     // Delegates to the shared `chatRow(for:)` helper so
                     // block/report callbacks, badge lookup, and all other
@@ -1188,79 +1189,81 @@ private struct ComposeBar: View {
     /// readability now that the reply chip is also a sibling.
     @ViewBuilder
     private var inputRow: some View {
-        HStack(spacing: 8) {
-            // Emote-picker button. Snapshots the sections (built on
-            // demand) and presents the grid sheet. Glass circle to match
-            // the send button's chrome.
-            Button {
-                pickerSections = emoteSectionsProvider()
-                showingEmotePicker = true
-            } label: {
-                Image(systemName: "face.smiling")
-                    .font(.system(size: 17, weight: .regular))
-                    .symbolRenderingMode(.hierarchical)
-                    .padding(2)
-            }
-            .buttonStyle(.glass)
-            .accessibilityLabel("Emotes")
-
-            TextField(textFieldPrompt, text: $composeText)
-                .textFieldStyle(.plain)
-                .focused($focused)
-                .submitLabel(.send)
-                .onSubmit { Task { await sendDraft() } }
-                // Forward every text change to the parent so it can
-                // persist via DraftStorage. UserDefaults batches writes
-                // so per-keystroke saves don't actually hit disk on
-                // every call — observed throughput is roughly the same
-                // as a debounced save without the .task(id:) sleep.
-                .onChange(of: composeText) { _, newValue in
-                    onDraftChange(newValue)
+        GlassEffectContainer(spacing: 8) {
+            HStack(spacing: 8) {
+                // Emote-picker button. Snapshots the sections (built on
+                // demand) and presents the grid sheet. Glass circle to match
+                // the send button's chrome.
+                Button {
+                    pickerSections = emoteSectionsProvider()
+                    showingEmotePicker = true
+                } label: {
+                    Image(systemName: "face.smiling")
+                        .font(.system(size: 17, weight: .regular))
+                        .symbolRenderingMode(.hierarchical)
+                        .padding(2)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                // Regular glass (not interactive) — typing happens inside
-                // the field, no glass-on-press animation needed.
-                .glassEffect(.regular, in: Capsule())
-                .accessibilityLabel("Message input")
-                .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
+                .buttonStyle(.glass)
+                .accessibilityLabel("Emotes")
 
-            Button {
-                Task { await sendDraft() }
-            } label: {
-                // Symbol effect `.bounce` fires when `isActive` toggles
-                // — gives the user a satisfying micro-interaction the
-                // first time they type a character. Reduce-Motion users
-                // get no animation (SF Symbols respect the system
-                // setting automatically). The button stays interactive
-                // either way.
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .symbolEffect(.bounce, value: isActive)
-                    .padding(2)
+                TextField(textFieldPrompt, text: $composeText)
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .submitLabel(.send)
+                    .onSubmit { Task { await sendDraft() } }
+                    // Forward every text change to the parent so it can
+                    // persist via DraftStorage. UserDefaults batches writes
+                    // so per-keystroke saves don't actually hit disk on
+                    // every call — observed throughput is roughly the same
+                    // as a debounced save without the .task(id:) sleep.
+                    .onChange(of: composeText) { _, newValue in
+                        onDraftChange(newValue)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    // Regular glass (not interactive) — typing happens inside
+                    // the field, no glass-on-press animation needed.
+                    .glassEffect(.regular, in: Capsule())
+                    .accessibilityLabel("Message input")
+                    .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
+
+                Button {
+                    Task { await sendDraft() }
+                } label: {
+                    // Symbol effect `.bounce` fires when `isActive` toggles
+                    // — gives the user a satisfying micro-interaction the
+                    // first time they type a character. Reduce-Motion users
+                    // get no animation (SF Symbols respect the system
+                    // setting automatically). The button stays interactive
+                    // either way.
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .symbolEffect(.bounce, value: isActive)
+                        .padding(2)
+                }
+                // Style switch: `.glassProminent` when the draft is
+                // meaningful, plain `.glass` otherwise. Per axiom-design's
+                // Liquid Glass guidance: "Use `.tint()` only to convey
+                // meaning (call to action, next step), not for decoration."
+                // The tint is the call-to-action signal — empty draft → no
+                // signal, populated draft → "this action is now meaningful."
+                //
+                // SwiftUI's conditional buttonStyle creates a fresh button
+                // identity per branch, which would normally retrigger the
+                // symbol effect on every keystroke. Pulling the active flag
+                // out into a computed property + using `.tint()` (which
+                // doesn't reset identity) avoids that — `.tint(.accentColor)`
+                // when active, no tint when not.
+                .buttonStyle(.glassProminent)
+                .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
+                .disabled(!isActive)
+                .accessibilityLabel("Send message")
             }
-            // Style switch: `.glassProminent` when the draft is
-            // meaningful, plain `.glass` otherwise. Per axiom-design's
-            // Liquid Glass guidance: "Use `.tint()` only to convey
-            // meaning (call to action, next step), not for decoration."
-            // The tint is the call-to-action signal — empty draft → no
-            // signal, populated draft → "this action is now meaningful."
-            //
-            // SwiftUI's conditional buttonStyle creates a fresh button
-            // identity per branch, which would normally retrigger the
-            // symbol effect on every keystroke. Pulling the active flag
-            // out into a computed property + using `.tint()` (which
-            // doesn't reset identity) avoids that — `.tint(.accentColor)`
-            // when active, no tint when not.
-            .buttonStyle(.glassProminent)
-            .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
-            .disabled(!isActive)
-            .accessibilityLabel("Send message")
+            // No padding modifiers here — `composeBarView`'s own VStack owns
+            // the horizontal + vertical padding for the whole compose bar
+            // (including the reply chip); the bar is pinned via `.safeAreaBar`.
         }
-        // No padding modifiers here — the outer VStack in `body` owns
-        // the horizontal + vertical padding for the whole compose bar
-        // including the reply chip.
     }
 
     private func sendDraft() async {

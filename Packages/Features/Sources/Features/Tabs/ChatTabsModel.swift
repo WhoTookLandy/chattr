@@ -177,6 +177,17 @@ public final class ChatTabsModel {
         return tab.id
     }
 
+    // MARK: - Reorder
+
+    /// Reorders open tabs (drag-to-reorder in the channel switcher). Mirrors
+    /// `Array.move(fromOffsets:toOffset:)` semantics so it can back an
+    /// `.onMove` in a SwiftUI `List`/`ForEach`. Persists the new order;
+    /// `activeTabId` is unaffected because it tracks identity, not index.
+    public func move(fromOffsets source: IndexSet, toOffset destination: Int) {
+        tabs.move(fromOffsets: source, toOffset: destination)
+        persistTabs()
+    }
+
     // MARK: - Close
 
     /// Closes the tab with the given id. Updates UI state synchronously (so
