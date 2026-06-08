@@ -183,12 +183,15 @@ public struct ChatTabsScreen: View {
         }
     }
 
-    /// Title for the principal item — the active tab's display name, or a
-    /// neutral fallback when nothing is open.
+    /// Title for the principal item — the display name of the *visible* tab.
+    /// When `activeTabId` hasn't been set yet (e.g. cold launch before scene
+    /// restoration runs), the pager shows `tabs.first`, so the title resolves
+    /// to it too instead of a generic fallback. "Chat" shows only when no
+    /// tabs are open.
     private func activeTabTitle(chatTabs: ChatTabsModel?) -> String {
         guard let chatTabs,
-              let activeId = chatTabs.activeTabId,
-              let tab = chatTabs.tabs.first(where: { $0.id == activeId })
+              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
+              let tab = chatTabs.tabs.first(where: { $0.id == visibleId })
         else { return "Chat" }
         return tab.displayName
     }
@@ -199,9 +202,13 @@ public struct ChatTabsScreen: View {
     private func pageDots(chatTabs: ChatTabsModel) -> some View {
         if chatTabs.tabs.count > 1 {
             HStack(spacing: 6) {
+                // Resolve the same way the title does: the pager shows
+                // `tabs.first` when `activeTabId` is still nil, so highlight
+                // that dot rather than leaving all of them dim.
+                let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
                 ForEach(chatTabs.tabs) { tab in
                     Circle()
-                        .fill(tab.id == chatTabs.activeTabId ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.35)))
+                        .fill(tab.id == visibleId ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.35)))
                         .frame(width: 6, height: 6)
                 }
             }
