@@ -45,7 +45,7 @@ public struct DevLogView: View {
         .listStyle(.plain)
         .navigationTitle("Recent Logs")
         .toolbarTitleDisplayMode(.inline)
-        // Hide the parent TabView's tab bar while this view is on screen —
+        // Hide the tab bar while this view is on screen —
         // dev tooling shouldn't compete with the rest of the app's chrome.
         // iOS-only modifier (`.tabBar` unavailable on macOS).
         #if os(iOS)

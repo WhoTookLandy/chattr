@@ -320,9 +320,10 @@ public struct ChatScreen: View {
         //
         // Pre-T11 history: `.task` was the obvious primitive but it cancelled
         // mid-flight during transient SwiftUI identity flickers (e.g. when
-        // openChannel ran `chatTabsModel.open + selectedTab = .chat` back-to-
-        // back, the paged-ScrollView LazyHStack briefly re-evaluated children
-        // and ChatScreen's task identity dropped). All 6 emote provider HTTP
+        // openChannel ran `chatTabsModel.open` — and, in an earlier design,
+        // `selectedTab = .chat` — back-to-back, the paged-ScrollView LazyHStack
+        // briefly re-evaluated children and ChatScreen's task identity dropped).
+        // All 6 emote provider HTTP
         // calls threw `URLError(.cancelled)` and the EmoteIndex was left
         // populated with 0 emotes. We worked around it by using `.onAppear`
         // + an unstructured Task — escaping view lifetime — but that leaked
