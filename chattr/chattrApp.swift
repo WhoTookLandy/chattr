@@ -32,6 +32,12 @@ struct chattrApp: App {
     let channelSessionRegistry: ChannelSessionRegistry
 
     init() {
+        // Configure Nuke's shared image pipeline once, before any view (and
+        // thus any LazyImage for badges/emotes/avatars) materializes. This is
+        // one-time app setup, so the app entry point — not a view body — is the
+        // correct home for it. Previously called from RootView.body, where it
+        // re-ran (guarded, but wastefully) on every re-evaluation.
+        ImagePipelineSetup.configure()
         do {
             // PersistedChatTab is the SwiftData projection of ChatTab — added
             // in commit E so chat tabs survive cold start. Lives in the

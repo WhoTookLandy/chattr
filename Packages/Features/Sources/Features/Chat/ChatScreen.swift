@@ -30,6 +30,16 @@ public struct ChatScreen: View {
 
     @State private var errorMessage: String?
 
+    /// The persisted compose draft for this channel, read from `DraftStorage`
+    /// exactly once at construction (see `init`). `ComposeBar` only consumes
+    /// `seedDraft` at first mount thanks to its own `@State(initialValue:)`
+    /// semantics, so re-reading it on every `body` evaluation — as the old
+    /// `composeBarView` did — was pure waste on the per-message hot path
+    /// (`body` re-evaluates on each new chat line). Seeding it here moves the
+    /// UserDefaults read to struct construction (parent rebuilds), off the
+    /// per-message path, while preserving exact first-mount behavior.
+    @State private var draftSeed: String
+
     // T11: badgeStore and emoteIndex are NOT `@State` here anymore — they
     // live on `ChannelSessionRegistry`, keyed by (accountUserId, channelId).
     // The registry's lifetime matches the channel tab's lifetime (refcount
@@ -162,6 +172,11 @@ public struct ChatScreen: View {
         self.channelId = channelId
         self.channelLoginName = channelLoginName
         self.channelDisplayName = channelDisplayName
+        // Read the persisted draft once, here at construction. `State(initial-
+        // Value:)` is the correct home for a value that only matters at first
+        // mount — a `.task`-based seed would arrive AFTER `ComposeBar` has
+        // already captured its initial draft, silently breaking restoration.
+        self._draftSeed = State(initialValue: DraftStorage.load(forChannelId: channelId))
     }
 
     public var body: some View {
@@ -375,10 +390,11 @@ public struct ChatScreen: View {
             channelDisplayName: channelDisplayName,
             replyContext: chatModel.replyContext,
             chatRestrictions: chatModel.chatRestrictions,
-            // Load the persisted draft synchronously here in body.
-            // UserDefaults reads are fast + iOS caches them; the seed
-            // only matters at first mount thanks to @State semantics.
-            seedDraft: DraftStorage.load(forChannelId: channelId),
+            // Seeded once at construction (see `draftSeed` / `init`), not
+            // re-read here — the seed only matters at first mount thanks to
+            // ComposeBar's own @State semantics, so reading it on every body
+            // pass was wasted UserDefaults work on the per-message hot path.
+            seedDraft: draftSeed,
             onCancelReply: { chatModel.cancelReply() },
             onDraftChange: { newDraft in
                 DraftStorage.save(forChannelId: channelId, text: newDraft)
