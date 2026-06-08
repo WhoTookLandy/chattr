@@ -185,26 +185,26 @@ public struct ChatScreen: View {
         // without writing a `Binding(get:set:)` inline (Swift 5.9+ allows
         // declaring @Bindable inside body for view-scoped projections).
         @Bindable var bindableChatModel = chatModel
-        // VStack lets the compose bar pin to the bottom while the
-        // ScrollView takes the rest. The bar lives INSIDE ChatScreen
-        // (not in ChatTabsScreen) because each tab has its own draft —
-        // sharing one bar across tabs would lose drafts on swipe.
-        VStack(spacing: 0) {
-            Group {
-                if let errorMessage {
-                    errorView(errorMessage)
-                } else if chatModel.lines.isEmpty {
-                    // Distinguish "attaching" (sessions not yet subscribed) from
-                    // "attached but quiet" (subscriptions live, but no messages
-                    // have arrived yet). Without explicit state UI a quiet channel
-                    // looks identical to a broken connection.
-                    emptyOrConnectingView
-                } else {
-                    chatScrollView
-                }
+        // `.safeAreaBar(edge: .bottom)` pins the compose bar below the
+        // scrolling content with integrated glass blur (iOS 26). The bar
+        // lives INSIDE ChatScreen (not in ChatTabsScreen) because each
+        // tab has its own draft — sharing one bar across tabs would lose
+        // drafts on swipe.
+        Group {
+            if let errorMessage {
+                errorView(errorMessage)
+            } else if chatModel.lines.isEmpty {
+                // Distinguish "attaching" (sessions not yet subscribed) from
+                // "attached but quiet" (subscriptions live, but no messages
+                // have arrived yet). Without explicit state UI a quiet channel
+                // looks identical to a broken connection.
+                emptyOrConnectingView
+            } else {
+                chatScrollView
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaBar(edge: .bottom) {
             composeBarView
         }
         // Send-failure alert is gone — drops and network errors now
@@ -1188,6 +1188,7 @@ private struct ComposeBar: View {
     /// readability now that the reply chip is also a sibling.
     @ViewBuilder
     private var inputRow: some View {
+        GlassEffectContainer(spacing: 8) {
         HStack(spacing: 8) {
             // Emote-picker button. Snapshots the sections (built on
             // demand) and presents the grid sheet. Glass circle to match
@@ -1261,6 +1262,7 @@ private struct ComposeBar: View {
         // No padding modifiers here — the outer VStack in `body` owns
         // the horizontal + vertical padding for the whole compose bar
         // including the reply chip.
+        }
     }
 
     private func sendDraft() async {
