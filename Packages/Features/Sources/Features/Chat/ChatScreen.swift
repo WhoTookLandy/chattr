@@ -1189,79 +1189,79 @@ private struct ComposeBar: View {
     @ViewBuilder
     private var inputRow: some View {
         GlassEffectContainer(spacing: 8) {
-        HStack(spacing: 8) {
-            // Emote-picker button. Snapshots the sections (built on
-            // demand) and presents the grid sheet. Glass circle to match
-            // the send button's chrome.
-            Button {
-                pickerSections = emoteSectionsProvider()
-                showingEmotePicker = true
-            } label: {
-                Image(systemName: "face.smiling")
-                    .font(.system(size: 17, weight: .regular))
-                    .symbolRenderingMode(.hierarchical)
-                    .padding(2)
-            }
-            .buttonStyle(.glass)
-            .accessibilityLabel("Emotes")
-
-            TextField(textFieldPrompt, text: $composeText)
-                .textFieldStyle(.plain)
-                .focused($focused)
-                .submitLabel(.send)
-                .onSubmit { Task { await sendDraft() } }
-                // Forward every text change to the parent so it can
-                // persist via DraftStorage. UserDefaults batches writes
-                // so per-keystroke saves don't actually hit disk on
-                // every call — observed throughput is roughly the same
-                // as a debounced save without the .task(id:) sleep.
-                .onChange(of: composeText) { _, newValue in
-                    onDraftChange(newValue)
+            HStack(spacing: 8) {
+                // Emote-picker button. Snapshots the sections (built on
+                // demand) and presents the grid sheet. Glass circle to match
+                // the send button's chrome.
+                Button {
+                    pickerSections = emoteSectionsProvider()
+                    showingEmotePicker = true
+                } label: {
+                    Image(systemName: "face.smiling")
+                        .font(.system(size: 17, weight: .regular))
+                        .symbolRenderingMode(.hierarchical)
+                        .padding(2)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                // Regular glass (not interactive) — typing happens inside
-                // the field, no glass-on-press animation needed.
-                .glassEffect(.regular, in: Capsule())
-                .accessibilityLabel("Message input")
-                .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
+                .buttonStyle(.glass)
+                .accessibilityLabel("Emotes")
 
-            Button {
-                Task { await sendDraft() }
-            } label: {
-                // Symbol effect `.bounce` fires when `isActive` toggles
-                // — gives the user a satisfying micro-interaction the
-                // first time they type a character. Reduce-Motion users
-                // get no animation (SF Symbols respect the system
-                // setting automatically). The button stays interactive
-                // either way.
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .symbolEffect(.bounce, value: isActive)
-                    .padding(2)
+                TextField(textFieldPrompt, text: $composeText)
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .submitLabel(.send)
+                    .onSubmit { Task { await sendDraft() } }
+                    // Forward every text change to the parent so it can
+                    // persist via DraftStorage. UserDefaults batches writes
+                    // so per-keystroke saves don't actually hit disk on
+                    // every call — observed throughput is roughly the same
+                    // as a debounced save without the .task(id:) sleep.
+                    .onChange(of: composeText) { _, newValue in
+                        onDraftChange(newValue)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    // Regular glass (not interactive) — typing happens inside
+                    // the field, no glass-on-press animation needed.
+                    .glassEffect(.regular, in: Capsule())
+                    .accessibilityLabel("Message input")
+                    .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
+
+                Button {
+                    Task { await sendDraft() }
+                } label: {
+                    // Symbol effect `.bounce` fires when `isActive` toggles
+                    // — gives the user a satisfying micro-interaction the
+                    // first time they type a character. Reduce-Motion users
+                    // get no animation (SF Symbols respect the system
+                    // setting automatically). The button stays interactive
+                    // either way.
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .symbolEffect(.bounce, value: isActive)
+                        .padding(2)
+                }
+                // Style switch: `.glassProminent` when the draft is
+                // meaningful, plain `.glass` otherwise. Per axiom-design's
+                // Liquid Glass guidance: "Use `.tint()` only to convey
+                // meaning (call to action, next step), not for decoration."
+                // The tint is the call-to-action signal — empty draft → no
+                // signal, populated draft → "this action is now meaningful."
+                //
+                // SwiftUI's conditional buttonStyle creates a fresh button
+                // identity per branch, which would normally retrigger the
+                // symbol effect on every keystroke. Pulling the active flag
+                // out into a computed property + using `.tint()` (which
+                // doesn't reset identity) avoids that — `.tint(.accentColor)`
+                // when active, no tint when not.
+                .buttonStyle(.glassProminent)
+                .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
+                .disabled(!isActive)
+                .accessibilityLabel("Send message")
             }
-            // Style switch: `.glassProminent` when the draft is
-            // meaningful, plain `.glass` otherwise. Per axiom-design's
-            // Liquid Glass guidance: "Use `.tint()` only to convey
-            // meaning (call to action, next step), not for decoration."
-            // The tint is the call-to-action signal — empty draft → no
-            // signal, populated draft → "this action is now meaningful."
-            //
-            // SwiftUI's conditional buttonStyle creates a fresh button
-            // identity per branch, which would normally retrigger the
-            // symbol effect on every keystroke. Pulling the active flag
-            // out into a computed property + using `.tint()` (which
-            // doesn't reset identity) avoids that — `.tint(.accentColor)`
-            // when active, no tint when not.
-            .buttonStyle(.glassProminent)
-            .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
-            .disabled(!isActive)
-            .accessibilityLabel("Send message")
-        }
-        // No padding modifiers here — the outer VStack in `body` owns
-        // the horizontal + vertical padding for the whole compose bar
-        // including the reply chip.
+            // No padding modifiers here — `composeBarView`'s own VStack owns
+            // the horizontal + vertical padding for the whole compose bar
+            // (including the reply chip); the bar is pinned via `.safeAreaBar`.
         }
     }
 
