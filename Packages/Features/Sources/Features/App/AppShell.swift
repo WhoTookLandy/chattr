@@ -53,10 +53,8 @@ public struct AppShell: View {
     /// switcher so "Add Account" can run the OAuth flow.
     private let clientId: String
 
-    @State private var selectedTab: AppTab = .follows
     @State private var chatTabsModel = ChatTabsModel()
 
-    /// Read from environment so we can wire close-X → registry.leave below.
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
 
     /// The app's `ModelContext` (injected by `.modelContainer(...)` at
@@ -66,13 +64,6 @@ public struct AppShell: View {
     /// `.modelContainer(modelContainer)` modifier.
     @Environment(\.modelContext) private var modelContext
 
-    /// Renamed from `Tab` to disambiguate from SwiftUI's `Tab` struct (iOS
-    /// 18+). With both in scope inside `body`, unqualified `Tab(...)` would
-    /// otherwise resolve to this nested enum and the new init wouldn't compile.
-    enum AppTab: Hashable, Sendable {
-        case follows, chat, profile
-    }
-
     public init(account: Account, accountStore: AccountStore, clientId: String) {
         self.account = account
         self.accountStore = accountStore
@@ -80,59 +71,12 @@ public struct AppShell: View {
     }
 
     public var body: some View {
-        TabView(selection: $selectedTab) {
-            Tab("Follows", systemImage: "person.2.fill", value: AppTab.follows) {
-                NavigationStack {
-                    ChannelListScreen(account: account, accountStore: accountStore)
-                }
-            }
-
-            Tab("Chat", systemImage: "bubble.left.and.bubble.right.fill", value: AppTab.chat) {
-                NavigationStack {
-                    ChatTabsScreen(
-                        account: account,
-                        accountStore: accountStore,
-                        onAddTab: { selectedTab = .follows }
-                    )
-                }
-            }
-            // Badge attaches directly to the Tab struct (vs the old
-            // `.tabItem { ... }.badge(...)` chain). Same semantics.
-            // The conditional yields 0 (which renders no badge) when no
-            // tabs are open — Tab.badge interprets 0 as "hidden".
-            .badge(chatTabsModel.tabs.isEmpty ? 0 : chatTabsModel.tabs.count)
-
-            // Profile tab. Replaces the previous "gear in ChannelListScreen
-            // toolbar → SettingsScreen push" pattern. Three reasons we
-            // promoted it to a tab:
-            //   1. Settings is account-level, not follows-level — it
-            //      belongs at the same nav depth as the main feeds.
-            //   2. The gear was visually isolated in the toolbar (the
-            //      audit's "lonely island" finding).
-            //   3. With 2 tabs, iOS 26's floating-capsule tab bar looked
-            //      thin/floaty. A third tab gives it the proper
-            //      navigation-chrome weight.
-            Tab("Profile", systemImage: "person.crop.circle.fill", value: AppTab.profile) {
-                NavigationStack {
-                    ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
-                }
-            }
-        }
-        // Removed `.tabBarMinimizeBehavior(.onScrollDown)`. iOS 26's minimize
-        // behavior collapses the tab bar into a small floating pill on
-        // scroll-down — designed to give content more room when you have
-        // 4+ tabs and the bar feels chunky. chattr has only 2 tabs
-        // (Follows + Chat), so the minimize trade-off doesn't apply:
-        // the collapsed pill ends up as an unlabeled floating glyph that
-        // confuses the eye more than the full bar would have crowded the
-        // content. With 2 tabs, keeping the bar full-time is the right
-        // call. If we ever ship 4+ tabs, this modifier can come back.
+        ChatTabsScreen(
+            account: account,
+            accountStore: accountStore,
+            clientId: clientId
+        )
         .environment(\.chatTabs, chatTabsModel)
-        // The openChannel action both updates the tab strip model AND switches
-        // the visible tab. Concentrating both side effects behind one verb
-        // keeps the call sites (e.g. ChannelListScreen row tap) ignorant of
-        // the navigation model. Today this wraps a single channel into a new
-        // tab; future "add to existing tab" UI would use a separate action.
         .environment(\.openChannel, OpenChannelAction { channelId, login, displayName, profileImageURL in
             let descriptor = ChannelDescriptor(
                 channelId: channelId,
@@ -141,7 +85,6 @@ public struct AppShell: View {
                 profileImageURL: profileImageURL
             )
             chatTabsModel.open(channel: descriptor)
-            selectedTab = .chat
         })
         // Single appearance task that does, in this exact order:
         //
