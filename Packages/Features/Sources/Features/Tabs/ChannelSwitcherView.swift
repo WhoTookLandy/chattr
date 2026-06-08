@@ -46,8 +46,10 @@ struct ChannelSwitcherView: View {
             .navigationTitle("Channels")
             .toolbarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { EditButton() }
-                ToolbarItem(placement: .topBarLeading) {
+                #if os(iOS)
+                ToolbarItem(placement: .primaryAction) { EditButton() }
+                #endif
+                ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
             }

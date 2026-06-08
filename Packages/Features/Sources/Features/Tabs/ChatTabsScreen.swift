@@ -129,12 +129,31 @@ public struct ChatTabsScreen: View {
         }
     }
 
+    /// `.topBar*` placements are iOS-only; map to cross-platform equivalents
+    /// on macOS so the Features package still compiles for its declared
+    /// `.macOS` platform — matching the rest of the target's semantic-
+    /// placement convention.
+    private var leadingHeaderPlacement: ToolbarItemPlacement {
+        #if os(iOS)
+        .topBarLeading
+        #else
+        .navigation
+        #endif
+    }
+    private var trailingHeaderPlacement: ToolbarItemPlacement {
+        #if os(iOS)
+        .topBarTrailing
+        #else
+        .primaryAction
+        #endif
+    }
+
     /// The toolbar header. Three STABLE items whose labels reflect the
     /// active tab — never inserted/removed conditionally (that would rebuild
     /// the bar and flicker; see axiom toolbars guidance).
     @ToolbarContentBuilder
     private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
+        ToolbarItem(placement: leadingHeaderPlacement) {
             Button { showProfile = true } label: {
                 Image(systemName: "person.crop.circle")
                     .symbolRenderingMode(.hierarchical)
@@ -155,7 +174,7 @@ public struct ChatTabsScreen: View {
             .accessibilityLabel("Switch channel")
             .disabled(chatTabs?.tabs.isEmpty ?? true)
         }
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: trailingHeaderPlacement) {
             Button { showFollows = true } label: {
                 Image(systemName: "square.grid.2x2")
                     .symbolRenderingMode(.hierarchical)
@@ -182,7 +201,7 @@ public struct ChatTabsScreen: View {
             HStack(spacing: 6) {
                 ForEach(chatTabs.tabs) { tab in
                     Circle()
-                        .fill(tab.id == chatTabs.activeTabId ? Color.accentColor : Color.secondary.opacity(0.35))
+                        .fill(tab.id == chatTabs.activeTabId ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.35)))
                         .frame(width: 6, height: 6)
                 }
             }
@@ -266,7 +285,7 @@ public struct ChatTabsScreen: View {
         ContentUnavailableView {
             Label("No channels open", systemImage: "bubble.left.and.bubble.right")
         } description: {
-            Text("Tap a channel on the Follows tab to start watching its chat.")
+            Text("Browse your Follows to start watching a channel's chat.")
         } actions: {
             Button("Go to Follows") {
                 showFollows = true

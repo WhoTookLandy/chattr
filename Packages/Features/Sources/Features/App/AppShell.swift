@@ -7,45 +7,20 @@ import os
 
 private let logger = AppLogger.make("Features.AppShell")
 
-/// Top-level navigation shell for a signed-in user: a TabView with two tabs.
-///
-///   - `Follows` — the channel list (ChannelListScreen) inside its own
-///     NavigationStack so the Settings push still works.
-///   - `Chat` — the multi-channel chat surface (ChatTabsScreen) inside its
-///     own NavigationStack so future channel-specific drill-downs (mods,
-///     viewers, etc.) can push.
-///
-/// Each tab's NavigationStack is independent — they don't share back-stacks.
-///
-/// ## Modern Tab struct syntax (iOS 18+)
-///
-/// Uses the `Tab(_:systemImage:value:content:)` initializer rather than the
-/// pre-iOS-18 "subview + .tabItem + .tag" pattern. Benefits:
-///   - Unlocks `Tab(role: .search)` for future search-specific tabs (gets
-///     iOS 26's morph-from-tab-icon-to-search-field animation automatically).
-///   - Unlocks `.sidebarAdaptable` for iPad layouts (sidebar in landscape,
-///     bottom tabs in portrait) with `TabSection` groupings.
-///   - Unlocks `.hidden(_:)` with state preservation, `.customizationID(_:)`
-///     for user-rearrangeable tab orders persisted via `TabViewCustomization`.
-///   - Composes cleanly with `.tabBarMinimizeBehavior(_:)` (iOS 26+).
-///
-/// ## Auto-minimize on scroll
-///
-/// `.tabBarMinimizeBehavior(.onScrollDown)` collapses the bottom tab bar to
-/// a compact form when the user scrolls down through tab content, and
-/// re-expands on scroll up. Both our tabs have meaningful scroll content
-/// (Follows = channel list, Chat = paged ChatScreens with their own scroll
-/// views), so the behavior is contextual: more vertical real estate while
-/// reading; chrome reappears when the user goes back to the top.
+/// Top-level shell for a signed-in user. Chat is the app's home surface:
+/// `AppShell` renders `ChatTabsScreen` directly (no `TabView`) and owns the
+/// cross-cutting wiring that the chat surface needs.
 ///
 /// AppShell owns:
-///   - `selectedTab`: which tab is visible.
-///   - `chatTabsModel`: the open-channel tab strip state.
+///   - `chatTabsModel`: the open-channel tab state (which channels are open,
+///     which is active), injected via `\.chatTabs` and surfaced in the
+///     chat header's switcher.
 ///
-/// It exposes both via `@Environment` to descendants, plus an
-/// `OpenChannelAction` closure that descendants (specifically
-/// `ChannelListScreen`'s row tap) invoke to "open this channel in chat" —
-/// the closure both adds the channel to the model AND switches the tab.
+/// It also injects the `\.openChannel` action (open a channel as a new chat
+/// tab — used by the Follows sheet's row tap) and, in a single appearance
+/// `.task`, wires `ChatTabsModel`'s `onOpen`/`onClose` to the session
+/// registry's acquire/release refcounting, installs `TabPersistence`, and
+/// hydrates persisted tabs on cold start.
 public struct AppShell: View {
     private let account: Account
     private let accountStore: AccountStore
