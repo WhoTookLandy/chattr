@@ -244,6 +244,12 @@ public struct ChatScreen: View {
                 channelLoginName: channelLoginName,
                 channelDisplayName: channelDisplayName
             )
+            // Half sheet by default — a thread is usually 2-5 messages,
+            // and keeping live chat visible behind it preserves context.
+            // Drag the grabber (or swipe up on the content) to expand to
+            // full height for long threads.
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         // No `.navigationTitle` here — the parent ChatTabsScreen sets it to
         // "Chat" and the active tab pill in the strip already identifies the
