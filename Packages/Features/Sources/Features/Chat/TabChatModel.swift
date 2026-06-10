@@ -54,27 +54,28 @@ public final class TabChatModel {
     /// (emote runs, mention runs, etc.) without re-tokenizing on every
     /// body recomputation.
 
-    /// All lines before block-filtering. The public `lines` is this filtered by
-    /// `blockedIds`.
-    private var allLines: [ChatLine] = []
+    /// Sliding-window store of every received line (the dedup/echo source of
+    /// truth) plus the incrementally-maintained, block-filtered projection the
+    /// view renders. Replaces the old `allLines` array + per-message
+    /// `BlockFilter.apply` full rescan + `Array.removeFirst` trim — see
+    /// `ChatBuffer` for the cost rationale. Cap = 500 retained lines per tab.
+    private var buffer = ChatBuffer(cap: 500)
+
+    /// Block-filtered, display-ready lines. Drives the list. Computed off the
+    /// stored `buffer` so @Observable still notifies the view on every buffer
+    /// mutation (the getter's read of `buffer` registers the dependency),
+    /// without a second stored copy to keep in sync.
+    public var lines: [ChatLine] { buffer.lines }
 
     /// Blocked user ids, pushed in by the view (which observes BlockStore).
-    /// Changing it re-filters `lines` immediately.
-    public var blockedIds: Set<String> = [] {
-        didSet { guard oldValue != blockedIds else { return }; rebuildLines() }
-    }
-
-    /// Block-filtered, display-ready lines. Drives the list.
-    public private(set) var lines: [ChatLine] = []
-
-    private func rebuildLines() {
-        lines = BlockFilter.apply(lines: allLines, blockedIds: blockedIds)
+    /// Changing it re-filters the visible projection immediately. The
+    /// no-op-when-unchanged guard lives inside `ChatBuffer.blockedIds`.
+    public var blockedIds: Set<String> {
+        get { buffer.blockedIds }
+        set { buffer.blockedIds = newValue }
     }
 
     public private(set) var attachState: AttachState = .detached
-
-    /// Max retained messages across all sessions in this tab.
-    private static let lineCap = 500
 
     /// Active subscription tokens, paired with the sessions they belong to.
     /// Stored as tuples (not a dict) because order doesn't matter and we
@@ -396,17 +397,16 @@ public final class TabChatModel {
         // order. For multi-session tabs we'd sort by event timestamp here
         // — TODO when N > 1 ships.
         //
-        // We rebuild `lines` from scratch by replaying each ChannelEvent
-        // through the same apply() that handles live events. This means
-        // priming uses identical code paths to live ingestion — no
-        // separate "initial state" logic to drift.
-        var primed: [ChatLine] = []
-        primed.reserveCapacity(combined.count)
+        // We rebuild the buffer from scratch by replaying each ChannelEvent
+        // through `ingest` — the SAME dispatch the live path uses (apply()
+        // calls ingest too). Priming therefore shares the cap + block-filter
+        // logic with live ingestion; no separate "initial state" path to
+        // drift. The buffer's own cap handles the multi-session overflow the
+        // old `Self.cap(primed)` did.
+        buffer.reset()
         for event in combined {
-            Self.appendLines(for: event, into: &primed, normalizationContext: self)
+            ingest(event)
         }
-        allLines = Self.cap(primed)
-        rebuildLines()
         attachState = .attached
         logger.info("TabChatModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
     }
@@ -557,13 +557,7 @@ public final class TabChatModel {
             deliveryState: .sending,    // renderer dims the row so the user sees it as in-flight
             replyParent: optimisticReplyParent
         )
-        allLines.append(optimistic)
-        // Cap as usual — sending while at 500 lines drops the oldest, same
-        // as a received message would.
-        if allLines.count > Self.lineCap {
-            allLines.removeFirst(allLines.count - Self.lineCap)
-        }
-        rebuildLines()
+        buffer.append(optimistic)
         // FIFO append — see pendingSendIDByText doc-comment.
         pendingSendIDByText[canonical, default: []].append(pendingId)
 
@@ -591,7 +585,7 @@ public final class TabChatModel {
                 // letter. Skipping the write avoids a tiny memory leak
                 // and a stale entry that could (extremely unlikely) match
                 // a future event with the same messageId.
-                if allLines.contains(where: { $0.id == pendingId }) {
+                if buffer.contains(id: pendingId) {
                     helixMessageIdByPendingId[pendingId] = response.messageId
                     // Defensive: start a fallback timer that fires if
                     // the echo never arrives. See `synthesizeStuckUpgrade`
@@ -647,8 +641,8 @@ public final class TabChatModel {
     /// could happen if the user triple-taps the retry button on a row
     /// that's mid-retry.
     public func retry(failedLineId: String) async {
-        guard let idx = allLines.firstIndex(where: { $0.id == failedLineId }),
-              case .failed(_, let retryText) = allLines[idx].deliveryState else {
+        guard let failedRow = buffer.line(id: failedLineId),
+              case .failed(_, let retryText) = failedRow.deliveryState else {
             return
         }
         // Capture the failed row's reply context BEFORE removing it so
@@ -660,7 +654,7 @@ public final class TabChatModel {
         // ReplyParent already carries the resolved threadRootMessageId
         // (set when the original send was made), so we use it directly
         // — no need to re-walk.
-        let preservedReply: ReplyContext? = allLines[idx].replyParent.map { rp in
+        let preservedReply: ReplyContext? = failedRow.replyParent.map { rp in
             ReplyContext(
                 parentMessageId: rp.parentMessageId,
                 parentAuthorDisplayName: rp.parentAuthorDisplayName,
@@ -671,8 +665,7 @@ public final class TabChatModel {
         // Remove the failed row first so the new optimistic insert
         // takes its place at the bottom of `lines` — the user expects
         // the retry to feel like a fresh send.
-        allLines.remove(at: idx)
-        rebuildLines()
+        buffer.remove(id: failedLineId)
         await send(text: retryText, replyOverride: preservedReply)
     }
 
@@ -726,8 +719,8 @@ public final class TabChatModel {
     private func synthesizeStuckUpgrade(pendingId: String, canonicalMessageId: String) {
         sendFallbackTimers.removeValue(forKey: pendingId)
 
-        guard let idx = allLines.firstIndex(where: { $0.id == pendingId }),
-              case .sending = allLines[idx].deliveryState else {
+        guard let row = buffer.line(id: pendingId),
+              case .sending = row.deliveryState else {
             // Already upgraded via echo, or removed — nothing to do.
             return
         }
@@ -741,18 +734,16 @@ public final class TabChatModel {
         //
         // If we'd create a dupe, just remove the optimistic row instead
         // of replacing — the echo's row already covers it.
-        if allLines.contains(where: { $0.id == canonicalMessageId }) {
+        if buffer.contains(id: canonicalMessageId) {
             logger.warning("Synthesize would duplicate id \(canonicalMessageId, privacy: .public); removing optimistic row only")
-            allLines.remove(at: idx)
-            rebuildLines()
+            buffer.remove(id: pendingId)
             cleanupPending(pendingId: pendingId)
             return
         }
 
         logger.warning("Echo never arrived for messageId=\(canonicalMessageId, privacy: .public); synthesizing local upgrade after \(Self.sendFallbackTimeout)")
 
-        let row = allLines[idx]
-        allLines[idx] = ChatLine(
+        buffer.replace(id: pendingId, with: ChatLine(
             id: canonicalMessageId,
             kind: row.kind,
             authorBadges: row.authorBadges,
@@ -765,8 +756,7 @@ public final class TabChatModel {
             timestamp: row.timestamp,
             deliveryState: .delivered,
             replyParent: row.replyParent
-        )
-        rebuildLines()
+        ))
 
         // Clean up correlation maps — we won't be reconciling this id
         // from an echo anymore (the synthesized id is what a future
@@ -775,9 +765,8 @@ public final class TabChatModel {
     }
 
     private func markFailed(pendingId: String, reason: String, retryText: String) {
-        guard let idx = allLines.firstIndex(where: { $0.id == pendingId }) else { return }
-        let row = allLines[idx]
-        allLines[idx] = ChatLine(
+        guard let row = buffer.line(id: pendingId) else { return }
+        buffer.replace(id: pendingId, with: ChatLine(
             id: row.id,
             kind: row.kind,
             authorBadges: row.authorBadges,
@@ -790,8 +779,7 @@ public final class TabChatModel {
             timestamp: row.timestamp,
             deliveryState: .failed(reason: reason, retryText: retryText),
             replyParent: row.replyParent       // preserve thread membership on failed
-        )
-        rebuildLines()
+        ))
     }
 
     /// View-facing reset for the toast. Call after the toast finishes
@@ -1026,9 +1014,9 @@ public final class TabChatModel {
             // This is a defensive check — the cleanup in Path 0 should
             // prevent the same echo from arriving twice in normal flow,
             // but Twitch occasionally re-sends events on reconnect.
-            // Check allLines (not the filtered `lines`) so a blocked
-            // user's prior message is still recognised as already stored.
-            if allLines.contains(where: { $0.id == chatMessage.messageId }) {
+            // Check the buffer's unfiltered window (not the filtered `lines`)
+            // so a blocked user's prior message is still recognised as stored.
+            if buffer.contains(id: chatMessage.messageId) {
                 return
             }
 
@@ -1064,7 +1052,7 @@ public final class TabChatModel {
             }
         }
 
-        Self.appendLines(for: event, into: &allLines, normalizationContext: self)
+        ingest(event)
 
         // Highlight sound: fire for a freshly-appended FOREIGN live
         // message that's highlighted, if the user has sounds on.
@@ -1079,7 +1067,7 @@ public final class TabChatModel {
         //     this fall-through is someone else's. The explicit
         //     `chatterUserId != currentUserId` guard covers the rare
         //     own-message-fell-through edge (failed send + late echo).
-        //   - `allLines.last?.isHighlighted` reads the just-appended row —
+        //   - `buffer.last?.isHighlighted` reads the just-appended row —
         //     true when it's a self-mention OR matches a configured
         //     keyword (the Normalizer set the flag).
         //   - `soundEnabled()` is checked LAST so the UserDefaults read
@@ -1091,15 +1079,10 @@ public final class TabChatModel {
         if case .message(let m) = event,
            m.chatterUserId != currentUserId,
            !blockedIds.contains(m.chatterUserId),
-           allLines.last?.isHighlighted == true,
+           buffer.last?.isHighlighted == true,
            HighlightSettings.soundEnabled() {
             HighlightSoundPlayer.shared.play()
         }
-
-        if allLines.count > Self.lineCap {
-            allLines.removeFirst(allLines.count - Self.lineCap)
-        }
-        rebuildLines()
     }
 
     /// Replaces the optimistic row at `pendingId` with a freshly-normalized
@@ -1111,9 +1094,6 @@ public final class TabChatModel {
     /// — without it the same six-line block would appear twice with the
     /// same content but different match-key sources, inviting drift.
     private func upgradeOptimistic(at pendingId: String, with chatMessage: ChatMessage) -> Bool {
-        guard let idx = allLines.firstIndex(where: { $0.id == pendingId }) else {
-            return false
-        }
         let snapshot = emoteIndex?.snapshot() ?? [:]
         let normalizedLine = Normalizer.normalize(
             message: chatMessage,
@@ -1121,9 +1101,9 @@ public final class TabChatModel {
             currentUserLogin: currentUserLogin,
             highlightKeywords: highlightKeywords
         )
-        allLines[idx] = normalizedLine
-        rebuildLines()
-        return true
+        // `replace` returns false (a no-op) when the optimistic row was already
+        // removed under us — the caller then falls through to a normal append.
+        return buffer.replace(id: pendingId, with: normalizedLine)
     }
 
     /// Removes any correlation-map entries pointing at `pendingId` from
@@ -1152,94 +1132,64 @@ public final class TabChatModel {
         sendFallbackTimers.removeValue(forKey: pendingId)
     }
 
-    /// Convert one `ChannelEvent` into zero-or-more ChatLine mutations and
-    /// apply them to the given lines array. Pulled out as a static so the
-    /// priming loop in `attach()` can reuse it without capturing `self`
-    /// into closures (which would require Sendable gymnastics) and so
-    /// future tests can exercise the dispatch logic in isolation.
+    /// Applies one `ChannelEvent` to the `buffer`. Shared by the live path
+    /// (`apply`, after echo reconciliation) and the priming loop (`attach`),
+    /// so initial state and live ingestion can't drift. The buffer owns the
+    /// cap + block-filter; this method only decides *what* mutation each event
+    /// kind produces.
     ///
-    /// `normalizationContext` carries the emote-index snapshot, current
-    /// user login, and highlight keywords — used for `.message` events.
-    /// Other event kinds don't depend on these.
-    private static func appendLines(
-        for event: ChannelSession.ChannelEvent,
-        into lines: inout [ChatLine],
-        normalizationContext: TabChatModel
-    ) {
+    /// Instance method (was a `static` taking the model as a context) because
+    /// it reads `emoteIndex` / `currentUserLogin` / `highlightKeywords` and
+    /// writes `buffer` — all instance state.
+    private func ingest(_ event: ChannelSession.ChannelEvent) {
         switch event {
         case .message(let chatMessage):
             // EmoteIndex.snapshot() is nonisolated + lock-protected, so
             // it's safe to call from @MainActor without an await.
-            let snapshot = normalizationContext.emoteIndex?.snapshot() ?? [:]
+            let snapshot = emoteIndex?.snapshot() ?? [:]
             let line = Normalizer.normalize(
                 message: chatMessage,
                 emoteSnapshot: snapshot,
-                currentUserLogin: normalizationContext.currentUserLogin,
-                highlightKeywords: normalizationContext.highlightKeywords
+                currentUserLogin: currentUserLogin,
+                highlightKeywords: highlightKeywords
             )
-            lines.append(line)
+            buffer.append(line)
 
         case .notification(let n):
             // The Normalizer skips notice types we don't render (returns
             // nil) — those are dropped here. Logging the skip is the
             // caller's job; the Normalizer stays sync-and-pure.
             if let line = Normalizer.line(from: n) {
-                lines.append(line)
+                buffer.append(line)
             }
 
         case .raid(let r):
-            lines.append(Normalizer.line(from: r))
+            buffer.append(Normalizer.line(from: r))
 
         case .messageDeleted(let targetMessageId):
             // Mutation in place: find the row by id, replace with a
             // deletedPlaceholder-kind copy. We DON'T remove the row —
             // a vanishing line is disorienting mid-scroll, and keeping
-            // it as a strikethrough is the Twitch web convention.
-            if let idx = lines.firstIndex(where: { $0.id == targetMessageId }) {
-                lines[idx] = lines[idx].withDeletedPlaceholder()
-            }
+            // it as a strikethrough is the Twitch web convention. A no-op
+            // when the target already aged out of the buffer.
+            buffer.mutate(id: targetMessageId) { $0.withDeletedPlaceholder() }
 
         case .chatCleared:
             // Flip every existing line to deletedPlaceholder. Future
             // messages still arrive normally — this only retroactively
             // hides the scrollback.
-            //
-            // In-place mutation (vs `lines.map { ... }`) avoids
-            // allocating a fresh 500-element array per chat-clear event.
-            // The @Observable property still publishes one change per
-            // element-write, but storage stays in place.
-            for idx in lines.indices {
-                lines[idx] = lines[idx].withDeletedPlaceholder()
-            }
+            buffer.mutateAll { $0.withDeletedPlaceholder() }
 
         case .messagesClearedFromUser(let targetUserId):
             // Flip every line whose author is the timed-out/banned user.
             // Required field `authorUserId` on ChatLine is what makes
             // this work — without it we'd have no key to match against.
-            //
-            // In-place mutation: only touches lines that match the
-            // target. Busy channels can see several timeouts per minute;
-            // avoiding the full-array .map per event is meaningful at
-            // 500-line ring buffers.
-            for idx in lines.indices where lines[idx].authorUserId == targetUserId {
-                lines[idx] = lines[idx].withDeletedPlaceholder()
-            }
+            buffer.mutateMatching(authorUserId: targetUserId) { $0.withDeletedPlaceholder() }
 
         case .restrictionsUpdated:
             // Restrictions updates produce no row — they're pure state
             // changes consumed by `apply()` before this switch runs.
-            // The case exists here to keep the switch exhaustive (Swift
-            // would otherwise refuse to compile when ChannelEvent grew
-            // the new case).
             break
         }
-    }
-
-    /// Trim a pre-built array to the cap. Used during the initial prime when
-    /// merging multiple sessions' snapshots — if their combined sizes exceed
-    /// the cap, keep the most recent.
-    private static func cap(_ lines: [ChatLine]) -> [ChatLine] {
-        if lines.count <= lineCap { return lines }
-        return Array(lines.suffix(lineCap))
     }
 }
