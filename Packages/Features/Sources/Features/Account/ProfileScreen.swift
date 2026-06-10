@@ -115,8 +115,14 @@ public struct ProfileScreen: View {
                 Text("System follows your device's appearance setting.")
             }
 
-            // Chat preferences — highlight keywords + the sound toggle.
+            // Chat preferences — appearance, highlight keywords + the
+            // sound toggle.
             Section {
+                NavigationLink {
+                    ChatAppearanceScreen(currentUserLogin: account.login)
+                } label: {
+                    Label("Chat Appearance", systemImage: "textformat.size")
+                }
                 NavigationLink {
                     HighlightKeywordsScreen()
                 } label: {

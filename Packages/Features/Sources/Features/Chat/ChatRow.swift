@@ -56,6 +56,14 @@ struct ChatRow: View, Equatable {
     /// theme in Settings. (Environment changes trigger a re-render.)
     @Environment(\.colorScheme) private var colorScheme
 
+    /// Chat rendering preferences (text size, timestamps, badges, animated
+    /// emotes). Injected at RootView from @AppStorage-backed keys, so
+    /// edits in ChatAppearanceScreen re-render visible rows live — the
+    /// same environment-invalidation mechanism as `colorScheme` above,
+    /// which also means it composes safely with the Equatable
+    /// short-circuit (environment changes bypass `==`).
+    @Environment(\.chatAppearance) private var appearance
+
     // MARK: - Equatable (profile-guided perf fix)
     //
     // Without explicit Equatable, SwiftUI's default View diffing compares
@@ -272,17 +280,27 @@ struct ChatRow: View, Equatable {
     @ViewBuilder
     private var messageBody: some View {
         FlowLayout(spacing: 4, alignment: .firstTextBaseline, hangingIndent: 14) {
+            // Optional leading timestamp. Monospaced digits so columns of
+            // timestamps align vertically across rows; tertiary + caption2
+            // so it reads as metadata, not message content.
+            if appearance.showTimestamps {
+                Text(line.timestamp, format: .dateTime.hour().minute())
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
             // Badges keyed by `url` — stable per-badge identity across row
             // re-renders means SwiftUI doesn't destroy + re-create the
             // underlying AsyncImage (which would re-fetch the badge image).
             // Pre-fix: `id: \.offset` triggered AsyncImage churn whenever
             // a row re-rendered (e.g., on `.deletedPlaceholder` flip).
-            ForEach(badgeEntries, id: \.url) { entry in
-                BadgeImage(entry: entry)
+            if appearance.showBadges {
+                ForEach(badgeEntries, id: \.url) { entry in
+                    BadgeImage(entry: entry, scale: appearance.textSize.imageScale)
+                }
             }
             // Username prefix
             Text(line.authorDisplayName)
-                .font(.callout.weight(.semibold))
+                .font(appearance.textSize.font.weight(.semibold))
                 .foregroundStyle(usernameColor)
             Text(":")
                 .foregroundStyle(.secondary)
@@ -365,16 +383,23 @@ struct ChatRow: View, Equatable {
     /// purely "given run X, what view?"
     @ViewBuilder
     private func runView(for run: LineRun) -> some View {
+        // All text runs derive their font from the appearance setting —
+        // `.standard` maps to `.callout`, the pre-settings default.
+        let bodyFont = appearance.textSize.font
         switch run {
         case .text(let body):
             Text(body)
-                .font(.callout)
+                .font(bodyFont)
 
         case .emote(let emote):
             // 7TV / BTTV / FFZ inline. Prefer the 2x size (matches the
             // approx 24pt height of a chat row's line) for a sharp,
             // not-too-large render.
-            EmoteImage(emote: emote)
+            EmoteImage(
+                emote: emote,
+                scale: appearance.textSize.imageScale,
+                allowAnimation: appearance.animatedEmotes
+            )
 
         case .twitchEmote(let reference, let displayName):
             // Existing Twitch CDN renderer — same component used pre-2.2.
@@ -385,21 +410,21 @@ struct ChatRow: View, Equatable {
             // extra weight bump so they pop more (in addition to the
             // row-level highlight backplate).
             Text("@\(login)")
-                .font(.callout.weight(isMe ? .bold : .semibold))
+                .font(bodyFont.weight(isMe ? .bold : .semibold))
                 .foregroundStyle(Color.accentColor)
 
         case .url(let urlString):
             // Slice-2 renders URLs as accent-tinted text. Tappable links
             // come in a later slice.
             Text(urlString)
-                .font(.callout)
+                .font(bodyFont)
                 .foregroundStyle(Color.accentColor)
 
         case .cheermote(let prefix, let bits, _):
             // Cheermotes render as compact text for now ("cheer100" → "💎100").
             // Full bits rendering (animated tier-colored icons) is a later slice.
             Text("\(prefix)\(bits)")
-                .font(.callout.weight(.semibold))
+                .font(bodyFont.weight(.semibold))
                 .foregroundStyle(.orange)
         }
     }
@@ -542,6 +567,13 @@ private struct SystemBubbleRow: View {
 /// Phase 2.2 ships static rendering; animation lands in a follow-up.
 private struct EmoteImage: View {
     let emote: Emote
+    /// Size multiplier from the chat text-size setting, so emotes track
+    /// the surrounding text instead of staying fixed at 24pt.
+    let scale: CGFloat
+    /// From `ChatAppearance.animatedEmotes`. When false, animated emotes
+    /// take the static `LazyImage` path below and render their first
+    /// frame — cheaper (no per-frame decode loop) and calmer.
+    let allowAnimation: Bool
     /// Pre-resolved CDN URL, computed once in `init`. Storing as `let`
     /// (vs a `var` computed property) ensures `AsyncImage(url:)` sees a
     /// stable URL across re-renders — without this, the computed
@@ -549,8 +581,10 @@ private struct EmoteImage: View {
     /// and cause AsyncImage to abandon its in-flight load.
     private let imageURL: URL?
 
-    init(emote: Emote) {
+    init(emote: Emote, scale: CGFloat = 1, allowAnimation: Bool = true) {
         self.emote = emote
+        self.scale = scale
+        self.allowAnimation = allowAnimation
         // Pick the 2x size (the middle of x1/x2/x4) — matches chat row
         // line height on @2x/@3x displays. Fall back to whatever size
         // we have if 2x is missing (rare but possible for partial-
@@ -560,18 +594,19 @@ private struct EmoteImage: View {
 
     var body: some View {
         Group {
-            if emote.isAnimated {
+            if emote.isAnimated && allowAnimation {
                 // Animated 7TV WebP / BTTV GIF / FFZ APNG — decode frames
                 // via ImageIO and cycle them. Only animated emotes pay
                 // this cost; the static majority use the cheap LazyImage
                 // path below.
-                AnimatedImageView(url: imageURL, width: 28, height: 24) {
+                AnimatedImageView(url: imageURL, width: 28 * scale, height: 24 * scale) {
                     Text(emote.name).font(.callout)
                 }
             } else {
                 // Static emote. LazyImage: sync memory-cache hit on first
                 // frame (no flash on re-scroll), off-main decode, auto
-                // memory+disk cache.
+                // memory+disk cache. Also the "animations off" path for
+                // animated emotes — ImageIO decodes just the first frame.
                 LazyImage(url: imageURL) { state in
                     if let image = state.image {
                         image
@@ -585,7 +620,7 @@ private struct EmoteImage: View {
                             .font(.callout)
                     }
                 }
-                .frame(maxWidth: 28, maxHeight: 24)
+                .frame(maxWidth: 28 * scale, maxHeight: 24 * scale)
             }
         }
         .accessibilityLabel(emote.name)
@@ -604,6 +639,8 @@ private struct EmoteImage: View {
 /// high-quality interpolation, edges look jagged on small icons.
 private struct BadgeImage: View {
     let entry: ChatBadgeEntry
+    /// Size multiplier from the chat text-size setting — see `EmoteImage`.
+    var scale: CGFloat = 1
 
     var body: some View {
         LazyImage(url: entry.url) { state in
@@ -617,7 +654,7 @@ private struct BadgeImage: View {
                 Color.clear.frame(width: 0, height: 0)
             }
         }
-        .frame(width: 18, height: 18)
+        .frame(width: 18 * scale, height: 18 * scale)
         .accessibilityLabel(entry.title ?? "Chat badge")
     }
 }

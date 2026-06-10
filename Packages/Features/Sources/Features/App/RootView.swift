@@ -30,6 +30,28 @@ public struct RootView: View {
     /// `activeAccount` falls back to most-recently-added.
     @AppStorage(AccountStore.activeAccountUserIdKey) private var activeAccountUserId: String = ""
 
+    // Chat appearance preferences — read here (the app's root) so one
+    // environment injection covers every chat surface at once: live chat,
+    // the thread sheet, and the settings screen's preview. @AppStorage
+    // observes the keys via KVO, so ChatAppearanceScreen's writes
+    // re-render all of them live.
+    @AppStorage(ChatAppearance.textSizeKey) private var chatTextSizeRaw: String = ChatAppearance.TextSize.standard.rawValue
+    @AppStorage(ChatAppearance.showTimestampsKey) private var chatShowTimestamps: Bool = false
+    @AppStorage(ChatAppearance.showBadgesKey) private var chatShowBadges: Bool = true
+    @AppStorage(ChatAppearance.animatedEmotesKey) private var chatAnimatedEmotes: Bool = true
+
+    /// Assembled appearance for environment injection. Raw-value parse
+    /// falls back to `.standard` if the stored string drifts (same
+    /// defensive pattern as ProfileScreen's `appearanceMode`).
+    private var chatAppearance: ChatAppearance {
+        ChatAppearance(
+            textSize: ChatAppearance.TextSize(rawValue: chatTextSizeRaw) ?? .standard,
+            showTimestamps: chatShowTimestamps,
+            showBadges: chatShowBadges,
+            animatedEmotes: chatAnimatedEmotes
+        )
+    }
+
     /// App-wide cache of global badges + emotes. Owned here so it survives
     /// channel-list / chat-screen navigation but gets re-instantiated if the
     /// whole RootView is unmounted (e.g. on full sign-out — though we're
@@ -100,6 +122,7 @@ public struct RootView: View {
         .environment(\.followsStore, followsStore)
         .environment(\.channelSessionRegistry, channelSessionRegistry)
         .environment(\.chatImagePrefetcher, chatImagePrefetcher)
+        .environment(\.chatAppearance, chatAppearance)
         .onChange(of: activeAccount?.userId) { _, newId in
             // Keep AccountStore's in-memory activeUserId in sync with the
             // rendered account — covers the cold-start case where the
