@@ -21,8 +21,17 @@ struct TabChatModelReplyTests {
 
     // MARK: - snippet(from:cap:)
 
-    @Test("Short text passes through unchanged, no ellipsis")
+    @Test("Word runs join with single spaces, no ellipsis")
     func snippetShortText() {
+        let runs: [LineRun] = [.text("hello"), .text("there")]
+        #expect(TabChatModel.snippet(from: runs, cap: 80) == "hello there")
+    }
+
+    @Test("A legacy multi-word run passes through unchanged")
+    func snippetLegacyMultiWordRun() {
+        // Pre-word-runs ChatLines (e.g. persisted fixtures) may still
+        // carry whitespace inside a single run — snippet must not
+        // double-space or mangle them.
         let runs: [LineRun] = [.text("hello there")]
         #expect(TabChatModel.snippet(from: runs, cap: 80) == "hello there")
     }
@@ -38,13 +47,13 @@ struct TabChatModelReplyTests {
 
     @Test("Mention runs render as @login")
     func snippetMention() {
-        let runs: [LineRun] = [.text("hey "), .mention(login: "xqc", isMe: false)]
+        let runs: [LineRun] = [.text("hey"), .mention(login: "xqc", isMe: false)]
         #expect(TabChatModel.snippet(from: runs, cap: 80) == "hey @xqc")
     }
 
     @Test("Emote runs render as their name")
     func snippetCheermote() {
-        let runs: [LineRun] = [.text("nice "), .cheermote(prefix: "cheer", bits: 100, tier: 1)]
+        let runs: [LineRun] = [.text("nice"), .cheermote(prefix: "cheer", bits: 100, tier: 1)]
         #expect(TabChatModel.snippet(from: runs, cap: 80) == "nice cheer100")
     }
 

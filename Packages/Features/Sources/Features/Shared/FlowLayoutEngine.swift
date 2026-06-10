@@ -28,6 +28,10 @@ enum FlowLayoutEngine {
         // First row starts flush at x=0; every wrapped row starts at the
         // hanging indent.
         var rowStart: CGFloat = 0
+        // Rightmost extent actually used — reported as the width when the
+        // container is unbounded (a SwiftUI nil-width probe). Returning
+        // `containerWidth` there would propagate infinity to the parent.
+        var usedWidth: CGFloat = 0
 
         for size in sizes {
             // Wrap if this item overflows AND the row already has content.
@@ -38,11 +42,13 @@ enum FlowLayoutEngine {
                 currentX = rowStart
             }
             origins.append(CGPoint(x: currentX, y: currentY))
+            usedWidth = max(usedWidth, currentX + size.width)
             currentX += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
 
         let totalHeight = currentY + rowHeight
-        return Result(origins: origins, size: CGSize(width: containerWidth, height: totalHeight))
+        let totalWidth = containerWidth.isFinite ? containerWidth : usedWidth
+        return Result(origins: origins, size: CGSize(width: totalWidth, height: totalHeight))
     }
 }

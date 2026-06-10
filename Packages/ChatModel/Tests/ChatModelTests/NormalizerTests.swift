@@ -7,13 +7,18 @@ import TwitchKit
 // Normalizer is a pure sync function — these tests are trivial fixture-in /
 // expectation-out. Each test exercises one tokenization rule:
 //
-//   - text fragments → split + emote-resolve
+//   - text fragments → split into per-word runs + emote-resolve
 //   - emote fragments → twitchEmote runs
 //   - mention fragments → mention runs with isMe flag
 //   - cheermote fragments → cheermote runs
-//   - adjacent-text coalescing
-//   - highlight keyword detection
+//   - cross-fragment text buffering (no word split at fragment seams)
+//   - highlight keyword detection (incl. phrases spanning words)
 //   - self-mention highlight
+//
+// Text runs are WORD-LEVEL and never contain whitespace: the renderer's
+// FlowLayout wraps between runs, so every word must be its own run for
+// chat lines to wrap naturally. Inter-word spacing is the layout's job
+// (FlowLayout spacing), not the data's.
 //
 // No mock URLSession needed — the Normalizer takes a plain `[String: Emote]`
 // dictionary as the emote source, so tests construct fixture emotes inline.
@@ -73,7 +78,8 @@ private func mentionSpec(_ text: String, login: String, userName: String? = nil)
 private func makeMessage(
     messageId: String = "m1",
     chatterUserName: String = "tester",
-    fragments: [FragmentSpec]
+    fragments: [FragmentSpec],
+    replyToLogin: String? = nil
 ) -> ChatMessage {
     let fragmentsJSON = fragments.map { spec -> [String: Any] in
         var dict: [String: Any] = ["type": spec.kind.rawValue, "text": spec.text]
@@ -94,7 +100,7 @@ private func makeMessage(
         }
         return dict
     }
-    let messageJSON: [String: Any] = [
+    var messageJSON: [String: Any] = [
         "message_id": messageId,
         "broadcaster_user_id": "1",
         "broadcaster_user_login": "broadcaster",
@@ -110,6 +116,19 @@ private func makeMessage(
         "badges": [],
         "message_type": "text",
     ]
+    if let replyToLogin {
+        messageJSON["reply"] = [
+            "parent_message_id": "parent1",
+            "parent_message_body": "the parent body",
+            "parent_user_id": "9",
+            "parent_user_login": replyToLogin,
+            "parent_user_name": replyToLogin,
+            "thread_message_id": "thread1",
+            "thread_user_id": "9",
+            "thread_user_login": replyToLogin,
+            "thread_user_name": replyToLogin,
+        ]
+    }
     let data = try! JSONSerialization.data(withJSONObject: messageJSON)
     // TwitchKit decodes EventSub payloads with `convertFromSnakeCase`.
     let decoder = JSONDecoder()
@@ -122,7 +141,7 @@ private func makeMessage(
 @Suite("Normalizer tokenization")
 struct NormalizerTokenizationTests {
 
-    @Test("Plain text becomes one text run")
+    @Test("Plain text becomes one run per word, no whitespace runs")
     func plainText() {
         let message = makeMessage(fragments: [textSpec("hello world")])
         let line = Normalizer.normalize(
@@ -130,7 +149,7 @@ struct NormalizerTokenizationTests {
             emoteSnapshot: [:],
             currentUserLogin: "me"
         )
-        #expect(line.runs == [.text("hello world")])
+        #expect(line.runs == [.text("hello"), .text("world")])
         #expect(line.isHighlighted == false)
     }
 
@@ -146,14 +165,15 @@ struct NormalizerTokenizationTests {
             emoteSnapshot: [:],
             currentUserLogin: "me"
         )
-        // Expect 3 runs: "hi ", twitchEmote(Kappa), " wave".
+        // Expect 3 runs: "hi", twitchEmote(Kappa), "wave" — surrounding
+        // whitespace is dropped (FlowLayout spacing renders the gaps).
         try? #require(line.runs.count == 3)
-        if case .text(let s) = line.runs[0] { #expect(s == "hi ") } else { Issue.record("run 0 not text") }
+        if case .text(let s) = line.runs[0] { #expect(s == "hi") } else { Issue.record("run 0 not text") }
         if case .twitchEmote(let ref, let name) = line.runs[1] {
             #expect(ref.id == "twitch1")
             #expect(name == "Kappa")
         } else { Issue.record("run 1 not twitchEmote") }
-        if case .text(let s) = line.runs[2] { #expect(s == " wave") } else { Issue.record("run 2 not text") }
+        if case .text(let s) = line.runs[2] { #expect(s == "wave") } else { Issue.record("run 2 not text") }
     }
 
     @Test("3rd-party emote in text fragment is upgraded")
@@ -165,11 +185,11 @@ struct NormalizerTokenizationTests {
             emoteSnapshot: ["poggers": poggers],
             currentUserLogin: "me"
         )
-        // Expect: "lul ", emote(poggers), " w"
+        // Expect: "lul", emote(poggers), "w"
         try? #require(line.runs.count == 3)
-        if case .text(let s) = line.runs[0] { #expect(s == "lul ") }
+        if case .text(let s) = line.runs[0] { #expect(s == "lul") }
         if case .emote(let e) = line.runs[1] { #expect(e.name == "poggers") } else { Issue.record("middle run not emote") }
-        if case .text(let s) = line.runs[2] { #expect(s == " w") }
+        if case .text(let s) = line.runs[2] { #expect(s == "w") }
     }
 
     @Test("Self-mention sets isMe and isHighlighted")
@@ -183,7 +203,7 @@ struct NormalizerTokenizationTests {
             emoteSnapshot: [:],
             currentUserLogin: "me"
         )
-        try? #require(line.runs.count == 2)
+        try? #require(line.runs.count == 4)  // mention + "how" + "are" + "you"
         if case .mention(let login, let isMe) = line.runs[0] {
             #expect(login == "me")
             #expect(isMe == true)
@@ -206,7 +226,7 @@ struct NormalizerTokenizationTests {
         #expect(line.isHighlighted == false)
     }
 
-    @Test("All-emote message produces alternating emote + text runs")
+    @Test("All-emote message produces only emote runs — no whitespace runs")
     func allEmote() {
         let kekw = makeEmote("KEKW")
         let lulw = makeEmote("LULW")
@@ -217,13 +237,11 @@ struct NormalizerTokenizationTests {
             emoteSnapshot: ["KEKW": kekw, "LULW": lulw, "POG": pog],
             currentUserLogin: "me"
         )
-        // Expect: [emote(KEKW), text(" "), emote(LULW), text(" "), emote(POG)]
-        try? #require(line.runs.count == 5)
+        // Expect: [emote(KEKW), emote(LULW), emote(POG)]
+        try? #require(line.runs.count == 3)
         if case .emote(let e) = line.runs[0] { #expect(e.name == "KEKW") }
-        if case .text(let s)  = line.runs[1] { #expect(s == " ") }
-        if case .emote(let e) = line.runs[2] { #expect(e.name == "LULW") }
-        if case .text(let s)  = line.runs[3] { #expect(s == " ") }
-        if case .emote(let e) = line.runs[4] { #expect(e.name == "POG") }
+        if case .emote(let e) = line.runs[1] { #expect(e.name == "LULW") }
+        if case .emote(let e) = line.runs[2] { #expect(e.name == "POG") }
     }
 
     @Test("Highlight keyword detection (case-insensitive substring)")
@@ -265,11 +283,10 @@ struct NormalizerTokenizationTests {
         #expect(line.runs.isEmpty)
     }
 
-    @Test("Adjacent text from sequential text fragments is coalesced")
-    func adjacentTextCoalesced() {
-        // Two separate `.text` fragments arrive back-to-back. After
-        // normalization they should collapse into one `.text` run, not stay
-        // as two.
+    @Test("Adjacent text fragments tokenize as one stream — words at the seam don't split")
+    func adjacentTextFragmentsBuffered() {
+        // Two `.text` fragments back-to-back: the word boundary comes
+        // from whitespace in the CONTENT, not from the fragment seam.
         let message = makeMessage(fragments: [
             textSpec("hello "),
             textSpec("world"),
@@ -279,21 +296,82 @@ struct NormalizerTokenizationTests {
             emoteSnapshot: [:],
             currentUserLogin: "me"
         )
-        #expect(line.runs == [.text("hello world")])
+        #expect(line.runs == [.text("hello"), .text("world")])
+
+        // A word split MID-WORD across a fragment seam must reassemble.
+        let split = makeMessage(fragments: [textSpec("hel"), textSpec("lo")])
+        let splitLine = Normalizer.normalize(
+            message: split,
+            emoteSnapshot: [:],
+            currentUserLogin: "me"
+        )
+        #expect(splitLine.runs == [.text("hello")])
     }
 
-    @Test("Whitespace preservation: trailing space before emote stays in text run")
-    func trailingSpacePreserved() {
+    @Test("No whitespace-only or whitespace-padded runs are ever emitted")
+    func noWhitespaceRuns() {
         let kappa = makeEmote("Kappa")
-        let message = makeMessage(fragments: [textSpec("hi Kappa")])
+        let message = makeMessage(fragments: [textSpec("  hi   Kappa  bye ")])
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: ["Kappa": kappa],
             currentUserLogin: "me"
         )
-        // Expect: ["hi ", emote(Kappa)] — the space MUST be retained
-        // (otherwise the renderer shows "hiKappa")
-        try? #require(line.runs.count == 2)
-        if case .text(let s) = line.runs[0] { #expect(s == "hi ") } else { Issue.record("expected text run") }
+        #expect(line.runs == [.text("hi"), .emote(kappa), .text("bye")])
+    }
+
+    @Test("Highlight phrase spanning multiple words still matches")
+    func phraseHighlightAcrossWords() {
+        let message = makeMessage(fragments: [textSpec("get free crypto now")])
+        let line = Normalizer.normalize(
+            message: message,
+            emoteSnapshot: [:],
+            currentUserLogin: "me",
+            highlightKeywords: ["free crypto"]
+        )
+        #expect(line.isHighlighted == true)
+    }
+
+    @Test("Highlight phrase does NOT match across an emote boundary")
+    func phraseBrokenByEmote() {
+        let kekw = makeEmote("KEKW")
+        let message = makeMessage(fragments: [textSpec("free KEKW crypto")])
+        let line = Normalizer.normalize(
+            message: message,
+            emoteSnapshot: ["KEKW": kekw],
+            currentUserLogin: "me",
+            highlightKeywords: ["free crypto"]
+        )
+        // "free" and "crypto" are separated by an emote run — they were
+        // never adjacent in the message, so the phrase must not match.
+        #expect(line.isHighlighted == false)
+    }
+
+    @Test("Reply: leading @parent mention is stripped, body tokenizes as words")
+    func replyMentionStripped() {
+        let message = makeMessage(
+            fragments: [
+                mentionSpec("@xqc", login: "xqc"),
+                textSpec(" hello there"),
+            ],
+            replyToLogin: "xqc"
+        )
+        let line = Normalizer.normalize(
+            message: message,
+            emoteSnapshot: [:],
+            currentUserLogin: "me"
+        )
+        #expect(line.runs == [.text("hello"), .text("there")])
+        #expect(line.replyParent?.parentMessageId == "parent1")
+    }
+
+    @Test("wordRuns helper tokenizes a plain string (optimistic-send path)")
+    func wordRunsHelper() {
+        let kappa = makeEmote("Kappa")
+        let runs = Normalizer.wordRuns(
+            text: " hello  Kappa world ",
+            emoteSnapshot: ["Kappa": kappa]
+        )
+        #expect(runs == [.text("hello"), .emote(kappa), .text("world")])
     }
 }

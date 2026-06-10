@@ -40,4 +40,22 @@ struct FlowLayoutEngineTests {
         #expect(r.origins[0].x == 0)
         #expect(r.size.height == 10)
     }
+
+    @Test("Infinite container returns used width, not infinity")
+    func infiniteContainerWidth() {
+        // SwiftUI probes layouts with nil width proposals (→ infinity).
+        // Returning .infinity as our size breaks the parent's layout math;
+        // the ideal size is the single-row used width.
+        let sizes = [CGSize(width: 20, height: 10), CGSize(width: 30, height: 14)]
+        let r = FlowLayoutEngine.layout(sizes: sizes, containerWidth: .infinity, spacing: 4, hangingIndent: 0)
+        #expect(r.size.width == 54)   // 20 + 4 + 30
+        #expect(r.size.height == 14)
+    }
+
+    @Test("Finite container still reports the container width (rows fill it)")
+    func finiteContainerWidthUnchanged() {
+        let sizes = [CGSize(width: 20, height: 10)]
+        let r = FlowLayoutEngine.layout(sizes: sizes, containerWidth: 100, spacing: 4, hangingIndent: 0)
+        #expect(r.size.width == 100)
+    }
 }

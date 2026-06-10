@@ -60,33 +60,39 @@ public enum Normalizer {
         badges: [ChatLine.AuthorBadge] = []
     ) -> ChatLine {
         // Walk Twitch's pre-tokenized fragments, expanding each one into
-        // zero-or-more LineRuns. Accumulate into a working array so we
-        // can coalesce adjacent text runs at the end.
+        // zero-or-more LineRuns.
+        //
+        // Text content is NOT tokenized per fragment: adjacent text-ish
+        // fragments are buffered into `pendingText` and tokenized as one
+        // stream when a non-text fragment (or end of message) is hit.
+        // Word boundaries come from whitespace in the content, never
+        // from fragment seams — a word Twitch splits across two text
+        // fragments must reassemble, not render as two half-words.
         var runs: [LineRun] = []
         var sawSelfMention = false
+        var pendingText = ""
+
+        func flushPendingText() {
+            guard !pendingText.isEmpty else { return }
+            tokenizeWords(text: pendingText, emoteSnapshot: emoteSnapshot, into: &runs)
+            pendingText = ""
+        }
 
         for fragment in message.message.fragments {
             switch fragment.type {
             case .text:
-                // Plain text — split into whitespace-delimited tokens,
-                // resolving each against the emote snapshot. Whitespace
-                // *between* tokens is preserved in the output (otherwise
-                // "lul Kappa w" would render as "lulKappaw" — no spaces).
-                tokenize(
-                    text: fragment.text,
-                    emoteSnapshot: emoteSnapshot,
-                    into: &runs
-                )
+                pendingText += fragment.text
 
             case .emote:
                 // Twitch-native emote, pre-resolved by Twitch's event.
                 if let ref = fragment.emote {
+                    flushPendingText()
                     runs.append(.twitchEmote(reference: ref, displayName: fragment.text))
                 } else {
                     // Defensive: if Twitch ever sends a .emote fragment
                     // without an EmoteReference (shouldn't happen, but
                     // future schema changes could), fall back to text.
-                    runs.append(.text(fragment.text))
+                    pendingText += fragment.text
                 }
 
             case .mention:
@@ -95,30 +101,27 @@ public enum Normalizer {
                 if let mention = fragment.mention {
                     let isMe = mention.userLogin.caseInsensitiveCompare(currentUserLogin) == .orderedSame
                     if isMe { sawSelfMention = true }
+                    flushPendingText()
                     runs.append(.mention(login: mention.userLogin, isMe: isMe))
                 } else {
-                    runs.append(.text(fragment.text))
+                    pendingText += fragment.text
                 }
 
             case .cheermote:
                 if let cheer = fragment.cheermote {
+                    flushPendingText()
                     runs.append(.cheermote(prefix: cheer.prefix, bits: cheer.bits, tier: cheer.tier))
                 } else {
-                    runs.append(.text(fragment.text))
+                    pendingText += fragment.text
                 }
 
             case .unknown:
                 // Future Twitch fragment types we don't yet handle —
                 // render the surface text rather than dropping content.
-                runs.append(.text(fragment.text))
+                pendingText += fragment.text
             }
         }
-
-        // Coalesce adjacent text runs so the renderer makes one Text view
-        // per text-chunk, not one per word. Improves baseline alignment
-        // when text/emote sequences mix (each Text view has its own
-        // baseline anchor — fewer Text views = fewer anchor adjustments).
-        var coalesced = Self.coalesceAdjacentText(runs)
+        flushPendingText()
 
         // Twitch's IRC convention prefixes reply bodies with
         // "@parentLogin " so legacy chat clients see who's being replied
@@ -127,23 +130,23 @@ public enum Normalizer {
         // mention is redundant + visually noisy. Strip it here so the
         // body reads as just the user's actual reply text.
         //
-        // We only strip when the runs START with the matching mention
-        // (followed optionally by a space-only text run) — keeps the
-        // strip surgical instead of removing every leading @ in any
-        // reply.
+        // We only strip when the runs START with the matching mention —
+        // keeps the strip surgical instead of removing every leading @
+        // in any reply.
         if message.reply != nil {
-            coalesced = Self.stripLeadingReplyMention(
-                runs: coalesced,
+            runs = Self.stripLeadingReplyMention(
+                runs: runs,
                 parentLogin: message.reply?.parentUserLogin ?? ""
             )
         }
 
         // Highlight detection — message is highlighted if it mentions me
-        // OR if any text run contains a configured keyword (case-insensitive
-        // substring match). The keyword check is bypassed when the keyword
+        // OR if any contiguous span of text words contains a configured
+        // keyword (case-insensitive substring match; phrases match across
+        // word runs). The keyword check is bypassed when the keyword
         // list is empty, which is the common case.
         let isHighlighted = sawSelfMention || Self.containsHighlight(
-            runs: coalesced,
+            runs: runs,
             keywords: highlightKeywords
         )
 
@@ -168,7 +171,7 @@ public enum Normalizer {
             authorUserId: message.chatterUserId,
             authorDisplayName: message.chatterUserName,
             authorColor: message.color,
-            runs: coalesced,
+            runs: runs,
             isHighlighted: isHighlighted,
             replyParent: replyParent
         )
@@ -325,95 +328,68 @@ public enum Normalizer {
 
     // MARK: - Tokenization
 
-    /// Split a string into whitespace-delimited tokens, emit `.emote` for
-    /// any token that resolves in the snapshot, `.text` for everything
-    /// else. Whitespace between tokens is appended back to the preceding
-    /// text run so rendering preserves the original spacing.
+    /// Tokenize a plain string into word-level runs. Public entry point
+    /// for callers that have raw text rather than a `ChatMessage` —
+    /// e.g. `TabChatModel`'s optimistic-send row.
+    public static func wordRuns(
+        text: String,
+        emoteSnapshot: [String: Emote] = [:]
+    ) -> [LineRun] {
+        var runs: [LineRun] = []
+        tokenizeWords(text: text, emoteSnapshot: emoteSnapshot, into: &runs)
+        return runs
+    }
+
+    /// Split a string into whitespace-delimited words: one `.emote` run
+    /// per word that resolves in the snapshot, one `.text` run per word
+    /// that doesn't. Whitespace is DROPPED — runs never contain spaces.
     ///
-    /// Implementation chooses a manual character walk over `String.split`
-    /// because `split` discards the original whitespace bytes — we'd have
-    /// to fake the spaces back, and they might not be exactly the same
-    /// (e.g., tabs collapse to spaces). Walking character-by-character
-    /// preserves exactly what was there.
-    private static func tokenize(
+    /// Word-level runs are what make chat wrapping work: the renderer's
+    /// `FlowLayout` can only wrap *between* runs, so a multi-word run
+    /// would wrap as one atomic block (orphaned usernames, giant gaps).
+    /// One run per word lets lines break exactly like Twitch web. The
+    /// inter-word gap is reconstructed by the layout's `spacing`, which
+    /// means consecutive whitespace collapses — same tradeoff Twitch's
+    /// own renderer makes.
+    private static func tokenizeWords(
         text: String,
         emoteSnapshot: [String: Emote],
         into runs: inout [LineRun]
     ) {
-        // Buffers for the current word and the current whitespace span.
-        // We flush the word when we hit whitespace; we flush the whitespace
-        // when we start a new word.
         var currentWord = ""
-        var pendingText = ""  // text accumulator for the next .text run
 
-        // Walk characters once. Each iteration either:
-        //   - extends `currentWord` (non-whitespace),
-        //   - or flushes `currentWord` (whitespace transition).
-        for ch in text {
-            if ch.isWhitespace {
-                if !currentWord.isEmpty {
-                    // Word complete — try to resolve as an emote.
-                    if let emote = emoteSnapshot[currentWord] {
-                        // Flush any pending text *before* the emote, then
-                        // emit the emote. Subsequent whitespace will start
-                        // the next text run.
-                        if !pendingText.isEmpty {
-                            runs.append(.text(pendingText))
-                            pendingText = ""
-                        }
-                        runs.append(.emote(emote))
-                    } else {
-                        // Not an emote — fold the word into pendingText
-                        // so consecutive non-emote words stay one text run.
-                        pendingText += currentWord
-                    }
-                    currentWord = ""
-                }
-                // The whitespace character itself belongs in pendingText
-                // so the next text run preserves the original spacing.
-                pendingText += String(ch)
-            } else {
-                currentWord += String(ch)
-            }
-        }
-
-        // End-of-fragment cleanup: flush any trailing word/text.
-        if !currentWord.isEmpty {
+        func flushWord() {
+            guard !currentWord.isEmpty else { return }
             if let emote = emoteSnapshot[currentWord] {
-                if !pendingText.isEmpty {
-                    runs.append(.text(pendingText))
-                    pendingText = ""
-                }
                 runs.append(.emote(emote))
             } else {
-                pendingText += currentWord
+                runs.append(.text(currentWord))
+            }
+            currentWord = ""
+        }
+
+        for ch in text {
+            if ch.isWhitespace {
+                flushWord()
+            } else {
+                currentWord.append(ch)
             }
         }
-        if !pendingText.isEmpty {
-            runs.append(.text(pendingText))
-        }
+        flushWord()
     }
 
     // MARK: - Post-processing
 
-    /// Merge consecutive `.text(...)` runs into a single run. Other run
-    /// kinds (emote, mention, etc.) act as barriers and stay distinct.
-    ///
-    /// This matters because the tokenizer emits one text run per
-    /// non-emote-broken segment, and a fragment-level walk can produce
-    /// adjacent text runs across fragment boundaries (e.g., a `.text`
-    /// fragment followed by a `.text` fragment for some reason).
     /// If `runs` starts with a `.mention` of the parent's login (Twitch's
     /// legacy "@parentLogin " prefix that backs up the reply metadata for
-    /// clients without UI support), strip it — including a single
-    /// trailing whitespace text run, so the user-facing body starts
-    /// at the actual response text.
+    /// clients without UI support), strip it so the user-facing body
+    /// starts at the actual response text. Word-level runs never carry
+    /// whitespace, so dropping the mention run is the whole job.
     ///
     /// Examples (parentLogin = "xqc"):
-    ///   [.mention("xqc"), .text(" hello there")]  → [.text("hello there")]
-    ///   [.mention("xqc"), .text(" "), .emote(...)] → [.emote(...)]
-    ///   [.text("hey "), .mention("xqc"), ...]      → unchanged (mention isn't leading)
-    ///   [.mention("ninja"), .text(" hi")]          → unchanged (mention isn't the parent)
+    ///   [.mention("xqc"), .text("hello"), .text("there")] → [.text("hello"), .text("there")]
+    ///   [.text("hey"), .mention("xqc"), ...]              → unchanged (mention isn't leading)
+    ///   [.mention("ninja"), .text("hi")]                  → unchanged (mention isn't the parent)
     ///
     /// Conservative: only strips when the mention is THE first run
     /// and matches the parent. Avoids accidentally stripping a
@@ -425,52 +401,45 @@ public enum Normalizer {
               login.caseInsensitiveCompare(parentLogin) == .orderedSame else {
             return runs
         }
-        var trimmed = Array(runs.dropFirst())
-        // Drop the leading-whitespace text run that follows the mention
-        // (Twitch always inserts one). If the FIRST remaining run is a
-        // text run consisting only of whitespace, drop it; otherwise
-        // strip leading whitespace from it.
-        if case .text(let body) = trimmed.first {
-            let lstripped = String(body.drop(while: { $0.isWhitespace }))
-            if lstripped.isEmpty {
-                trimmed.removeFirst()
-            } else {
-                trimmed[0] = .text(lstripped)
-            }
-        }
-        return trimmed
+        return Array(runs.dropFirst())
     }
 
-    private static func coalesceAdjacentText(_ runs: [LineRun]) -> [LineRun] {
-        var result: [LineRun] = []
-        result.reserveCapacity(runs.count)
-        for run in runs {
-            if case .text(let next) = run,
-               case .text(let prev) = result.last {
-                result[result.count - 1] = .text(prev + next)
-            } else {
-                result.append(run)
-            }
-        }
-        return result
-    }
-
-    /// Returns true when any text run contains any of the (non-empty)
-    /// keywords as a case-insensitive substring. Empty keyword list
-    /// short-circuits — no allocation, immediate false.
+    /// Returns true when any contiguous span of text words contains any
+    /// of the (non-empty) keywords as a case-insensitive substring.
+    /// Empty keyword list short-circuits — no allocation, immediate false.
+    ///
+    /// Words within one span are joined with a single space before
+    /// matching, so multi-word phrases ("free crypto") match. Non-text
+    /// runs (emotes, mentions, …) end the span — words that were never
+    /// textually adjacent in the message can't fake a phrase match, and
+    /// emote NAMES stay invisible to keywords (an emote run carries no
+    /// text words).
     private static func containsHighlight(
         runs: [LineRun],
         keywords: [String]
     ) -> Bool {
         guard !keywords.isEmpty else { return false }
-        for run in runs {
-            guard case .text(let body) = run else { continue }
+
+        func spanMatches(_ span: [String]) -> Bool {
+            guard !span.isEmpty else { return false }
+            let haystack = span.joined(separator: " ")
             for keyword in keywords where !keyword.isEmpty {
-                if body.range(of: keyword, options: .caseInsensitive) != nil {
+                if haystack.range(of: keyword, options: .caseInsensitive) != nil {
                     return true
                 }
             }
+            return false
         }
-        return false
+
+        var span: [String] = []
+        for run in runs {
+            if case .text(let word) = run {
+                span.append(word)
+            } else {
+                if spanMatches(span) { return true }
+                span.removeAll(keepingCapacity: true)
+            }
+        }
+        return spanMatches(span)
     }
 }

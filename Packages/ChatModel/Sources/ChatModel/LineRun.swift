@@ -5,9 +5,14 @@ import TwitchKit
 /// One inline run inside a chat message.
 ///
 /// A chat message renders as a sequence of `LineRun`s in reading order:
-/// e.g., `[.text("hello "), .emote(pog), .text(" "), .mention("xqc", isMe: false)]`.
+/// e.g., `[.text("hello"), .emote(pog), .mention("xqc", isMe: false)]`.
 /// The `FlowLayout` view in the chat row lays them out with shared baselines
 /// so emote images and surrounding text align visually.
+///
+/// Runs are WORD-LEVEL: a `.text` run is exactly one whitespace-delimited
+/// word and never contains whitespace. `FlowLayout` can only wrap *between*
+/// runs, so one-run-per-word is what makes chat lines wrap naturally; the
+/// inter-word gap is the layout's `spacing`, not characters in the data.
 ///
 /// ## Why this is separate from `TwitchKit.ChatFragment`
 ///
@@ -38,9 +43,7 @@ import TwitchKit
 // SwiftUI's `ForEach` uses `Identifiable.id` for row identity rather
 // than Hashable, so Hashable isn't actually needed here.
 public enum LineRun: Sendable, Equatable {
-    /// A contiguous text run. The Normalizer concatenates consecutive text
-    /// tokens (with their separating whitespace preserved) so the renderer
-    /// makes one Text view per text run, not one per word.
+    /// One word of plain text — no whitespace, see the type-level note.
     case text(String)
 
     /// A third-party emote (7TV / BTTV / FFZ) — resolved via EmoteIndex

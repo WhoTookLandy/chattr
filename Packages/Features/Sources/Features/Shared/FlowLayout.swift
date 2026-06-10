@@ -41,14 +41,23 @@ struct FlowLayout: Layout {
 
     func makeCache(subviews: Subviews) -> Cache { Cache() }
 
-    /// SwiftUI calls this when the subviews collection changes between
-    /// layout passes (subview added/removed). We invalidate by clearing
-    /// the sizes array; the next `sizeThatFits` repopulates.
+    /// SwiftUI calls this when the subviews change between layout passes
+    /// — and "change" includes a subview's INTRINSIC SIZE changing with
+    /// the count staying the same. That happens constantly in chat rows:
+    /// a badge goes 0×0 → 18×18 when its image loads, an emote goes
+    /// name-as-text → 28pt image. The previous count-only check kept
+    /// stale sizes through those transitions, which is exactly the
+    /// "truncated orphan word / emote shoved to the right edge" bug:
+    /// origins were computed from measurements of subviews that no
+    /// longer exist in that form.
+    ///
+    /// Unconditional invalidation is the correct (and Apple-sample)
+    /// pattern. The cache's job is only to dedupe the sizeThatFits +
+    /// placeSubviews pair WITHIN one layout pass — that still works,
+    /// because `ensureSizes` early-returns on the second call of a pass.
     func updateCache(_ cache: inout Cache, subviews: Subviews) {
-        if cache.sizes.count != subviews.count {
-            cache.sizes = []
-            cache.containerWidth = .nan
-        }
+        cache.sizes = []
+        cache.containerWidth = .nan
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
@@ -81,9 +90,15 @@ struct FlowLayout: Layout {
             case .center: yOffset = (rowHeight - size.height) / 2
             default:      yOffset = rowHeight - size.height // baseline/bottom approx (unchanged)
             }
+            // Clamp the width proposal to the space remaining on the row.
+            // A single item wider than the container (long URL, unbroken
+            // CJK run) would otherwise be proposed its full measured
+            // width and overflow the trailing edge; clamping makes Text
+            // wrap/truncate inside bounds instead.
+            let availableWidth = max(0, bounds.width - origin.x)
             subview.place(
                 at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y + yOffset),
-                proposal: ProposedViewSize(width: size.width, height: size.height)
+                proposal: ProposedViewSize(width: min(size.width, availableWidth), height: size.height)
             )
         }
     }

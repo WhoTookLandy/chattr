@@ -134,7 +134,9 @@ struct ChatAppearanceScreen: View {
         id: "preview-chatter",
         authorDisplayName: "PixelPeach",
         authorColor: "#FF69B4",
-        runs: [.text("welcome to the stream! today we're checking out the new update")],
+        // Word-level runs, matching Normalizer output — the preview must
+        // wrap exactly like real chat lines do.
+        runs: ChatModel.Normalizer.wordRuns(text: "welcome to the stream! today we're checking out the new update"),
         timestamp: Date.now.addingTimeInterval(-150)
     )
 
@@ -145,8 +147,7 @@ struct ChatAppearanceScreen: View {
         id: "preview-emote",
         authorDisplayName: "DankDan",
         authorColor: "#1E90FF",
-        runs: [
-            .text("this song is a banger"),
+        runs: ChatModel.Normalizer.wordRuns(text: "this song is a banger") + [
             .emote(Emote(
                 id: "60ae7316f7c927fad14e6ca2",
                 name: "catJAM",
@@ -164,10 +165,8 @@ struct ChatAppearanceScreen: View {
             id: "preview-mention",
             authorDisplayName: "ChatterBoi",
             authorColor: "#9146FF",
-            runs: [
-                .mention(login: login, isMe: true),
-                .text("totally agree with you on that one"),
-            ],
+            runs: [.mention(login: login, isMe: true)]
+                + ChatModel.Normalizer.wordRuns(text: "totally agree with you on that one"),
             isHighlighted: true,
             timestamp: Date.now.addingTimeInterval(-15)
         )

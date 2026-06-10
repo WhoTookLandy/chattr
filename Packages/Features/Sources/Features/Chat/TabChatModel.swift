@@ -550,8 +550,10 @@ public final class TabChatModel {
             authorUserId: currentUserId,
             authorDisplayName: currentUserDisplayName.isEmpty ? currentUserLogin : currentUserDisplayName,
             authorColor: "",            // unknown until echo arrives; renderer falls back to .primary
-            runs: [.text(canonical)],   // no emote resolution on the optimistic row — echo will
-                                        // overwrite with the Normalizer's tokenized version
+            runs: Normalizer.wordRuns(text: canonical),
+                                        // Word-level runs (required for FlowLayout wrapping) but
+                                        // no emote resolution on the optimistic row — echo will
+                                        // overwrite with the Normalizer's fully tokenized version
             isHighlighted: false,
             timestamp: .now,
             deliveryState: .sending,    // renderer dims the row so the user sees it as in-flight
@@ -891,30 +893,34 @@ public final class TabChatModel {
     }
 
     /// Build a short, single-line preview of a message's runs for the
-    /// reply chip. Emote and twitchEmote runs become their name (in
-    /// angle brackets so the user sees "<KEKW>" rather than blank space
-    /// where the emote image would have rendered). URL and cheermote
-    /// runs render as their text. The total is capped with an ellipsis.
+    /// reply chip. Emote and twitchEmote runs become their name, URL and
+    /// cheermote runs render as their text. Runs are word-level (no
+    /// whitespace of their own) so pieces are joined with single spaces.
+    /// The total is capped with an ellipsis.
     ///
     /// Internal (not private) so `ThreadView` can reuse it via
     /// `replyContext(for:)` without duplicating the dispatch logic.
     static func snippet(from runs: [LineRun], cap: Int) -> String {
         var out = ""
         for run in runs {
+            let piece: String
             switch run {
             case .text(let s):
-                out += s
+                piece = s
             case .emote(let e):
-                out += e.name
+                piece = e.name
             case .twitchEmote(_, let display):
-                out += display
+                piece = display
             case .mention(let login, _):
-                out += "@\(login)"
+                piece = "@\(login)"
             case .url(let s):
-                out += s
+                piece = s
             case .cheermote(let prefix, let bits, _):
-                out += "\(prefix)\(bits)"
+                piece = "\(prefix)\(bits)"
             }
+            if piece.isEmpty { continue }
+            if !out.isEmpty { out += " " }
+            out += piece
             if out.count >= cap { break }
         }
         if out.count > cap {
