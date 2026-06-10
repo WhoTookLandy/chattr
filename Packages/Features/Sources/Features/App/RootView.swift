@@ -91,12 +91,19 @@ public struct RootView: View {
     /// against the current account list; falls back to most-recently-added
     /// (`accounts.first`, since the @Query sorts by addedAt desc) when
     /// there's no stored selection or it points at a removed account.
+    ///
+    /// Accounts flagged `needsReauth` are skipped in both paths — an
+    /// expired session can't drive AppShell (every Helix call would
+    /// fail). They stay in the switcher with a re-authorize affordance;
+    /// when NO healthy account remains this returns nil and SignInView
+    /// renders (with the session-expired banner).
     private var activeAccount: Account? {
         if !activeAccountUserId.isEmpty,
-           let match = accounts.first(where: { $0.userId == activeAccountUserId }) {
+           let match = accounts.first(where: { $0.userId == activeAccountUserId }),
+           !match.needsReauth {
             return match
         }
-        return accounts.first
+        return accounts.first(where: { !$0.needsReauth })
     }
 
     public var body: some View {

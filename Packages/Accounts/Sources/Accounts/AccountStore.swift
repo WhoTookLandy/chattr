@@ -224,9 +224,9 @@ public final class AccountStore {
     /// in the background and the user may not relaunch until much later.
     public static let lastSessionExpiredLoginKey = "chattr.lastSessionExpiredLogin"
 
-    /// Force the app into the unauthenticated state for a specific account.
-    /// Use this from the auth layer when the refresh path discovers the user
-    /// genuinely cannot continue (refresh_token missing, expired, or revoked).
+    /// Force a specific account into the needs-re-auth state. Use this from
+    /// the auth layer when the refresh path discovers the user genuinely
+    /// cannot continue (refresh_token missing, expired, or revoked).
     ///
     /// Why this exists (vs `remove(account:)`):
     ///   - Takes a `userId: String` so callers without an `Account` in hand
@@ -234,27 +234,42 @@ public final class AccountStore {
     ///   - **Best-effort**: it never throws. The user is already in a broken
     ///     state; piling another error on top doesn't help. We log instead.
     ///   - Writes a UserDefaults flag (`lastSessionExpiredLoginKey`) so
-    ///     `SignInView` can show a contextual banner on the next render
-    ///     instead of dropping the user to a blank sign-in screen.
+    ///     `SignInView` can show a contextual banner on the next render —
+    ///     but only when no healthy account remains to fall back to (with
+    ///     a healthy account, RootView lands there instead of SignInView,
+    ///     and a months-stale banner on some future sign-out would mislead).
     ///
-    /// Side effect — drops the `Account` row from SwiftData. RootView's
-    /// `@Query` observes this and naturally re-renders `SignInView`.
+    /// Side effect — the `Account` row is **marked `needsReauth`, not
+    /// deleted**. The account stays visible in the switcher with a
+    /// "session expired" badge and a one-tap re-authorize, instead of
+    /// silently vanishing. RootView's `@Query` observes the change and
+    /// re-renders: to the next healthy account, or to `SignInView` when
+    /// none remains. (Deleting is reserved for user-initiated
+    /// `remove(account:)`.)
     public func forceSignOut(userId: String, reason: SignOutReason) async {
-        // Stash the reason for SignInView's banner. Only the `.sessionExpired`
-        // case writes — user-initiated sign-out doesn't need to explain itself.
-        if case .sessionExpired(let login) = reason {
-            UserDefaults.standard.set(login, forKey: Self.lastSessionExpiredLoginKey)
-            // .notice: forced sign-out is a boundary event that drives UI
-            // state transitions — important to see in default log filtering.
-            logger.notice("forceSignOut(.sessionExpired) for @\(login, privacy: .public)")
-        }
-
-        // Find and delete the Account row. Use mainContext to keep RootView's
-        // `@Query` in sync (same reasoning as `remove(account:)` — separate
-        // contexts can fail to propagate delete events).
+        // Find the Account row. Use mainContext to keep RootView's `@Query`
+        // in sync (same reasoning as `remove(account:)` — separate contexts
+        // can fail to propagate change events).
         let context = modelContainer.mainContext
         let descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == userId })
-        if let account = try? context.fetch(descriptor).first {
+        let account = try? context.fetch(descriptor).first
+
+        // Stash the reason for SignInView's banner. Only the `.sessionExpired`
+        // case writes — user-initiated sign-out doesn't need to explain itself
+        // — and only when this expiry leaves no healthy signed-in account
+        // (i.e. the user will actually land on SignInView).
+        if case .sessionExpired(let login) = reason {
+            let healthyRemain = (try? context.fetch(FetchDescriptor<Account>()))?
+                .contains { $0.userId != userId && !$0.needsReauth } ?? false
+            if !healthyRemain {
+                UserDefaults.standard.set(login, forKey: Self.lastSessionExpiredLoginKey)
+            }
+            // .notice: forced sign-out is a boundary event that drives UI
+            // state transitions — important to see in default log filtering.
+            logger.notice("forceSignOut(.sessionExpired) for @\(login, privacy: .public) (healthy fallback remains: \(healthyRemain))")
+        }
+
+        if let account {
             // Best-effort cleanup. Each step logs on failure but doesn't throw.
             do {
                 try await client(for: account).auth.logout()
@@ -269,7 +284,14 @@ public final class AccountStore {
             if activeUserId[account.platform] == userId {
                 activeUserId[account.platform] = nil
             }
-            context.delete(account)
+            // Mark, don't delete — see the doc comment. Also clear the
+            // stored selection if it pointed here, so RootView's fallback
+            // picks a healthy account rather than re-resolving this one.
+            account.needsReauth = true
+            let key = Self.activeAccountKey(for: account.platform)
+            if UserDefaults.standard.string(forKey: key) == userId {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
             do {
                 try context.save()
             } catch {

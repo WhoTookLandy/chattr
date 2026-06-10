@@ -38,14 +38,17 @@ struct AccountSwitcherView: View {
     @State private var errorMessage: String?
 
     /// The effective active account's userId: the stored selection if it
-    /// resolves to a real account, else the most-recently-added (fallback,
-    /// mirroring RootView's `activeAccount` logic).
+    /// resolves to a real, healthy account, else the most-recently-added
+    /// healthy one (fallback, mirroring RootView's `activeAccount` logic —
+    /// `needsReauth` accounts can't be active, so they never get the
+    /// checkmark).
     private var activeUserId: String? {
         if !storedActiveUserId.isEmpty,
-           accounts.contains(where: { $0.userId == storedActiveUserId }) {
+           let match = accounts.first(where: { $0.userId == storedActiveUserId }),
+           !match.needsReauth {
             return storedActiveUserId
         }
-        return accounts.first?.userId
+        return accounts.first(where: { !$0.needsReauth })?.userId
     }
 
     var body: some View {
@@ -100,7 +103,14 @@ struct AccountSwitcherView: View {
     /// Switch to `account` and dismiss. selectAccount writes the active
     /// userId to UserDefaults; RootView's @AppStorage observes it and
     /// re-renders AppShell with the new account.
+    ///
+    /// Expired accounts route to re-auth instead — selecting them would
+    /// render an AppShell whose every Helix call fails.
     private func switchTo(_ account: Account) {
+        if account.needsReauth {
+            Task { await reauthorize(account) }
+            return
+        }
         // Already active — just close.
         guard account.userId != activeUserId else {
             dismiss()
@@ -116,6 +126,25 @@ struct AccountSwitcherView: View {
         // YouTube accounts join this list.
         accountStore.selectAccount(account)
         dismiss()
+    }
+
+    /// Re-run the OAuth flow for an expired account. Same flow as "Add
+    /// Account" — `AccountStore.add` upserts on the unique `userId`, which
+    /// replaces the row's fields (clearing `needsReauth`, since a fresh
+    /// `Account` defaults to false) and persists the new tokens under the
+    /// same `tokenNamespace`. On success the account becomes active and
+    /// we dismiss into it.
+    private func reauthorize(_ account: Account) async {
+        isAddingAccount = true
+        errorMessage = nil
+        defer { isAddingAccount = false }
+        do {
+            _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
+            dismiss()
+        } catch {
+            logger.error("Re-authorize failed for @\(account.login): \(error.localizedDescription)")
+            errorMessage = (error as? AppError)?.message ?? error.localizedDescription
+        }
     }
 
     /// Run the shared OAuth flow to add a new account. On success it
@@ -179,14 +208,26 @@ private struct AccountRowLabel: View {
                 Text(account.displayName)
                     .font(.body.weight(.medium))
                     .foregroundStyle(.primary)
-                Text("@\(account.login)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if account.needsReauth {
+                    // Orange + clock, matching SignInView's banner tone —
+                    // a routine session timeout, not a security incident.
+                    Text("Session expired — tap to re-authorize")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("@\(account.login)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
 
-            if isActive {
+            if account.needsReauth {
+                Image(systemName: "clock.badge.exclamationmark")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.orange)
+            } else if isActive {
                 Image(systemName: "checkmark.circle.fill")
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(Color.accentColor)
@@ -194,6 +235,10 @@ private struct AccountRowLabel: View {
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(account.displayName)\(isActive ? ", active" : "")")
+        .accessibilityLabel(
+            account.needsReauth
+                ? "\(account.displayName), session expired, tap to re-authorize"
+                : "\(account.displayName)\(isActive ? ", active" : "")"
+        )
     }
 }
