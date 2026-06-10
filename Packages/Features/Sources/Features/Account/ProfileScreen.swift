@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import Accounts
 import Core
 import DesignSystem
@@ -58,6 +59,37 @@ public struct ProfileScreen: View {
     /// Whether the account-switcher sheet is presented.
     @State private var showingAccountSwitcher = false
 
+    /// All signed-in accounts — drives the header's long-press hot-switch
+    /// menu. Same sort as RootView/switcher (newest first).
+    @Query(sort: \Account.addedAt, order: .reverse)
+    private var accounts: [Account]
+
+    /// 7-tap counter on the version footer (release builds' dev-tools
+    /// unlock). Session-scoped on purpose — partial taps don't persist.
+    @State private var versionTapCount = 0
+
+    /// Whether the Developer section is visible in release builds.
+    /// Toggled by 7 taps on the version footer; persisted so the user
+    /// doesn't re-unlock every launch. DEBUG builds bypass this.
+    @AppStorage("chattr.devToolsUnlocked") private var devToolsUnlocked = false
+
+    private var showDeveloperSection: Bool {
+        #if DEBUG
+        return true
+        #else
+        return devToolsUnlocked
+        #endif
+    }
+
+    /// "chattr 1.2 (34)" — the first thing support asks for. Reads the
+    /// app bundle (Bundle.main is the host app at runtime, not the
+    /// Features package bundle).
+    private var versionString: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        return "chattr \(version) (\(build))"
+    }
+
     public init(account: Account, accountStore: AccountStore, clientId: String) {
         self.account = account
         self.accountStore = accountStore
@@ -93,6 +125,40 @@ public struct ProfileScreen: View {
                     }
                 }
                 .buttonStyle(.plain)
+                // Long-press hot-switch: jump straight to another account
+                // without the sheet round-trip. Tap stays "open the
+                // switcher" (discoverable); the menu is the power-user
+                // accelerator. Expired accounts route to the switcher,
+                // which owns the re-authorize flow.
+                .contextMenu {
+                    ForEach(accounts) { other in
+                        if other.userId == account.userId {
+                            // Current account — checkmark, inert.
+                            Button {} label: {
+                                Label(other.displayName, systemImage: "checkmark")
+                            }
+                            .disabled(true)
+                        } else if other.needsReauth {
+                            Button {
+                                showingAccountSwitcher = true
+                            } label: {
+                                Label("\(other.displayName) — expired", systemImage: "clock.badge.exclamationmark")
+                            }
+                        } else {
+                            Button {
+                                accountStore.selectAccount(other)
+                            } label: {
+                                Label(other.displayName, systemImage: "person.crop.circle")
+                            }
+                        }
+                    }
+                    Divider()
+                    Button {
+                        showingAccountSwitcher = true
+                    } label: {
+                        Label("Manage Accounts…", systemImage: "person.2")
+                    }
+                }
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             }
@@ -148,20 +214,21 @@ public struct ProfileScreen: View {
                 Text("Messages that @-mention you or match a keyword are highlighted. Turn on the sound for an audible ping on highlights.")
             }
 
-            // Developer tools — always visible for now. When the app ships
-            // for real users we'll gate behind `#if DEBUG` or a hidden
-            // tap-counter gesture; today there's no production audience so
-            // a discoverable nav row is fine.
-            Section {
-                NavigationLink {
-                    DevLogView()
-                } label: {
-                    Label("Recent Logs", systemImage: "doc.text.magnifyingglass")
+            // Developer tools — always visible in DEBUG; in release builds
+            // hidden behind 7 taps on the version footer (the classic),
+            // persisted via `devToolsUnlocked`.
+            if showDeveloperSection {
+                Section {
+                    NavigationLink {
+                        DevLogView()
+                    } label: {
+                        Label("Recent Logs", systemImage: "doc.text.magnifyingglass")
+                    }
+                } header: {
+                    Text("Developer")
+                } footer: {
+                    Text("Live view of chattr's runtime logs (from OSLogStore). Useful for diagnosing why something didn't work.")
                 }
-            } header: {
-                Text("Developer")
-            } footer: {
-                Text("Live view of chattr's runtime logs (from OSLogStore). Useful for diagnosing why something didn't work.")
             }
 
             // Sign-out lives at the bottom — destructive actions stay
@@ -173,6 +240,10 @@ public struct ProfileScreen: View {
                     showingSignOutConfirm = true
                 } label: {
                     Label("Sign out @\(account.login)", systemImage: "rectangle.portrait.and.arrow.right")
+                        // The destructive role reddens the title but the
+                        // icon keeps the app tint — force the whole label
+                        // red so the row reads as one destructive unit.
+                        .foregroundStyle(.red)
                 }
                 .disabled(isSigningOut)
             } footer: {
@@ -186,7 +257,27 @@ public struct ProfileScreen: View {
                         .font(.footnote)
                 }
             }
+
+            // Version footer — the first thing support asks for, and the
+            // 7-tap dev-tools unlock target in release builds (toggles,
+            // so another 7 taps re-hides).
+            Section {
+            } footer: {
+                Text(versionString)
+                    .frame(maxWidth: .infinity)
+                    .multilineTextAlignment(.center)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        versionTapCount += 1
+                        if versionTapCount >= 7 {
+                            versionTapCount = 0
+                            devToolsUnlocked.toggle()
+                        }
+                    }
+            }
         }
+        // Subtle confirmation when the 7th tap lands (either direction).
+        .sensoryFeedback(.success, trigger: devToolsUnlocked)
         .navigationTitle("Profile")
         // `.inlineLarge` keeps the title in the toolbar (no big drop-down
         // title) — consistent with the ChannelListScreen treatment. Saves
