@@ -46,7 +46,13 @@ public final class AccountStore {
 
     /// All known accounts across every platform, newest-first.
     public func allAccounts() async throws -> [Account] {
-        let context = ModelContext(modelContainer)
+        // mainContext, not a throwaway ModelContext(modelContainer): an
+        // ephemeral context deallocates at end of scope, leaving the returned
+        // @Model objects with no live backing context — accessing any property
+        // afterward is undefined behavior (stale reads / EXC_BAD_ACCESS).
+        // mainContext lives for the app's lifetime, so the returned Accounts
+        // stay valid for callers.
+        let context = modelContainer.mainContext
         var descriptor = FetchDescriptor<Account>()
         descriptor.sortBy = [SortDescriptor(\.addedAt, order: .reverse)]
         return try context.fetch(descriptor)
@@ -57,7 +63,9 @@ public final class AccountStore {
     /// computed `platform` accessor.
     public func allAccounts(on platform: ChatPlatform) async throws -> [Account] {
         let raw = platform.rawValue
-        let context = ModelContext(modelContainer)
+        // mainContext for the same reason as allAccounts() — the returned
+        // Accounts must outlive their fetching context.
+        let context = modelContainer.mainContext
         var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.platformRaw == raw })
         descriptor.sortBy = [SortDescriptor(\.addedAt, order: .reverse)]
         return try context.fetch(descriptor)
@@ -66,7 +74,9 @@ public final class AccountStore {
     /// The currently active account on the given platform, if any.
     public func activeAccount(on platform: ChatPlatform = .twitch) async throws -> Account? {
         guard let userId = activeUserId[platform] else { return nil }
-        let context = ModelContext(modelContainer)
+        // mainContext for the same reason as allAccounts() — the returned
+        // Account must outlive its fetching context.
+        let context = modelContainer.mainContext
         var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == userId })
         descriptor.fetchLimit = 1
         return try context.fetch(descriptor).first
