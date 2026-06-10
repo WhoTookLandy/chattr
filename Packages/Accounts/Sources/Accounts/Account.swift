@@ -1,16 +1,35 @@
 import Foundation
 import SwiftData
+import Core
 
-/// A locally persisted Twitch account.
+/// A locally persisted chat-platform account.
 ///
-/// One row per signed-in Twitch identity. Tokens are *not* stored here —
+/// One row per signed-in identity. Tokens are *not* stored here —
 /// they live in TwitchKit's `KeychainTokenStore` keyed by `tokenNamespace`.
 /// This row stores the public-ish identity bits the UI needs.
 @Model
 public final class Account {
-    /// Twitch user_id — the canonical stable identifier.
+    /// Platform user_id — the canonical stable identifier (Twitch user_id
+    /// today; Kick/YouTube IDs later, disambiguated by `platformRaw`).
     @Attribute(.unique)
     public var userId: String
+
+    /// Which platform this identity belongs to, stored as the raw string
+    /// so SwiftData's lightweight migration can backfill existing rows
+    /// with the literal default — every pre-multi-platform row IS a
+    /// Twitch account. (An enum-typed property would also work, but the
+    /// raw string keeps the stored schema independent of the enum's
+    /// Codable encoding and survives a future case rename via mapping
+    /// in the computed accessor.)
+    public var platformRaw: String = ChatPlatform.twitch.rawValue
+
+    /// Typed accessor over `platformRaw`. Unknown raw values (a future
+    /// build's platform opened in an old build) fall back to `.twitch`
+    /// rather than trapping.
+    public var platform: ChatPlatform {
+        get { ChatPlatform(rawValue: platformRaw) ?? .twitch }
+        set { platformRaw = newValue.rawValue }
+    }
 
     /// Twitch login (lowercase username, e.g. "xqc").
     public var login: String
@@ -43,6 +62,7 @@ public final class Account {
 
     public init(
         userId: String,
+        platform: ChatPlatform = .twitch,
         login: String,
         displayName: String,
         profileImageURL: String,
@@ -51,6 +71,7 @@ public final class Account {
         needsReauth: Bool = false
     ) {
         self.userId = userId
+        self.platformRaw = platform.rawValue
         self.login = login
         self.displayName = displayName
         self.profileImageURL = profileImageURL

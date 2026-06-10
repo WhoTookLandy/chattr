@@ -1,18 +1,8 @@
 import Foundation
+import Core
 
-/// Platform a chat channel lives on. Single case today (`.twitch`) — the
-/// enum exists now so every reference to "a channel" already carries a
-/// platform tag, removing the need to retrofit every type when Kick /
-/// YouTube Live / etc. arrive.
-///
-/// `Codable` so the SwiftData persistence layer (commit E) can round-trip
-/// platform values without a string conversion at the boundary.
-public enum ChatPlatform: String, Codable, Hashable, Sendable, CaseIterable {
-    case twitch
-    // Future:
-    // case kick
-    // case youtube
-}
+// ChatPlatform moved to Core — the Accounts package needs it for the
+// platform-aware Account model, and Accounts can't depend on Features.
 
 /// A single channel on a single platform. Replaces the previous
 /// `OpenChannelDescriptor` (which was implicitly Twitch-only and 1:1 with

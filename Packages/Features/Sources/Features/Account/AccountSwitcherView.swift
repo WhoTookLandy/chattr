@@ -110,7 +110,11 @@ struct AccountSwitcherView: View {
         // @AppStorage in RootView reacts; the `.id(userId)` change tears
         // down this sheet's host AppShell. Dismiss to avoid a flash of
         // the sheet over the re-rendered shell.
-        accountStore.selectAccount(userId: account.userId)
+        //
+        // The Account-taking overload reads the platform off the row, so
+        // the selection lands in the right per-platform slot when Kick /
+        // YouTube accounts join this list.
+        accountStore.selectAccount(account)
         dismiss()
     }
 

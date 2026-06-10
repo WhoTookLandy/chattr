@@ -31,8 +31,11 @@ public final class AccountStore {
     /// reconnect stays aggressive while a channel is open. (See SessionActivitySignal.)
     public let sessionActivity = SessionActivitySignal()
 
-    /// Currently active account's userId. Drives which client/identity drives the UI.
-    private var activeUserId: String?
+    /// Currently active account's userId, per platform. One identity can
+    /// be active on Twitch and another on Kick *simultaneously* — a Kick
+    /// channel always speaks through the Kick identity, so "active" is a
+    /// per-platform slot, not a single global.
+    private var activeUserId: [ChatPlatform: String] = [:]
 
     public init(modelContainer: ModelContainer, clientId: String) {
         self.modelContainer = modelContainer
@@ -41,7 +44,7 @@ public final class AccountStore {
 
     // MARK: - Public API
 
-    /// All known accounts, newest-first.
+    /// All known accounts across every platform, newest-first.
     public func allAccounts() async throws -> [Account] {
         let context = ModelContext(modelContainer)
         var descriptor = FetchDescriptor<Account>()
@@ -49,41 +52,73 @@ public final class AccountStore {
         return try context.fetch(descriptor)
     }
 
-    /// The currently active account, if any.
-    public func activeAccount() async throws -> Account? {
-        guard let activeUserId else { return nil }
+    /// Accounts for one platform, newest-first. The predicate filters on
+    /// the stored `platformRaw` column — `#Predicate` can't see the
+    /// computed `platform` accessor.
+    public func allAccounts(on platform: ChatPlatform) async throws -> [Account] {
+        let raw = platform.rawValue
         let context = ModelContext(modelContainer)
-        var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == activeUserId })
+        var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.platformRaw == raw })
+        descriptor.sortBy = [SortDescriptor(\.addedAt, order: .reverse)]
+        return try context.fetch(descriptor)
+    }
+
+    /// The currently active account on the given platform, if any.
+    public func activeAccount(on platform: ChatPlatform = .twitch) async throws -> Account? {
+        guard let userId = activeUserId[platform] else { return nil }
+        let context = ModelContext(modelContainer)
+        var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == userId })
         descriptor.fetchLimit = 1
         return try context.fetch(descriptor).first
     }
 
-    /// Set which account is active.
-    public func setActive(userId: String) {
-        self.activeUserId = userId
+    /// Set which account is active on a platform (in-memory only — see
+    /// `selectAccount` for the persisted variant).
+    public func setActive(userId: String, platform: ChatPlatform = .twitch) {
+        activeUserId[platform] = userId
         // .notice: account-switch is a boundary crossing — visible without
         // raising the filter threshold during debugging.
-        logger.notice("Active account → \(userId, privacy: .public)")
+        logger.notice("Active \(platform.rawValue, privacy: .public) account → \(userId, privacy: .public)")
     }
 
-    /// UserDefaults key holding the userId of the device's active account.
-    /// Read by RootView (`@AppStorage`) to pick which account's AppShell
-    /// to show, and by the account switcher to mark the active row.
+    /// UserDefaults key holding the userId of the device's active **Twitch**
+    /// account. Read by RootView (`@AppStorage`) to pick which account's
+    /// AppShell to show, and by the account switcher to mark the active row.
     /// Per-device by design — not a SwiftData field (see Account.swift).
+    ///
+    /// Kept as the bare legacy constant (no `.twitch` suffix) so existing
+    /// devices keep their selection across the multi-platform migration —
+    /// every pre-existing selection IS a Twitch selection. Other platforms
+    /// get suffixed keys via `activeAccountKey(for:)`.
     public static let activeAccountUserIdKey = "chattr.activeAccountUserId"
 
-    /// Make the account with `userId` active. Writes the userId to
-    /// UserDefaults (which RootView's `@AppStorage` observes and reacts
-    /// to — re-rendering AppShell with the new account) and updates the
-    /// in-memory `activeUserId`.
+    /// Per-platform UserDefaults key for the active-account selection.
+    /// `.twitch` maps to the legacy unsuffixed key (see above).
+    public static func activeAccountKey(for platform: ChatPlatform) -> String {
+        switch platform {
+        case .twitch: return activeAccountUserIdKey
+        }
+    }
+
+    /// Make the account with `userId` active on `platform`. Writes the
+    /// userId to UserDefaults (which RootView's `@AppStorage` observes and
+    /// reacts to — re-rendering AppShell with the new account) and updates
+    /// the in-memory `activeUserId` slot for that platform.
     ///
     /// No SwiftData write, so no migration and no per-device sync. The
     /// `@AppStorage` in RootView picks up the UserDefaults change via KVO
     /// and re-renders.
-    public func selectAccount(userId: String) {
-        UserDefaults.standard.set(userId, forKey: Self.activeAccountUserIdKey)
-        setActive(userId: userId)
-        logger.notice("Selected account \(userId, privacy: .public)")
+    public func selectAccount(userId: String, platform: ChatPlatform = .twitch) {
+        UserDefaults.standard.set(userId, forKey: Self.activeAccountKey(for: platform))
+        setActive(userId: userId, platform: platform)
+        logger.notice("Selected account \(userId, privacy: .public) on \(platform.rawValue, privacy: .public)")
+    }
+
+    /// Convenience that reads the platform off the account row itself —
+    /// prefer this from UI code so call sites can't pair a userId with
+    /// the wrong platform.
+    public func selectAccount(_ account: Account) {
+        selectAccount(userId: account.userId, platform: account.platform)
     }
 
     /// Returns (constructing if needed) the TwitchClient for the given account.
@@ -153,6 +188,7 @@ public final class AccountStore {
         // Account.profileImageURL uses uppercase 'URL' (Swift convention on stored model property).
         let account = Account(
             userId: user.id,
+            platform: .twitch,
             login: user.login,
             displayName: user.displayName,
             profileImageURL: user.profileImageUrl,
@@ -161,10 +197,10 @@ public final class AccountStore {
         let context = ModelContext(modelContainer)
         context.insert(account)
         try context.save()
-        activeUserId = user.id
+        activeUserId[.twitch] = user.id
         // Make the newly-added account active on this device. RootView's
         // @AppStorage observes this key and re-renders into the new account.
-        UserDefaults.standard.set(user.id, forKey: Self.activeAccountUserIdKey)
+        UserDefaults.standard.set(user.id, forKey: Self.activeAccountKey(for: .twitch))
 
         // .notice: account added is a user-initiated boundary crossing.
         logger.notice("Added account @\(user.login, privacy: .public) (\(user.id, privacy: .public))")
@@ -230,8 +266,8 @@ public final class AccountStore {
             }
             OAuthRefreshTokenCache.delete(for: userId)
             clients[userId] = nil
-            if activeUserId == userId {
-                activeUserId = nil
+            if activeUserId[account.platform] == userId {
+                activeUserId[account.platform] = nil
             }
             context.delete(account)
             do {
@@ -242,12 +278,11 @@ public final class AccountStore {
         } else {
             logger.info("forceSignOut: no Account row for userId \(userId) — likely already gone")
             // Still clear the in-memory client cache and active-account
-            // tracking — they may have outlived the row.
+            // tracking — they may have outlived the row. Without a row we
+            // don't know the platform, so sweep every slot.
             OAuthRefreshTokenCache.delete(for: userId)
             clients[userId] = nil
-            if activeUserId == userId {
-                activeUserId = nil
-            }
+            activeUserId = activeUserId.filter { $0.value != userId }
         }
     }
 
@@ -267,14 +302,15 @@ public final class AccountStore {
         // (intentionally — see OAuthRefreshTokenCache header).
         OAuthRefreshTokenCache.delete(for: account.userId)
         clients[account.userId] = nil
-        if activeUserId == account.userId {
-            activeUserId = nil
+        if activeUserId[account.platform] == account.userId {
+            activeUserId[account.platform] = nil
         }
         // If we removed the active account, clear the stored selection so
         // RootView's @AppStorage fallback (accounts.first by addedAt) picks
         // the next account — or SignInView if it was the last one.
-        if UserDefaults.standard.string(forKey: Self.activeAccountUserIdKey) == account.userId {
-            UserDefaults.standard.removeObject(forKey: Self.activeAccountUserIdKey)
+        let key = Self.activeAccountKey(for: account.platform)
+        if UserDefaults.standard.string(forKey: key) == account.userId {
+            UserDefaults.standard.removeObject(forKey: key)
         }
         let context = modelContainer.mainContext
         context.delete(account)
