@@ -36,9 +36,10 @@ struct ChatRow: View, Equatable {
     /// a `.message` row. Optional for the same reason as `onRetry`.
     var onReply: (() -> Void)? = nil
     /// Called when the user picks "View Thread" from the long-press
-    /// menu. Optional — when nil, the menu item is hidden (so the
+    /// menu OR taps the quoted-reply preview line. Optional — when nil,
+    /// the menu item is hidden and the quote tap is disabled (so the
     /// thread-sheet view itself, which doesn't recurse, sets it nil
-    /// to suppress the entry).
+    /// to suppress both).
     var onViewThread: (() -> Void)? = nil
     /// Called when a moderator picks "Delete Message" from the
     /// long-press menu. Optional — when nil, the menu item is hidden.
@@ -51,6 +52,10 @@ struct ChatRow: View, Equatable {
     var onBlock: (() -> Void)? = nil
     /// Called when the user picks a reason from "Report…". Same nil-hides rule.
     var onReport: ((UserBlockReason) -> Void)? = nil
+    /// Whether a reply line renders its quoted-parent block. The thread
+    /// sheet sets this false — inside a thread every message's parent is
+    /// already visible right above it, so per-row quotes are pure noise.
+    var showsQuotedReply: Bool = true
 
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
@@ -97,7 +102,9 @@ struct ChatRow: View, Equatable {
     // (ChatLine + [ChatBadgeEntry]) so this is safe — no instance state
     // is accessed.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.line == rhs.line && lhs.badgeEntries == rhs.badgeEntries
+        lhs.line == rhs.line
+            && lhs.badgeEntries == rhs.badgeEntries
+            && lhs.showsQuotedReply == rhs.showsQuotedReply
     }
 
     var body: some View {
@@ -225,60 +232,86 @@ struct ChatRow: View, Equatable {
         }
     }
 
-    /// Wraps `messageBody` with a quoted-preview block above it when
-    /// the line is a reply. For non-reply messages, this is just
-    /// `messageBody` unchanged — no layout cost.
+    /// Wraps `messageBody` with a quoted-preview line above it when
+    /// the line is a reply (and quoting isn't suppressed). For non-reply
+    /// messages, this is just `messageBody` unchanged — no layout cost.
     ///
-    /// The quoted block visually borrows from Twitch web's reply
-    /// rendering: a thin leading bar (the "quote" affordance) +
-    /// dimmed parent author name + truncated parent body. One line,
-    /// truncated tail.
+    /// Quote + body share ONE container background so they read as a
+    /// single unit. Proximity alone doesn't bind them in a dense chat
+    /// list — without the shared plate, the quote visually attaches to
+    /// whichever message happens to sit above it. When the line is also
+    /// highlighted (@-mention), the container takes the accent tint
+    /// instead of stacking a second plate inside.
     @ViewBuilder
     private var messageWithOptionalQuote: some View {
-        if let reply = line.replyParent {
-            VStack(alignment: .leading, spacing: 2) {
+        if showsQuotedReply, let reply = line.replyParent {
+            VStack(alignment: .leading, spacing: 3) {
                 quotedPreview(reply)
-                messageBody
+                messageBody(highlightPlate: false)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(line.isHighlighted
+                          ? Color.accentColor.opacity(0.12)
+                          : Color.secondary.opacity(0.07))
             }
         } else {
             messageBody
         }
     }
 
-    /// Quoted-parent block. Two stacked lines: parent author + body.
-    /// Uses caption2 / footnote weights so it visually subordinates to
-    /// the real message body below.
+    /// Quoted-parent preview: ONE line — reply arrow, parent author,
+    /// truncated parent body. Single-line (vs the old stacked author/body)
+    /// because vertical space is the scarcest resource in a fast chat;
+    /// the quote is a glanceable hint, not content to read, and the full
+    /// context is one tap away.
+    ///
+    /// The whole line is a button that opens the thread sheet — same
+    /// action as the long-press "View Thread" menu item, but actually
+    /// discoverable. Read-only contexts (thread sheet, previews) pass
+    /// `onViewThread == nil`, which disables the tap without changing
+    /// the visual.
     @ViewBuilder
     private func quotedPreview(_ reply: ChatLine.ReplyParent) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            // Leading "quote" bar — 2pt-wide rounded rect using the
-            // tertiary system fill so it adapts to light/dark
-            // automatically. Reads as "this is a quoted block"
-            // without needing a separate icon.
-            Capsule()
-                .fill(.tertiary)
-                .frame(width: 2)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(reply.parentAuthorDisplayName)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text(reply.parentBody)
+        Button {
+            onViewThread?()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrowshape.turn.up.left.fill")
                     .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text(reply.parentAuthorDisplayName)
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(reply.parentBody)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
         }
-        .padding(.leading, 2)
+        .buttonStyle(.plain)
+        .disabled(onViewThread == nil)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Replying to \(reply.parentAuthorDisplayName): \(reply.parentBody)")
+        .accessibilityHint(onViewThread == nil ? "" : "Opens the thread")
     }
 
     /// The standard inline message body (badges + username + runs).
     /// Pulled out as a property so .deletedPlaceholder can overlay it
     /// without duplicating the layout.
-    @ViewBuilder
     private var messageBody: some View {
+        messageBody(highlightPlate: line.isHighlighted)
+    }
+
+    /// `highlightPlate: false` lets the reply container own the tint —
+    /// a highlighted reply gets ONE accent plate around quote + body,
+    /// not a second one nested inside.
+    @ViewBuilder
+    private func messageBody(highlightPlate: Bool) -> some View {
         FlowLayout(spacing: 4, alignment: .firstTextBaseline, hangingIndent: 14) {
             // Optional leading timestamp. Monospaced digits so columns of
             // timestamps align vertically across rows; tertiary + caption2
@@ -319,10 +352,10 @@ struct ChatRow: View, Equatable {
         // Highlighted lines get an accent-tinted backplate so a "@me ..."
         // mention stands out at a glance. Subtle — uses the system accent at
         // low opacity so it doesn't fight with the row content.
-        .padding(.horizontal, line.isHighlighted ? 4 : 0)
-        .padding(.vertical, line.isHighlighted ? 2 : 0)
+        .padding(.horizontal, highlightPlate ? 4 : 0)
+        .padding(.vertical, highlightPlate ? 2 : 0)
         .background {
-            if line.isHighlighted {
+            if highlightPlate {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(Color.accentColor.opacity(0.12))
             }

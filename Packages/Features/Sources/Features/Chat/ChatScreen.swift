@@ -1357,18 +1357,34 @@ private struct ThreadView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(threadLines) { line in
-                                ChatRow(
-                                    line: line,
-                                    badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? []
-                                    // Note: deliberately no onRetry /
-                                    // onReply / onViewThread inside the
-                                    // thread sheet. Reply is implicit
-                                    // (the compose bar threads
-                                    // automatically); recursive
-                                    // View Thread would be a no-op;
-                                    // retry on optimistic rows still
-                                    // works from the main chat view.
-                                )
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ChatRow(
+                                        line: line,
+                                        badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? [],
+                                        // Note: deliberately no onRetry /
+                                        // onReply / onViewThread inside the
+                                        // thread sheet. Reply is implicit
+                                        // (the compose bar threads
+                                        // automatically); recursive
+                                        // View Thread would be a no-op;
+                                        // retry on optimistic rows still
+                                        // works from the main chat view.
+                                        //
+                                        // Quotes are suppressed: inside a
+                                        // thread, every reply's parent is
+                                        // already visible above it.
+                                        showsQuotedReply: false
+                                    )
+                                    // Thin rule under the root message so
+                                    // the sheet reads "original ↑ /
+                                    // replies ↓" at a glance. Only when
+                                    // the root is still in the buffer AND
+                                    // there's something below it.
+                                    if line.id == rootMessageId, threadLines.count > 1 {
+                                        Divider()
+                                            .padding(.vertical, 2)
+                                    }
+                                }
                                 .id(line.id)
                             }
                         }
