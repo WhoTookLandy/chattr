@@ -323,8 +323,12 @@ struct ChatRow: View, Equatable {
     /// When the chatter's display name is a localized variant of their
     /// login (and the setting is on), the login is appended in dimmed
     /// parentheses — order per `appearance.loginNameDisplay`.
-    private var usernamePrefix: Text {
-        let nameFont = appearance.font.weight(.semibold)
+    ///
+    /// Takes the row's already-computed body font: `appearance.font`
+    /// allocates a fresh `Font` per access, so `messageBody` computes it
+    /// once and threads it through here and every `runView`.
+    private func usernamePrefix(bodyFont: Font) -> Text {
+        let nameFont = bodyFont.weight(.semibold)
         guard let pair = ChatAppearance.loginAnnotation(
             displayName: line.authorDisplayName,
             login: line.authorUserLogin,
@@ -348,6 +352,10 @@ struct ChatRow: View, Equatable {
     /// not a second one nested inside.
     @ViewBuilder
     private func messageBody(highlightPlate: Bool) -> some View {
+        // Computed ONCE per body — `appearance.font` builds a new
+        // `Font.system(size:)` on every access, and this body would
+        // otherwise read it once per text run plus timestamp + username.
+        let bodyFont = appearance.font
         // No hanging indent — wrapped lines continue flush at the leading
         // edge, matching Twitch's native chat. The 14pt indent we shipped
         // briefly made continuations look misaligned ("starts a little bit
@@ -360,7 +368,7 @@ struct ChatRow: View, Equatable {
             // + secondary grey so rows read uniformly, not metadata-tiny.
             if appearance.showTimestamps {
                 Text(line.timestamp, format: Self.timestampFormat)
-                    .font(appearance.font.monospacedDigit())
+                    .font(bodyFont.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
             // Badges keyed by `url` — stable per-badge identity across row
@@ -376,7 +384,7 @@ struct ChatRow: View, Equatable {
             // Username prefix. The colon is interpolated into the same Text
             // so it hugs the name ("Landy:") instead of floating 4pt away as
             // its own flow item — and the pair can never wrap apart.
-            Text("\(usernamePrefix)\(Text(":").foregroundStyle(.secondary))")
+            Text("\(usernamePrefix(bodyFont: bodyFont))\(Text(":").foregroundStyle(.secondary))")
 
             // Walk the pre-normalized runs in order. `line.runs` is immutable
             // after `Normalizer.normalize(...)` returns (we replace the whole
@@ -386,7 +394,7 @@ struct ChatRow: View, Equatable {
             // tripping AsyncImage's identity-change re-fetch for runs that
             // contain `.emote` / `.twitchEmote` cases.
             ForEach(line.runs.indices, id: \.self) { idx in
-                runView(for: line.runs[idx])
+                runView(for: line.runs[idx], bodyFont: bodyFont)
             }
         }
         // Highlighted lines get an accent-tinted backplate so a "@me ..."
@@ -455,10 +463,9 @@ struct ChatRow: View, Equatable {
     /// the Normalizer already did all the tokenization work, so this is
     /// purely "given run X, what view?"
     @ViewBuilder
-    private func runView(for run: LineRun) -> some View {
+    private func runView(for run: LineRun, bodyFont: Font) -> some View {
         // All text runs derive their font from the appearance setting —
-        // `.standard` maps to `.callout`, the pre-settings default.
-        let bodyFont = appearance.font
+        // passed in by `messageBody`, which computes it once per row.
         switch run {
         case .text(let body):
             Text(body)
