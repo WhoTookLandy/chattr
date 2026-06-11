@@ -18,6 +18,16 @@ import SwiftUI
 /// already rely on for `colorScheme`).
 public struct ChatAppearance: Equatable, Sendable {
 
+    /// How to annotate a chatter's username with their login. A Twitch
+    /// display name differs from the login only by capitalization OR as a
+    /// fully localized non-Latin name — so "differs ignoring case" is a
+    /// precise proxy for "this is a localized name worth annotating".
+    public enum LoginNameDisplay: String, CaseIterable, Sendable {
+        case off          // デレク
+        case displayFirst // デレク (derek)   — default
+        case loginFirst   // derek (デレク)
+    }
+
     /// Default chat text size in points — matches `.callout` (16pt at the
     /// standard Dynamic Type setting), the pre-settings rendering.
     public static let defaultTextSizePoints: Double = 16
@@ -52,19 +62,23 @@ public struct ChatAppearance: Equatable, Sendable {
     /// the screen and scrolls underneath the floating toolbar pills,
     /// instead of stopping at the safe-area edge below them.
     public var edgeToEdge: Bool = false
+    /// Annotate localized usernames with the login (see `loginAnnotation`).
+    public var loginNameDisplay: LoginNameDisplay = .displayFirst
 
     public init(
         textSizePoints: Double = ChatAppearance.defaultTextSizePoints,
         showTimestamps: Bool = false,
         showBadges: Bool = true,
         animatedEmotes: Bool = true,
-        edgeToEdge: Bool = false
+        edgeToEdge: Bool = false,
+        loginNameDisplay: LoginNameDisplay = .displayFirst
     ) {
         self.textSizePoints = textSizePoints
         self.showTimestamps = showTimestamps
         self.showBadges = showBadges
         self.animatedEmotes = animatedEmotes
         self.edgeToEdge = edgeToEdge
+        self.loginNameDisplay = loginNameDisplay
     }
 
     // MARK: - Storage keys
@@ -82,6 +96,7 @@ public struct ChatAppearance: Equatable, Sendable {
     public static let showBadgesKey = "chattr.chatAppearance.showBadges"
     public static let animatedEmotesKey = "chattr.chatAppearance.animatedEmotes"
     public static let edgeToEdgeKey = "chattr.chatAppearance.edgeToEdge"
+    public static let loginNameDisplayKey = "chattr.chatAppearance.loginNameDisplay"
 
     // MARK: - Chat history
 
@@ -136,5 +151,30 @@ extension EnvironmentValues {
     public var chatAppearance: ChatAppearance {
         get { self[ChatAppearanceKey.self] }
         set { self[ChatAppearanceKey.self] = newValue }
+    }
+}
+
+// MARK: - Login annotation rule
+
+extension ChatAppearance {
+    /// The (primary, secondary) name pair to render for a username, or
+    /// `nil` when no login annotation should be shown. `secondary` is the
+    /// name shown in dimmed parentheses. The single source of truth for
+    /// both the trigger rule and the name ordering.
+    public static func loginAnnotation(
+        displayName: String,
+        login: String,
+        style: LoginNameDisplay
+    ) -> (primary: String, secondary: String)? {
+        guard style != .off,
+              !login.isEmpty,
+              displayName.lowercased() != login.lowercased() else {
+            return nil
+        }
+        switch style {
+        case .off:          return nil   // unreachable — guarded above
+        case .displayFirst: return (displayName, login)
+        case .loginFirst:   return (login, displayName)
+        }
     }
 }
