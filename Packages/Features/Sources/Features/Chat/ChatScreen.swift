@@ -86,36 +86,18 @@ public struct ChatScreen: View {
         channelSessionRegistry?.connectionStatus(forAccountUserId: account.userId)
     }
 
-    /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
-    /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
-    /// the binding also updates as the user scrolls manually (iOS 17+ API).
-    @State private var scrolledMessageId: String?
-
-    /// True when the scroll is at (or near) the bottom — i.e. the user is
-    /// "tailing" live chat. Driven by `.onScrollGeometryChange` reading
-    /// real scroll geometry. Gates the auto-scroll-on-new-message and
-    /// controls the jump-to-bottom pill's visibility (pill shows when
-    /// false).
-    @State private var isAtBottom = true
-
-    /// Count of messages that arrived while the user was scrolled up
-    /// (not tailing). Shown in the jump-to-bottom pill ("3 new
-    /// messages") so the user knows how much they're missing. Reset to
-    /// 0 whenever they return to the bottom.
-    @State private var unreadWhileScrolledUp = 0
-
-    /// Incremented to ask the UIKit chat list to scroll to the newest message
-    /// (jump-to-bottom pill). The collection view acts on each change.
-    @State private var scrollToBottomToken = 0
-
-    /// Current connection pill, derived from connection-state transitions via
-    /// `ConnectionBanner.next`. Driven by the `.onChange` below.
-    @State private var connectionBanner: ConnectionBanner = .hidden
-
-    /// Cancels the in-flight "Live again" auto-dismiss when state changes again.
-    @State private var liveAgainDismiss: Task<Void, Never>?
+    // NOTE: scroll-position state (`scrolledMessageId`, `isAtBottom`,
+    // `unreadWhileScrolledUp`, `scrollToBottomToken`) and the connection-
+    // banner state live inside the extracted `ChatTranscript` view below —
+    // NOT here on ChatScreen. Same observation-scoping rationale as the
+    // compose-bar state note further down: those values change at scroll /
+    // message rate, and keeping them out of ChatScreen keeps this body off
+    // the per-message hot path.
 
     /// Brief "Reported & blocked" confirmation; auto-clears after ~2s.
+    /// Stays on ChatScreen (not ChatTranscript) because it's WRITTEN by the
+    /// report closures built in `chatRow(for:)` here; the transcript reads
+    /// it through a binding for the pill overlay.
     @State private var showReportConfirmation = false
     @State private var reportConfirmationDismiss: Task<Void, Never>?
 
@@ -133,11 +115,6 @@ public struct ChatScreen: View {
     /// skip the easeOut tween on auto-scroll so chat snaps instantly to the
     /// newest message instead of animating.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// Chat appearance preferences. ChatScreen itself only consumes
-    /// `edgeToEdge` (full-bleed transcript) — the per-row knobs are read
-    /// by ChatRow from the same environment.
-    @Environment(\.chatAppearance) private var appearance
 
     // NOTE: compose-bar state (`composeText`, `isSending`, `composeFocused`)
     // lives inside the extracted `ComposeBar` view below — NOT here on
@@ -203,14 +180,28 @@ public struct ChatScreen: View {
         Group {
             if let errorMessage {
                 errorView(errorMessage)
-            } else if chatModel.lines.isEmpty {
-                // Distinguish "attaching" (sessions not yet subscribed) from
-                // "attached but quiet" (subscriptions live, but no messages
-                // have arrived yet). Without explicit state UI a quiet channel
-                // looks identical to a broken connection.
-                emptyOrConnectingView
             } else {
-                chatScrollView
+                // The transcript (empty state + message list + pills) is a
+                // separate child view for OBSERVATION SCOPING: it is the only
+                // body that reads `chatModel.lines`, so per-message buffer
+                // mutations re-evaluate just that subtree. Before this split,
+                // the `lines.isEmpty` read right here subscribed ALL of
+                // ChatScreen.body to the buffer — the whole screen (compose
+                // bar closures, sheets, alert wiring) re-ran for every
+                // inbound message, 50–200×/sec during raids.
+                //
+                // Passing `chatModel` itself registers NO dependency — only
+                // property reads do. `rowContent` closes over ChatScreen's
+                // row callbacks (retry/reply/block/report) so the transcript
+                // stays ignorant of them; the closures run from the cell
+                // provider, outside any body, exactly as before.
+                ChatTranscript(
+                    chatModel: chatModel,
+                    channelLoginName: channelLoginName,
+                    connectionStatus: connectionStatus,
+                    rowContent: { line in chatRow(for: line) },
+                    showReportConfirmation: $showReportConfirmation
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -468,6 +459,241 @@ public struct ChatScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Builds the row for one line — same badge lookup + callbacks the
+    /// `ForEach` used, lifted into a helper so both the collection-view cell
+    /// provider and the legacy `LazyVStack` can call it.
+    private func chatRow(for line: ChatLine) -> ChatRow {
+        ChatRow(
+            line: line,
+            badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? [],
+            onRetry: { Task { await chatModel.retry(failedLineId: line.id) } },
+            onReply: { chatModel.beginReply(to: line) },
+            onViewThread: {
+                viewingThreadRootId = ThreadRootID(id: TabChatModel.threadRoot(of: line))
+            },
+            onDelete: (chatModel.currentUserCanModerate
+                       && line.authorUserId != account.userId)
+                ? { Task { await chatModel.deleteMessage(line.id) } }
+                : nil,
+            onBlock: line.authorUserId == account.userId ? nil : {
+                Task {
+                    await blockStore?.block(
+                        userId: line.authorUserId,
+                        login: line.authorDisplayName,
+                        displayName: line.authorDisplayName,
+                        reason: .other
+                    )
+                }
+            },
+            onReport: line.authorUserId == account.userId ? nil : { reason in
+                Task {
+                    await blockStore?.block(
+                        userId: line.authorUserId,
+                        login: line.authorDisplayName,
+                        displayName: line.authorDisplayName,
+                        reason: reason
+                    )
+                    showReportConfirmation = true
+                    reportConfirmationDismiss?.cancel()
+                    reportConfirmationDismiss = Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(2))
+                        guard !Task.isCancelled else { return }
+                        showReportConfirmation = false
+                    }
+                }
+            }
+        )
+    }
+
+    // MARK: - Session lifecycle
+
+    @MainActor
+    private func startSession() async {
+        // Badge load runs in a sibling .task modifier (see body) — gives us
+        // structured-cancellation parity with this session-start task.
+        guard let registry = channelSessionRegistry else {
+            errorMessage = "Couldn't open chat: missing session registry"
+            logger.error("ChatScreen has no registry in environment — was RootView injected?")
+            return
+        }
+
+        // Signpost-bracket the session-start so Instruments can show the
+        // overlap with the emote-load interval. Useful for diagnosing
+        // races like the cancellation-during-channel-open bug we hit
+        // (Instruments would show emote-load truncated while session-start
+        // continues to completion, making the relationship obvious).
+        let signpostID = signposter.makeSignpostID()
+        let signpostState = signposter.beginInterval(
+            "session-start",
+            id: signpostID,
+            "channel=\(channelLoginName)"
+        )
+        defer { signposter.endInterval("session-start", signpostState) }
+
+        do {
+            // Registry returns the cached session if one exists for this
+            // (userId, channelId), or constructs + starts a new one. Either
+            // way the session is already-running by the time we get it.
+            let session = try await registry.session(
+                accountUserId: account.userId,
+                accountLogin: account.login,
+                channelId: channelId,
+                channelLoginName: channelLoginName
+            )
+            logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
+
+            // Hand the session to the tab model, which atomically primes
+            // `chatModel.lines` from the session's current ring buffer AND
+            // subscribes for future messages via `ChannelSession.subscribe(_:)`.
+            //
+            // For the MVP this is always a single-element array. When multi-
+            // channel tabs ship, `attach(sessions: [a, b, c])` will subscribe
+            // to all of them with the same model — the rest of ChatScreen
+            // doesn't need to change.
+            //
+            // Lifecycle: detach() is called from `.onDisappear` in the body
+            // below. The model's pub-sub subscriptions stay live as long as
+            // this ChatScreen instance is mounted; on tear-down they're
+            // released, but the underlying `ChannelSession` stays alive in
+            // the registry (other tabs may share it, ref counting in commit E).
+            //
+            // Phase 2.2 addition: hand in the per-channel EmoteIndex so each
+            // incoming message gets normalized through
+            // `Normalizer.normalize(...)` against the third-party emote
+            // table. The index may not be loaded yet at this point — the
+            // model tolerates a nil/empty snapshot and tokens stay as text
+            // until the snapshot fills in.
+            //
+            // T11: index comes from the registry (same object across all
+            // ChatScreen mounts for this channel). Fall through to a
+            // throwaway EmoteIndex if registry is missing — startSession
+            // already errored out above in that case, so this branch is
+            // effectively unreachable; the fallback exists only to keep
+            // the type-checker happy without forcing a force-unwrap.
+            let index = registry.emoteIndex(
+                forAccountUserId: account.userId,
+                channelId: channelId
+            )
+            await chatModel.attach(
+                sessions: [session],
+                emoteIndex: index,
+                currentUserId: account.userId,
+                currentUserLogin: account.login,
+                currentUserDisplayName: account.displayName,
+                // User-configured highlight keywords (Profile → Highlight
+                // Keywords). Read at attach time — changing them mid-session
+                // applies on the next channel attach (reopen / relaunch).
+                // Self-mentions are always highlighted regardless of this
+                // list; keywords are additive.
+                highlightKeywords: HighlightSettings.keywords(),
+                // Chat History setting — read at attach time, like the
+                // keywords. Tab remounts re-attach, so a changed setting
+                // takes hold on the next swipe back to (or reopen of) a
+                // channel.
+                lineCap: ChatAppearance.chatHistoryLines(),
+                // Registry-owned normalize memo — survives this screen's
+                // unmount so swiping back re-primes from cache hits
+                // instead of re-tokenizing the whole ring (see
+                // NormalizedLineCache).
+                lineCache: registry.normalizedLineCache(
+                    forAccountUserId: account.userId,
+                    channelId: channelId
+                )
+            )
+        } catch is CancellationError {
+            // Expected on view tear-down / channel-tab switch. The outgoing
+            // instance's `try await registry.session(...)` gets cancelled in
+            // flight. Silently exit — don't show a red error.
+            logger.info("ChatScreen session-start cancelled for #\(channelLoginName)")
+        } catch {
+            errorMessage = "Couldn't open chat: \(error.localizedDescription)"
+            logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// The transcript region: empty/connecting state, the scrolling message
+/// list, and the floating pills that ride on it. Everything here is moved
+/// verbatim from ChatScreen — only the row factory is abstracted into
+/// `rowContent` so this view stays ignorant of the row callbacks.
+///
+/// ## Why this is a separate view (observation scoping)
+///
+/// `@Observable` registers dependencies per view BODY that reads a
+/// property. `TabChatModel.lines` is derived from the stored `buffer`,
+/// which mutates on EVERY inbound message — so whichever body reads
+/// `lines` re-evaluates at chat-message rate (50-200x/sec during raids).
+/// When that body was `ChatScreen.body`, each message re-ran the whole
+/// screen: compose-bar closure construction, sheet/alert wiring, registry
+/// lookups. Isolating every `lines` read (and the scroll-rate @State)
+/// here confines per-message invalidation to this subtree.
+///
+/// To verify after touching this boundary: add `let _ = Self._printChanges()`
+/// to ChatScreen.body in a debug build and open a busy channel — ChatScreen
+/// should stay silent while messages flow; only ChatTranscript ticks.
+private struct ChatTranscript: View {
+    /// Observed HERE, not in ChatScreen — see the doc comment above.
+    let chatModel: TabChatModel
+    let channelLoginName: String
+    /// Registry-owned per-account connection store; drives the
+    /// "Reconnecting… / Live again" pill.
+    let connectionStatus: ConnectionStatusStore?
+    /// Row factory — closes over ChatScreen's callbacks (retry, reply,
+    /// block, report). Runs from the cell provider, outside any body.
+    let rowContent: (ChatLine) -> ChatRow
+    /// Parent-owned: written by the report flow's row callbacks (built in
+    /// ChatScreen), read by the confirmation pill overlay here.
+    @Binding var showReportConfirmation: Bool
+
+    /// Chat appearance preferences — this view consumes `edgeToEdge`.
+    @Environment(\.chatAppearance) private var appearance
+
+    /// Block list for the signed-in account. Pushed into
+    /// `chatModel.blockedIds` reactively by the onChange/task in
+    /// `chatScrollView`.
+    @Environment(\.blockStore) private var blockStore
+
+    /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
+    /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
+    /// the binding also updates as the user scrolls manually (iOS 17+ API).
+    @State private var scrolledMessageId: String?
+
+    /// True when the scroll is at (or near) the bottom — i.e. the user is
+    /// "tailing" live chat. Driven by `.onScrollGeometryChange` reading
+    /// real scroll geometry. Gates the auto-scroll-on-new-message and
+    /// controls the jump-to-bottom pill's visibility (pill shows when
+    /// false).
+    @State private var isAtBottom = true
+
+    /// Count of messages that arrived while the user was scrolled up
+    /// (not tailing). Shown in the jump-to-bottom pill ("3 new
+    /// messages") so the user knows how much they're missing. Reset to
+    /// 0 whenever they return to the bottom.
+    @State private var unreadWhileScrolledUp = 0
+
+    /// Incremented to ask the UIKit chat list to scroll to the newest message
+    /// (jump-to-bottom pill). The collection view acts on each change.
+    @State private var scrollToBottomToken = 0
+
+    /// Current connection pill, derived from connection-state transitions via
+    /// `ConnectionBanner.next`. Driven by the `.onChange` in `chatScrollView`.
+    @State private var connectionBanner: ConnectionBanner = .hidden
+
+    /// Cancels the in-flight "Live again" auto-dismiss when state changes again.
+    @State private var liveAgainDismiss: Task<Void, Never>?
+
+    var body: some View {
+        if chatModel.lines.isEmpty {
+            // Distinguish "attaching" (sessions not yet subscribed) from
+            // "attached but quiet" (subscriptions live, but no messages
+            // have arrived yet). Without explicit state UI a quiet channel
+            // looks identical to a broken connection.
+            emptyOrConnectingView
+        } else {
+            chatScrollView
+        }
+    }
+
     /// Empty-state placeholder. Two flavors driven by `chatModel.attachState`:
     ///   - `.detached` / `.attaching` → "Connecting to chat…" with a spinner
     ///     (the model's `attach(sessions:)` is in flight — that includes
@@ -513,7 +739,7 @@ public struct ChatScreen: View {
         ZStack {
             ChatListView(
                 lines: chatModel.lines,
-                rowContent: { line in chatRow(for: line) },
+                rowContent: { line in rowContent(line) },
                 isAtBottom: $isAtBottom,
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge
@@ -599,52 +825,6 @@ public struct ChatScreen: View {
         #endif
     }
 
-    /// Builds the row for one line — same badge lookup + callbacks the
-    /// `ForEach` used, lifted into a helper so both the collection-view cell
-    /// provider and the legacy `LazyVStack` can call it.
-    private func chatRow(for line: ChatLine) -> ChatRow {
-        ChatRow(
-            line: line,
-            badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? [],
-            onRetry: { Task { await chatModel.retry(failedLineId: line.id) } },
-            onReply: { chatModel.beginReply(to: line) },
-            onViewThread: {
-                viewingThreadRootId = ThreadRootID(id: TabChatModel.threadRoot(of: line))
-            },
-            onDelete: (chatModel.currentUserCanModerate
-                       && line.authorUserId != account.userId)
-                ? { Task { await chatModel.deleteMessage(line.id) } }
-                : nil,
-            onBlock: line.authorUserId == account.userId ? nil : {
-                Task {
-                    await blockStore?.block(
-                        userId: line.authorUserId,
-                        login: line.authorDisplayName,
-                        displayName: line.authorDisplayName,
-                        reason: .other
-                    )
-                }
-            },
-            onReport: line.authorUserId == account.userId ? nil : { reason in
-                Task {
-                    await blockStore?.block(
-                        userId: line.authorUserId,
-                        login: line.authorDisplayName,
-                        displayName: line.authorDisplayName,
-                        reason: reason
-                    )
-                    showReportConfirmation = true
-                    reportConfirmationDismiss?.cancel()
-                    reportConfirmationDismiss = Task { @MainActor in
-                        try? await Task.sleep(for: .seconds(2))
-                        guard !Task.isCancelled else { return }
-                        showReportConfirmation = false
-                    }
-                }
-            }
-        )
-    }
-
     /// The scrolling chat content. Only mounted once we have at least one
     /// message — keeps the empty-state cleanly separated and avoids feeding
     /// an empty LazyVStack into `.scrollPosition` (which would no-op until
@@ -662,11 +842,11 @@ public struct ChatScreen: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(chatModel.lines) { line in
-                    // Delegates to the shared `chatRow(for:)` helper so
+                    // Delegates to the injected `rowContent` factory so
                     // block/report callbacks, badge lookup, and all other
                     // row construction stay in one place (same as the UIKit
                     // collection-view cell provider above).
-                    chatRow(for: line)
+                    rowContent(line)
                         .id(line.id)
                 }
             }
@@ -869,111 +1049,6 @@ public struct ChatScreen: View {
         )
     }
 
-    // MARK: - Session lifecycle
-
-    @MainActor
-    private func startSession() async {
-        // Badge load runs in a sibling .task modifier (see body) — gives us
-        // structured-cancellation parity with this session-start task.
-        guard let registry = channelSessionRegistry else {
-            errorMessage = "Couldn't open chat: missing session registry"
-            logger.error("ChatScreen has no registry in environment — was RootView injected?")
-            return
-        }
-
-        // Signpost-bracket the session-start so Instruments can show the
-        // overlap with the emote-load interval. Useful for diagnosing
-        // races like the cancellation-during-channel-open bug we hit
-        // (Instruments would show emote-load truncated while session-start
-        // continues to completion, making the relationship obvious).
-        let signpostID = signposter.makeSignpostID()
-        let signpostState = signposter.beginInterval(
-            "session-start",
-            id: signpostID,
-            "channel=\(channelLoginName)"
-        )
-        defer { signposter.endInterval("session-start", signpostState) }
-
-        do {
-            // Registry returns the cached session if one exists for this
-            // (userId, channelId), or constructs + starts a new one. Either
-            // way the session is already-running by the time we get it.
-            let session = try await registry.session(
-                accountUserId: account.userId,
-                accountLogin: account.login,
-                channelId: channelId,
-                channelLoginName: channelLoginName
-            )
-            logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
-
-            // Hand the session to the tab model, which atomically primes
-            // `chatModel.lines` from the session's current ring buffer AND
-            // subscribes for future messages via `ChannelSession.subscribe(_:)`.
-            //
-            // For the MVP this is always a single-element array. When multi-
-            // channel tabs ship, `attach(sessions: [a, b, c])` will subscribe
-            // to all of them with the same model — the rest of ChatScreen
-            // doesn't need to change.
-            //
-            // Lifecycle: detach() is called from `.onDisappear` in the body
-            // below. The model's pub-sub subscriptions stay live as long as
-            // this ChatScreen instance is mounted; on tear-down they're
-            // released, but the underlying `ChannelSession` stays alive in
-            // the registry (other tabs may share it, ref counting in commit E).
-            //
-            // Phase 2.2 addition: hand in the per-channel EmoteIndex so each
-            // incoming message gets normalized through
-            // `Normalizer.normalize(...)` against the third-party emote
-            // table. The index may not be loaded yet at this point — the
-            // model tolerates a nil/empty snapshot and tokens stay as text
-            // until the snapshot fills in.
-            //
-            // T11: index comes from the registry (same object across all
-            // ChatScreen mounts for this channel). Fall through to a
-            // throwaway EmoteIndex if registry is missing — startSession
-            // already errored out above in that case, so this branch is
-            // effectively unreachable; the fallback exists only to keep
-            // the type-checker happy without forcing a force-unwrap.
-            let index = registry.emoteIndex(
-                forAccountUserId: account.userId,
-                channelId: channelId
-            )
-            await chatModel.attach(
-                sessions: [session],
-                emoteIndex: index,
-                currentUserId: account.userId,
-                currentUserLogin: account.login,
-                currentUserDisplayName: account.displayName,
-                // User-configured highlight keywords (Profile → Highlight
-                // Keywords). Read at attach time — changing them mid-session
-                // applies on the next channel attach (reopen / relaunch).
-                // Self-mentions are always highlighted regardless of this
-                // list; keywords are additive.
-                highlightKeywords: HighlightSettings.keywords(),
-                // Chat History setting — read at attach time, like the
-                // keywords. Tab remounts re-attach, so a changed setting
-                // takes hold on the next swipe back to (or reopen of) a
-                // channel.
-                lineCap: ChatAppearance.chatHistoryLines(),
-                // Registry-owned normalize memo — survives this screen's
-                // unmount so swiping back re-primes from cache hits
-                // instead of re-tokenizing the whole ring (see
-                // NormalizedLineCache).
-                lineCache: registry.normalizedLineCache(
-                    forAccountUserId: account.userId,
-                    channelId: channelId
-                )
-            )
-        } catch is CancellationError {
-            // Expected on view tear-down / channel-tab switch. The outgoing
-            // instance's `try await registry.session(...)` gets cancelled in
-            // flight. Silently exit — don't show a red error.
-            logger.info("ChatScreen session-start cancelled for #\(channelLoginName)")
-        } catch {
-            errorMessage = "Couldn't open chat: \(error.localizedDescription)"
-            logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")
-        }
-    }
 }
 
 // MARK: - ComposeBar
