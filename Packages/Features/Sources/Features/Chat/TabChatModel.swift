@@ -642,6 +642,10 @@ public final class TabChatModel {
             originalBadges: selfBadges,  // last echoed badge set (empty before first echo)
             authorUserId: currentUserId,
             authorDisplayName: currentUserDisplayName.isEmpty ? currentUserLogin : currentUserDisplayName,
+            authorUserLogin: currentUserLogin,
+                                        // Carry the signed-in user's login so a localized
+                                        // (non-Latin) self display name renders as "name (login)"
+                                        // immediately, instead of flipping when the echo arrives.
             authorColor: selfColor,      // attach-time /chat/color seed, refreshed by echoes
             runs: Normalizer.wordRuns(text: canonical),
                                         // Word-level runs (required for FlowLayout wrapping) but
@@ -845,6 +849,7 @@ public final class TabChatModel {
             originalBadges: row.originalBadges,
             authorUserId: row.authorUserId,
             authorDisplayName: row.authorDisplayName,
+            authorUserLogin: row.authorUserLogin,   // preserve the login annotation on synthesized delivery
             authorColor: row.authorColor,
             runs: row.runs,
             isHighlighted: row.isHighlighted,
@@ -868,6 +873,7 @@ public final class TabChatModel {
             originalBadges: row.originalBadges,
             authorUserId: row.authorUserId,
             authorDisplayName: row.authorDisplayName,
+            authorUserLogin: row.authorUserLogin,   // preserve the login annotation when a send fails
             authorColor: row.authorColor,
             runs: row.runs,
             isHighlighted: row.isHighlighted,
