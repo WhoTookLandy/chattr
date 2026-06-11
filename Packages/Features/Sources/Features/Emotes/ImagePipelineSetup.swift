@@ -33,10 +33,14 @@ public enum ImagePipelineSetup {
 
     /// True after `configure()` has run successfully. Used by the
     /// guard inside `configure()` to make repeated calls cheap.
-    private nonisolated(unsafe) static var didConfigure = false
+    /// `@MainActor` (not `nonisolated(unsafe)`) so the read-modify-write
+    /// in `configure()` is compiler-checked rather than promised safe.
+    @MainActor private static var didConfigure = false
 
     /// Sets Nuke's shared pipeline to chattr-tuned defaults. Call once
-    /// at app launch (RootView's task body is the canonical site).
+    /// at app launch (`chattrApp.init` is the canonical site — `App` is
+    /// `@MainActor`, so the isolation is free for callers).
+    @MainActor
     public static func configure() {
         guard !didConfigure else { return }
         didConfigure = true
