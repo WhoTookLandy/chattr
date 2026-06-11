@@ -76,7 +76,10 @@ public enum BackfillProvider {
             // Parse each IRC line. Lines that fail to parse are skipped,
             // not thrown — a few malformed lines shouldn't break the
             // whole backfill.
-            let messages = body.messages.compactMap { IRCMessageParser.parse($0, channelLogin: channelLogin) }
+            let messageDecoder = IRCMessageParser.makeDecoder()
+            let messages = body.messages.compactMap {
+                IRCMessageParser.parse($0, channelLogin: channelLogin, decoder: messageDecoder)
+            }
             logger.info("Backfilled \(messages.count) message(s) for #\(channelLogin, privacy: .public)")
             return messages
         } catch is CancellationError {
@@ -126,10 +129,23 @@ public enum BackfillProvider {
 /// the Normalizer tests.
 internal enum IRCMessageParser {
 
+    /// A decoder configured for the EventSub `ChatMessage` shape. The
+    /// backfill hot path creates ONE and reuses it across all ~150 lines —
+    /// `JSONDecoder` allocates non-trivial internal state per instance, so
+    /// per-line construction was pure churn on the session-open path.
+    static func makeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }
+
     /// Parse one IRC line into a `ChatMessage`, or return nil if the
     /// line doesn't match the PRIVMSG shape (e.g., JOIN/PART/NOTICE
     /// lines, which rustlog occasionally includes).
-    static func parse(_ line: String, channelLogin: String) -> ChatMessage? {
+    ///
+    /// The defaulted `decoder` keeps one-off call sites (tests) unchanged;
+    /// batch callers pass a shared instance.
+    static func parse(_ line: String, channelLogin: String, decoder: JSONDecoder = makeDecoder()) -> ChatMessage? {
         // 1. Tag block: starts with '@', ends at first space.
         guard line.hasPrefix("@") else { return nil }
         let afterTags = line.dropFirst()  // strip leading '@'
@@ -206,8 +222,6 @@ internal enum IRCMessageParser {
 
         do {
             let data = try JSONSerialization.data(withJSONObject: messageJSON)
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
             return try decoder.decode(ChatMessage.self, from: data)
         } catch {
             // One line failed to decode — log and skip. Don't fail the
