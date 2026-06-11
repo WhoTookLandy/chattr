@@ -320,10 +320,27 @@ struct ChatRow: View, Equatable {
     }
 
     /// Styled username Text, ready to interpolate alongside the colon.
+    /// When the chatter's display name is a localized variant of their
+    /// login (and the setting is on), the login is appended in dimmed
+    /// parentheses — order per `appearance.loginNameDisplay`.
     private var usernamePrefix: Text {
-        Text(line.authorDisplayName)
-            .font(appearance.font.weight(.semibold))
+        let nameFont = appearance.font.weight(.semibold)
+        guard let pair = ChatAppearance.loginAnnotation(
+            displayName: line.authorDisplayName,
+            login: line.authorUserLogin,
+            style: appearance.loginNameDisplay
+        ) else {
+            return Text(line.authorDisplayName)
+                .font(nameFont)
+                .foregroundStyle(usernameColor)
+        }
+        let primary = Text(pair.primary)
+            .font(nameFont)
             .foregroundStyle(usernameColor)
+        let secondary = Text(" (\(pair.secondary))")
+            .font(nameFont)
+            .foregroundStyle(Color.secondary)
+        return Text("\(primary)\(secondary)")
     }
 
     /// `highlightPlate: false` lets the reply container own the tint —
