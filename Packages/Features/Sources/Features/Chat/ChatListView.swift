@@ -35,7 +35,11 @@ struct ChatListView: UIViewControllerRepresentable {
         vc.rowContent = rowContent
         vc.onAtBottomChanged = { atBottom in
             // Avoid mutating SwiftUI state during the UIKit layout pass.
-            DispatchQueue.main.async { isAtBottom = atBottom }
+            // Task { @MainActor } defers past the current synchronous
+            // execution like DispatchQueue.main.async did, but stays in the
+            // Swift concurrency model (main actor executor, not a raw GCD
+            // enqueue) — one scheduling world instead of two.
+            Task { @MainActor in isAtBottom = atBottom }
         }
         return vc
     }
