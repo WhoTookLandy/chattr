@@ -54,6 +54,7 @@ struct ChatSettingsSheet: View {
     @AppStorage(ChatAppearance.showTimestampsKey) private var showTimestamps: Bool = false
     @AppStorage(ChatAppearance.animatedEmotesKey) private var animatedEmotes: Bool = true
     @AppStorage(ChatAppearance.edgeToEdgeKey) private var edgeToEdge: Bool = false
+    @AppStorage(ChatAppearance.loginNameDisplayKey) private var loginNameDisplay: ChatAppearance.LoginNameDisplay = .displayFirst
 
     /// Twitch's standard slow-mode wait times. The current channel value
     /// is spliced in when it's nonstandard (set from another client) so
@@ -214,6 +215,12 @@ struct ChatSettingsSheet: View {
             }
             Toggle(isOn: $animatedEmotes) {
                 Label("Animated Emotes", systemImage: "sparkles")
+            }
+            Toggle(isOn: Binding(
+                get: { loginNameDisplay != .off },
+                set: { loginNameDisplay = $0 ? .displayFirst : .off }
+            )) {
+                Label("Show Usernames", systemImage: "at")
             }
             Toggle(isOn: $edgeToEdge) {
                 Label("Edge-to-Edge Chat", systemImage: "arrow.up.left.and.arrow.down.right")
