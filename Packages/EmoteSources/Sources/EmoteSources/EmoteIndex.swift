@@ -31,8 +31,8 @@ private let logger = AppLogger.make("EmoteSources.Index")
 ///
 /// ## Per-provider failure handling
 ///
-/// `withTaskGroup` runs all three providers in parallel for both global
-/// and channel loads. Per-provider failures are logged and swallowed —
+/// A single `withTaskGroup` runs all six fetches (global + channel for
+/// each provider) in parallel. Per-provider failures are logged and swallowed —
 /// 7TV could be down and we still want to render BTTV+FFZ emotes for
 /// the user. The index emits what it could load, even if partial.
 public actor EmoteIndex {
@@ -154,48 +154,42 @@ public actor EmoteIndex {
 
         var merged: [String: Emote] = [:]
 
-        // Step 1: global emotes from all providers, in parallel.
-        await withTaskGroup(of: [Emote].self) { group in
+        // Global + channel fetches for all providers run in one 6-task group,
+        // so the network wait is max(t_global, t_channel) instead of their sum.
+        // Results merge as they arrive, in whatever order they complete: `merge`
+        // is commutative across the six arrays because precedence is data-driven
+        // — channel scope is carried by the emote itself (`ownerChannelId`,
+        // stamped by every provider) and source rank by `priority(of:)` — so a
+        // channel emote arriving before a same-name global still wins.
+        await withTaskGroup(of: (isChannel: Bool, emotes: [Emote]).self) { group in
             for provider in providers {
                 group.addTask {
                     do {
-                        return try await provider.globalEmotes()
+                        return (isChannel: false, emotes: try await provider.globalEmotes())
                     } catch {
                         logger.error("Global emotes failed for \(String(describing: type(of: provider))): \(error.localizedDescription)")
-                        return []
+                        return (isChannel: false, emotes: [])
                     }
                 }
-            }
-            for await emotes in group {
-                for emote in emotes {
-                    Self.merge(into: &merged, emote: emote, isChannelLevel: false)
-                }
-            }
-        }
-
-        // Step 2: channel emotes from all providers, also in parallel.
-        // These override globals on name collision (channel > global).
-        await withTaskGroup(of: [Emote].self) { group in
-            for provider in providers {
                 group.addTask {
                     do {
-                        return try await provider.channelEmotes(broadcasterId: broadcasterId, broadcasterLogin: broadcasterLogin)
+                        return (isChannel: true, emotes: try await provider.channelEmotes(broadcasterId: broadcasterId, broadcasterLogin: broadcasterLogin))
                     } catch {
                         logger.error("Channel emotes failed for \(String(describing: type(of: provider))) (\(broadcasterLogin)): \(error.localizedDescription)")
-                        return []
+                        return (isChannel: true, emotes: [])
                     }
                 }
             }
-            for await emotes in group {
-                for emote in emotes {
-                    Self.merge(into: &merged, emote: emote, isChannelLevel: true)
+            for await result in group {
+                for emote in result.emotes {
+                    Self.merge(into: &merged, emote: emote, isChannelLevel: result.isChannel)
                 }
             }
         }
 
         // If the parent Task was cancelled mid-flight, every provider call
         // returned `[]` (each provider's catch swallowed the CancellationError
-        // — see `withTaskGroup` blocks above). Publishing here would do two
+        // — see the `withTaskGroup` block above). Publishing here would do two
         // wrong things at once:
         //
         //   1. Set `byName` and the snapshot to empty, wiping any prior load
