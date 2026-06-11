@@ -13,8 +13,19 @@ import ChatModel
 /// inverted-transform approach was rejected (it degrades the per-row context
 /// menu previews).
 struct ChatListView: UIViewControllerRepresentable {
-    /// Display-ready lines, passed from `ChatScreen.body`.
-    let lines: [ChatLine]
+    /// Monotonic publish version from `TabChatModel`. The ONLY value that drives
+    /// a data update — passing the `Int` (not the `[ChatLine]`) is what keeps
+    /// `ChatScreen.body` off the full-array dependency on the per-message hot
+    /// path. When it advances by exactly one, the controller applies the
+    /// incremental batch; any other jump falls back to a full snapshot.
+    let changeVersion: Int
+    /// Pulls the change batch that produced the current `changeVersion`
+    /// (incremental fast path). A closure, not a stored array, so reading it
+    /// doesn't register a body dependency.
+    let latestChanges: () -> [ChatChange]
+    /// Pulls the full visible snapshot — the first-mount / coalesced-jump
+    /// fallback. Only invoked when the incremental path can't be trusted.
+    let snapshot: () -> [ChatLine]
     /// Builds a row for one line — the badge lookup and the four per-line
     /// callbacks are assembled by `ChatScreen`, keeping this component
     /// ignorant of the model layer.
@@ -49,7 +60,12 @@ struct ChatListView: UIViewControllerRepresentable {
         // so cells built after this call use current state.
         vc.rowContent = rowContent
         vc.extendsToTop = extendsToTop
-        vc.update(lines: lines, scrollToBottomToken: scrollToBottomToken)
+        vc.update(
+            version: changeVersion,
+            latestChanges: latestChanges,
+            snapshot: snapshot,
+            scrollToBottomToken: scrollToBottomToken
+        )
     }
 }
 
@@ -125,8 +141,9 @@ final class ChatListViewController: UIViewController {
 
     /// Last-applied lines, keyed by id for the cell provider's O(1) lookup.
     private var linesByID: [String: ChatLine] = [:]
-    /// Last-applied lines in order — the `old` side of the next diff.
-    private(set) var lastLines: [ChatLine] = []
+    /// Last model publish version applied to the data source. `-1` = nothing
+    /// applied yet, which forces a full snapshot reset on the first update.
+    private var lastAppliedVersion = -1
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -235,37 +252,88 @@ final class ChatListViewController: UIViewController {
         )
     }
 
-    /// Diff the new lines against the last-applied set, apply the structural
-    /// snapshot (insert/delete/move derived from the id order), then explicitly
-    /// reconfigure cells whose `ChatLine` value changed but whose id did not.
-    func update(lines newLines: [ChatLine], scrollToBottomToken: Int) {
-        let delta = ChatListDiff.compute(old: lastLines, new: newLines)
-
-        // Jump-to-bottom pill fired — enter tailing mode BEFORE the snapshot
-        // applies so the pin below (and every subsequent layout pass) lands
-        // this same update. The per-pass re-pin is what makes the jump
-        // converge on the true bottom even when every row between here and
-        // there still has only its estimated height.
-        if scrollToBottomToken != lastScrollToBottomToken {
-            lastScrollToBottomToken = scrollToBottomToken
-            isPinnedToBottom = true
+    /// Apply a model publish. The data source is updated from the model's typed
+    /// change stream rather than a re-diff of the whole array:
+    ///   - version unchanged → no data work (SwiftUI re-ran update for some
+    ///     other reason, e.g. the `isAtBottom` binding); still honor the pill.
+    ///   - version == lastApplied + 1 → apply the incremental batch (fast path).
+    ///   - any other jump (first mount, or SwiftUI coalesced several publishes)
+    ///     → reset wholesale from the snapshot (safety net).
+    func update(
+        version: Int,
+        latestChanges: () -> [ChatChange],
+        snapshot: () -> [ChatLine],
+        scrollToBottomToken: Int
+    ) {
+        if version != lastAppliedVersion {
+            if version == lastAppliedVersion + 1 {
+                apply(changes: latestChanges())
+            } else {
+                apply(changes: [.reset(snapshot())])
+            }
+            lastAppliedVersion = version
         }
 
-        // Only needed when scrolled up AND rows are leaving above us.
+        if scrollToBottomToken != lastScrollToBottomToken {
+            lastScrollToBottomToken = scrollToBottomToken
+            // The at-bottom branch inside `apply` already scrolled when tailing;
+            // only act on the token when scrolled up, so we never scroll twice.
+            if !lastReportedAtBottom { scrollToBottom(animated: false) }
+        }
+    }
+
+    /// Folds a batch of `ChatChange` onto the diffable data source — the UIKit
+    /// mirror of `ChatChange.apply(_:to:)`, whose equivalence the buffer's
+    /// contract tests guarantee. Preserves the existing scroll behavior: snap
+    /// to the live edge when tailing, otherwise hold the reading position when
+    /// rows leave above the viewport.
+    private func apply(changes: [ChatChange]) {
+        guard !changes.isEmpty else { return }
+        let wasAtBottom = lastReportedAtBottom
+
+        // Anchoring is only needed when scrolled up AND rows are leaving (a
+        // removal or a wholesale reset can drop rows above the viewport).
+        let mayDropRows = changes.contains { change in
+            switch change {
+            case .removed, .reset: return true
+            case .appended, .reconfigured: return false
+            }
+        }
         let anchor: (id: String, distanceFromTop: CGFloat)? =
-            (!isPinnedToBottom && !delta.removed.isEmpty) ? currentTopAnchor() : nil
+            (!wasAtBottom && mayDropRows) ? currentTopAnchor() : nil
 
-        lastLines = newLines
-        linesByID = newLines.reduce(into: [:]) { $0[$1.id] = $1 }
+        var snapshot = dataSource.snapshot()
+        if snapshot.numberOfSections == 0 { snapshot.appendSections([.main]) }
+        var toReconfigure: [String] = []
 
-        var snapshot = NSDiffableDataSourceSnapshot<Section, String>()
-        snapshot.appendSections([.main])
-        snapshot.appendItems(delta.orderedIDs, toSection: .main)
+        for change in changes {
+            switch change {
+            case .appended(let line):
+                linesByID[line.id] = line
+                snapshot.appendItems([line.id], toSection: .main)
+            case .removed(let id):
+                linesByID[id] = nil
+                if snapshot.itemIdentifiers.contains(id) { snapshot.deleteItems([id]) }
+            case .reconfigured(let line):
+                linesByID[line.id] = line
+                toReconfigure.append(line.id)
+            case .reset(let lines):
+                linesByID = lines.reduce(into: [:]) { $0[$1.id] = $1 }
+                snapshot = NSDiffableDataSourceSnapshot<Section, String>()
+                snapshot.appendSections([.main])
+                snapshot.appendItems(lines.map(\.id), toSection: .main)
+                toReconfigure.removeAll()
+            }
+        }
+
         dataSource.apply(snapshot, animatingDifferences: false)
 
-        if !delta.reconfigured.isEmpty {
+        // Reconfigure only ids that survived the batch (a line can be
+        // reconfigured then removed within one batch).
+        let liveReconfigure = toReconfigure.filter { snapshot.itemIdentifiers.contains($0) }
+        if !liveReconfigure.isEmpty {
             var reconfig = dataSource.snapshot()
-            reconfig.reconfigureItems(delta.reconfigured)
+            reconfig.reconfigureItems(liveReconfigure)
             dataSource.apply(reconfig, animatingDifferences: false)
         }
 

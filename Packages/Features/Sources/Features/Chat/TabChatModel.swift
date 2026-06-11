@@ -61,18 +61,56 @@ public final class TabChatModel {
     /// `ChatBuffer` for the cost rationale. Cap = 500 retained lines per tab.
     private var buffer = ChatBuffer(cap: 500)
 
-    /// Block-filtered, display-ready lines. Drives the list. Computed off the
-    /// stored `buffer` so @Observable still notifies the view on every buffer
-    /// mutation (the getter's read of `buffer` registers the dependency),
-    /// without a second stored copy to keep in sync.
+    /// Block-filtered, display-ready lines. Used as the **fallback snapshot**
+    /// for the incremental-change channel — `ChatListView` reads this only on
+    /// first mount or after a coalesced burst (see `changeVersion`), not per
+    /// message. Computed off the stored `buffer` so @Observable still notifies
+    /// the view, without a second stored copy to keep in sync.
     public var lines: [ChatLine] { buffer.lines }
+
+    /// True when there are no visible lines — drives `ChatScreen`'s empty
+    /// state. Reading this (instead of `lines.isEmpty`) keeps `ChatScreen.body`
+    /// off the full-array dependency on the hot path. Internal: only consumed
+    /// inside the Features module.
+    var isEmpty: Bool { buffer.isEmpty }
+
+    // MARK: - Incremental change channel
+    //
+    // Instead of re-publishing the whole `lines` array every message and making
+    // the view re-diff it, the model pushes a typed `[ChatChange]` batch the
+    // view applies directly. `changeVersion` is the only @Observable trigger;
+    // the batch itself is @ObservationIgnored so reading it never churns
+    // observation. The view applies `latestChangeBatch` when `changeVersion`
+    // advanced by exactly one, and falls back to a wholesale snapshot of
+    // `lines` on first mount or a coalesced multi-step jump.
+
+    /// Drained-but-undelivered changes from the most recent publish. Read by
+    /// `ChatListView` during its update. Observation-ignored: pulling it must
+    /// not invalidate any view.
+    @ObservationIgnored private var _latestChangeBatch: [ChatChange] = []
+    var latestChangeBatch: [ChatChange] { _latestChangeBatch }
+
+    /// Monotonic publish counter. Bumps once per non-empty change batch; the
+    /// view compares it against the version it last applied.
+    private(set) var changeVersion: Int = 0
+
+    /// Drains the buffer's accumulated changes and publishes them. Safe to call
+    /// after any buffer mutation; a no-op when nothing changed. Because the
+    /// buffer *accumulates* between calls, a missed call only delays delivery
+    /// (the next call drains everything) — it can never lose or corrupt a row.
+    private func publishPending() {
+        let changes = buffer.takeChanges()
+        guard !changes.isEmpty else { return }
+        _latestChangeBatch = changes
+        changeVersion &+= 1
+    }
 
     /// Blocked user ids, pushed in by the view (which observes BlockStore).
     /// Changing it re-filters the visible projection immediately. The
     /// no-op-when-unchanged guard lives inside `ChatBuffer.blockedIds`.
     public var blockedIds: Set<String> {
         get { buffer.blockedIds }
-        set { buffer.blockedIds = newValue }
+        set { buffer.blockedIds = newValue; publishPending() }
     }
 
     public private(set) var attachState: AttachState = .detached
@@ -500,6 +538,7 @@ public final class TabChatModel {
         for event in combined {
             ingest(event)
         }
+        publishPending()
         attachState = .attached
         logger.info("TabChatModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
     }
@@ -657,6 +696,7 @@ public final class TabChatModel {
             replyParent: optimisticReplyParent
         )
         buffer.append(optimistic)
+        publishPending()
         // FIFO append — see pendingSendIDByText doc-comment.
         pendingSendIDByText[canonical, default: []].append(pendingId)
 
@@ -765,6 +805,7 @@ public final class TabChatModel {
         // takes its place at the bottom of `lines` — the user expects
         // the retry to feel like a fresh send.
         buffer.remove(id: failedLineId)
+        publishPending()
         await send(text: retryText, replyOverride: preservedReply)
     }
 
@@ -836,6 +877,7 @@ public final class TabChatModel {
         if buffer.contains(id: canonicalMessageId) {
             logger.warning("Synthesize would duplicate id \(canonicalMessageId, privacy: .public); removing optimistic row only")
             buffer.remove(id: pendingId)
+            publishPending()
             cleanupPending(pendingId: pendingId)
             return
         }
@@ -857,6 +899,7 @@ public final class TabChatModel {
             deliveryState: .delivered,
             replyParent: row.replyParent
         ))
+        publishPending()
 
         // Clean up correlation maps — we won't be reconciling this id
         // from an echo anymore (the synthesized id is what a future
@@ -881,6 +924,7 @@ public final class TabChatModel {
             deliveryState: .failed(reason: reason, retryText: retryText),
             replyParent: row.replyParent       // preserve thread membership on failed
         ))
+        publishPending()
     }
 
     /// View-facing reset for the toast. Call after the toast finishes
@@ -1197,6 +1241,8 @@ public final class TabChatModel {
            HighlightSettings.soundEnabled() {
             HighlightSoundPlayer.shared.play()
         }
+
+        publishPending()
     }
 
     /// Replaces the optimistic row at `pendingId` with a freshly-normalized
@@ -1223,7 +1269,9 @@ public final class TabChatModel {
         lineCache?.store(normalizedLine, context: cacheContext(emoteVersion: snapshot.count))
         // `replace` returns false (a no-op) when the optimistic row was already
         // removed under us — the caller then falls through to a normal append.
-        return buffer.replace(id: pendingId, with: normalizedLine)
+        let didReplace = buffer.replace(id: pendingId, with: normalizedLine)
+        publishPending()
+        return didReplace
     }
 
     /// Removes any correlation-map entries pointing at `pendingId` from

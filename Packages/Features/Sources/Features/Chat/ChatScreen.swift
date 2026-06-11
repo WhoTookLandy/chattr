@@ -738,8 +738,14 @@ private struct ChatTranscript: View {
         // positions inside the visible safe region.
         ZStack {
             ChatListView(
-                lines: chatModel.lines,
-                rowContent: { line in rowContent(line) },
+                // Pass the publish VERSION (an Int), not the lines array — that's
+                // what keeps this body off the full-array dependency. The view
+                // pulls the change batch / snapshot via the closures only when it
+                // actually needs them, inside its own update pass.
+                changeVersion: chatModel.changeVersion,
+                latestChanges: { chatModel.latestChangeBatch },
+                snapshot: { chatModel.lines },
+                rowContent: { line in chatRow(for: line) },
                 isAtBottom: $isAtBottom,
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge
@@ -748,11 +754,16 @@ private struct ChatTranscript: View {
         }
         // New messages while scrolled up tally into the unread pill; while
         // tailing, the collection view auto-scrolls and we reset the count.
-        .onChange(of: chatModel.lines.count) { oldCount, newCount in
+        // Counting `.appended` changes in the just-published batch replaces the
+        // old `lines.count` delta (which we no longer observe per message).
+        .onChange(of: chatModel.changeVersion) { _, _ in
             if isAtBottom {
                 unreadWhileScrolledUp = 0
-            } else if newCount > oldCount {
-                unreadWhileScrolledUp += (newCount - oldCount)
+            } else {
+                let appended = chatModel.latestChangeBatch.reduce(into: 0) { count, change in
+                    if case .appended = change { count += 1 }
+                }
+                if appended > 0 { unreadWhileScrolledUp += appended }
             }
         }
         .onChange(of: isAtBottom) { _, atBottom in
@@ -798,7 +809,11 @@ private struct ChatTranscript: View {
         .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
             chatModel.blockedIds = ids
         }
-        .task(id: blockStore?.blockedIds ?? []) {
+        // Seed once on appear; .onChange above handles every subsequent
+        // mutation. Previously this was `.task(id: blockStore?.blockedIds ?? [])`,
+        // which re-hashed the entire Set on every block/unblock and cancelled +
+        // restarted the task each time — redundant with onChange.
+        .task {
             chatModel.blockedIds = blockStore?.blockedIds ?? []
         }
         #else
@@ -808,7 +823,7 @@ private struct ChatTranscript: View {
             .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
                 chatModel.blockedIds = ids
             }
-            .task(id: blockStore?.blockedIds ?? []) {
+            .task {
                 chatModel.blockedIds = blockStore?.blockedIds ?? []
             }
         #endif
