@@ -58,4 +58,24 @@ struct FlowLayoutEngineTests {
         let r = FlowLayoutEngine.layout(sizes: sizes, containerWidth: 100, spacing: 4, hangingIndent: 0)
         #expect(r.size.width == 100)
     }
+
+    @Test("Row tables map every item to its row's tallest height")
+    func rowTables() {
+        // 40+4+40 = 84 fits in 100; the third item wraps to row 1.
+        let sizes = [
+            CGSize(width: 40, height: 10),
+            CGSize(width: 40, height: 18),  // tallest in row 0
+            CGSize(width: 40, height: 12),  // alone in row 1
+        ]
+        let r = FlowLayoutEngine.layout(sizes: sizes, containerWidth: 100, spacing: 4, hangingIndent: 0)
+        #expect(r.rowIndexByItem == [0, 0, 1])
+        #expect(r.rowHeights == [18, 12])
+    }
+
+    @Test("Row tables are empty for empty input")
+    func rowTablesEmpty() {
+        let r = FlowLayoutEngine.layout(sizes: [], containerWidth: 100, spacing: 4, hangingIndent: 0)
+        #expect(r.rowIndexByItem.isEmpty)
+        #expect(r.rowHeights.isEmpty)
+    }
 }

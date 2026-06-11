@@ -21,16 +21,22 @@ struct FlowLayout: Layout {
     /// Indent applied to every wrapped (non-first) row. 0 = classic flow.
     var hangingIndent: CGFloat
 
-    /// Per-layout-pass cache of subview sizes. SwiftUI calls `makeCache` once
-    /// when the Layout's view tree is built and reuses the storage across
-    /// repeated `sizeThatFits` / `placeSubviews` calls.
+    /// Per-layout-pass cache of subview sizes AND the wrapping result. SwiftUI
+    /// calls `makeCache` once when the Layout's view tree is built and reuses
+    /// the storage across repeated `sizeThatFits` / `placeSubviews` calls.
     ///
     /// `containerWidth` is stored alongside the sizes so we can invalidate
     /// if `placeSubviews` is called with a different width than the most
     /// recent `sizeThatFits` (rare — only on container size changes).
+    ///
+    /// `result` caches `FlowLayoutEngine.layout` for that same width, so the
+    /// `sizeThatFits` + `placeSubviews` pair of a layout pass runs the
+    /// wrapping math once instead of twice. Invalidated whenever the sizes
+    /// are (same lifetime: both derive from sizes + width).
     struct Cache {
         var sizes: [CGSize] = []
         var containerWidth: CGFloat = .nan
+        var result: FlowLayoutEngine.Result?
     }
 
     init(spacing: CGFloat = 4, alignment: VerticalAlignment = .firstTextBaseline, hangingIndent: CGFloat = 0) {
@@ -58,33 +64,25 @@ struct FlowLayout: Layout {
     func updateCache(_ cache: inout Cache, subviews: Subviews) {
         cache.sizes = []
         cache.containerWidth = .nan
+        cache.result = nil
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         let containerWidth = proposal.width ?? .infinity
-        ensureSizes(subviews: subviews, containerWidth: containerWidth, cache: &cache)
-        return FlowLayoutEngine.layout(
-            sizes: cache.sizes,
-            containerWidth: containerWidth,
-            spacing: spacing,
-            hangingIndent: hangingIndent
-        ).size
+        ensureLayout(subviews: subviews, containerWidth: containerWidth, cache: &cache)
+        return cache.result?.size ?? .zero
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
         let containerWidth = bounds.width
-        ensureSizes(subviews: subviews, containerWidth: containerWidth, cache: &cache)
-        let result = FlowLayoutEngine.layout(
-            sizes: cache.sizes,
-            containerWidth: containerWidth,
-            spacing: spacing,
-            hangingIndent: hangingIndent
-        )
-        // Group origins by row (same y) to apply per-row vertical alignment.
+        ensureLayout(subviews: subviews, containerWidth: containerWidth, cache: &cache)
+        guard let result = cache.result else { return }
+        // Per-row vertical alignment via the engine's row table — O(1) per
+        // item, no origin scanning.
         for (index, subview) in subviews.enumerated() {
             let origin = result.origins[index]
             let size = cache.sizes[index]
-            let rowHeight = rowHeightForY(origin.y, origins: result.origins, sizes: cache.sizes)
+            let rowHeight = result.rowHeights[result.rowIndexByItem[index]]
             let yOffset: CGFloat
             switch alignment {
             case .center: yOffset = (rowHeight - size.height) / 2
@@ -103,26 +101,27 @@ struct FlowLayout: Layout {
         }
     }
 
-    /// Tallest subview height among those sharing the row at `y`.
-    private func rowHeightForY(_ y: CGFloat, origins: [CGPoint], sizes: [CGSize]) -> CGFloat {
-        var h: CGFloat = 0
-        for (i, o) in origins.enumerated() where o.y == y {
-            h = max(h, sizes[i].height)
-        }
-        return h
-    }
-
-    /// Populate `cache.sizes` if empty OR if the containerWidth has changed
-    /// since the last measure. Repeated calls with the same width are no-ops
-    /// — the cache is hot across the `sizeThatFits` + `placeSubviews` pair
-    /// for any given layout pass.
-    private func ensureSizes(subviews: Subviews, containerWidth: CGFloat, cache: inout Cache) {
-        if cache.sizes.count == subviews.count && cache.containerWidth == containerWidth {
+    /// Populate `cache.sizes` AND `cache.result` if empty OR if the
+    /// containerWidth has changed since the last measure. Repeated calls with
+    /// the same width are no-ops — the cache is hot across the
+    /// `sizeThatFits` + `placeSubviews` pair for any given layout pass.
+    private func ensureLayout(subviews: Subviews, containerWidth: CGFloat, cache: inout Cache) {
+        if cache.sizes.count == subviews.count,
+           cache.containerWidth == containerWidth,
+           cache.result != nil {
             return
         }
-        cache.sizes = subviews.map {
-            $0.sizeThatFits(ProposedViewSize(width: containerWidth, height: nil))
+        if cache.sizes.count != subviews.count || cache.containerWidth != containerWidth {
+            cache.sizes = subviews.map {
+                $0.sizeThatFits(ProposedViewSize(width: containerWidth, height: nil))
+            }
+            cache.containerWidth = containerWidth
         }
-        cache.containerWidth = containerWidth
+        cache.result = FlowLayoutEngine.layout(
+            sizes: cache.sizes,
+            containerWidth: containerWidth,
+            spacing: spacing,
+            hangingIndent: hangingIndent
+        )
     }
 }

@@ -11,6 +11,13 @@ enum FlowLayoutEngine {
     struct Result {
         var origins: [CGPoint]
         var size: CGSize
+        /// Row membership per item (parallel to `origins`), so callers can
+        /// resolve an item's row height in O(1) instead of scanning all
+        /// origins for matching y values (which also relied on fragile
+        /// floating-point equality of accumulated offsets).
+        var rowIndexByItem: [Int]
+        /// Tallest item height per row, indexed by `rowIndexByItem`.
+        var rowHeights: [CGFloat]
     }
 
     static func layout(
@@ -21,6 +28,10 @@ enum FlowLayoutEngine {
     ) -> Result {
         var origins: [CGPoint] = []
         origins.reserveCapacity(sizes.count)
+        var rowIndexByItem: [Int] = []
+        rowIndexByItem.reserveCapacity(sizes.count)
+        var rowHeights: [CGFloat] = []
+        var currentRow = 0
 
         var currentX: CGFloat = 0
         var currentY: CGFloat = 0
@@ -36,19 +47,30 @@ enum FlowLayoutEngine {
         for size in sizes {
             // Wrap if this item overflows AND the row already has content.
             if currentX + size.width > containerWidth, currentX > rowStart {
+                rowHeights.append(rowHeight)
+                currentRow += 1
                 currentY += rowHeight + spacing
                 rowHeight = 0
                 rowStart = hangingIndent
                 currentX = rowStart
             }
             origins.append(CGPoint(x: currentX, y: currentY))
+            rowIndexByItem.append(currentRow)
             usedWidth = max(usedWidth, currentX + size.width)
             currentX += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+        if !sizes.isEmpty {
+            rowHeights.append(rowHeight)
+        }
 
         let totalHeight = currentY + rowHeight
         let totalWidth = containerWidth.isFinite ? containerWidth : usedWidth
-        return Result(origins: origins, size: CGSize(width: totalWidth, height: totalHeight))
+        return Result(
+            origins: origins,
+            size: CGSize(width: totalWidth, height: totalHeight),
+            rowIndexByItem: rowIndexByItem,
+            rowHeights: rowHeights
+        )
     }
 }
