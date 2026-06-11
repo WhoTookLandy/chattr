@@ -49,4 +49,11 @@ struct LoginNameAnnotationTests {
             displayName: "デレク", login: "", style: .displayFirst
         ) == nil)
     }
+
+    @Test("Empty display name → nil")
+    func emptyDisplayName() {
+        #expect(ChatAppearance.loginAnnotation(
+            displayName: "", login: "derek", style: .displayFirst
+        ) == nil)
+    }
 }

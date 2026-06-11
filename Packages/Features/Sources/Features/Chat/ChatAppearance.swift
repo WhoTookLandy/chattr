@@ -168,6 +168,7 @@ extension ChatAppearance {
     ) -> (primary: String, secondary: String)? {
         guard style != .off,
               !login.isEmpty,
+              !displayName.isEmpty,
               displayName.lowercased() != login.lowercased() else {
             return nil
         }
