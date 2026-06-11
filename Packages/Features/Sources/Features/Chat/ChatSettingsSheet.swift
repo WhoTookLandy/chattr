@@ -220,7 +220,7 @@ struct ChatSettingsSheet: View {
                 get: { loginNameDisplay != .off },
                 set: { loginNameDisplay = $0 ? .displayFirst : .off }
             )) {
-                Label("Show Usernames", systemImage: "at")
+                Label("Show Username", systemImage: "at")
             }
             Toggle(isOn: $edgeToEdge) {
                 Label("Edge-to-Edge Chat", systemImage: "arrow.up.left.and.arrow.down.right")
