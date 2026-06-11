@@ -29,6 +29,44 @@ struct EmoteCodableTests {
         #expect(decoded.ownerChannelId == "12345")
     }
 
+    @Test("Emote with aspect ratio round-trips")
+    func aspectRatioRoundTrips() throws {
+        let original = Emote(
+            id: "7tv:wide",
+            name: "LongEmote",
+            urls: [.x1: URL(string: "https://cdn.7tv.app/wide/1x.webp")!],
+            isAnimated: false,
+            isZeroWidth: false,
+            source: .sevenTV,
+            ownerChannelId: nil,
+            aspectRatio: 3.0
+        )
+        let decoded = try JSONDecoder().decode(Emote.self, from: try JSONEncoder().encode(original))
+        #expect(decoded == original)
+        #expect(decoded.aspectRatio == 3.0)
+    }
+
+    @Test("Legacy cached JSON without aspectRatio still decodes (nil aspect)")
+    func legacyJSONDecodesWithoutAspect() throws {
+        // Shape of an entry persisted by the pre-aspectRatio cache —
+        // decoding must not fail, or every user's emote cache would be
+        // silently discarded on upgrade. Note `urls` is a flat key/value
+        // ARRAY: Codable encodes non-String dictionary keys that way.
+        let legacy = """
+        {
+          "id": "7tv:old",
+          "name": "OldCache",
+          "urls": ["x1", "https://cdn.7tv.app/old/1x.webp"],
+          "isAnimated": false,
+          "isZeroWidth": false,
+          "source": "sevenTV"
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(Emote.self, from: legacy)
+        #expect(decoded.name == "OldCache")
+        #expect(decoded.aspectRatio == nil)
+    }
+
     @Test("Global emote (nil ownerChannelId) round-trips")
     func globalEmoteRoundTrips() throws {
         let original = Emote(
@@ -64,6 +102,6 @@ struct ChannelEmoteCachePayloadTests {
 
         #expect(decoded.broadcasterId == "99")
         #expect(decoded.byName["ZULUL"] == emote)
-        #expect(ChannelEmoteCachePayload.cacheVersion == 1)
+        #expect(ChannelEmoteCachePayload.cacheVersion == 2)
     }
 }

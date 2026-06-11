@@ -38,6 +38,14 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
     /// channel emote set includes it. nil for global emotes.
     public let ownerChannelId: String?
 
+    /// Native width÷height of the emote image, from provider metadata
+    /// (7TV: per-file dimensions; FFZ: emoticon dimensions; BTTV: none —
+    /// nil). Lets the renderer give wide emotes their natural width at a
+    /// fixed line height AND reserve correct layout space before the
+    /// image loads. Optional so cache entries persisted before this field
+    /// existed keep decoding (missing key → nil → square-ish fallback box).
+    public let aspectRatio: Double?
+
     /// Raw values are persisted in the on-disk emote cache — renaming a case or
     /// changing a raw value is a breaking change; bump the cache version if you do.
     public enum Size: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
@@ -59,7 +67,8 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
         isAnimated: Bool,
         isZeroWidth: Bool,
         source: Source,
-        ownerChannelId: String? = nil
+        ownerChannelId: String? = nil,
+        aspectRatio: Double? = nil
     ) {
         self.id = id
         self.name = name
@@ -68,5 +77,6 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
         self.isZeroWidth = isZeroWidth
         self.source = source
         self.ownerChannelId = ownerChannelId
+        self.aspectRatio = aspectRatio
     }
 }

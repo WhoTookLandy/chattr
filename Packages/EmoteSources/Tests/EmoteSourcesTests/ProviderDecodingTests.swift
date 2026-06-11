@@ -163,6 +163,66 @@ struct SevenTVDecodingTests {
         #expect(emotes[0].isAnimated == true)
     }
 
+    @Test("Carries the file dimensions through as an aspect ratio")
+    func parsesAspectRatio() async throws {
+        // A "wide" emote: 96×32 at 1x → aspect 3.0. The 7TV API reports
+        // width/height per file; ratio is identical across size variants.
+        let json = """
+        {
+          "emotes": [
+            {
+              "id": "W0001",
+              "name": "WideBoi",
+              "data": {
+                "animated": false,
+                "host": {
+                  "url": "https://cdn.7tv.app/emote/W0001",
+                  "files": [
+                    {"name": "1x.webp", "format": "WEBP", "width": 96, "height": 32},
+                    {"name": "2x.webp", "format": "WEBP", "width": 192, "height": 64}
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+        let provider = SevenTVProvider(urlSession: mockedSession(
+            url: "https://7tv.io/v3/emote-sets/global",
+            data: json
+        ))
+        let emotes = try await provider.globalEmotes()
+        try #require(emotes.count == 1)
+        #expect(emotes[0].aspectRatio == 3.0)
+    }
+
+    @Test("Missing file dimensions yield nil aspect ratio")
+    func missingDimensionsYieldNilAspect() async throws {
+        let json = """
+        {
+          "emotes": [
+            {
+              "id": "N0001",
+              "name": "NoDims",
+              "data": {
+                "host": {
+                  "url": "https://cdn.7tv.app/emote/N0001",
+                  "files": [{"name": "1x.webp", "format": "WEBP"}]
+                }
+              }
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+        let provider = SevenTVProvider(urlSession: mockedSession(
+            url: "https://7tv.io/v3/emote-sets/global",
+            data: json
+        ))
+        let emotes = try await provider.globalEmotes()
+        try #require(emotes.count == 1)
+        #expect(emotes[0].aspectRatio == nil)
+    }
+
     @Test("Drops emotes with no usable variants")
     func dropsEmoteWithNoUsableVariants() async throws {
         let json = """
@@ -334,5 +394,34 @@ struct FFZDecodingTests {
         ))
         let emotes = try await provider.channelEmotes(broadcasterId: "1", broadcasterLogin: "noone")
         #expect(emotes.isEmpty)
+    }
+
+    @Test("Carries emoticon dimensions through as an aspect ratio")
+    func parsesAspectRatio() async throws {
+        // FFZ reports width/height at the emoticon level (1x dimensions).
+        let json = """
+        {
+          "sets": {
+            "3": {
+              "emoticons": [
+                {
+                  "id": 300,
+                  "name": "WideZulul",
+                  "width": 56,
+                  "height": 28,
+                  "urls": {"1": "//cdn.frankerfacez.com/emote/300/1"}
+                }
+              ]
+            }
+          }
+        }
+        """.data(using: .utf8)!
+        let provider = FFZProvider(urlSession: mockedSession(
+            url: "https://api.frankerfacez.com/v1/set/global",
+            data: json
+        ))
+        let emotes = try await provider.globalEmotes()
+        try #require(emotes.count == 1)
+        #expect(emotes[0].aspectRatio == 2.0)
     }
 }

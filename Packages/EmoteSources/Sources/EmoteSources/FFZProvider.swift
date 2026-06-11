@@ -72,6 +72,10 @@ public struct FFZProvider: EmoteProvider {
         /// Animated URL set (added in a later FFZ API revision). Present
         /// only for animated emotes; nil for the majority.
         let animated: [String: String]?
+        /// 1x pixel dimensions, reported at the emoticon level. Drives
+        /// `Emote.aspectRatio` for natural-width rendering.
+        let width: Int?
+        let height: Int?
     }
 
     private static func map(_ j: EmoteJSON, ownerChannelId: String?) -> Emote? {
@@ -98,6 +102,12 @@ public struct FFZProvider: EmoteProvider {
         }
         guard !urls.isEmpty else { return nil }
 
+        let aspectRatio: Double? = if let w = j.width, let h = j.height, w > 0, h > 0 {
+            Double(w) / Double(h)
+        } else {
+            nil
+        }
+
         return Emote(
             id: "ffz:\(j.id)",
             name: j.name,
@@ -105,7 +115,8 @@ public struct FFZProvider: EmoteProvider {
             isAnimated: j.animated != nil,
             isZeroWidth: false,                 // FFZ has no zero-width emotes.
             source: .ffz,
-            ownerChannelId: ownerChannelId
+            ownerChannelId: ownerChannelId,
+            aspectRatio: aspectRatio
         )
     }
 }

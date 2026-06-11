@@ -82,6 +82,10 @@ public struct SevenTVProvider: EmoteProvider {
         let name: String
         /// "WEBP", "AVIF", "PNG", etc.
         let format: String
+        /// Pixel dimensions of this variant. Drives `Emote.aspectRatio`
+        /// so wide emotes can render at their natural width.
+        let width: Int?
+        let height: Int?
     }
 
     /// Convert a raw 7TV emote JSON record into our unified `Emote` value.
@@ -118,6 +122,15 @@ public struct SevenTVProvider: EmoteProvider {
         let isZeroWidth = (flags & 0x01) != 0
         let isAnimated = j.data?.animated ?? false
 
+        // Width÷height is identical across size variants, so any file with
+        // dimensions works — take the first WebP that reports them.
+        let aspectRatio: Double? = webpFiles.lazy
+            .compactMap { file -> Double? in
+                guard let w = file.width, let h = file.height, w > 0, h > 0 else { return nil }
+                return Double(w) / Double(h)
+            }
+            .first
+
         return Emote(
             id: "7tv:\(j.id)",
             name: j.name,
@@ -125,7 +138,8 @@ public struct SevenTVProvider: EmoteProvider {
             isAnimated: isAnimated,
             isZeroWidth: isZeroWidth,
             source: .sevenTV,
-            ownerChannelId: ownerChannelId
+            ownerChannelId: ownerChannelId,
+            aspectRatio: aspectRatio
         )
     }
 }
