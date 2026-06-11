@@ -15,7 +15,7 @@ let package = Package(
         .package(path: "../Channels"),
         .package(path: "../EmoteSources"),
         .package(path: "../ChatModel"),
-        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.0"),
+        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.2"),
         // Nuke for image loading + caching. Profile-guided choice:
         // chat-row badges and emotes recycle constantly during scroll;
         // SwiftUI's AsyncImage refetches+redecodes per recycle and

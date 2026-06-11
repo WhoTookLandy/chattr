@@ -12,7 +12,8 @@ let package = Package(
         .package(path: "../Core"),
         .package(path: "../Accounts"),
         .package(path: "../EmoteSources"),
-        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.0"),
+        .package(path: "../ChatModel"),
+        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.2"),
     ],
     targets: [
         .target(
@@ -21,6 +22,7 @@ let package = Package(
                 "Core",
                 "Accounts",
                 "EmoteSources",
+                "ChatModel",
                 .product(name: "TwitchKit", package: "TwitchKit"),
             ],
             path: "Sources/Channels",

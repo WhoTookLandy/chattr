@@ -699,7 +699,7 @@
 			repositoryURL = "https://github.com/AndrewBeshay/TwitchKit.git";
 			requirement = {
 				kind = exactVersion;
-				version = 0.3.0;
+				version = 0.3.2;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
