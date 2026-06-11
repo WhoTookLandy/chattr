@@ -276,9 +276,12 @@ final class ChatListViewController: UIViewController {
 
         if scrollToBottomToken != lastScrollToBottomToken {
             lastScrollToBottomToken = scrollToBottomToken
-            // The at-bottom branch inside `apply` already scrolled when tailing;
-            // only act on the token when scrolled up, so we never scroll twice.
-            if !lastReportedAtBottom { scrollToBottom(animated: false) }
+            // Jump-to-bottom pill: re-enter tailing. The per-pass
+            // pinToBottomIfNeeded (and the explicit pin in `apply`) glue the
+            // offset to the live edge from here — same mechanism as
+            // resumeTailingIfNearBottom, the controller's pin-based tailing.
+            isPinnedToBottom = true
+            pinToBottomIfNeeded()
         }
     }
 

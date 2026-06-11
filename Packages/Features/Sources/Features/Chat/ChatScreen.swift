@@ -745,7 +745,7 @@ private struct ChatTranscript: View {
                 changeVersion: chatModel.changeVersion,
                 latestChanges: { chatModel.latestChangeBatch },
                 snapshot: { chatModel.lines },
-                rowContent: { line in chatRow(for: line) },
+                rowContent: { line in rowContent(line) },
                 isAtBottom: $isAtBottom,
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge
