@@ -40,6 +40,7 @@ public struct RootView: View {
     @AppStorage(ChatAppearance.showBadgesKey) private var chatShowBadges: Bool = true
     @AppStorage(ChatAppearance.animatedEmotesKey) private var chatAnimatedEmotes: Bool = true
     @AppStorage(ChatAppearance.edgeToEdgeKey) private var chatEdgeToEdge: Bool = false
+    @AppStorage(ChatAppearance.loginNameDisplayKey) private var chatLoginNameDisplay: ChatAppearance.LoginNameDisplay = .displayFirst
     /// Observed only to re-fire the registry-sync `.task(id:)` below when
     /// the user changes the setting — consumers read the value through
     /// `ChatAppearance.chatHistoryLines()` (which also validates it).
@@ -60,7 +61,8 @@ public struct RootView: View {
             showTimestamps: chatShowTimestamps,
             showBadges: chatShowBadges,
             animatedEmotes: chatAnimatedEmotes,
-            edgeToEdge: chatEdgeToEdge
+            edgeToEdge: chatEdgeToEdge,
+            loginNameDisplay: chatLoginNameDisplay
         )
     }
 
