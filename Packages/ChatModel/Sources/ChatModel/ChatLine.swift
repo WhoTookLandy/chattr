@@ -83,6 +83,14 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// "xQc" not "xqc"). Already de-decorated of any IRC-era affectations.
     public let authorDisplayName: String
 
+    /// The chatter's lowercase login ("derek"), the unique handle used for
+    /// @-mentions and Helix lookups. Distinct from `authorDisplayName`,
+    /// which may be a localized non-Latin name ("デレク") or just a
+    /// capitalization variant. Empty for system/bubble lines that have no
+    /// single inline author. The renderer uses it to annotate localized
+    /// names — see `ChatAppearance.loginAnnotation`.
+    public let authorUserLogin: String
+
     /// User-picked color, as a `#RRGGBB` hex. Empty when the user hasn't
     /// picked one — the renderer falls back to `.primary` in that case.
     public let authorColor: String
@@ -311,6 +319,7 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
             originalBadges: originalBadges,
             authorUserId: authorUserId,
             authorDisplayName: authorDisplayName,
+            authorUserLogin: authorUserLogin,
             authorColor: authorColor,
             runs: runs,                       // keep content for strikethrough display
             isHighlighted: false,             // deleted messages aren't highlighted
@@ -333,6 +342,7 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         originalBadges: [ChatBadge] = [],
         authorUserId: String = "",
         authorDisplayName: String,
+        authorUserLogin: String = "",
         authorColor: String = "",
         runs: [LineRun],
         isHighlighted: Bool = false,
@@ -346,6 +356,7 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         self.originalBadges = originalBadges
         self.authorUserId = authorUserId
         self.authorDisplayName = authorDisplayName
+        self.authorUserLogin = authorUserLogin
         self.authorColor = authorColor
         self.runs = runs
         self.isHighlighted = isHighlighted

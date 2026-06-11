@@ -374,4 +374,17 @@ struct NormalizerTokenizationTests {
         )
         #expect(runs == [.text("hello"), .emote(kappa), .text("world")])
     }
+
+    @Test("Chatter login is carried onto the ChatLine")
+    func carriesLogin() {
+        // makeMessage derives chatter_user_login as chatterUserName.lowercased()
+        let message = makeMessage(chatterUserName: "Tester", fragments: [textSpec("hi")])
+        let line = Normalizer.normalize(
+            message: message,
+            emoteSnapshot: [:],
+            currentUserLogin: "someoneelse"
+        )
+        #expect(line.authorUserLogin == "tester")
+        #expect(line.authorDisplayName == "Tester")
+    }
 }

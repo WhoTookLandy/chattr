@@ -170,6 +170,7 @@ public enum Normalizer {
             originalBadges: message.badges,
             authorUserId: message.chatterUserId,
             authorDisplayName: message.chatterUserName,
+            authorUserLogin: message.chatterUserLogin,
             authorColor: message.color,
             runs: runs,
             isHighlighted: isHighlighted,
