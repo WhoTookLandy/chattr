@@ -1,5 +1,6 @@
 import Foundation
 import Accounts
+import ChatModel
 import EmoteSources
 import TwitchKit
 import Core
@@ -121,6 +122,14 @@ public final class ChannelSessionRegistry {
 
     private var emoteIndexes: [String: EmoteIndex] = [:]
     private var badgeStores: [String: ChatBadgeStore] = [:]
+    private var normalizedLineCaches: [String: NormalizedLineCache] = [:]
+
+    /// Ring capacity handed to each NEWLY constructed `ChannelSession` —
+    /// the user's Chat History setting. Kept in sync by `RootView` (set at
+    /// launch and on setting changes). Existing sessions keep the capacity
+    /// they were built with; the new value applies when a channel tab is
+    /// next opened fresh.
+    public var chatHistoryLimit: Int = 500
 
     public init(accountStore: AccountStore) {
         self.accountStore = accountStore
@@ -164,6 +173,7 @@ public final class ChannelSessionRegistry {
             channelId: channelId,
             channelLoginName: channelLoginName,
             accountUserId: accountUserId,
+            ringCapacity: chatHistoryLimit,
             refreshTokenHandler: { [weak accountStore] in
                 guard let accountStore else { throw AppError(message: "AccountStore deallocated during refresh") }
                 try await accountStore.refreshTokens(userId: accountUserId, login: accountLogin)
@@ -310,6 +320,7 @@ public final class ChannelSessionRegistry {
             // also waste memory across closed-then-reopened tabs.
             emoteIndexes[key] = nil
             badgeStores[key] = nil
+            normalizedLineCaches[key] = nil
             // After tearing down the session, check if THIS account has
             // any remaining sessions. If not, cancel the shared event
             // dispatcher Task — otherwise the WebSocket stays connected
@@ -373,6 +384,24 @@ public final class ChannelSessionRegistry {
         }
         let new = ChatBadgeStore()
         badgeStores[key] = new
+        return new
+    }
+
+    /// Returns the shared `NormalizedLineCache` for this account × channel
+    /// pair, creating it on first access. Same lifetime semantics as
+    /// `emoteIndex(...)` — surviving tab swipes is its entire reason to
+    /// exist (see the type's doc comment).
+    ///
+    /// Capacity is 2× the chat-history limit so a full ring re-prime is all
+    /// cache hits even after the ring has churned somewhat past the entries'
+    /// insertion order.
+    public func normalizedLineCache(forAccountUserId accountUserId: String, channelId: String) -> NormalizedLineCache {
+        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
+        if let existing = normalizedLineCaches[key] {
+            return existing
+        }
+        let new = NormalizedLineCache(capacity: chatHistoryLimit * 2)
+        normalizedLineCaches[key] = new
         return new
     }
 

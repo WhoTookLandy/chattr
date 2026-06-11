@@ -1,15 +1,21 @@
 import SwiftUI
 import Accounts
+import DesignSystem
+import NukeUI
 
 /// Root content of the Chat surface — now also the app's home screen.
 ///
 /// Layout:
 ///   1. A single `NavigationStack` with a toolbar header that reflects the
-///      active tab (avatar leading → Profile, channel name principal →
-///      switcher, grid trailing → Follows).
+///      active tab (account avatar leading → Profile, floating channel-name
+///      pill principal → switcher, heart trailing → Follows).
 ///   2. A horizontally-paged `ScrollView` of `ChatScreen` pages — one page
 ///      per open tab. Swipe left/right to switch tabs.
-///   3. Page-dots below the transcript (hidden for a single tab).
+///   3. Page-dots live INSIDE the channel pill (hidden for a single tab) —
+///      they used to occupy a dedicated strip below the transcript, which
+///      read as a dead black bar between the chat surface and the home
+///      indicator. Folding them into the pill returns that strip's height
+///      to the transcript.
 ///
 /// ## How the paging works
 ///
@@ -49,6 +55,12 @@ public struct ChatTabsScreen: View {
 
     @Environment(\.chatTabs) private var chatTabs
 
+    /// Read for `edgeToEdge`: when the user runs chat full-bleed, the
+    /// navigation bar's own background is hidden so the avatar / channel
+    /// pill / heart become free-standing glass over the transcript
+    /// (Reddit-style) instead of sitting on a bar.
+    @Environment(\.chatAppearance) private var appearance
+
     /// Scene-scoped restoration of the active tab id. `@SceneStorage` only
     /// supports primitive types, so we round-trip through UUID's
     /// `uuidString` representation. Persisted per-scene (each window has
@@ -82,10 +94,7 @@ public struct ChatTabsScreen: View {
         NavigationStack {
             Group {
                 if let chatTabs, !chatTabs.tabs.isEmpty {
-                    VStack(spacing: 0) {
-                        pagedChatContent(chatTabs: chatTabs)
-                        pageDots(chatTabs: chatTabs)
-                    }
+                    pagedChatContent(chatTabs: chatTabs)
                     .onAppear {
                         if let savedId = persistedActiveTabId,
                            let uuid = UUID(uuidString: savedId),
@@ -100,8 +109,23 @@ public struct ChatTabsScreen: View {
                     emptyState
                 }
             }
+            // Same surface as the transcript itself (ChatScreen applies it
+            // too) — without this, the page-gutters and empty state sit on
+            // pure system black and read as dead bars around the chat.
+            .background(Color.chatSurface.ignoresSafeArea())
             .toolbar { headerToolbar(chatTabs: chatTabs) }
             .toolbarTitleDisplayMode(.inline)
+            // Edge-to-Edge Chat: no bar background at all — the three
+            // toolbar items float free-standing over the transcript,
+            // each carrying its own glass. Default (.automatic) restores
+            // the system bar treatment for the inset layout. Placement
+            // `.automatic` = the primary bar (nav bar on iOS) and, unlike
+            // `.navigationBar`, also compiles for the package's macOS
+            // target.
+            .toolbarBackgroundVisibility(
+                appearance.edgeToEdge ? .hidden : .automatic,
+                for: .automatic
+            )
         }
         // Open-chats switcher.
         .sheet(isPresented: $showSwitcher) {
@@ -148,38 +172,94 @@ public struct ChatTabsScreen: View {
         #endif
     }
 
-    /// The toolbar header. Three STABLE items whose labels reflect the
-    /// active tab — never inserted/removed conditionally (that would rebuild
-    /// the bar and flicker; see axiom toolbars guidance).
+    /// The toolbar header, Reddit-style: the account's actual avatar
+    /// leading, a floating glass pill with the channel name (and page
+    /// dots, when several tabs are open) in the center, follows trailing.
+    /// Three STABLE items whose labels reflect the active tab — never
+    /// inserted/removed conditionally (that would rebuild the bar and
+    /// flicker; see axiom toolbars guidance).
     @ToolbarContentBuilder
     private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
         ToolbarItem(placement: leadingHeaderPlacement) {
             Button { showProfile = true } label: {
-                Image(systemName: "person.crop.circle")
-                    .symbolRenderingMode(.hierarchical)
+                avatarImage
             }
             .accessibilityLabel("Profile")
         }
         ToolbarItem(placement: .principal) {
             Button { showSwitcher = true } label: {
-                HStack(spacing: 5) {
-                    Text(activeTabTitle(chatTabs: chatTabs))
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                VStack(spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(activeTabTitle(chatTabs: chatTabs))
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    pillPageDots(chatTabs: chatTabs)
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                // The pill's own glass — `.interactive()` so it responds
+                // to the press like the standalone control it looks like.
+                .glassEffect(.regular.interactive(), in: Capsule())
             }
+            .buttonStyle(.plain)
             .accessibilityLabel("Switch channel")
             .disabled(chatTabs?.tabs.isEmpty ?? true)
         }
+        // The pill carries its own glass above; hide the bar's shared
+        // item background so the two don't stack into a double capsule.
+        .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: trailingHeaderPlacement) {
             Button { showFollows = true } label: {
-                Image(systemName: "square.grid.2x2")
+                Image(systemName: "heart")
                     .symbolRenderingMode(.hierarchical)
             }
             .accessibilityLabel("Follows")
+        }
+    }
+
+    /// The signed-in account's avatar, circle-cropped to toolbar-icon
+    /// size. Falls back to the old SF Symbol while loading or when the
+    /// profile-image URL is missing (first sign-in before the /users
+    /// probe completes).
+    private var avatarImage: some View {
+        LazyImage(url: URL(string: account.profileImageURL)) { state in
+            if let image = state.image {
+                image.resizable().scaledToFill()
+            } else {
+                Image(systemName: "person.crop.circle")
+                    .resizable()
+                    .scaledToFit()
+                    .symbolRenderingMode(.hierarchical)
+            }
+        }
+        .frame(width: 28, height: 28)
+        .clipShape(Circle())
+    }
+
+    /// Miniature page dots inside the channel pill — one per open tab,
+    /// active highlighted. Rendered only with 2+ tabs; with a single tab
+    /// the pill is just the name (nothing to switch between). These
+    /// replace the dedicated dots strip that used to sit below the
+    /// transcript eating vertical space.
+    @ViewBuilder
+    private func pillPageDots(chatTabs: ChatTabsModel?) -> some View {
+        if let chatTabs, chatTabs.tabs.count > 1 {
+            HStack(spacing: 4) {
+                // Resolve the same way the title does: the pager shows
+                // `tabs.first` when `activeTabId` is still nil, so highlight
+                // that dot rather than leaving all of them dim.
+                let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
+                ForEach(chatTabs.tabs) { tab in
+                    Circle()
+                        .fill(tab.id == visibleId ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.35)))
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .accessibilityHidden(true)
         }
     }
 
@@ -196,27 +276,6 @@ public struct ChatTabsScreen: View {
         return tab.displayName
     }
 
-    /// Page-dots under the transcript — one per open tab, active highlighted.
-    /// Hidden for a single tab (no switching to indicate).
-    @ViewBuilder
-    private func pageDots(chatTabs: ChatTabsModel) -> some View {
-        if chatTabs.tabs.count > 1 {
-            HStack(spacing: 6) {
-                // Resolve the same way the title does: the pager shows
-                // `tabs.first` when `activeTabId` is still nil, so highlight
-                // that dot rather than leaving all of them dim.
-                let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
-                ForEach(chatTabs.tabs) { tab in
-                    Circle()
-                        .fill(tab.id == visibleId ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.35)))
-                        .frame(width: 6, height: 6)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
-            .accessibilityHidden(true)
-        }
-    }
 
     /// Horizontally-paged ScrollView with one ChatScreen per open tab.
     /// Swipe left/right to switch tabs; tap a row in the switcher to jump.
@@ -253,6 +312,14 @@ public struct ChatTabsScreen: View {
         // page. Swipe-to-page writes back here → header title + page-dot update.
         .scrollPosition(id: $bindable.activeTabId)
         .scrollIndicators(.hidden)
+        // Edge-to-Edge Chat: SwiftUI hangs the toolbar's scroll-edge
+        // treatment off THIS pager ScrollView (the nearest scroll
+        // container under the bar), not the UIKit list inside it. The
+        // automatic style resolved to a heavy dark band over the whole
+        // toolbar region; `.soft` is the progressive blur — content
+        // gently blurs out as it nears the physical top, keeping the
+        // free-standing pills legible without dimming the transcript.
+        .scrollEdgeEffectStyle(appearance.edgeToEdge ? .soft : .automatic, for: .top)
     }
 
     /// One paged ChatScreen for a tab. MVP: renders the tab's first (and

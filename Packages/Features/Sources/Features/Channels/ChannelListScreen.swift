@@ -121,6 +121,10 @@ public struct ChannelListScreen: View {
             case .all:  allSegment
             }
         }
+        // Soft progressive blur where rows scroll out at the bottom edge —
+        // same treatment as the chat transcript's top edge. Applied to the
+        // Group so both segments' Lists pick it up.
+        .scrollEdgeEffectStyle(.soft, for: .bottom)
         // "Following" matches the convention every social app uses (Twitter/X,
         // Instagram, Bluesky). Shorter than the previous "@displayName's Follows".
         // The account context is one tap away via the gear → Settings.

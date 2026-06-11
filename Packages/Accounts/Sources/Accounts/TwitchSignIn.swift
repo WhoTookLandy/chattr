@@ -30,6 +30,12 @@ public enum TwitchSignIn {
     /// - `moderatorManageChatMessages`: mod-only Delete Message
     ///   affordance. Non-mods approve it harmlessly; Twitch rejects the
     ///   delete server-side if the user isn't actually a mod.
+    /// - `moderatorManageChatSettings`: mod-only Chat Modes section in
+    ///   the in-chat settings sheet (emote-only, slow mode, …). Same
+    ///   harmless-for-non-mods rationale as chat_messages. NOTE:
+    ///   accounts signed in before this scope was added must sign in
+    ///   again to pick it up — until then the PATCH fails with
+    ///   unauthorized and the sheet surfaces the error.
     public static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,
@@ -37,6 +43,7 @@ public enum TwitchSignIn {
         .userReadFollows,
         .userReadEmotes,
         .moderatorManageChatMessages,
+        .moderatorManageChatSettings,
     ]
 
     /// The redirect URI the Vercel bridge 302-redirects back to. Must

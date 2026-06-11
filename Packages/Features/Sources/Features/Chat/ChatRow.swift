@@ -57,6 +57,18 @@ struct ChatRow: View, Equatable {
     /// already visible right above it, so per-row quotes are pure noise.
     var showsQuotedReply: Bool = true
 
+    /// Fixed-width `HH:mm` (24-hour, zero-padded) — the Twitch-native chat
+    /// timestamp shape. Verbatim because every locale-aware hour style adds
+    /// an am/pm marker on 12-hour devices; a chat column needs the stable
+    /// 5-character form regardless of region. Built once: format-string
+    /// parsing isn't free, and rows render by the thousand.
+    private static let timestampFormat = Date.VerbatimFormatStyle(
+        format: "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)",
+        locale: .current,
+        timeZone: .current,
+        calendar: .current
+    )
+
     /// Read once per row so the username color recomputes when the user toggles
     /// theme in Settings. (Environment changes trigger a re-render.)
     @Environment(\.colorScheme) private var colorScheme
@@ -307,19 +319,32 @@ struct ChatRow: View, Equatable {
         messageBody(highlightPlate: line.isHighlighted)
     }
 
+    /// Styled username Text, ready to interpolate alongside the colon.
+    private var usernamePrefix: Text {
+        Text(line.authorDisplayName)
+            .font(appearance.font.weight(.semibold))
+            .foregroundStyle(usernameColor)
+    }
+
     /// `highlightPlate: false` lets the reply container own the tint —
     /// a highlighted reply gets ONE accent plate around quote + body,
     /// not a second one nested inside.
     @ViewBuilder
     private func messageBody(highlightPlate: Bool) -> some View {
-        FlowLayout(spacing: 4, alignment: .firstTextBaseline, hangingIndent: 14) {
-            // Optional leading timestamp. Monospaced digits so columns of
-            // timestamps align vertically across rows; tertiary + caption2
-            // so it reads as metadata, not message content.
+        // No hanging indent — wrapped lines continue flush at the leading
+        // edge, matching Twitch's native chat. The 14pt indent we shipped
+        // briefly made continuations look misaligned ("starts a little bit
+        // after the edge") rather than intentionally nested.
+        FlowLayout(spacing: 4, alignment: .firstTextBaseline) {
+            // Optional leading timestamp. Fixed-width 24-hour HH:mm (matching
+            // Twitch's native chat) — verbatim rather than locale-aware
+            // `.dateTime.hour().minute()`, which appends an am/pm marker in
+            // 12-hour locales and makes the column wide and ragged. Body-size
+            // + secondary grey so rows read uniformly, not metadata-tiny.
             if appearance.showTimestamps {
-                Text(line.timestamp, format: .dateTime.hour().minute())
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                Text(line.timestamp, format: Self.timestampFormat)
+                    .font(appearance.font.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
             // Badges keyed by `url` — stable per-badge identity across row
             // re-renders means SwiftUI doesn't destroy + re-create the
@@ -328,15 +353,13 @@ struct ChatRow: View, Equatable {
             // a row re-rendered (e.g., on `.deletedPlaceholder` flip).
             if appearance.showBadges {
                 ForEach(badgeEntries, id: \.url) { entry in
-                    BadgeImage(entry: entry, scale: appearance.textSize.imageScale)
+                    BadgeImage(entry: entry, scale: appearance.imageScale)
                 }
             }
-            // Username prefix
-            Text(line.authorDisplayName)
-                .font(appearance.textSize.font.weight(.semibold))
-                .foregroundStyle(usernameColor)
-            Text(":")
-                .foregroundStyle(.secondary)
+            // Username prefix. The colon is interpolated into the same Text
+            // so it hugs the name ("Landy:") instead of floating 4pt away as
+            // its own flow item — and the pair can never wrap apart.
+            Text("\(usernamePrefix)\(Text(":").foregroundStyle(.secondary))")
 
             // Walk the pre-normalized runs in order. `line.runs` is immutable
             // after `Normalizer.normalize(...)` returns (we replace the whole
@@ -418,7 +441,7 @@ struct ChatRow: View, Equatable {
     private func runView(for run: LineRun) -> some View {
         // All text runs derive their font from the appearance setting —
         // `.standard` maps to `.callout`, the pre-settings default.
-        let bodyFont = appearance.textSize.font
+        let bodyFont = appearance.font
         switch run {
         case .text(let body):
             Text(body)
@@ -430,7 +453,7 @@ struct ChatRow: View, Equatable {
             // not-too-large render.
             EmoteImage(
                 emote: emote,
-                scale: appearance.textSize.imageScale,
+                scale: appearance.imageScale,
                 allowAnimation: appearance.animatedEmotes
             )
 
@@ -626,20 +649,32 @@ private struct EmoteImage: View {
     }
 
     var body: some View {
+        // Fixed line height, natural width: wide 7TV/FFZ emotes get their
+        // real aspect ratio instead of being crushed into a square-ish box.
+        // Computed from API metadata (not the loaded image) so the row
+        // reserves the right width before the image arrives — no reflow
+        // when a wide emote pops in.
+        let emoteHeight = 24 * scale
+        let emoteWidth = EmoteDisplayMetrics.width(aspectRatio: emote.aspectRatio, height: emoteHeight)
         Group {
-            if emote.isAnimated && allowAnimation {
+            if emote.isAnimated {
                 // Animated 7TV WebP / BTTV GIF / FFZ APNG — decode frames
                 // via ImageIO and cycle them. Only animated emotes pay
                 // this cost; the static majority use the cheap LazyImage
                 // path below.
-                AnimatedImageView(url: imageURL, width: 28 * scale, height: 24 * scale) {
+                //
+                // With animations off this STILL goes through the frame
+                // decoder (with `animate: false`) rather than LazyImage:
+                // a first-frame-only decode renders delta-encoded WebPs
+                // (blank opening frame) as empty space, while the decoder
+                // picks the first VISIBLE frame as the static poster.
+                AnimatedImageView(url: imageURL, width: emoteWidth, height: emoteHeight, animate: allowAnimation) {
                     Text(emote.name).font(.callout)
                 }
             } else {
                 // Static emote. LazyImage: sync memory-cache hit on first
                 // frame (no flash on re-scroll), off-main decode, auto
-                // memory+disk cache. Also the "animations off" path for
-                // animated emotes — ImageIO decodes just the first frame.
+                // memory+disk cache.
                 LazyImage(url: imageURL) { state in
                     if let image = state.image {
                         image
@@ -653,7 +688,7 @@ private struct EmoteImage: View {
                             .font(.callout)
                     }
                 }
-                .frame(maxWidth: 28 * scale, maxHeight: 24 * scale)
+                .frame(maxWidth: emoteWidth, maxHeight: emoteHeight)
             }
         }
         .accessibilityLabel(emote.name)

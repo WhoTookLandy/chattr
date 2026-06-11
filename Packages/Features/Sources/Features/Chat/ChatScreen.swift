@@ -2,6 +2,7 @@ import SwiftUI
 import Accounts
 import Channels
 import ChatModel
+import DesignSystem
 import EmoteSources
 import TwitchKit
 import Core
@@ -124,10 +125,19 @@ public struct ChatScreen: View {
     /// we wrap it minimally for the API.
     @State private var viewingThreadRootId: ThreadRootID?
 
+    /// True while the in-chat settings sheet (chat modes + preferences)
+    /// is presented. Opened from the compose bar's gear button.
+    @State private var showChatSettings = false
+
     /// When true, the user has Reduce Motion on in system Accessibility — we
     /// skip the easeOut tween on auto-scroll so chat snaps instantly to the
     /// newest message instead of animating.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Chat appearance preferences. ChatScreen itself only consumes
+    /// `edgeToEdge` (full-bleed transcript) — the per-row knobs are read
+    /// by ChatRow from the same environment.
+    @Environment(\.chatAppearance) private var appearance
 
     // NOTE: compose-bar state (`composeText`, `isSending`, `composeFocused`)
     // lives inside the extracted `ComposeBar` view below — NOT here on
@@ -204,6 +214,11 @@ public struct ChatScreen: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Chat surface color — slightly lifted off pure black/white in
+        // both schemes (see DesignSystem.Color.chatSurface). Applied here
+        // (not on the list) so the empty/connecting states and the area
+        // behind the glass compose bar share the same surface.
+        .background(Color.chatSurface.ignoresSafeArea())
         .safeAreaBar(edge: .bottom) {
             composeBarView
         }
@@ -248,6 +263,18 @@ public struct ChatScreen: View {
             // and keeping live chat visible behind it preserves context.
             // Drag the grabber (or swipe up on the content) to expand to
             // full height for long threads.
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        // In-chat settings: chat modes (mod-gated) + viewer preferences.
+        // Half sheet like Twitch's native Chat Settings; expandable for
+        // the appearance sub-screen.
+        .sheet(isPresented: $showChatSettings) {
+            ChatSettingsSheet(
+                chatModel: chatModel,
+                channelLoginName: channelLoginName,
+                currentUserLogin: account.login
+            )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
@@ -416,6 +443,7 @@ public struct ChatScreen: View {
                     twitchGlobal: resolvedTwitchGlobals
                 )
             },
+            onOpenSettings: { showChatSettings = true },
             onSend: { draft in await chatModel.send(text: draft) }
         )
     }
@@ -476,12 +504,22 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var chatScrollView: some View {
         #if canImport(UIKit)
-        ChatListView(
-            lines: chatModel.lines,
-            rowContent: { line in chatRow(for: line) },
-            isAtBottom: $isAtBottom,
-            scrollToBottomToken: scrollToBottomToken
-        )
+        // The ZStack is the safe-area-respecting anchor for the floating
+        // pills (overlays below) while the list itself may bleed past the
+        // top edge: `ignoresSafeArea` expands only the ChatListView, so
+        // with Edge-to-Edge Chat on, messages scroll underneath the
+        // toolbar glass but the connection/jump pills keep their
+        // positions inside the visible safe region.
+        ZStack {
+            ChatListView(
+                lines: chatModel.lines,
+                rowContent: { line in chatRow(for: line) },
+                isAtBottom: $isAtBottom,
+                scrollToBottomToken: scrollToBottomToken,
+                extendsToTop: appearance.edgeToEdge
+            )
+            .ignoresSafeArea(edges: appearance.edgeToEdge ? .top : [])
+        }
         // New messages while scrolled up tally into the unread pill; while
         // tailing, the collection view auto-scrolls and we reset the count.
         .onChange(of: chatModel.lines.count) { oldCount, newCount in
@@ -793,35 +831,35 @@ public struct ChatScreen: View {
         }
     }
 
-    /// Floating "jump to latest" pill. Subtle by design — a thin glass
-    /// capsule with secondary-grey text so it reads as a quiet hint, not
-    /// a call-to-action competing with the chat. Shows an unread count
-    /// when messages arrived while scrolled up, else just "Latest".
+    /// Floating "jump to latest" pill. Two moods: with unread messages it's
+    /// a proper call-to-action — footnote-weight primary text on a roomier
+    /// glass capsule, sized like Twitch's native "N new messages" chip —
+    /// because at caption2/5pt it read as an ignorable speck. Caught up,
+    /// it relaxes back to a quiet secondary "Latest" hint.
     @ViewBuilder
     private var jumpToBottomPill: some View {
         Button {
             jumpToLatest()
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.semibold))
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down")
+                    .font(.footnote.weight(.semibold))
                 if unreadWhileScrolledUp > 0 {
                     // Apple's inflection markdown pluralizes "message"
                     // automatically (1 message / 2 messages).
                     Text("^[\(unreadWhileScrolledUp) new message](inflect: true)")
-                        .font(.caption2.weight(.medium))
+                        .font(.footnote.weight(.semibold))
                 } else {
                     Text("Latest")
-                        .font(.caption2.weight(.medium))
+                        .font(.footnote.weight(.medium))
                 }
             }
-            // Clear grey type so the pill stays quiet against chat.
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-            // Glass capsule (regular, not prominent/tinted) for the
-            // subtle floating-hint aesthetic.
-            .glassEffect(.regular, in: Capsule())
+            .foregroundStyle(unreadWhileScrolledUp > 0 ? Color.primary : Color.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            // `.interactive()` so the glass responds to the press —
+            // it's a button now, not a status pill.
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
@@ -911,7 +949,20 @@ public struct ChatScreen: View {
                 // applies on the next channel attach (reopen / relaunch).
                 // Self-mentions are always highlighted regardless of this
                 // list; keywords are additive.
-                highlightKeywords: HighlightSettings.keywords()
+                highlightKeywords: HighlightSettings.keywords(),
+                // Chat History setting — read at attach time, like the
+                // keywords. Tab remounts re-attach, so a changed setting
+                // takes hold on the next swipe back to (or reopen of) a
+                // channel.
+                lineCap: ChatAppearance.chatHistoryLines(),
+                // Registry-owned normalize memo — survives this screen's
+                // unmount so swiping back re-primes from cache hits
+                // instead of re-tokenizing the whole ring (see
+                // NormalizedLineCache).
+                lineCache: registry.normalizedLineCache(
+                    forAccountUserId: account.userId,
+                    channelId: channelId
+                )
             )
         } catch is CancellationError {
             // Expected on view tear-down / channel-tab switch. The outgoing
@@ -969,6 +1020,11 @@ private struct ComposeBar: View {
     /// Builds the emote-picker sections on demand (when the emote button
     /// is tapped) so we don't recompute them on every body eval.
     let emoteSectionsProvider: () -> [EmoteSection]
+    /// Opens the in-chat settings sheet. Lives in the compose bar's
+    /// trailing slot, time-shared with Send: gear while the draft is
+    /// empty, send button once there's text (Twitch-native pattern —
+    /// the slot is never wasted on a no-op send button).
+    let onOpenSettings: () -> Void
     let onSend: @MainActor (String) async -> Void
 
     @State private var composeText: String
@@ -995,6 +1051,7 @@ private struct ComposeBar: View {
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
         emoteSectionsProvider: @escaping () -> [EmoteSection],
+        onOpenSettings: @escaping () -> Void,
         onSend: @escaping @MainActor (String) async -> Void
     ) {
         self.channelLoginName = channelLoginName
@@ -1004,6 +1061,7 @@ private struct ComposeBar: View {
         self.onCancelReply = onCancelReply
         self.onDraftChange = onDraftChange
         self.emoteSectionsProvider = emoteSectionsProvider
+        self.onOpenSettings = onOpenSettings
         self.onSend = onSend
         self._composeText = State(initialValue: seedDraft)
     }
@@ -1021,7 +1079,10 @@ private struct ComposeBar: View {
             inputRow
         }
         .padding(.horizontal)
-        .padding(.vertical, 8)
+        // Tight vertical padding — every point here is a point taken from
+        // the transcript. The field's own internal padding plus the
+        // safe-area gap below keep the bar comfortable at 4pt.
+        .padding(.vertical, 4)
         // Animate the chip's appearance/disappearance. We trigger on
         // `replyContext != nil` (not the full context value) because
         // we only want the animation on chip appear/disappear, NOT on
@@ -1182,13 +1243,13 @@ private struct ComposeBar: View {
         return "Send a message in #\(channelLoginName)"
     }
 
-    /// True when the send button represents a meaningful action: the
-    /// draft has at least one non-whitespace character AND we're not
-    /// already mid-send. Drives both the tinting (accent vs muted)
-    /// AND the `.disabled(!isActive)` modifier so a single source of
-    /// truth governs both visual + behavior.
-    private var isActive: Bool {
-        !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
+    /// True when the draft has at least one non-whitespace character.
+    /// Drives the trailing-slot swap: settings gear when false, send
+    /// button when true. (Send clears `composeText` synchronously at
+    /// send-start, so the slot reverts to the gear the instant a send
+    /// is committed — no separate isSending check needed for the swap.)
+    private var hasDraft: Bool {
+        !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// The TextField + Send button row, pulled out of the body for
@@ -1226,46 +1287,54 @@ private struct ComposeBar: View {
                         onDraftChange(newValue)
                     }
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 8)
                     // Regular glass (not interactive) — typing happens inside
                     // the field, no glass-on-press animation needed.
                     .glassEffect(.regular, in: Capsule())
                     .accessibilityLabel("Message input")
                     .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
 
-                Button {
-                    Task { await sendDraft() }
-                } label: {
-                    // Symbol effect `.bounce` fires when `isActive` toggles
-                    // — gives the user a satisfying micro-interaction the
-                    // first time they type a character. Reduce-Motion users
-                    // get no animation (SF Symbols respect the system
-                    // setting automatically). The button stays interactive
-                    // either way.
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                        .symbolRenderingMode(.hierarchical)
-                        .symbolEffect(.bounce, value: isActive)
-                        .padding(2)
+                // Trailing slot, time-shared: settings gear while the draft
+                // is empty, accent send button once there's text. An
+                // always-present-but-disabled send button was dead space
+                // (and a dead tap target) for the 95% of time spent
+                // reading, and the gear gives chat settings a home without
+                // adding a fourth item to the row.
+                if hasDraft {
+                    Button {
+                        Task { await sendDraft() }
+                    } label: {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .symbolRenderingMode(.hierarchical)
+                            .padding(2)
+                    }
+                    // Always prominent + tinted: the button only exists
+                    // when sending is meaningful, so the call-to-action
+                    // signal is unconditional now. Per axiom-design's
+                    // Liquid Glass guidance, the tint conveys "next step."
+                    .buttonStyle(.glassProminent)
+                    .tint(Color.accentColor)
+                    .disabled(isSending)
+                    .transition(.blurReplace)
+                    .accessibilityLabel("Send message")
+                } else {
+                    Button {
+                        onOpenSettings()
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 17, weight: .regular))
+                            .symbolRenderingMode(.hierarchical)
+                            .padding(2)
+                    }
+                    .buttonStyle(.glass)
+                    .transition(.blurReplace)
+                    .accessibilityLabel("Chat settings")
                 }
-                // Style switch: `.glassProminent` when the draft is
-                // meaningful, plain `.glass` otherwise. Per axiom-design's
-                // Liquid Glass guidance: "Use `.tint()` only to convey
-                // meaning (call to action, next step), not for decoration."
-                // The tint is the call-to-action signal — empty draft → no
-                // signal, populated draft → "this action is now meaningful."
-                //
-                // SwiftUI's conditional buttonStyle creates a fresh button
-                // identity per branch, which would normally retrigger the
-                // symbol effect on every keystroke. Pulling the active flag
-                // out into a computed property + using `.tint()` (which
-                // doesn't reset identity) avoids that — `.tint(.accentColor)`
-                // when active, no tint when not.
-                .buttonStyle(.glassProminent)
-                .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
-                .disabled(!isActive)
-                .accessibilityLabel("Send message")
             }
+            // Animate the gear ⇄ send swap (and the field width change it
+            // causes). Value-scoped so unrelated re-renders don't animate.
+            .animation(.snappy(duration: 0.2), value: hasDraft)
             // No padding modifiers here — `composeBarView`'s own VStack owns
             // the horizontal + vertical padding for the whole compose bar
             // (including the reply chip); the bar is pinned via `.safeAreaBar`.
@@ -1464,8 +1533,10 @@ private struct ThreadComposeBar: View {
     @State private var isSending: Bool = false
     @FocusState private var focused: Bool
 
-    private var isActive: Bool {
-        !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
+    /// Same trailing-slot rule as the main ComposeBar: the send button
+    /// exists only while there's something to send.
+    private var hasDraft: Bool {
+        !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var prompt: String {
@@ -1488,20 +1559,23 @@ private struct ThreadComposeBar: View {
                 .accessibilityLabel("Reply input")
                 .accessibilityHint("Type a reply to send to \(channelDisplayName)")
 
-            Button {
-                Task { await sendDraft() }
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .symbolEffect(.bounce, value: isActive)
-                    .padding(2)
+            if hasDraft {
+                Button {
+                    Task { await sendDraft() }
+                } label: {
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .padding(2)
+                }
+                .buttonStyle(.glassProminent)
+                .tint(Color.accentColor)
+                .disabled(isSending)
+                .transition(.blurReplace)
+                .accessibilityLabel("Send reply")
             }
-            .buttonStyle(.glassProminent)
-            .tint(isActive ? Color.accentColor : Color.secondary.opacity(0.5))
-            .disabled(!isActive)
-            .accessibilityLabel("Send reply")
         }
+        .animation(.snappy(duration: 0.2), value: hasDraft)
         .padding(.horizontal)
         .padding(.vertical, 8)
     }

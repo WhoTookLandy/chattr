@@ -116,9 +116,43 @@ public final class TabChatModel {
     /// Twitch's authoritative payload.
     private var currentUserDisplayName: String = ""
 
+    /// The signed-in user's chat name color ("#FF69B4"), stamped onto
+    /// optimistic send rows so they render in the right color
+    /// immediately instead of flashing plain for the ~0.5s echo
+    /// round-trip. Seeded from GET /chat/color at attach (fire-and-
+    /// forget), then kept fresh from each echoed own-message — the echo
+    /// value wins because it reflects mid-session color changes.
+    private var selfColor: String = ""
+
+    /// The signed-in user's badge set in THIS channel (mod / sub / VIP
+    /// …), captured from the most recent echoed own-message. Stamped
+    /// onto optimistic rows for the same flash-free reason as
+    /// `selfColor`. Empty until the first echo of the session — there's
+    /// no cheap Helix endpoint for "my badges in channel X", so the
+    /// first message renders badge-less and every one after is styled.
+    private var selfBadges: [ChatBadge] = []
+
     /// Case-insensitive substrings that trigger row highlighting. Empty
     /// by default — keyword highlighting disabled.
     private var highlightKeywords: [String] = []
+
+    /// Registry-owned memo of normalize results for this channel — survives
+    /// this model's detach/re-attach across tab swipes, which is the whole
+    /// point: re-priming from the session ring becomes dictionary hits
+    /// instead of re-tokenizing every message on the main thread. nil in
+    /// tests / pre-attach; everything degrades to plain normalization.
+    private var lineCache: NormalizedLineCache?
+
+    /// Fingerprint of the inputs normalization depends on, for cache
+    /// stamping. `emoteVersion` is the snapshot's entry count — see
+    /// `NormalizedLineCache.Context` for why that's sufficient.
+    private func cacheContext(emoteVersion: Int) -> NormalizedLineCache.Context {
+        NormalizedLineCache.Context(
+            emoteVersion: emoteVersion,
+            currentUserLogin: currentUserLogin,
+            highlightKeywords: highlightKeywords
+        )
+    }
 
     // MARK: - Send-orchestration state
 
@@ -259,6 +293,39 @@ public final class TabChatModel {
     /// observation path is free.
     public private(set) var currentUserCanModerate: Bool = false
 
+    /// Forward a chat-mode change (emote-only, subs-only, followers-only,
+    /// slow mode) to the attached channel's session — see
+    /// `ChannelSession.updateChatSettings` for parameter semantics.
+    /// Throws when no session is attached or Helix rejects the PATCH
+    /// (not actually a mod, token missing `moderator:manage:chat_settings`,
+    /// network failure) — the settings sheet surfaces the error and
+    /// reverts its controls.
+    ///
+    /// `chatRestrictions` is assigned here from the PATCH response in
+    /// addition to the session's `.restrictionsUpdated` fan-out (which
+    /// also lands, idempotently) so the caller observes the new state
+    /// the moment this returns.
+    public func updateChatSettings(
+        emoteOnly: Bool? = nil,
+        subscribersOnly: Bool? = nil,
+        followersOnly: Bool? = nil,
+        followersDurationMinutes: Int? = nil,
+        slowMode: Bool? = nil,
+        slowModeSeconds: Int? = nil
+    ) async throws {
+        guard let session = subscriptions.first?.session else {
+            throw AppError(message: "Not connected to chat.")
+        }
+        chatRestrictions = try await session.updateChatSettings(
+            emoteOnly: emoteOnly,
+            subscribersOnly: subscribersOnly,
+            followersOnly: followersOnly,
+            followersDurationMinutes: followersDurationMinutes,
+            slowMode: slowMode,
+            slowModeSeconds: slowModeSeconds
+        )
+    }
+
     /// Payload for an in-flight reply intent. Held by `replyContext`;
     /// passed to `ChannelSession.send` as `replyParentMessageId` when
     /// the user finally taps Send.
@@ -333,7 +400,9 @@ public final class TabChatModel {
         currentUserId: String = "",
         currentUserLogin: String = "",
         currentUserDisplayName: String = "",
-        highlightKeywords: [String] = []
+        highlightKeywords: [String] = [],
+        lineCap: Int = 500,
+        lineCache: NormalizedLineCache? = nil
     ) async {
         // Synchronous re-entry guard — must precede any `await`.
         guard !isAttaching else {
@@ -342,6 +411,16 @@ public final class TabChatModel {
         }
         isAttaching = true
         defer { isAttaching = false }
+
+        // Apply the user's Chat History setting. Rebuild (rather than
+        // reset) when the cap changed, carrying the block set over — the
+        // view pushes `blockedIds` on its own schedule and may have done
+        // so before attach ran.
+        if buffer.cap != lineCap {
+            let blocked = buffer.blockedIds
+            buffer = ChatBuffer(cap: max(1, lineCap))
+            buffer.blockedIds = blocked
+        }
 
         // Tear down any prior subscriptions (e.g., user changed channel set
         // in a multi-channel tab). Cheap when subs is empty (early return
@@ -357,6 +436,7 @@ public final class TabChatModel {
         self.currentUserLogin = currentUserLogin
         self.currentUserDisplayName = currentUserDisplayName
         self.highlightKeywords = highlightKeywords
+        self.lineCache = lineCache
 
         attachState = .attaching
 
@@ -389,6 +469,19 @@ public final class TabChatModel {
             // message echo carrying mod/broadcaster badges.
             if firstSession.isAccountBroadcaster {
                 currentUserCanModerate = true
+            }
+            // Seed the optimistic-row name color from /chat/color so even
+            // the FIRST send of the session renders styled. Fire-and-forget
+            // — attach shouldn't wait on a cosmetic fetch, and the echo
+            // path overwrites with fresher data anyway. The echo-wins
+            // guard (only fill while still empty) avoids regressing a
+            // color an echo taught us during the fetch's round-trip.
+            if selfColor.isEmpty {
+                Task { [weak self] in
+                    guard let color = await firstSession.fetchOwnChatColor() else { return }
+                    guard let self, self.selfColor.isEmpty else { return }
+                    self.selfColor = color
+                }
             }
         }
 
@@ -546,10 +639,10 @@ public final class TabChatModel {
             id: pendingId,
             kind: .message,
             authorBadges: [],
-            originalBadges: [],
+            originalBadges: selfBadges,  // last echoed badge set (empty before first echo)
             authorUserId: currentUserId,
             authorDisplayName: currentUserDisplayName.isEmpty ? currentUserLogin : currentUserDisplayName,
-            authorColor: "",            // unknown until echo arrives; renderer falls back to .primary
+            authorColor: selfColor,      // attach-time /chat/color seed, refreshed by echoes
             runs: Normalizer.wordRuns(text: canonical),
                                         // Word-level runs (required for FlowLayout wrapping) but
                                         // no emote resolution on the optimistic row — echo will
@@ -998,6 +1091,15 @@ public final class TabChatModel {
                 }
             }
 
+            // Self-style side-observation: each echoed own-message carries
+            // the authoritative color + badge set for this channel. Cache
+            // them so the NEXT optimistic send row renders fully styled
+            // instead of flashing plain until its own echo lands.
+            if chatMessage.chatterUserId == currentUserId {
+                if !chatMessage.color.isEmpty { selfColor = chatMessage.color }
+                if !chatMessage.badges.isEmpty { selfBadges = chatMessage.badges }
+            }
+
             // ─── Path 0 (primary): Helix-id match ────────────────────
             //
             // We learned this messageId from `sendChatMessage`'s response.
@@ -1107,6 +1209,12 @@ public final class TabChatModel {
             currentUserLogin: currentUserLogin,
             highlightKeywords: highlightKeywords
         )
+        // Memo the echo's normalized form: the echo event sits in the
+        // session ring under this canonical messageId, so the next tab
+        // remount replays it through `ingest` — which should hit, not
+        // re-normalize. (The optimistic `pending-…` row itself is never
+        // cached; it isn't a ring event.)
+        lineCache?.store(normalizedLine, context: cacheContext(emoteVersion: snapshot.count))
         // `replace` returns false (a no-op) when the optimistic row was already
         // removed under us — the caller then falls through to a normal append.
         return buffer.replace(id: pendingId, with: normalizedLine)
@@ -1153,12 +1261,22 @@ public final class TabChatModel {
             // EmoteIndex.snapshot() is nonisolated + lock-protected, so
             // it's safe to call from @MainActor without an await.
             let snapshot = emoteIndex?.snapshot() ?? [:]
+            let context = cacheContext(emoteVersion: snapshot.count)
+            // Memo hit: this exact message was normalized before (live
+            // arrival, or a prior tab mount) under the same inputs. The
+            // re-prime path on tab swipes is ~all hits, which is what
+            // keeps swiping between open chats cheap.
+            if let cached = lineCache?.line(id: chatMessage.messageId, context: context) {
+                buffer.append(cached)
+                return
+            }
             let line = Normalizer.normalize(
                 message: chatMessage,
                 emoteSnapshot: snapshot,
                 currentUserLogin: currentUserLogin,
                 highlightKeywords: highlightKeywords
             )
+            lineCache?.store(line, context: context)
             buffer.append(line)
 
         case .notification(let n):

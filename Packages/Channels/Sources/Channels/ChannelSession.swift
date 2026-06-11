@@ -98,9 +98,12 @@ public actor ChannelSession {
     private let channelLoginName: String
     private let accountUserId: String
 
-    /// Ring buffer of received events, capped at 500.
+    /// Ring buffer of received events, capped at `ringCapacity`.
     private var ring: [ChannelEvent] = []
-    private static let ringCapacity = 500
+    /// Set at construction from the user's Chat History setting (default
+    /// 500). Fixed for the session's lifetime — a changed setting applies
+    /// to sessions created after it (i.e. newly opened channel tabs).
+    private let ringCapacity: Int
 
     /// Live events that arrived via `handle(event:)` while `backfillPending`
     /// is true — i.e. after we subscribed to EventSub but before the rustlog
@@ -142,6 +145,7 @@ public actor ChannelSession {
         channelId: String,
         channelLoginName: String,
         accountUserId: String,
+        ringCapacity: Int = 500,
         refreshTokenHandler: @escaping @Sendable () async throws -> Void = {
             throw AppError(message: "ChannelSession constructed without refreshTokenHandler")
         }
@@ -150,6 +154,7 @@ public actor ChannelSession {
         self.channelId = channelId
         self.channelLoginName = channelLoginName
         self.accountUserId = accountUserId
+        self.ringCapacity = max(1, ringCapacity)
         self.refreshTokenHandler = refreshTokenHandler
     }
 
@@ -412,6 +417,95 @@ public actor ChannelSession {
         }
     }
 
+    /// The signed-in user's chat name color (GET /chat/color), e.g.
+    /// "#FF69B4". Used to stamp optimistic send rows with the right
+    /// color BEFORE the first echo of the session teaches us — without
+    /// it, the user's first message flashes plain-white for the echo
+    /// round-trip (~0.5s). nil on failure or when the user never picked
+    /// a color (Twitch returns "" then) — callers fall back to the
+    /// echo-taught value.
+    public func fetchOwnChatColor() async -> String? {
+        do {
+            let color = try await client.api.fetchUserChatColors(userIDs: [accountUserId]).first?.color
+            return (color?.isEmpty == false) ? color : nil
+        } catch {
+            // Cosmetic-only data; the echo upgrade corrects the row anyway.
+            logger.debug("Own-chat-color fetch failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Update the broadcaster's chat-mode settings (PATCH /chat/settings)
+    /// on behalf of the signed-in account, which must be the broadcaster
+    /// or a moderator — Twitch enforces that server-side (the UI gates
+    /// the controls behind `TabChatModel.currentUserCanModerate` too).
+    /// Requires the `moderator:manage:chat_settings` scope on the token.
+    ///
+    /// nil parameters are omitted from the PATCH body and left unchanged
+    /// on Twitch's side. To enable slow/followers mode with a duration,
+    /// pass BOTH the flag and the duration (Twitch's API shape).
+    ///
+    /// On success the cached restrictions snapshot is replaced with the
+    /// PATCH response (the authoritative new state) and a
+    /// `.restrictionsUpdated` event fans out to subscribers, so the
+    /// compose-bar strip and any open settings UI update instantly
+    /// instead of waiting on the EventSub `chat_settings.update` echo.
+    /// The echo still arrives and re-applies identical state — both
+    /// paths are idempotent.
+    @discardableResult
+    public func updateChatSettings(
+        emoteOnly: Bool? = nil,
+        subscribersOnly: Bool? = nil,
+        followersOnly: Bool? = nil,
+        followersDurationMinutes: Int? = nil,
+        slowMode: Bool? = nil,
+        slowModeSeconds: Int? = nil
+    ) async throws -> ChatRestrictions {
+        let update = ChatSettingsUpdate(
+            emoteMode: emoteOnly,
+            followerMode: followersOnly,
+            followerModeDuration: followersDurationMinutes,
+            slowMode: slowMode,
+            slowModeWaitTime: slowModeSeconds,
+            subscriberMode: subscribersOnly
+        )
+        let settings: ChatSettings
+        do {
+            settings = try await client.api.updateChatSettings(
+                broadcasterID: channelId, moderatorID: accountUserId, with: update
+            )
+        } catch HelixError.unauthorized {
+            try await refreshTokenHandler()
+            settings = try await client.api.updateChatSettings(
+                broadcasterID: channelId, moderatorID: accountUserId, with: update
+            )
+        }
+
+        let restrictions = ChatRestrictions(from: settings)
+        cachedRestrictions = restrictions
+        cachedRestrictionsAreLive = true
+
+        // Mirror handle(event:)'s ring + fan-out semantics so a local
+        // settings change is indistinguishable from an EventSub-delivered
+        // one downstream.
+        let channelEvent: ChannelEvent = .restrictionsUpdated(restrictions)
+        if backfillPending {
+            pendingLive.append(channelEvent)
+        } else {
+            if ring.count >= ringCapacity {
+                ring.removeFirst(ring.count - ringCapacity + 1)
+            }
+            ring.append(channelEvent)
+        }
+        let handlers = Array(subscribers.values)
+        await withTaskGroup(of: Void.self) { group in
+            for handler in handlers {
+                group.addTask { await handler(channelEvent) }
+            }
+        }
+        return restrictions
+    }
+
     // MARK: - Send
 
     /// Sends a chat message through this session's authenticated user. Wraps
@@ -592,7 +686,7 @@ public actor ChannelSession {
         ring = Self.mergeBackfill(
             history: history,
             pendingLive: pendingLive,
-            capacity: Self.ringCapacity
+            capacity: ringCapacity
         )
         let bufferedCount = pendingLive.count
         pendingLive = []
@@ -639,8 +733,8 @@ public actor ChannelSession {
             pendingLive.append(channelEvent)
         } else {
             // Append to ring buffer with cap.
-            if ring.count >= Self.ringCapacity {
-                ring.removeFirst(ring.count - Self.ringCapacity + 1)
+            if ring.count >= ringCapacity {
+                ring.removeFirst(ring.count - ringCapacity + 1)
             }
             ring.append(channelEvent)
         }

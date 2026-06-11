@@ -24,6 +24,11 @@ struct ChatListView: UIViewControllerRepresentable {
     /// SwiftUI → UIKit: incremented by the jump-to-bottom pill to request a
     /// scroll to the newest message.
     let scrollToBottomToken: Int
+    /// True when the user's Edge-to-Edge Chat setting extends the
+    /// transcript under the toolbar pills. Switches the top scroll-edge
+    /// effect: `.hard` cutoff when the list stops at the safe-area edge,
+    /// system-default soft dissolve when content runs underneath glass.
+    var extendsToTop: Bool = false
 
     func makeUIViewController(context: Context) -> ChatListViewController {
         let vc = ChatListViewController()
@@ -39,7 +44,22 @@ struct ChatListView: UIViewControllerRepresentable {
         // rowContent captures fresh per-body closures each update — refresh it
         // so cells built after this call use current state.
         vc.rowContent = rowContent
+        vc.extendsToTop = extendsToTop
         vc.update(lines: lines, scrollToBottomToken: scrollToBottomToken)
+    }
+}
+
+/// Collection view that reports every layout pass to its owner. Self-sizing
+/// cells (`UIHostingConfiguration` + `.estimated` heights) invalidate layout
+/// from INSIDE the collection view as cells materialize and report their real
+/// heights — those passes reach `layoutSubviews` here but NOT the view
+/// controller's `viewDidLayoutSubviews`, so this hook is the only reliable
+/// place to re-assert the bottom pin after each estimate→actual correction.
+private final class LayoutCallbackCollectionView: UICollectionView {
+    var onDidLayout: (() -> Void)?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onDidLayout?()
     }
 }
 
@@ -55,12 +75,45 @@ final class ChatListViewController: UIViewController {
     /// UIKit → SwiftUI callback for tailing state (set by the representable).
     var onAtBottomChanged: ((Bool) -> Void)?
 
+    /// Mirrors `ChatListView.extendsToTop` — applied on change (and once
+    /// at viewDidLoad, since the representable sets it before the view
+    /// loads). Full-bleed hides the top edge effect entirely so messages
+    /// stay fully legible to the physical top (the toolbar items carry
+    /// their own glass); the inset layout keeps the crisp `.hard` cutoff.
+    var extendsToTop: Bool = false {
+        didSet {
+            guard isViewLoaded, oldValue != extendsToTop else { return }
+            applyTopEdgeTreatment()
+        }
+    }
+
+    private func applyTopEdgeTreatment() {
+        collectionView.topEdgeEffect.isHidden = extendsToTop
+        collectionView.topEdgeEffect.style = .hard
+    }
+
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<Section, String>!
 
     /// Last `isAtBottom` value pushed to SwiftUI — we only call the callback on
     /// a flip, never per scroll frame (matches the old onScrollGeometryChange).
     private var lastReportedAtBottom = true
+
+    /// True while the transcript is "tailing" — glued to the newest message.
+    ///
+    /// While pinned, every collection-view layout pass re-asserts the
+    /// bottom-pinned content offset (see `pinToBottomIfNeeded`). This replaces
+    /// the old one-shot `scrollToItem(at:.bottom)`: with `.estimated(44)`
+    /// self-sizing rows, a one-shot scroll computes its destination from
+    /// estimated attributes and lands wrong whenever real heights differ —
+    /// the per-pass re-pin absorbs each estimate→actual correction before
+    /// it's ever drawn (the "bounce" on new messages, and the pill jump
+    /// landing short of the bottom).
+    ///
+    /// Cleared the moment the user starts dragging; restored when a drag or
+    /// deceleration ends near the bottom, or when the jump-to-bottom pill
+    /// fires. Starts true — chat opens tailing.
+    private var isPinnedToBottom = true
 
     /// Last-seen scroll-to-bottom token — the jump-to-bottom pill increments the
     /// value to request a scroll; we act only when it changes.
@@ -78,13 +131,22 @@ final class ChatListViewController: UIViewController {
     }
 
     private func configureCollectionView() {
-        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: Self.makeLayout())
+        let layoutCallbackView = LayoutCallbackCollectionView(frame: view.bounds, collectionViewLayout: Self.makeLayout())
+        // Re-pin after EVERY layout pass while tailing — this is what keeps
+        // the bottom glued through self-sizing corrections, front-trims, and
+        // keyboard/inset changes. The offset-delta guard inside
+        // pinToBottomIfNeeded breaks the layout→pin→layout recursion once
+        // the geometry converges.
+        layoutCallbackView.onDidLayout = { [weak self] in self?.pinToBottomIfNeeded() }
+        collectionView = layoutCallbackView
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
         collectionView.keyboardDismissMode = .interactive
-        // Hard scroll-edge dissolve under the pinned glass tab strip — the
-        // UIKit equivalent of SwiftUI's `.scrollEdgeEffectStyle(.hard, for: .top)`.
-        collectionView.topEdgeEffect.style = .hard
+        // Top scroll-edge treatment — `.hard` cutoff for the inset layout,
+        // hidden entirely when Edge-to-Edge Chat runs the transcript under
+        // the free-standing toolbar items (the UIKit equivalent of
+        // SwiftUI's `.scrollEdgeEffectStyle(_:for: .top)`).
+        applyTopEdgeTreatment()
         collectionView.delegate = self
         view.addSubview(collectionView)
     }
@@ -102,7 +164,9 @@ final class ChatListViewController: UIViewController {
         let group = NSCollectionLayoutGroup.vertical(layoutSize: itemSize, subitems: [item])
         let section = NSCollectionLayoutSection(group: group)
         section.interGroupSpacing = 4
-        section.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16)
+        // Bottom inset tighter than top: the compose bar's own padding
+        // already provides breathing room below the last message.
+        section.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16)
         return UICollectionViewCompositionalLayout(section: section)
     }
 
@@ -142,14 +206,29 @@ final class ChatListViewController: UIViewController {
         collectionView.setContentOffset(offset, animated: false)
     }
 
-    /// Scroll the newest message to the bottom edge. No animation — under burst
-    /// traffic queued animations stutter (the same reason `ChatScreen` snapped
-    /// instantly).
-    private func scrollToBottom(animated: Bool) {
-        let count = collectionView.numberOfItems(inSection: 0)
-        guard count > 0 else { return }
-        let indexPath = IndexPath(item: count - 1, section: 0)
-        collectionView.scrollToItem(at: indexPath, at: .bottom, animated: animated)
+    /// Re-assert the bottom-pinned content offset if tailing. Called from the
+    /// collection view's `layoutSubviews` (every pass) and from `update` right
+    /// after a snapshot applies.
+    ///
+    /// No animation — under burst traffic queued animations stutter (the same
+    /// reason `ChatScreen` snapped instantly), and `setContentOffset(animated:
+    /// false)` also kills any in-flight deceleration so a pill tap mid-fling
+    /// doesn't fight the momentum.
+    private func pinToBottomIfNeeded() {
+        guard isPinnedToBottom else { return }
+        let target = ScrollAnchor.bottomPinnedOffsetY(
+            contentHeight: collectionView.contentSize.height,
+            containerHeight: collectionView.bounds.height,
+            topInset: collectionView.adjustedContentInset.top,
+            bottomInset: collectionView.adjustedContentInset.bottom
+        )
+        // Sub-point deltas are layout noise, not drift — skipping them is
+        // what terminates the layout→pin→layout recursion.
+        guard abs(collectionView.contentOffset.y - target) > 0.5 else { return }
+        collectionView.setContentOffset(
+            CGPoint(x: collectionView.contentOffset.x, y: target),
+            animated: false
+        )
     }
 
     /// Diff the new lines against the last-applied set, apply the structural
@@ -157,11 +236,20 @@ final class ChatListViewController: UIViewController {
     /// reconfigure cells whose `ChatLine` value changed but whose id did not.
     func update(lines newLines: [ChatLine], scrollToBottomToken: Int) {
         let delta = ChatListDiff.compute(old: lastLines, new: newLines)
-        let wasAtBottom = lastReportedAtBottom
+
+        // Jump-to-bottom pill fired — enter tailing mode BEFORE the snapshot
+        // applies so the pin below (and every subsequent layout pass) lands
+        // this same update. The per-pass re-pin is what makes the jump
+        // converge on the true bottom even when every row between here and
+        // there still has only its estimated height.
+        if scrollToBottomToken != lastScrollToBottomToken {
+            lastScrollToBottomToken = scrollToBottomToken
+            isPinnedToBottom = true
+        }
 
         // Only needed when scrolled up AND rows are leaving above us.
         let anchor: (id: String, distanceFromTop: CGFloat)? =
-            (!wasAtBottom && !delta.removed.isEmpty) ? currentTopAnchor() : nil
+            (!isPinnedToBottom && !delta.removed.isEmpty) ? currentTopAnchor() : nil
 
         lastLines = newLines
         linesByID = newLines.reduce(into: [:]) { $0[$1.id] = $1 }
@@ -177,19 +265,17 @@ final class ChatListViewController: UIViewController {
             dataSource.apply(reconfig, animatingDifferences: false)
         }
 
-        if wasAtBottom {
-            // scrollToItem mutates contentOffset, which fires scrollViewDidScroll
-            // synchronously; the flip-only guard there prevents any feedback loop.
-            scrollToBottom(animated: false)
+        if isPinnedToBottom {
+            // Force the post-snapshot layout now, then pin. layoutIfNeeded
+            // runs the collection view's layoutSubviews, whose onDidLayout
+            // already pins — the explicit call after it is a cheap no-op
+            // guard for the path where layout was already clean.
+            // setContentOffset fires scrollViewDidScroll synchronously; the
+            // flip-only guard there prevents any feedback loop.
+            collectionView.layoutIfNeeded()
+            pinToBottomIfNeeded()
         } else if let anchor {
             restoreTopAnchor(anchor)
-        }
-
-        if scrollToBottomToken != lastScrollToBottomToken {
-            lastScrollToBottomToken = scrollToBottomToken
-            // The `wasAtBottom` branch above already scrolled — only act on the
-            // token when it didn't, so a single update never scrolls twice.
-            if !wasAtBottom { scrollToBottom(animated: false) }
         }
     }
 }
@@ -205,6 +291,46 @@ extension ChatListViewController: UICollectionViewDelegate {
         guard atBottom != lastReportedAtBottom else { return }
         lastReportedAtBottom = atBottom
         onAtBottomChanged?(atBottom)
+    }
+
+    /// A finger on the transcript always wins over tailing — unpin
+    /// immediately so a layout pass mid-drag can't yank the offset back
+    /// to the bottom while the user is reading scrollback.
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        isPinnedToBottom = false
+    }
+
+    /// Drag released without momentum — resume tailing if it ended near
+    /// the bottom (within the same 44pt the pill logic uses).
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { resumeTailingIfNearBottom(scrollView) }
+    }
+
+    /// Momentum settled — same near-bottom check as the direct release.
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        resumeTailingIfNearBottom(scrollView)
+    }
+
+    /// Status-bar tap scrolls to the top — that's an explicit "leave the
+    /// live edge", so unpin before the system scroll starts.
+    func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
+        isPinnedToBottom = false
+        return true
+    }
+
+    /// Re-enter tailing mode when a user-initiated scroll settles near the
+    /// bottom, and snap the remaining ≤44pt so "near the bottom" and
+    /// "tailing" can't drift apart (the pin keeps asserting the exact
+    /// bottom from here on).
+    private func resumeTailingIfNearBottom(_ scrollView: UIScrollView) {
+        guard ScrollAnchor.isNearBottom(
+            contentHeight: scrollView.contentSize.height,
+            offsetY: scrollView.contentOffset.y,
+            containerHeight: scrollView.bounds.height,
+            bottomInset: scrollView.adjustedContentInset.bottom
+        ) else { return }
+        isPinnedToBottom = true
+        pinToBottomIfNeeded()
     }
 }
 #endif

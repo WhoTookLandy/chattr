@@ -35,20 +35,32 @@ public struct RootView: View {
     // the thread sheet, and the settings screen's preview. @AppStorage
     // observes the keys via KVO, so ChatAppearanceScreen's writes
     // re-render all of them live.
-    @AppStorage(ChatAppearance.textSizeKey) private var chatTextSizeRaw: String = ChatAppearance.TextSize.standard.rawValue
+    @AppStorage(ChatAppearance.textSizePointsKey) private var chatTextSizePoints: Double = ChatAppearance.defaultTextSizePoints
     @AppStorage(ChatAppearance.showTimestampsKey) private var chatShowTimestamps: Bool = false
     @AppStorage(ChatAppearance.showBadgesKey) private var chatShowBadges: Bool = true
     @AppStorage(ChatAppearance.animatedEmotesKey) private var chatAnimatedEmotes: Bool = true
+    @AppStorage(ChatAppearance.edgeToEdgeKey) private var chatEdgeToEdge: Bool = false
+    /// Observed only to re-fire the registry-sync `.task(id:)` below when
+    /// the user changes the setting — consumers read the value through
+    /// `ChatAppearance.chatHistoryLines()` (which also validates it).
+    @AppStorage(ChatAppearance.chatHistoryLinesKey) private var chatHistoryLines: Int = ChatAppearance.defaultChatHistoryLines
 
-    /// Assembled appearance for environment injection. Raw-value parse
-    /// falls back to `.standard` if the stored string drifts (same
-    /// defensive pattern as ProfileScreen's `appearanceMode`).
+    /// Dynamic Type multiplier for the chat text size: 1.0 at the standard
+    /// content size, growing/shrinking with the user's systemwide setting.
+    /// Applied to the slider-chosen base points below, so chat text (and
+    /// emotes/badges via `imageScale`) keeps tracking Dynamic Type the way
+    /// the old text-style-based steps did. `@ScaledMetric` re-renders this
+    /// view on content-size changes, which re-injects the environment.
+    @ScaledMetric(relativeTo: .callout) private var chatTypeScale: CGFloat = 1.0
+
+    /// Assembled appearance for environment injection.
     private var chatAppearance: ChatAppearance {
         ChatAppearance(
-            textSize: ChatAppearance.TextSize(rawValue: chatTextSizeRaw) ?? .standard,
+            textSizePoints: chatTextSizePoints * chatTypeScale,
             showTimestamps: chatShowTimestamps,
             showBadges: chatShowBadges,
-            animatedEmotes: chatAnimatedEmotes
+            animatedEmotes: chatAnimatedEmotes,
+            edgeToEdge: chatEdgeToEdge
         )
     }
 
@@ -85,6 +97,9 @@ public struct RootView: View {
         self.accountStore = accountStore
         self.clientId = clientId
         self.channelSessionRegistry = channelSessionRegistry
+        // Carry the pre-slider discrete text-size choice into the points
+        // key (no-op once migrated or when the user has set the slider).
+        ChatAppearance.migrateLegacyTextSizeIfNeeded()
     }
 
     /// The account to show. Resolves the stored active-account selection
@@ -138,6 +153,13 @@ public struct RootView: View {
             if let newId {
                 accountStore.setActive(userId: newId)
             }
+        }
+        // Keep the registry's ring capacity in step with the Chat History
+        // setting — at launch and whenever the user changes it. Applies to
+        // sessions constructed AFTER the change (newly opened tabs);
+        // existing sessions keep their capacity.
+        .task(id: chatHistoryLines) {
+            channelSessionRegistry.chatHistoryLimit = ChatAppearance.chatHistoryLines()
         }
         // Bound the per-channel emote cache: delete files not refreshed in 7
         // days. Runs once at launch (not keyed to account). The 24h TTL governs

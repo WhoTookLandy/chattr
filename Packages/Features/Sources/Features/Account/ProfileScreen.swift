@@ -214,6 +214,17 @@ public struct ProfileScreen: View {
                 Text("Messages that @-mention you or match a keyword are highlighted. Turn on the sound for an audible ping on highlights.")
             }
 
+            // Storage — cache usage breakdown + clear button.
+            Section {
+                NavigationLink {
+                    StorageSettingsScreen()
+                } label: {
+                    Label("Storage", systemImage: "internaldrive")
+                }
+            } footer: {
+                Text("See how much space cached emotes and images use, and clear them.")
+            }
+
             // Developer tools — always visible in DEBUG; in release builds
             // hidden behind 7 taps on the version footer (the classic),
             // persisted via `devToolsUnlocked`.

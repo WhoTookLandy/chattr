@@ -47,3 +47,41 @@ struct ScrollAnchorTests {
         ))
     }
 }
+
+@Suite("ScrollAnchor.bottomPinnedOffsetY")
+struct BottomPinnedOffsetTests {
+
+    // pinned offset = contentHeight - containerHeight + bottomInset,
+    // floored at -topInset (the scroll view's natural rest position)
+
+    @Test("Tall content pins to content bottom")
+    func tallContent() {
+        #expect(ScrollAnchor.bottomPinnedOffsetY(
+            contentHeight: 1000, containerHeight: 600, topInset: 0, bottomInset: 0
+        ) == 400)
+    }
+
+    @Test("Bottom inset pushes the pin further down")
+    func bottomInset() {
+        // The compose bar's safe-area inset means "bottom" is above it:
+        // 1000 - 600 + 20 = 420
+        #expect(ScrollAnchor.bottomPinnedOffsetY(
+            contentHeight: 1000, containerHeight: 600, topInset: 0, bottomInset: 20
+        ) == 420)
+    }
+
+    @Test("Content shorter than the viewport rests at the top inset")
+    func shortContentClampsToTopInset() {
+        // 300 - 600 = -300 would over-scroll; clamp to -topInset (-50)
+        #expect(ScrollAnchor.bottomPinnedOffsetY(
+            contentHeight: 300, containerHeight: 600, topInset: 50, bottomInset: 0
+        ) == -50)
+    }
+
+    @Test("Short content with no insets rests at zero")
+    func shortContentNoInsets() {
+        #expect(ScrollAnchor.bottomPinnedOffsetY(
+            contentHeight: 300, containerHeight: 600, topInset: 0, bottomInset: 0
+        ) == 0)
+    }
+}

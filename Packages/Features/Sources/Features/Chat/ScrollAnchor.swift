@@ -24,4 +24,22 @@ enum ScrollAnchor {
         let distanceFromBottom = contentHeight - offsetY - containerHeight + bottomInset
         return distanceFromBottom <= threshold
     }
+
+    /// The `contentOffset.y` that pins the content's bottom edge to the
+    /// viewport's bottom edge. Floored at `-topInset` so content shorter than
+    /// the viewport rests at its natural top position instead of over-scrolling.
+    ///
+    /// Re-asserted on every layout pass while tailing (see
+    /// `ChatListViewController`): self-sizing cells report their real heights
+    /// AFTER a one-shot scroll lands, so any single scroll into unmaterialized
+    /// rows lands wrong by construction — re-pinning per pass absorbs each
+    /// estimate→actual correction before it's drawn.
+    static func bottomPinnedOffsetY(
+        contentHeight: CGFloat,
+        containerHeight: CGFloat,
+        topInset: CGFloat,
+        bottomInset: CGFloat
+    ) -> CGFloat {
+        max(-topInset, contentHeight - containerHeight + bottomInset)
+    }
 }

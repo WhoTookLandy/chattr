@@ -146,6 +146,10 @@ struct AddChannelView: View {
         guard trimmed.count >= 2 else {
             results = []
             isSearching = false
+            // A failure message from a longer query shouldn't outlive the
+            // query that produced it (e.g. backspacing to one character,
+            // or a restored sheet re-running with a stale draft query).
+            errorMessage = nil
             return
         }
         // Debounce — if the user keeps typing, this task is cancelled and

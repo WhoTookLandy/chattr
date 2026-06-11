@@ -26,14 +26,16 @@ struct ChatAppearanceScreen: View {
 
     // Same keys RootView injects from — writing here re-renders every
     // chat surface live (see ChatAppearance's reactivity note).
-    @AppStorage(ChatAppearance.textSizeKey) private var textSizeRaw: String = ChatAppearance.TextSize.standard.rawValue
+    @AppStorage(ChatAppearance.textSizePointsKey) private var textSizePoints: Double = ChatAppearance.defaultTextSizePoints
     @AppStorage(ChatAppearance.showTimestampsKey) private var showTimestamps: Bool = false
     @AppStorage(ChatAppearance.showBadgesKey) private var showBadges: Bool = true
     @AppStorage(ChatAppearance.animatedEmotesKey) private var animatedEmotes: Bool = true
+    @AppStorage(ChatAppearance.edgeToEdgeKey) private var edgeToEdge: Bool = false
+    @AppStorage(ChatAppearance.chatHistoryLinesKey) private var chatHistoryLines: Int = ChatAppearance.defaultChatHistoryLines
 
-    private var textSize: ChatAppearance.TextSize {
-        ChatAppearance.TextSize(rawValue: textSizeRaw) ?? .standard
-    }
+    /// Same Dynamic Type multiplier RootView applies at injection — the
+    /// preview must render at the size live chat will actually use.
+    @ScaledMetric(relativeTo: .callout) private var typeScale: CGFloat = 1.0
 
     /// Appearance assembled from the local @AppStorage mirrors —
     /// applied to the preview rows via `.environment` so they reflect
@@ -43,7 +45,7 @@ struct ChatAppearanceScreen: View {
     /// presented outside RootView, e.g. in a #Preview).
     private var previewAppearance: ChatAppearance {
         ChatAppearance(
-            textSize: textSize,
+            textSizePoints: textSizePoints * typeScale,
             showTimestamps: showTimestamps,
             showBadges: showBadges,
             animatedEmotes: animatedEmotes
@@ -72,19 +74,36 @@ struct ChatAppearanceScreen: View {
             }
 
             Section {
-                Picker("Text Size", selection: Binding(
-                    get: { textSize },
-                    set: { textSizeRaw = $0.rawValue }
-                )) {
-                    ForEach(ChatAppearance.TextSize.allCases) { size in
-                        Text(size.displayName).tag(size)
+                HStack(spacing: 12) {
+                    // Anchor glyphs at the slider's actual bounds so the
+                    // endpoints communicate real sizes, not abstract ideas.
+                    Text("A")
+                        .font(.system(size: ChatAppearance.textSizePointsRange.lowerBound))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Slider(
+                        value: $textSizePoints,
+                        in: ChatAppearance.textSizePointsRange,
+                        step: 1
+                    ) {
+                        Text("Text Size")
                     }
+                    Text("A")
+                        .font(.system(size: ChatAppearance.textSizePointsRange.upperBound))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                 }
-                .pickerStyle(.segmented)
             } header: {
-                Text("Text Size")
+                HStack {
+                    Text("Text Size")
+                    Spacer()
+                    // Live readout — gives the slider a concrete, repeatable
+                    // value (useful for "what size was I on before?").
+                    Text("\(Int(textSizePoints)) pt")
+                        .monospacedDigit()
+                }
             } footer: {
-                Text("Sizes scale with your Dynamic Type setting. Emotes and badges scale to match.")
+                Text("Scales with your Dynamic Type setting. Emotes and badges scale to match.")
             }
 
             Section {
@@ -106,6 +125,26 @@ struct ChatAppearanceScreen: View {
                 }
             } footer: {
                 Text("When off, animated emotes show their first frame. Saves battery in busy chats.")
+            }
+
+            Section {
+                Picker(selection: $chatHistoryLines) {
+                    ForEach(ChatAppearance.chatHistoryOptions, id: \.self) { count in
+                        Text("\(count) messages").tag(count)
+                    }
+                } label: {
+                    Label("Chat History", systemImage: "clock.arrow.circlepath")
+                }
+            } footer: {
+                Text("How many messages each chat keeps in scrollback. Larger histories use more memory and make switching between open chats slower. Applies the next time a chat opens.")
+            }
+
+            Section {
+                Toggle(isOn: $edgeToEdge) {
+                    Label("Edge-to-Edge Chat", systemImage: "arrow.up.left.and.arrow.down.right")
+                }
+            } footer: {
+                Text("Chat runs to the top of the screen and scrolls behind the floating header.")
             }
         }
         .navigationTitle("Chat Appearance")
