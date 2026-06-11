@@ -31,6 +31,7 @@ struct ChatAppearanceScreen: View {
     @AppStorage(ChatAppearance.showBadgesKey) private var showBadges: Bool = true
     @AppStorage(ChatAppearance.animatedEmotesKey) private var animatedEmotes: Bool = true
     @AppStorage(ChatAppearance.edgeToEdgeKey) private var edgeToEdge: Bool = false
+    @AppStorage(ChatAppearance.loginNameDisplayKey) private var loginNameDisplay: ChatAppearance.LoginNameDisplay = .displayFirst
     @AppStorage(ChatAppearance.chatHistoryLinesKey) private var chatHistoryLines: Int = ChatAppearance.defaultChatHistoryLines
 
     /// Same Dynamic Type multiplier RootView applies at injection — the
@@ -48,7 +49,8 @@ struct ChatAppearanceScreen: View {
             textSizePoints: textSizePoints * typeScale,
             showTimestamps: showTimestamps,
             showBadges: showBadges,
-            animatedEmotes: animatedEmotes
+            animatedEmotes: animatedEmotes,
+            loginNameDisplay: loginNameDisplay
         )
     }
 
@@ -120,6 +122,20 @@ struct ChatAppearanceScreen: View {
             }
 
             Section {
+                Picker(selection: $loginNameDisplay) {
+                    Text("Off").tag(ChatAppearance.LoginNameDisplay.off)
+                    Text("デレク (derek)").tag(ChatAppearance.LoginNameDisplay.displayFirst)
+                    Text("derek (デレク)").tag(ChatAppearance.LoginNameDisplay.loginFirst)
+                } label: {
+                    Label("Show Username", systemImage: "at")
+                }
+            } header: {
+                Text("Localized Names")
+            } footer: {
+                Text("When a chatter's display name differs from their username — common for non-Latin names — show the username alongside it.")
+            }
+
+            Section {
                 Toggle(isOn: $animatedEmotes) {
                     Label("Animated Emotes", systemImage: "sparkles")
                 }
@@ -171,7 +187,8 @@ struct ChatAppearanceScreen: View {
 
     private static let previewLineChatter = ChatLine(
         id: "preview-chatter",
-        authorDisplayName: "PixelPeach",
+        authorDisplayName: "デレク",
+        authorUserLogin: "derek",
         authorColor: "#FF69B4",
         // Word-level runs, matching Normalizer output — the preview must
         // wrap exactly like real chat lines do.
