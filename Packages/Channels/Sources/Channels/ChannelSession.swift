@@ -239,12 +239,24 @@ public actor ChannelSession {
         // events to `handle(event:)`, which buffers them while backfill is
         // pending.
         try await subscribeToChat()
-        await subscribeToNotificationTopic(.notification, label: "notification")
-        await subscribeToNotificationTopic(.messageDelete, label: "message_delete")
-        await subscribeToNotificationTopic(.clear, label: "chat_clear")
-        await subscribeToNotificationTopic(.clearUserMessages, label: "clear_user_messages")
-        await subscribeToNotificationTopic(.settingsUpdate, label: "settings_update")
-        await subscribeToRaid()
+
+        // The six enrichment topics are independent Helix POSTs, none of which
+        // gates the first rendered frame (chat.message above is the only
+        // required one). Firing them concurrently collapses six serial
+        // round-trips into one wall-clock round-trip — the dominant cost on the
+        // session-open path. Each call still hops back onto the actor to append
+        // its id to `activeSubscriptionIds`, so that mutation stays serialized;
+        // only the network waits overlap. We still await the group as a unit so
+        // the session isn't exposed until every subscription is live — same
+        // guarantee as before, just parallelized.
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.subscribeToNotificationTopic(.notification, label: "notification") }
+            group.addTask { await self.subscribeToNotificationTopic(.messageDelete, label: "message_delete") }
+            group.addTask { await self.subscribeToNotificationTopic(.clear, label: "chat_clear") }
+            group.addTask { await self.subscribeToNotificationTopic(.clearUserMessages, label: "clear_user_messages") }
+            group.addTask { await self.subscribeToNotificationTopic(.settingsUpdate, label: "settings_update") }
+            group.addTask { await self.subscribeToRaid() }
+        }
 
         // Drain backfill and merge. Failures are absorbed by BackfillProvider —
         // we never propagate; an empty backfill just flushes whatever buffered
@@ -254,20 +266,16 @@ public actor ChannelSession {
         let backfill = await backfillTask
         applyBackfill(backfill)
 
-        // Fetch chat-settings restrictions before returning from start().
-        // We DO await this (rather than firing a background Task) because
-        // `TabChatModel.attach` reads `currentChatRestrictions()`
-        // immediately after the session is acquired — if the fetch is
-        // still in flight, attach reads nil and the compose bar shows
-        // no restriction strip for the lifetime of the tab.
-        //
-        // Cost is small: this is a single Helix call (~150ms) on top of
-        // an already-multi-hundred-ms session-start. The restrictions
-        // fetch overlaps with EventSub subscribe + backfill drain in
-        // practice (Swift's async runtime parallelizes I/O-bound work
-        // when there's no explicit ordering dependency, which there
-        // isn't here).
-        await refreshChatRestrictions()
+        // Fetch chat-settings restrictions WITHOUT blocking session exposure.
+        // The restriction strip on the compose bar is enrichment, not part of
+        // the first rendered frame, so we no longer pay its Helix round-trip
+        // (~150ms) on the critical path. The fetch resolves after `start()`
+        // returns and reaches an already-attached tab reactively, via
+        // `applyInitialRestrictions`'s `.restrictionsUpdated` fan-out — the same
+        // path a live `channel.chat_settings.update` takes. If the fetch happens
+        // to resolve before a tab attaches, `attach`'s `currentChatRestrictions()`
+        // read picks up the seeded cache instead; either ordering is correct.
+        Task { await self.refreshChatRestrictions() }
 
         // NOTE: We deliberately do NOT iterate `client.eventSub.events` here.
         // That AsyncStream is single-consumer — if every ChannelSession had
@@ -483,20 +491,17 @@ public actor ChannelSession {
         cachedRestrictions
     }
 
-    /// Refresh the restrictions snapshot from Helix. Called once in
-    /// `start()`; future commits could call it again on a
-    /// `channel.chat_settings.update` EventSub event for live updates.
+    /// Refresh the restrictions snapshot from Helix and fan the result out.
+    /// Kicked off as a background task by `start()` — deliberately NOT
+    /// awaited there, so session exposure doesn't block on this Helix
+    /// round-trip (the compose-bar strip is enrichment, not first-frame
+    /// critical). The fetched snapshot reaches an already-attached tab
+    /// reactively via `applyInitialRestrictions`'s `.restrictionsUpdated`
+    /// fan-out — the same path a live `channel.chat_settings.update` takes.
     private func refreshChatRestrictions() async {
         do {
             let settings = try await accountStoreSafeFetch()
-            // Race guard: if an EventSub `chat_settings.update` arrived
-            // while we were waiting on the Helix response, the Helix
-            // data is older than what we already have. Don't overwrite.
-            guard !cachedRestrictionsAreLive else {
-                logger.debug("Skipping Helix restrictions overwrite — EventSub update already populated cache")
-                return
-            }
-            cachedRestrictions = ChatRestrictions(from: settings)
+            await applyInitialRestrictions(ChatRestrictions(from: settings))
             logger.debug("Refreshed chat restrictions for #\(self.channelLoginName, privacy: .public)")
         } catch is CancellationError {
             // Session tear-down racing fetch — silent exit.
@@ -505,6 +510,43 @@ public actor ChannelSession {
             // the user can still chat and Twitch's dropReason will fill
             // in any restriction we miss.
             logger.warning("Failed to fetch chat restrictions: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Commit a start-time restrictions snapshot to the cache and fan it out
+    /// to subscribers as `.restrictionsUpdated`, so a tab attached before the
+    /// fetch resolved updates its compose-bar strip reactively. Mirrors the
+    /// ring + fan-out shape of `updateChatSettings` / `handle` so a backgrounded
+    /// initial fetch is indistinguishable downstream from a live EventSub update.
+    ///
+    /// No-ops when:
+    ///   - `restrictions` is nil — the Helix fetch failed; leave the cache as is.
+    ///   - `cachedRestrictionsAreLive` — a live `chat_settings.update` already
+    ///     landed while the fetch was in flight, so the Helix snapshot is older
+    ///     than what we hold. Same race guard the awaited refresh used to apply
+    ///     inline (CR MEDIUM 4), now that the fetch resolves after exposure.
+    ///
+    /// Internal (not private) so ChannelsTests can drive the fan-out + guard
+    /// offline — same visibility relaxation as `applyBackfill`.
+    func applyInitialRestrictions(_ restrictions: ChatRestrictions?) async {
+        guard let restrictions else { return }
+        guard !cachedRestrictionsAreLive else {
+            logger.debug("Skipping Helix restrictions overwrite — EventSub update already populated cache")
+            return
+        }
+        cachedRestrictions = restrictions
+
+        let event: ChannelEvent = .restrictionsUpdated(restrictions)
+        if backfillPending {
+            pendingLive.append(event)
+        } else {
+            appendToRing(event)
+        }
+        let handlers = Array(subscribers.values)
+        await withTaskGroup(of: Void.self) { group in
+            for handler in handlers {
+                group.addTask { await handler(event) }
+            }
         }
     }
 
