@@ -7,20 +7,32 @@ import os
 
 private let logger = AppLogger.make("Features.AppShell")
 
-/// Top-level shell for a signed-in user. Chat is the app's home surface:
-/// `AppShell` renders `ChatTabsScreen` directly (no `TabView`) and owns the
-/// cross-cutting wiring that the chat surface needs.
+/// Top-level shell for a signed-in user. Four tabs:
+///
+///   - **Home**: live follows + open-chat pills + the full follow list as
+///     a push. The app's landing surface — answers "who's live?" on open.
+///   - **Chats**: the paged chat surface (`ChatTabsScreen`), unchanged.
+///   - **You**: profile / appearance / storage — the old Profile sheet's
+///     content as a persistent destination.
+///   - **Search**: open any channel by name (`role: .search` gives it the
+///     system's trailing-edge treatment; the field morphs from the tab).
+///
+/// Sheets remain only for genuinely transient tasks (the open-tabs
+/// switcher); primary destinations are tabs.
 ///
 /// AppShell owns:
+///   - `selectedTab`: which top-level tab is visible. `openChannel` and
+///     Home's resume-chat action write `.chats` here so "tap a channel
+///     anywhere → land in its chat" works from every tab.
 ///   - `chatTabsModel`: the open-channel tab state (which channels are open,
 ///     which is active), injected via `\.chatTabs` and surfaced in the
 ///     chat header's switcher.
 ///
 /// It also injects the `\.openChannel` action (open a channel as a new chat
-/// tab — used by the Follows sheet's row tap) and, in a single appearance
-/// `.task`, wires `ChatTabsModel`'s `onOpen`/`onClose` to the session
-/// registry's acquire/release refcounting, installs `TabPersistence`, and
-/// hydrates persisted tabs on cold start.
+/// tab — used by Home, Following, and Search row taps) and, in a single
+/// appearance `.task`, wires `ChatTabsModel`'s `onOpen`/`onClose` to the
+/// session registry's acquire/release refcounting, installs
+/// `TabPersistence`, and hydrates persisted tabs on cold start.
 public struct AppShell: View {
     private let account: Account
     private let accountStore: AccountStore
@@ -28,6 +40,12 @@ public struct AppShell: View {
     /// switcher so "Add Account" can run the OAuth flow.
     private let clientId: String
 
+    /// The app's top-level destinations.
+    enum AppTab: Hashable {
+        case home, chats, you, search
+    }
+
+    @State private var selectedTab: AppTab = .home
     @State private var chatTabsModel = ChatTabsModel()
 
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
@@ -46,11 +64,40 @@ public struct AppShell: View {
     }
 
     public var body: some View {
-        ChatTabsScreen(
-            account: account,
-            accountStore: accountStore,
-            clientId: clientId
-        )
+        TabView(selection: $selectedTab) {
+            Tab("Home", systemImage: "house", value: AppTab.home) {
+                HomeScreen(
+                    account: account,
+                    accountStore: accountStore,
+                    onResumeChat: { tab in
+                        chatTabsModel.activeTabId = tab.id
+                        selectedTab = .chats
+                    }
+                )
+            }
+            Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: AppTab.chats) {
+                ChatTabsScreen(
+                    account: account,
+                    accountStore: accountStore,
+                    goHome: { selectedTab = .home }
+                )
+            }
+            Tab("You", systemImage: "person.crop.circle", value: AppTab.you) {
+                NavigationStack {
+                    ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
+                }
+            }
+            // `role: .search` separates the tab on the trailing edge and
+            // morphs it into the search field on activation (iOS 26).
+            Tab(value: AppTab.search, role: .search) {
+                AddChannelView(
+                    account: account,
+                    accountStore: accountStore,
+                    showsCancelButton: false
+                )
+            }
+        }
+        .chatTabBarMinimize()
         .environment(\.chatTabs, chatTabsModel)
         .environment(\.openChannel, OpenChannelAction { channelId, login, displayName, profileImageURL in
             let descriptor = ChannelDescriptor(
@@ -60,6 +107,8 @@ public struct AppShell: View {
                 profileImageURL: profileImageURL
             )
             chatTabsModel.open(channel: descriptor)
+            // Land the user in the chat they just opened, from any tab.
+            selectedTab = .chats
         })
         // Single appearance task that does, in this exact order:
         //
@@ -161,5 +210,18 @@ public struct AppShell: View {
             chatTabsModel.hydrateFromPersistence()
             logger.info("AppShell wired tab callbacks + persistence; hydration kicked off")
         }
+    }
+}
+
+private extension View {
+    /// `.tabBarMinimizeBehavior` is iOS/iPadOS-only; the Features package
+    /// also compiles for macOS where the modifier doesn't exist.
+    @ViewBuilder
+    func chatTabBarMinimize() -> some View {
+        #if os(iOS)
+        self.tabBarMinimizeBehavior(.onScrollDown)
+        #else
+        self
+        #endif
     }
 }

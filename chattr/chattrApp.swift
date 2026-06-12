@@ -59,17 +59,33 @@ struct chattrApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(
-                accountStore: accountStore,
-                clientId: Self.clientId,
-                channelSessionRegistry: channelSessionRegistry
-            )
-            .modelContainer(modelContainer)
+            Group {
+                #if DEBUG
+                // Design-review harness: `-uiPreview` boots the tab shell
+                // with mock data, no sign-in. See `UIPreviewRoot`.
+                if ProcessInfo.processInfo.arguments.contains("-uiPreview") {
+                    UIPreviewRoot()
+                } else {
+                    rootView
+                }
+                #else
+                rootView
+                #endif
+            }
             // nil = follow system (the default). SwiftUI's preferredColorScheme
             // recurses through child environments, so all sheets/navs honor it.
             .preferredColorScheme(
                 (AppearanceMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme
             )
         }
+    }
+
+    private var rootView: some View {
+        RootView(
+            accountStore: accountStore,
+            clientId: Self.clientId,
+            channelSessionRegistry: channelSessionRegistry
+        )
+        .modelContainer(modelContainer)
     }
 }

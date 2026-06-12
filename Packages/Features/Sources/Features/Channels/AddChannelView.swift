@@ -19,6 +19,9 @@ private let logger = AppLogger.make("Features.AddChannel")
 struct AddChannelView: View {
     let account: Account
     let accountStore: AccountStore
+    /// False when hosted in the Search tab (a persistent destination has
+    /// nothing to cancel); true for the legacy sheet presentation.
+    var showsCancelButton: Bool = true
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openChannel) private var openChannel
@@ -126,8 +129,10 @@ struct AddChannelView: View {
             #endif
             .autocorrectionDisabled()
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                if showsCancelButton {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
                 }
             }
             // Debounced search: `.task(id: query)` cancels the prior task

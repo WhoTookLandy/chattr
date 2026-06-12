@@ -135,13 +135,10 @@ struct ChatAppearanceScreen: View {
                 Text("When a chatter's display name differs from their username — common for non-Latin names — show the username alongside it.")
             }
 
-            Section {
-                Toggle(isOn: $animatedEmotes) {
-                    Label("Animated Emotes", systemImage: "sparkles")
-                }
-            } footer: {
-                Text("When off, animated emotes show their first frame. Saves battery in busy chats.")
-            }
+            // Animated Emotes moved to You → Chat → Emotes — it's an
+            // emote setting, and that page owns everything emote-shaped.
+            // The @AppStorage mirror above stays: the preview rows still
+            // need the value to render accurately.
 
             Section {
                 Picker(selection: $chatHistoryLines) {

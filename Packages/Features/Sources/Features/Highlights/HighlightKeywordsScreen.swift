@@ -1,7 +1,9 @@
 import SwiftUI
 
-/// Editor for the user's highlight keyword list. Reachable from
-/// Profile → Chat → Highlight Keywords.
+/// The Highlights feature's single settings home: the keyword list AND
+/// the sound toggle. Reachable from You → Chat → Highlights. (The sound
+/// toggle used to live inline on the Profile screen, a different surface
+/// from the keywords it modifies — one feature, one page now.)
 ///
 /// A message that contains any of these keywords (case-insensitive
 /// substring) gets the highlighted row treatment AND — if the sound
@@ -27,8 +29,29 @@ struct HighlightKeywordsScreen: View {
     @State private var newKeyword: String = ""
     @FocusState private var addFieldFocused: Bool
 
+    /// Mirror of `HighlightSettings.soundEnabled()`, seeded at init so the
+    /// toggle reflects the persisted value. Writes go through both this
+    /// @State (instant UI) AND `HighlightSettings.setSoundEnabled`
+    /// (persistence) — the key lives in HighlightSettings' namespace, not
+    /// a SwiftUI-owned default, so @AppStorage doesn't apply.
+    @State private var soundEnabled: Bool = HighlightSettings.soundEnabled()
+
     var body: some View {
         Form {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { soundEnabled },
+                    set: {
+                        soundEnabled = $0
+                        HighlightSettings.setSoundEnabled($0)
+                    }
+                )) {
+                    Label("Highlight Sound", systemImage: "speaker.wave.2.fill")
+                }
+            } footer: {
+                Text("Play a sound when a message @-mentions you or matches a keyword.")
+            }
+
             Section {
                 // Inline add row — text field + a plus button. Submitting
                 // the field (return key) also adds, so the user can rattle
@@ -79,7 +102,7 @@ struct HighlightKeywordsScreen: View {
                 }
             }
         }
-        .navigationTitle("Highlight Keywords")
+        .navigationTitle("Highlights")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
