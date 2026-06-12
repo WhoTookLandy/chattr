@@ -451,14 +451,21 @@ public final class ChatTranscriptModel {
         }
     }
 
-    /// Synchronous re-entry guard for `attach(sessions:)`. Without it, two
-    /// concurrent attach() calls can both pass the "subscriptions empty"
-    /// check before either commits — classic actor reentrancy state-staleness
-    /// pattern from axiom-concurrency's `isolation-inheritance-diag.md`. The
-    /// flag is set/cleared synchronously, so a second call entering the
-    /// method during the first's await suspension sees `isAttaching == true`
-    /// and bails immediately, before any await.
-    private var isAttaching: Bool = false
+    /// Monotonic attach epoch. Bumped synchronously at the start of every
+    /// `attach(...)`; the value that call establishes is `myEpoch`. Two things
+    /// hang off it:
+    ///   - **Supersession:** an in-flight attach re-checks `myEpoch == attachEpoch`
+    ///     after each `await`; if a newer attach has bumped the epoch, the older
+    ///     one bails (undoing any partial subscription) so the LAST attach wins
+    ///     — replacing the old skip-and-strand re-entry guard, which left the
+    ///     *surviving* call un-attached when it raced an in-flight one (the model
+    ///     then rendered its primed lines but had no live subscription →
+    ///     "Not connected to chat").
+    ///   - **Stale-detach protection:** `detach(ifEpoch:)` is a no-op unless the
+    ///     passed epoch is still current. The session-lifecycle `.task` passes
+    ///     the epoch its `attach` returned, so a *dying* ChatScreen appearance's
+    ///     teardown can't detach a model a *newer* appearance just re-attached.
+    private var attachEpoch: Int = 0
 
     public init() {}
 
@@ -467,24 +474,24 @@ public final class ChatTranscriptModel {
     /// Subscribes to each session, primes `lines` from their combined current
     /// state, and starts receiving new messages via callback.
     ///
-    /// **Re-entry safety**: a synchronous flag (`isAttaching`) guards against
-    /// concurrent invocations. SwiftUI's `.task` can fire twice for the same
-    /// view identity during multi-state transitions like our `openChannel`
-    /// action; without this guard the two calls interleave at their `await`
-    /// suspensions and BOTH register subscribers on the same session — same
-    /// model, double append per message, duplicate IDs in `ForEach`.
+    /// **Re-entry safety (epoch supersession)**: SwiftUI's `.task` can fire two
+    /// overlapping `attach`es for the same model — e.g. a ChatScreen appearance
+    /// disappears and reappears (paged tabs) or the channel session is torn down
+    /// and rebuilt — and they interleave at their `await` suspensions. A bumped
+    /// `attachEpoch` (claimed synchronously before any await) plus a re-check
+    /// after every suspension means a superseded attach bails (undoing any
+    /// partial subscription) so the LAST attach wins. This replaces the old
+    /// "skip if already attaching" guard, which left the *surviving* call
+    /// un-attached when it raced an in-flight one (the model then rendered its
+    /// primed lines but had no live subscription → "Not connected to chat").
     ///
-    /// Setting the flag synchronously *before* any `await` is what makes the
-    /// pattern correct. @MainActor's "lock" is released at every suspension
-    /// point, so a flag set after an await wouldn't block re-entry — but
-    /// the synchronous prologue here is atomic relative to any other
-    /// @MainActor work.
-    ///
-    /// Idempotent at the API level: a second attach with the same sessions
-    /// while the first is in flight is a no-op. A subsequent attach AFTER
-    /// the first completes will detach the prior subscriptions and re-subscribe
-    /// (useful for future multi-channel "the user added/removed a channel
-    /// from this tab" flows).
+    /// A subsequent attach AFTER the first completes detaches the prior
+    /// subscriptions and re-subscribes (re-establishes the live session on
+    /// rebuild, and supports future multi-channel add/remove flows).
+    /// - Returns: the attach epoch this call established. The caller (the
+    ///   session-lifecycle `.task`) passes it back to `detach(ifEpoch:)` so a
+    ///   stale teardown can't strand a newer attach.
+    @discardableResult
     public func attach(
         sessions: [ChannelSession],
         emoteIndex: EmoteIndex? = nil,
@@ -502,14 +509,13 @@ public final class ChatTranscriptModel {
         draftKey: ChannelDescriptor.ID = "",
         moderatedChannelIds: (@Sendable () async -> Set<String>)? = nil,
         onModerationRevoked: (@Sendable () async -> Void)? = nil
-    ) async {
-        // Synchronous re-entry guard — must precede any `await`.
-        guard !isAttaching else {
-            logger.info("ChatTranscriptModel attach skipped — already in flight")
-            return
-        }
-        isAttaching = true
-        defer { isAttaching = false }
+    ) async -> Int {
+        // Claim a fresh epoch synchronously (before any await). A concurrent
+        // attach that starts later bumps it again; we re-check after every
+        // suspension and bail if superseded, so the LAST attach wins instead
+        // of the old "skip and strand" behavior.
+        attachEpoch &+= 1
+        let myEpoch = attachEpoch
 
         // Apply the user's Chat History setting. Rebuild (rather than
         // reset) when the cap changed, carrying the block set over — the
@@ -521,10 +527,10 @@ public final class ChatTranscriptModel {
             buffer.blockedIds = blocked
         }
 
-        // Tear down any prior subscriptions (e.g., user changed channel set
-        // in a multi-channel tab). Cheap when subs is empty (early return
-        // inside detach).
-        await detach()
+        // Tear down any prior subscriptions (unconditional — `ifEpoch: nil`).
+        // Cheap when subs is empty (early return inside detach).
+        await detach(ifEpoch: nil)
+        guard myEpoch == attachEpoch else { return myEpoch }   // superseded mid-detach
 
         // Stash normalization context for the per-message handler. Captured
         // here rather than inside the closure so the closure stays small
@@ -554,6 +560,13 @@ public final class ChatTranscriptModel {
                 // Hop to MainActor to convert + apply.
                 await self?.apply(event)
             }
+            guard myEpoch == attachEpoch else {
+                // A newer attach superseded us while we awaited subscribe — undo
+                // the subscription we just made so we don't leak a subscriber on
+                // the registry-owned session, then bail.
+                await session.unsubscribe(token)
+                return myEpoch
+            }
             subscriptions.append((session, token))
             combined.append(contentsOf: snapshot)
         }
@@ -565,6 +578,7 @@ public final class ChatTranscriptModel {
 
         if let firstSession = sessions.first {
             chatRestrictions = await firstSession.currentChatRestrictions()
+            guard myEpoch == attachEpoch else { return myEpoch }   // superseded
             // Instant broadcaster check — `isAccountBroadcaster` is
             // nonisolated and just compares the two ids. For broadcasters
             // this gives us mod-power before any chat has happened.
@@ -628,7 +642,8 @@ public final class ChatTranscriptModel {
         }
         publishPending()
         attachState = .attached
-        logger.info("ChatTranscriptModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
+        logger.info("ChatTranscriptModel attached to \(sessions.count) session(s) [epoch \(myEpoch)], primed with \(self.lines.count) line(s)")
+        return myEpoch
     }
 
     /// The single funnel for "we just learned the user can moderate here."
@@ -649,7 +664,14 @@ public final class ChatTranscriptModel {
 
     /// Unsubscribes from every session and clears local state. Safe to call
     /// multiple times; each call no-ops if already detached.
-    public func detach() async {
+    ///
+    /// - Parameter ifEpoch: when non-nil, this teardown only runs if the epoch
+    ///   is still current (`== attachEpoch`). The session-lifecycle `.task`
+    ///   passes the epoch its `attach` returned, so a *dying* ChatScreen
+    ///   appearance can't tear down a model that a *newer* appearance just
+    ///   re-attached. `nil` (the internal call from `attach`) always tears down.
+    public func detach(ifEpoch epoch: Int? = nil) async {
+        if let epoch, epoch != attachEpoch { return }
         // Cancel any in-flight fallback timers BEFORE the empty-guard
         // so a model with pending sends but no subscriptions (rare)
         // still gets its timers cleaned. Calling cancel on a completed

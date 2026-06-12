@@ -311,18 +311,21 @@ public struct ChatScreen: View {
         // SwiftUI's task cancellation completes before the next view's
         // `.task` body starts.
         .task(id: channelId) {
-            await startSession()
+            let attachEpoch = await startSession()
             // Hold the task open until SwiftUI cancels us (view torn down
             // or channelId changes). Sleeping for a year is the canonical
             // SwiftUI idiom — Task.sleep is implemented as a scheduler
             // primitive, not a busy-loop, so the cost is zero CPU.
             try? await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
             // Cancellation reaches here via CancellationError from sleep.
-            // detach awaits the model's pub-sub teardown (unsubscribe from
-            // the registry-owned session, cancel any sendFallbackTimers).
-            // The chatModel reference survives because @State storage
-            // persists until the task fully exits.
-            await chatModel.detach()
+            // Detach ONLY if this appearance still owns the current attachment:
+            // a newer ChatScreen appearance (paged re-mount, or a session
+            // teardown+rebuild) bumps the model's epoch, so a stale teardown
+            // here becomes a no-op and can't strand the freshly re-attached
+            // model (the "I see chat but it says Not connected" bug). The
+            // chatModel reference survives because @State storage persists
+            // until the task fully exits.
+            await chatModel.detach(ifEpoch: attachEpoch)
         }
         .task {
             guard let store = badgeStore else { return }
@@ -442,7 +445,19 @@ public struct ChatScreen: View {
                 )
             },
             onOpenSettings: { showChatSettings = true },
-            onSend: { draft in await chatModel.send(text: draft) }
+            onSend: { draft in
+                // Self-heal: if the model lost its live session under us (a
+                // lifecycle race, or a session teardown+rebuild that left it
+                // detached while still showing primed lines), re-establish it
+                // before sending — so the user never hits a phantom
+                // "Not connected to chat" on a channel that's clearly live.
+                // `startSession`/`attach` are epoch-guarded + idempotent, so a
+                // no-op when already attached.
+                if chatModel.attachState != .attached {
+                    _ = await startSession()
+                }
+                await chatModel.send(text: draft)
+            }
         )
     }
 
@@ -515,13 +530,18 @@ public struct ChatScreen: View {
     // MARK: - Session lifecycle
 
     @MainActor
-    private func startSession() async {
+    /// - Returns: the attach epoch the model established (passed to
+    ///   `detach(ifEpoch:)` on teardown), or `0` if no attach happened
+    ///   (missing registry, cancelled, or error). `0` is the pre-attach
+    ///   sentinel — a teardown keyed on it no-ops unless nothing ever attached.
+    @discardableResult
+    private func startSession() async -> Int {
         // Badge load runs in a sibling .task modifier (see body) — gives us
         // structured-cancellation parity with this session-start task.
         guard let registry = channelSessionRegistry else {
             errorMessage = "Couldn't open chat: missing session registry"
             logger.error("ChatScreen has no registry in environment — was RootView injected?")
-            return
+            return 0
         }
 
         // Signpost-bracket the session-start so Instruments can show the
@@ -581,7 +601,7 @@ public struct ChatScreen: View {
                 forAccountUserId: account.userId,
                 channelId: channelId
             )
-            await chatModel.attach(
+            let epoch = await chatModel.attach(
                 sessions: [session],
                 emoteIndex: index,
                 currentUserId: account.userId,
@@ -636,14 +656,17 @@ public struct ChatScreen: View {
                     )
                 }
             )
+            return epoch
         } catch is CancellationError {
             // Expected on view tear-down / channel-tab switch. The outgoing
             // instance's `try await registry.session(...)` gets cancelled in
             // flight. Silently exit — don't show a red error.
             logger.info("ChatScreen session-start cancelled for #\(channelLoginName)")
+            return 0
         } catch {
             errorMessage = "Couldn't open chat: \(error.localizedDescription)"
             logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")
+            return 0
         }
     }
 }

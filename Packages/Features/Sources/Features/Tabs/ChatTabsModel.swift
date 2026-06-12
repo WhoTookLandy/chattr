@@ -117,6 +117,14 @@ public final class ChatTabsModel {
     /// a potentially-gone registry, firing no-op acquires.
     private var hydrationTask: Task<Void, Never>?
 
+    /// True once a successful hydrate has run for THIS model instance.
+    /// `hydrateFromPersistence()` is idempotent against it: a second call
+    /// (e.g. AppShell's `.task` re-firing on a view re-appearance) is a no-op,
+    /// so it can't churn `tabs` 0→1 and spuriously tear down + rebuild a live
+    /// channel session. A genuine account swap creates a fresh model (AppShell
+    /// is `.id(userId)`), which re-hydrates the new account's tabs.
+    private var hasHydrated = false
+
     /// In-flight `onOpen` tasks, keyed by tab id. Tracked so that:
     ///   - a `close` for the same tab can await the acquire before releasing
     ///     (preventing a release-before-acquire race that underflows the
@@ -159,10 +167,15 @@ public final class ChatTabsModel {
     /// `ChatTabsScreen` for the `@SceneStorage` binding.
     public func hydrateFromPersistence() {
         guard let persistence else { return }
+        // Idempotent: only hydrate once per model. A re-run would reset `tabs`
+        // and re-fire onOpen, which (paired with a transient empty save) churns
+        // the registry refcount and tears down a live session for no reason.
+        guard !hasHydrated else { return }
         do {
             let rows = try persistence.fetchAll()
             let restored = rows.map { $0.toChatTab() }
             tabs = restored
+            hasHydrated = true
             // Cancel any prior hydration that's still in flight (rare —
             // would only happen if hydrate is called twice rapidly).
             hydrationTask?.cancel()
