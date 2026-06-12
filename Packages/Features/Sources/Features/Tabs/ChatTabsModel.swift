@@ -67,6 +67,19 @@ public final class ChatTabsModel {
     /// a potentially-gone registry, firing no-op acquires.
     private var hydrationTask: Task<Void, Never>?
 
+    /// In-flight `onOpen` tasks, keyed by tab id. Tracked so that:
+    ///   - a `close` for the same tab can await the acquire before releasing
+    ///     (preventing a release-before-acquire race that underflows the
+    ///     registry refcount and leaks the channel's EventSub subscription on
+    ///     Twitch's side), and
+    ///   - teardown (`cancelHydration`) can cancel pending acquires.
+    ///
+    /// Bounded by the number of currently-open tabs: `close` clears its entry,
+    /// and a completed open leaves a single harmless finished `Task` per open
+    /// tab. Previously these were fire-and-forget `Task {}`s with neither
+    /// tracking nor race protection.
+    private var openTasks: [UUID: Task<Void, Never>] = [:]
+
     public init() {}
 
     // MARK: - Persistence
@@ -129,6 +142,10 @@ public final class ChatTabsModel {
     public func cancelHydration() {
         hydrationTask?.cancel()
         hydrationTask = nil
+        // Pending tab acquires would otherwise fire onOpen against a stale
+        // registry after teardown.
+        for task in openTasks.values { task.cancel() }
+        openTasks.removeAll()
     }
 
     // MARK: - Open
@@ -148,7 +165,7 @@ public final class ChatTabsModel {
         }
         activeTabId = tab.id
         if isNew, let onOpen {
-            Task { await onOpen(tab) }
+            openTasks[tab.id] = Task { await onOpen(tab) }
         }
     }
 
@@ -172,7 +189,7 @@ public final class ChatTabsModel {
         activeTabId = tab.id
         persistTabs()
         if let onOpen {
-            Task { await onOpen(tab) }
+            openTasks[tab.id] = Task { await onOpen(tab) }
         }
         return tab.id
     }
@@ -213,7 +230,16 @@ public final class ChatTabsModel {
         }
         persistTabs()
         if let onClose {
-            Task { await onClose(closed) }
+            // Await any in-flight acquire for this tab before releasing, so the
+            // registry refcount is settled first. Closing mid-acquire would
+            // otherwise let release run ahead of acquire, underflowing the
+            // count and leaking the channel's EventSub subscription.
+            let pendingOpen = openTasks[tabId]
+            openTasks[tabId] = nil
+            Task {
+                await pendingOpen?.value
+                await onClose(closed)
+            }
         }
     }
 }

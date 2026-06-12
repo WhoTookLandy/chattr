@@ -299,32 +299,47 @@ public actor ChannelSession {
         do {
             let record = try await client.eventSub.subscribe(subscription)
             activeSubscriptionIds.append(record.id)
-        } catch HelixError.unauthorized, HelixError.notAuthenticated, HelixError.oauth {
-            // Same auth-failure triage as `AccountStore.withTokenRefresh`
-            // (which wraps every plain-Helix call site — this is the
-            // EventSub-path equivalent, routed through the injected
-            // refreshTokenHandler):
-            //   - .unauthorized: stale access token → refresh + retry.
-            //   - .notAuthenticated: TwitchKit's token provider sees an
-            //     empty store. Most commonly a TRANSIENT Keychain miss at
-            //     cold start / after reboot (prewarming reads protected
-            //     items before first unlock) — the account is fine, the
-            //     bridge refresh re-mints and re-seats the token. Without
-            //     this case, chat-open surfaced "Not authenticated — login
-            //     required" while a reopen (riding a withTokenRefresh
-            //     recovery elsewhere) worked.
-            //   - .oauth: TwitchKit's internal auto-refresh fired and
-            //     failed (we ship no client_secret) → bridge it instead.
-            logger.info("EventSub chat.message subscribe hit an auth failure; refreshing tokens via bridge and retrying")
-            try await refreshTokenHandler()
-            let record = try await client.eventSub.subscribe(subscription)
-            activeSubscriptionIds.append(record.id)
         } catch HelixError.conflict {
             // 409 "already subscribed" — Twitch keeps the subscription alive
             // on this WebSocket from a prior session; events still flow.
             logger.info("EventSub already subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public) — reusing existing subscription (no id captured)")
+        } catch let error where Self.isAuthRefreshable(error) {
+            // A stale access token reaches us in one of THREE shapes — not just
+            // `.unauthorized`. In practice `.oauth` is the common one:
+            //   - .unauthorized      — the 401 surfaced to us directly.
+            //   - .oauth(...)        — TwitchKit's HelixClient intercepted the
+            //                          401, tried its own `/oauth2/token` refresh,
+            //                          and Twitch rejected it ("missing client
+            //                          secret" — we ship no secret; it lives on
+            //                          the Vercel bridge). TwitchKit then wiped
+            //                          its own token store as it threw.
+            //   - .notAuthenticated  — that store-wipe already happened on an
+            //                          earlier call, so the token is simply gone.
+            // All three mean "refresh via the bridge and retry once." This
+            // mirrors `AccountStore.withTokenRefresh`, which nets the same three
+            // cases around every other Helix call site — chat previously caught
+            // only `.unauthorized`, so the `.oauth` path escaped here and the
+            // user saw "Couldn't open chat: OAuth error: missing client secret".
+            logger.info("EventSub chat.message subscribe needs a token refresh (\(error.localizedDescription, privacy: .public)); refreshing via bridge and retrying")
+            try await refreshTokenHandler()
+            let record = try await client.eventSub.subscribe(subscription)
+            activeSubscriptionIds.append(record.id)
         }
         logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public)")
+    }
+
+    /// The three `HelixError` shapes a stale (or already-wiped) access token can
+    /// take, all of which are recoverable by a bridge refresh + one retry.
+    /// Centralizing the predicate keeps the chat subscribe path in lockstep with
+    /// `AccountStore.withTokenRefresh`, which guards every other Helix call site
+    /// against exactly these cases.
+    private static func isAuthRefreshable(_ error: Error) -> Bool {
+        switch error {
+        case HelixError.unauthorized, HelixError.oauth, HelixError.notAuthenticated:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Subscribes to one of the chat-related notification topics

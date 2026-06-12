@@ -43,7 +43,17 @@ struct chattrApp: App {
             // in commit E so chat tabs survive cold start. Lives in the
             // Features package alongside the runtime ChatTab struct it
             // mirrors.
-            let container = try ModelContainer(for: Account.self, JoinedChannel.self, PersistedChatTab.self)
+            //
+            // Built against an explicit VersionedSchema + SchemaMigrationPlan
+            // (see AppSchema.swift) rather than the bare model list, so future
+            // schema changes can ship as MigrationStages instead of crashing
+            // existing users at launch. V1 is structurally identical to the
+            // old bare schema, so current installs open without migrating.
+            let schema = Schema(versionedSchema: AppSchemaV1.self)
+            let container = try ModelContainer(
+                for: schema,
+                migrationPlan: AppMigrationPlan.self
+            )
             self.modelContainer = container
             let store = AccountStore(modelContainer: container, clientId: Self.clientId)
             self.accountStore = store
