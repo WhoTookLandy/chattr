@@ -83,6 +83,17 @@ public actor ChannelSession {
         /// stays accurate without a tab reopen.
         case restrictionsUpdated(ChatRestrictions)
 
+        /// A synthetic "New" rule separating messages from before the user
+        /// was receiving live chat from messages after. Never arrives from
+        /// Twitch — the session mints one in two places:
+        ///   - `applyBackfill`: between rustlog history and live events,
+        ///     so a freshly-joined channel shows where "you joined" sits.
+        ///   - `resyncAfterReconnect`: ahead of gap-filled messages that
+        ///     were broadcast while the EventSub socket was down.
+        /// `id` is minted with the event and stored in the ring so every
+        /// replay (tab re-attach) produces the same stable `ChatLine.id`.
+        case newMessagesDivider(id: String, timestamp: Date)
+
         /// The signed-in account's mod status in this channel changed
         /// mid-session. Emitted from two `channel.moderate` v2 signals
         /// (see `enableModerationEvents`):
@@ -151,6 +162,12 @@ public actor ChannelSession {
     /// doesn't need to know about `AccountStore` or `Account` directly.
     private let refreshTokenHandler: @Sendable () async throws -> Void
 
+    /// Fetches recent chat history (channelLogin, limit) → messages. Defaults
+    /// to `BackfillProvider.fetchRecentMessages`; tests inject a stub so the
+    /// join-backfill and reconnect-resync actor paths run without network.
+    /// Same closure-injection pattern as `refreshTokenHandler`.
+    private let fetchBackfill: @Sendable (String, Int) async -> [ChatMessage]
+
     /// True while a `channel.moderate` v2 subscription is live (or being
     /// created) for this session. Makes `enableModerationEvents()`
     /// idempotent — every mod-status path in every attached tab calls it
@@ -167,6 +184,9 @@ public actor ChannelSession {
         ringCapacity: Int = 500,
         refreshTokenHandler: @escaping @Sendable () async throws -> Void = {
             throw AppError(message: "ChannelSession constructed without refreshTokenHandler")
+        },
+        fetchBackfill: @escaping @Sendable (String, Int) async -> [ChatMessage] = { login, limit in
+            await BackfillProvider.fetchRecentMessages(channelLogin: login, limit: limit)
         }
     ) {
         self.client = client
@@ -175,6 +195,7 @@ public actor ChannelSession {
         self.accountUserId = accountUserId
         self.ringCapacity = max(1, ringCapacity)
         self.refreshTokenHandler = refreshTokenHandler
+        self.fetchBackfill = fetchBackfill
     }
 
     // MARK: - Lifecycle
@@ -201,7 +222,7 @@ public actor ChannelSession {
         // by any tab) until `start()` returns. The entire pending window is
         // therefore internal — no subscriber ever observes the empty/partial
         // ring, preserving the atomic prime+subscribe invariant.
-        async let backfillTask = BackfillProvider.fetchRecentMessages(channelLogin: channelLoginName)
+        async let backfillTask = fetchBackfill(channelLoginName, Self.joinBackfillLimit)
 
         try await client.eventSub.connect()
 
@@ -568,10 +589,7 @@ public actor ChannelSession {
         if backfillPending {
             pendingLive.append(channelEvent)
         } else {
-            if ring.count >= ringCapacity {
-                ring.removeFirst(ring.count - ringCapacity + 1)
-            }
-            ring.append(channelEvent)
+            appendToRing(channelEvent)
         }
         let handlers = Array(subscribers.values)
         await withTaskGroup(of: Void.self) { group in
@@ -714,11 +732,24 @@ public actor ChannelSession {
         ring
     }
 
+    /// Appends one event to the ring, dropping the oldest past `ringCapacity`.
+    /// The single owner of the cap invariant — every post-backfill ring write
+    /// (live dispatch, local settings change, reconnect gap-fill) goes through
+    /// here so the trim logic can't drift between call sites.
+    private func appendToRing(_ event: ChannelEvent) {
+        if ring.count >= ringCapacity {
+            ring.removeFirst(ring.count - ringCapacity + 1)
+        }
+        ring.append(event)
+    }
+
     // MARK: - Backfill merge
 
     /// Merges rustlog `history` with `pendingLive` (events buffered while the
     /// backfill fetch was in flight), deduplicating by `messageId` and capping
-    /// to `capacity`.
+    /// to `capacity`. When `divider` is non-nil it's inserted between the two
+    /// blocks — after every history event, before the first buffered-live one —
+    /// marking "everything above happened before you joined."
     ///
     /// `static` + pure so it's unit-testable without a `TwitchClient`. The
     /// instance wrapper `applyBackfill(_:)` calls this and commits the result
@@ -726,11 +757,12 @@ public actor ChannelSession {
     static func mergeBackfill(
         history: [ChannelEvent],
         pendingLive: [ChannelEvent],
-        capacity: Int
+        capacity: Int,
+        divider: ChannelEvent? = nil
     ) -> [ChannelEvent] {
         var seenMessageIds = Set<String>()
         var merged: [ChannelEvent] = []
-        merged.reserveCapacity(history.count + pendingLive.count)
+        merged.reserveCapacity(history.count + pendingLive.count + 1)
 
         // History first (oldest scrollback), then buffered-live in arrival
         // order. Chat messages dedup by canonical `messageId` — the same
@@ -739,7 +771,19 @@ public actor ChannelSession {
         // its chronological history position rather than jumping to the live tail.
         // Non-message events (notifications/raids/clears) never appear in
         // backfill and carry no shared id, so they pass through untouched.
-        for event in history + pendingLive {
+        //
+        // The divider goes between the blocks (not appended after dedup) so a
+        // live duplicate that kept its history position still lands above it.
+        for event in history {
+            if case .message(let message) = event {
+                guard seenMessageIds.insert(message.messageId).inserted else { continue }
+            }
+            merged.append(event)
+        }
+        if let divider {
+            merged.append(divider)
+        }
+        for event in pendingLive {
             if case .message(let message) = event {
                 guard seenMessageIds.insert(message.messageId).inserted else { continue }
             }
@@ -757,12 +801,24 @@ public actor ChannelSession {
     /// respect to `handle(event:)`. An `await` here would reopen the actor and
     /// let a live event slip in between "merge" and "clear" — it would be lost
     /// or double-counted.
-    private func applyBackfill(_ backfill: [ChatMessage]) {
+    ///
+    /// Internal (not private) so ChannelsTests can end the buffering window on
+    /// a never-`start()`ed session and drive `resyncAfterReconnect` offline —
+    /// same visibility relaxation as `translate(event:...)`. Production's only
+    /// caller remains `start()`.
+    func applyBackfill(_ backfill: [ChatMessage]) {
         let history = backfill.map { ChannelEvent.message($0) }
+        // Join divider: only when there's actually history to separate —
+        // an empty backfill (rustlog down, brand-new channel) would put a
+        // meaningless rule at the very top of an all-live transcript.
+        let divider: ChannelEvent? = history.isEmpty
+            ? nil
+            : .newMessagesDivider(id: "divider-\(UUID().uuidString)", timestamp: .now)
         ring = Self.mergeBackfill(
             history: history,
             pendingLive: pendingLive,
-            capacity: ringCapacity
+            capacity: ringCapacity,
+            divider: divider
         )
         let bufferedCount = pendingLive.count
         pendingLive = []
@@ -771,6 +827,112 @@ public actor ChannelSession {
         if !ring.isEmpty {
             logger.info("Primed ring with \(self.ring.count) event(s) for #\(self.channelLoginName, privacy: .public) — \(history.count) backfilled, \(bufferedCount) buffered-live")
         }
+    }
+
+    // MARK: - Reconnect resync
+
+    /// True while a reconnect gap-fill is in flight. Set synchronously at the
+    /// top of `resyncAfterReconnect` (before its first await) so back-to-back
+    /// `.connected` transitions — flapping network, registry resyncing every
+    /// session for the account — collapse to one rustlog fetch.
+    private var resyncInFlight = false
+
+    /// Join-time backfill fetch size — "comfortable scrollback" (matches the
+    /// historical BackfillProvider default this call site used to rely on).
+    private static let joinBackfillLimit = 150
+
+    /// Gap-fill fetch size. Smaller than the join backfill's 150: the gap is
+    /// usually seconds-to-minutes of missed chat, and anything beyond this in
+    /// a single disconnect means the scrollback context is gone anyway.
+    private static let reconnectBackfillLimit = 100
+
+    /// Fills the gap left by an EventSub socket drop. TwitchKit reconnects and
+    /// re-subscribes on its own, but EventSub has no replay — anything Twitch
+    /// broadcast while the socket was down is simply lost. This fetches a small
+    /// rustlog backfill, drops everything the ring already has (dedup by
+    /// `messageId`), and appends a "New" divider followed by only the missing
+    /// messages — both into the ring AND fanned out to live subscribers.
+    ///
+    /// Nothing missed → nothing appended: a clean blip doesn't litter the
+    /// transcript with dividers.
+    ///
+    /// Called by `ChannelSessionRegistry`'s connection pump on every
+    /// reconnecting→connected (or waitingForNetwork→connected) transition.
+    ///
+    /// Known small races, accepted:
+    ///   - Live events arriving during the rustlog fetch land in the ring
+    ///     first, so the gap batch can sit ~one fetch round-trip later than
+    ///     strict chronology. (Backfilled rows carry no server timestamp, so
+    ///     a sort isn't possible anyway.)
+    ///   - rustlog snapshots at fetch time; messages broadcast between that
+    ///     snapshot and TwitchKit's `resubscribeAll()` completing can be
+    ///     missed by both sources.
+    public func resyncAfterReconnect() async {
+        // The initial-backfill window has its own divider + merge path; a
+        // resync during it would race `applyBackfill`'s atomic commit.
+        guard !backfillPending, !resyncInFlight else { return }
+        resyncInFlight = true
+        defer { resyncInFlight = false }
+
+        let fetched = await fetchBackfill(channelLoginName, Self.reconnectBackfillLimit)
+        guard !fetched.isEmpty else { return }
+
+        let gapEvents = Self.reconnectGapEvents(
+            fetched: fetched,
+            ring: ring,
+            dividerId: "divider-\(UUID().uuidString)",
+            timestamp: .now
+        )
+        guard !gapEvents.isEmpty else {
+            logger.info("Reconnect resync for #\(self.channelLoginName, privacy: .public): no missed messages")
+            return
+        }
+        logger.notice("Reconnect resync for #\(self.channelLoginName, privacy: .public): filling \(gapEvents.count - 1) missed message(s)")
+
+        // Commit the whole batch to the ring synchronously (no await between
+        // appends) so a live `handle(event:)` can't interleave INSIDE the
+        // divider+messages block.
+        for event in gapEvents {
+            appendToRing(event)
+        }
+
+        // Fan out after the ring commit, one event at a time in order —
+        // same TaskGroup shape as `handle(event:)`. Subscribers that dedup
+        // by id (TabChatModel Path 1) absorb any overlap with rows they
+        // already hold (e.g. a self-send whose lost echo was locally
+        // synthesized).
+        let handlers = Array(subscribers.values)
+        for event in gapEvents {
+            await withTaskGroup(of: Void.self) { group in
+                for handler in handlers {
+                    group.addTask { await handler(event) }
+                }
+            }
+        }
+    }
+
+    /// Pure gap computation: which of the freshly-fetched rustlog messages are
+    /// NOT already in the ring, prefixed with a `.newMessagesDivider` when the
+    /// gap is non-empty. Returns `[]` when nothing was missed — the caller
+    /// then appends nothing (no divider for a clean reconnect).
+    ///
+    /// `static` + pure for the same testability reason as `mergeBackfill`.
+    static func reconnectGapEvents(
+        fetched: [ChatMessage],
+        ring: [ChannelEvent],
+        dividerId: String,
+        timestamp: Date
+    ) -> [ChannelEvent] {
+        var knownMessageIds = Set<String>()
+        for event in ring {
+            if case .message(let message) = event {
+                knownMessageIds.insert(message.messageId)
+            }
+        }
+        let missing = fetched.filter { !knownMessageIds.contains($0.messageId) }
+        guard !missing.isEmpty else { return [] }
+        return [.newMessagesDivider(id: dividerId, timestamp: timestamp)]
+            + missing.map { ChannelEvent.message($0) }
     }
 
     // MARK: - Event handling (driven by registry's dispatcher)
@@ -821,11 +983,7 @@ public actor ChannelSession {
             // no-op anyway, so we fall through for uniformity.
             pendingLive.append(channelEvent)
         } else {
-            // Append to ring buffer with cap.
-            if ring.count >= ringCapacity {
-                ring.removeFirst(ring.count - ringCapacity + 1)
-            }
-            ring.append(channelEvent)
+            appendToRing(channelEvent)
         }
 
         // Snapshot subscribers so subscribe/unsubscribe during the loop's

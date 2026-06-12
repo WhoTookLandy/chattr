@@ -605,11 +605,49 @@ public final class ChannelSessionRegistry {
         // inner `== nil` guard keeps the block safe regardless of placement.
         if connectionDispatchTasks[accountUserId] == nil {
             let store = connectionStatus(forAccountUserId: accountUserId)
-            connectionDispatchTasks[accountUserId] = Task { @MainActor in
+            connectionDispatchTasks[accountUserId] = Task { @MainActor [weak self] in
+                // Track the previous state so a RECOVERY (reconnecting →
+                // connected) is distinguishable from the cold-start connect
+                // (connecting → connected, which the join backfill covers).
+                var previous: ConnectionState = .connecting
                 for await state in client.eventSub.connectionState {
                     guard !Task.isCancelled else { return }
                     store.update(state)
+                    if Self.isReconnectRecovery(from: previous, to: state) {
+                        self?.resyncSessionsAfterReconnect(accountUserId: accountUserId)
+                    }
+                    previous = state
                 }
+            }
+        }
+    }
+
+    /// True when a state transition means "the socket was down and is back" —
+    /// the trigger for the reconnect gap-fill. `.connecting → .connected` is
+    /// the initial cold-start connect (rustlog join-backfill covers it), and
+    /// `.disconnected` is an explicit teardown that only comes back through a
+    /// fresh `start()` — neither resyncs.
+    static func isReconnectRecovery(from previous: ConnectionState, to current: ConnectionState) -> Bool {
+        guard current == .connected else { return false }
+        switch previous {
+        case .reconnecting, .waitingForNetwork: return true
+        case .connecting, .connected, .disconnected: return false
+        }
+    }
+
+    /// Kick a gap-fill on every STARTED session for the account. Fire-and-
+    /// forget per session — the resync is best-effort (rustlog may be down)
+    /// and must never block the connection pump's stream consumption.
+    /// Sessions mid-`start()` are skipped: their initial backfill is already
+    /// fetching against the post-reconnect subscription.
+    private func resyncSessionsAfterReconnect(accountUserId: String) {
+        let prefix = "\(accountUserId)/"
+        let accountSessions = sessions.filter { $0.key.hasPrefix(prefix) }.map(\.value)
+        guard !accountSessions.isEmpty else { return }
+        logger.info("EventSub reconnected for account \(accountUserId, privacy: .public) — resyncing \(accountSessions.count) session(s)")
+        for session in accountSessions {
+            Task {
+                await session.resyncAfterReconnect()
             }
         }
     }

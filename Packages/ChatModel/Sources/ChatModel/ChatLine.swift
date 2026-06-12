@@ -227,6 +227,12 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         /// dims it. Mutation in place — we don't drop the row because
         /// the user is mid-scroll and a vanishing row is disorienting.
         case deletedPlaceholder
+
+        /// The red "New" rule separating messages from before the user
+        /// was watching (rustlog backfill on join, or a reconnect gap-fill)
+        /// from live messages. Carries no content — the row is purely the
+        /// line + caption; `runs` is empty and author fields are blank.
+        case newMessagesDivider
     }
 
     /// Payload for a `.subBubble` line: a sub, resub, gift sub, prime
@@ -311,8 +317,12 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// renderer reads the kind and strikethroughs the content.
     ///
     /// Idempotent: deleting a deleted line is a no-op (same returned value).
+    /// `.newMessagesDivider` rows are also a no-op — the divider isn't a
+    /// message, so a chat-clear (which calls this on every line) must leave
+    /// the rule intact rather than render it as struck-through nothing.
     public func withDeletedPlaceholder() -> ChatLine {
-        ChatLine(
+        if case .newMessagesDivider = kind { return self }
+        return ChatLine(
             id: id,
             kind: .deletedPlaceholder,
             authorBadges: authorBadges,

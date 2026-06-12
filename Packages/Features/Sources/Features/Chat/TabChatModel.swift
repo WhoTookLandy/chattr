@@ -1470,6 +1470,19 @@ public final class TabChatModel {
             // this work — without it we'd have no key to match against.
             buffer.mutateMatching(authorUserId: targetUserId) { $0.withDeletedPlaceholder() }
 
+        case .newMessagesDivider(let id, let timestamp):
+            // The red "New" rule. Pure presentation — empty author, empty
+            // runs; ChatRow dispatches on the kind. The id was minted with
+            // the ring event, so a re-prime (tab swipe back) replays the
+            // same stable identity instead of a fresh row.
+            buffer.append(ChatLine(
+                id: id,
+                kind: .newMessagesDivider,
+                authorDisplayName: "",
+                runs: [],
+                timestamp: timestamp
+            ))
+
         case .restrictionsUpdated:
             // Restrictions updates produce no row — they're pure state
             // changes consumed by `apply()` before this switch runs.
