@@ -67,7 +67,7 @@ struct TabChatModelDividerTests {
         let model = await makeAttachedModel()
         let stamp = Date(timeIntervalSince1970: 1_700_000_000)
 
-        model.apply(.message(chatMessage(id: "m1")))
+        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
         model.apply(.newMessagesDivider(id: "div-1", timestamp: stamp))
 
         #expect(model.lines.map(\.id) == ["m1", "div-1"])
@@ -82,9 +82,9 @@ struct TabChatModelDividerTests {
     func chatClearPreservesDivider() async {
         let model = await makeAttachedModel()
 
-        model.apply(.message(chatMessage(id: "m1")))
+        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
         model.apply(.newMessagesDivider(id: "div-1", timestamp: .now))
-        model.apply(.message(chatMessage(id: "m2")))
+        model.apply(.message(chatMessage(id: "m2"), isHistorical: false))
         model.apply(.chatCleared)
 
         let kinds = model.lines.map(\.kind)
@@ -99,12 +99,24 @@ struct TabChatModelDividerTests {
         // Path 1 dedup-by-id must drop it rather than duplicate the row.
         let model = await makeAttachedModel()
 
-        model.apply(.message(chatMessage(id: "m1")))
+        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
         model.apply(.newMessagesDivider(id: "div-1", timestamp: .now))
-        model.apply(.message(chatMessage(id: "m1")))   // duplicate — dropped
-        model.apply(.message(chatMessage(id: "gap1"))) // genuinely missed
+        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))   // duplicate — dropped
+        model.apply(.message(chatMessage(id: "gap1"), isHistorical: false)) // genuinely missed
 
         #expect(model.lines.map(\.id) == ["m1", "div-1", "gap1"])
+        await model.detach()
+    }
+
+    @Test("Historical provenance stamps the line; live stays undimmed")
+    func historicalFlagStampsLine() async {
+        let model = await makeAttachedModel()
+
+        model.apply(.message(chatMessage(id: "h1"), isHistorical: true))
+        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
+
+        #expect(model.lines.first?.isHistorical == true)
+        #expect(model.lines.last?.isHistorical == false)
         await model.detach()
     }
 

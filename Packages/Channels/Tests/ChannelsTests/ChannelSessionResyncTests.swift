@@ -10,7 +10,8 @@ import TwitchKit
 ///     events buffered during the fetch window, surviving dedup and the cap.
 ///   - `reconnectGapEvents(fetched:ring:dividerId:timestamp:)` — the
 ///     reconnect gap-fill: only messages the ring doesn't already hold come
-///     back, prefixed with a divider; a clean reconnect yields nothing.
+///     back (flagged historical), capped by a trailing divider so the rule
+///     marks where live resumes; a clean reconnect yields nothing.
 ///
 /// The actor-side commit paths (`applyBackfill`, `resyncAfterReconnect`) are
 /// deliberately thin wrappers over these — same testing strategy as
@@ -26,7 +27,7 @@ struct ChannelSessionResyncTests {
     }
 
     private func message(id: String) -> ChannelSession.ChannelEvent {
-        .message(chatMessage(id: id))
+        .message(chatMessage(id: id), isHistorical: false)
     }
 
     /// Flatten an event list to a readable shape: message ids verbatim,
@@ -34,7 +35,7 @@ struct ChannelSessionResyncTests {
     private func ids(_ events: [ChannelSession.ChannelEvent]) -> [String] {
         events.compactMap {
             switch $0 {
-            case .message(let m): return m.messageId
+            case .message(let m, _): return m.messageId
             case .newMessagesDivider(let id, _): return id
             default: return nil
             }
@@ -103,7 +104,7 @@ struct ChannelSessionResyncTests {
 
     // MARK: - reconnectGapEvents
 
-    @Test("Only messages the ring doesn't hold come back, divider first")
+    @Test("Only messages the ring doesn't hold come back, capped by the divider")
     func gapFillReturnsOnlyMissing() {
         let ring = [message(id: "m1"), message(id: "m2")]
         let fetched = [
@@ -115,7 +116,7 @@ struct ChannelSessionResyncTests {
         let events = ChannelSession.reconnectGapEvents(
             fetched: fetched, ring: ring, dividerId: "div-r", timestamp: .now
         )
-        #expect(ids(events) == ["div-r", "gap1", "gap2"])
+        #expect(ids(events) == ["gap1", "gap2", "div-r"])
     }
 
     @Test("Clean reconnect (nothing missed) yields no events — and no divider")
@@ -136,7 +137,7 @@ struct ChannelSessionResyncTests {
             dividerId: "div-r",
             timestamp: .now
         )
-        #expect(ids(events) == ["div-r", "a", "c"])
+        #expect(ids(events) == ["a", "c", "div-r"])
     }
 
     @Test("Non-message ring events (bubbles, prior dividers) don't block dedup")
@@ -152,7 +153,7 @@ struct ChannelSessionResyncTests {
             dividerId: "div-r",
             timestamp: .now
         )
-        #expect(ids(events) == ["div-r", "gap1"])
+        #expect(ids(events) == ["gap1", "div-r"])
     }
 
     @Test("Empty ring treats the whole fetch as the gap")
@@ -163,7 +164,7 @@ struct ChannelSessionResyncTests {
             dividerId: "div-r",
             timestamp: .now
         )
-        #expect(ids(events) == ["div-r", "a", "b"])
+        #expect(ids(events) == ["a", "b", "div-r"])
     }
 
     // MARK: - Actor path (offline via injected fetchBackfill)
@@ -214,22 +215,28 @@ struct ChannelSessionResyncTests {
 
         await session.resyncAfterReconnect()
 
-        // Ring: m1, join divider, resync divider, gap1.
+        // Ring: m1, join divider, gap1 (historical), resync divider — the
+        // divider TRAILS the gap so it marks where live messages resume.
         let ring = await session.currentSnapshot()
         let ringIds = ids(ring)
         #expect(ringIds.count == 4)
         #expect(ringIds.first == "m1")
-        #expect(ringIds.last == "gap1")
-        if case .newMessagesDivider = ring[2] {} else {
-            Issue.record("Expected a divider at the gap position, got \(ring[2])")
+        if case .message(let gap, let isHistorical) = ring[2] {
+            #expect(gap.messageId == "gap1")
+            #expect(isHistorical)   // gap-fill rows render dimmed
+        } else {
+            Issue.record("Expected the gap message above the divider, got \(ring[2])")
         }
-        // Fan-out delivered exactly the gap batch, divider first. The fan-out
+        if case .newMessagesDivider = ring[3] {} else {
+            Issue.record("Expected the divider to trail the gap, got \(ring[3])")
+        }
+        // Fan-out delivered exactly the gap batch, divider last. The fan-out
         // TaskGroup is awaited inside resyncAfterReconnect, so no waiting here.
         let received = await recorder.events
-        #expect(ids(received).last == "gap1")
         #expect(received.count == 2)
-        if case .newMessagesDivider = received[0] {} else {
-            Issue.record("Expected the divider to fan out first, got \(received[0])")
+        #expect(ids(received).first == "gap1")
+        if case .newMessagesDivider = received[1] {} else {
+            Issue.record("Expected the divider to fan out last, got \(received[1])")
         }
     }
 

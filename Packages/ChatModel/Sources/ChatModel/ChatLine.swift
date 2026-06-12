@@ -114,6 +114,15 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// sorted-merge logic.
     public let timestamp: Date
 
+    /// True when this line arrived via a rustlog history fetch (join
+    /// backfill or reconnect gap-fill) rather than live over EventSub.
+    /// The renderer dims historical rows slightly so it's immediately
+    /// legible which part of the transcript the user actually witnessed
+    /// — everything above a "New" divider reads as history at a glance.
+    /// `var` (like `kind` / `deliveryState`) so the ingest path can stamp
+    /// it after normalization without a full memberwise copy.
+    public var isHistorical: Bool
+
     /// Reply attachment, populated when this message is itself a reply
     /// to another message. The renderer uses it to draw a quoted
     /// preview above the message body (similar to Twitch web's
@@ -339,6 +348,7 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
                                               // deleted it stays failed — though
                                               // the strikethrough takes visual
                                               // priority over the retry icon)
+            isHistorical: isHistorical,       // a deleted backfill row stays dimmed
             replyParent: replyParent          // preserve thread membership too —
                                               // a deleted reply still belongs to
                                               // its thread for view-thread purposes
@@ -358,6 +368,7 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         isHighlighted: Bool = false,
         timestamp: Date = .now,
         deliveryState: DeliveryState = .delivered,
+        isHistorical: Bool = false,
         replyParent: ReplyParent? = nil
     ) {
         self.id = id
@@ -372,6 +383,7 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         self.isHighlighted = isHighlighted
         self.timestamp = timestamp
         self.deliveryState = deliveryState
+        self.isHistorical = isHistorical
         self.replyParent = replyParent
     }
 }

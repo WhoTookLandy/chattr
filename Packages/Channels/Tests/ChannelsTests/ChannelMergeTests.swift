@@ -18,13 +18,13 @@ struct ChannelMergeTests {
     /// going through the IRC parser (the only public path to a ChatMessage).
     private func message(id: String, text: String = "hi") -> ChannelSession.ChannelEvent {
         let line = "@id=\(id);room-id=1;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :\(text)"
-        return .message(IRCMessageParser.parse(line, channelLogin: "ch")!)
+        return .message(IRCMessageParser.parse(line, channelLogin: "ch")!, isHistorical: false)
     }
 
     /// Extract the ordered list of messageIds from a merged event list.
     private func ids(_ events: [ChannelSession.ChannelEvent]) -> [String] {
         events.compactMap {
-            if case .message(let m) = $0 { return m.messageId }
+            if case .message(let m, _) = $0 { return m.messageId }
             return nil
         }
     }

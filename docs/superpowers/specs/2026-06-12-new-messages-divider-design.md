@@ -9,8 +9,13 @@ Date: 2026-06-12
    the Twitch-native treatment.
 2. **Reconnect backfill**: when the EventSub socket drops and recovers (app
    backgrounded, network blip), fetch a small rustlog backfill, compare it
-   against what we already have, insert **only the missing messages**, and show
-   the same divider at the disconnect point.
+   against what we already have, and insert **only the missing messages** —
+   dimmed, ABOVE the divider — so the "New" rule always marks where live
+   messages resume.
+3. **History dim**: every rustlog-sourced row (join backfill and reconnect
+   gap-fill) carries `isHistorical` and renders at 0.75 opacity, so
+   witnessed-live vs fetched-history is legible row by row, not just at the
+   divider boundary.
 
 ## Architecture
 
@@ -68,8 +73,10 @@ divider (nothing to separate).
      the whole actor path offline).
   3. Compute gap events via the pure static
      `reconnectGapEvents(fetched:ring:dividerId:timestamp:)`:
-     messages whose `messageId` is not in the ring, prefixed with a divider.
-     Empty when nothing was missed → **no divider, no fan-out**.
+     messages whose `messageId` is not in the ring (flagged historical),
+     capped by a TRAILING divider — the rule marks where live resumes, with
+     the fetched gap dimmed above it. Empty when nothing was missed →
+     **no divider, no fan-out**.
   4. Append the batch to the ring synchronously (cap-aware), then fan each
      event out to subscribers in order (same TaskGroup shape as
      `handle(event:)`).
@@ -92,6 +99,18 @@ tab buffers, so ring and visible state would diverge until the next
 re-prime. Each divider marks a real gap, and the buffer cap ages old ones
 out naturally. Revisit only if it proves noisy in practice (would need a
 removal-capable change channel first).
+
+### History provenance (`isHistorical`)
+
+`ChannelEvent.message` carries `isHistorical: Bool` — true for rustlog-sourced
+messages (join history in `applyBackfill`, gap-fill in `reconnectGapEvents`),
+false for live EventSub arrivals. The flag rides the ring event, so re-primes
+replay the same provenance. `TabChatModel.ingest` stamps it onto
+`ChatLine.isHistorical` (re-stamped on cache hits so the memo can't carry a
+stale dim state), `ChatRow` renders historical rows at 0.75 opacity (above
+the 0.55 in-flight treatment so the states stay distinguishable), and the
+highlight-sound gate skips historical mentions — replayed history must not
+ping.
 
 ### Rendering (ChatModel + Features)
 

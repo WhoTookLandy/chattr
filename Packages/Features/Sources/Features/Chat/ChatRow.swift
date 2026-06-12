@@ -130,6 +130,12 @@ struct ChatRow: View, Equatable {
         VStack(alignment: .leading, spacing: 0) {
             rowContent
         }
+        // History dim: rustlog-sourced rows (join backfill, reconnect
+        // gap-fill) render slightly faded so witnessed-live and fetched
+        // history separate at a glance — the "New" divider marks the
+        // boundary, the dim confirms it row by row. 0.75 sits above the
+        // 0.55 in-flight treatment so the two states stay distinguishable.
+        .opacity(line.isHistorical ? 0.75 : 1)
         .contextMenu {
             // Reply only makes sense on actual chat messages — not
             // on sub/raid/system bubbles or deleted placeholders.

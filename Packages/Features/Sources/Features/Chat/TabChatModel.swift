@@ -1227,7 +1227,7 @@ public final class TabChatModel {
         // `lines` and write access to both correlation maps — neither of
         // which the static (used for priming, where no pending sends
         // exist) has.
-        if case .message(let chatMessage) = event {
+        if case .message(let chatMessage, _) = event {
             // Mod-status side-observation. We look at the badges
             // attached to OUR own echoed messages. If we see a
             // "moderator" or "broadcaster" set_id, we're a mod here.
@@ -1340,7 +1340,8 @@ public final class TabChatModel {
         //   - `!blockedIds.contains(...)` keeps a blocked user silent: blocking
         //     means "invisible to me," so their (still-arriving) messages must
         //     not ping the highlight sound even if they @-mention us.
-        if case .message(let m) = event,
+        if case .message(let m, let isHistorical) = event,
+           !isHistorical,
            m.chatterUserId != currentUserId,
            !blockedIds.contains(m.chatterUserId),
            buffer.last?.isHighlighted == true,
@@ -1417,7 +1418,7 @@ public final class TabChatModel {
     /// writes `buffer` — all instance state.
     private func ingest(_ event: ChannelSession.ChannelEvent) {
         switch event {
-        case .message(let chatMessage):
+        case .message(let chatMessage, let isHistorical):
             // EmoteIndex.snapshot() is nonisolated + lock-protected, so
             // it's safe to call from @MainActor without an await.
             let snapshot = emoteIndex?.snapshot() ?? [:]
@@ -1425,17 +1426,21 @@ public final class TabChatModel {
             // Memo hit: this exact message was normalized before (live
             // arrival, or a prior tab mount) under the same inputs. The
             // re-prime path on tab swipes is ~all hits, which is what
-            // keeps swiping between open chats cheap.
-            if let cached = lineCache?.line(id: chatMessage.messageId, context: context) {
+            // keeps swiping between open chats cheap. The provenance flag
+            // is re-stamped on every append (it rides the ring event, not
+            // the cache) so a hit can never carry a stale dim state.
+            if var cached = lineCache?.line(id: chatMessage.messageId, context: context) {
+                cached.isHistorical = isHistorical
                 buffer.append(cached)
                 return
             }
-            let line = Normalizer.normalize(
+            var line = Normalizer.normalize(
                 message: chatMessage,
                 emoteSnapshot: snapshot,
                 currentUserLogin: currentUserLogin,
                 highlightKeywords: highlightKeywords
             )
+            line.isHistorical = isHistorical
             lineCache?.store(line, context: context)
             buffer.append(line)
 

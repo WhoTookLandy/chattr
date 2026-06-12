@@ -45,8 +45,13 @@ public actor ChannelSession {
     /// the handler passed to `subscribe(_:)`. The ring buffer stores these
     /// for late subscribers' prime snapshot.
     public enum ChannelEvent: Sendable {
-        /// A regular chat message.
-        case message(ChatMessage)
+        /// A regular chat message. `isHistorical` is true when the message
+        /// came from a rustlog history fetch (join backfill or reconnect
+        /// gap-fill) instead of arriving live over EventSub — consumers
+        /// render those dimmed so witnessed-live and fetched-history are
+        /// distinguishable at a glance. Part of the ring event, so re-primes
+        /// replay the same provenance.
+        case message(ChatMessage, isHistorical: Bool)
 
         /// A `channel.chat.notification` event — subs, resubs, gift subs,
         /// raids (notification variant), announcements, etc. The Normalizer
@@ -88,8 +93,9 @@ public actor ChannelSession {
         /// Twitch — the session mints one in two places:
         ///   - `applyBackfill`: between rustlog history and live events,
         ///     so a freshly-joined channel shows where "you joined" sits.
-        ///   - `resyncAfterReconnect`: ahead of gap-filled messages that
-        ///     were broadcast while the EventSub socket was down.
+        ///   - `resyncAfterReconnect`: after the gap-filled messages, so
+        ///     the rule always reads "live from here down" — the fetched
+        ///     gap renders dimmed above it.
         /// `id` is minted with the event and stored in the ring so every
         /// replay (tab re-attach) produces the same stable `ChatLine.id`.
         case newMessagesDivider(id: String, timestamp: Date)
@@ -775,7 +781,7 @@ public actor ChannelSession {
         // The divider goes between the blocks (not appended after dedup) so a
         // live duplicate that kept its history position still lands above it.
         for event in history {
-            if case .message(let message) = event {
+            if case .message(let message, _) = event {
                 guard seenMessageIds.insert(message.messageId).inserted else { continue }
             }
             merged.append(event)
@@ -784,7 +790,7 @@ public actor ChannelSession {
             merged.append(divider)
         }
         for event in pendingLive {
-            if case .message(let message) = event {
+            if case .message(let message, _) = event {
                 guard seenMessageIds.insert(message.messageId).inserted else { continue }
             }
             merged.append(event)
@@ -807,7 +813,7 @@ public actor ChannelSession {
     /// same visibility relaxation as `translate(event:...)`. Production's only
     /// caller remains `start()`.
     func applyBackfill(_ backfill: [ChatMessage]) {
-        let history = backfill.map { ChannelEvent.message($0) }
+        let history = backfill.map { ChannelEvent.message($0, isHistorical: true) }
         // Join divider: only when there's actually history to separate —
         // an empty backfill (rustlog down, brand-new channel) would put a
         // meaningless rule at the very top of an all-live transcript.
@@ -850,8 +856,9 @@ public actor ChannelSession {
     /// re-subscribes on its own, but EventSub has no replay — anything Twitch
     /// broadcast while the socket was down is simply lost. This fetches a small
     /// rustlog backfill, drops everything the ring already has (dedup by
-    /// `messageId`), and appends a "New" divider followed by only the missing
-    /// messages — both into the ring AND fanned out to live subscribers.
+    /// `messageId`), and appends only the missing messages (dimmed as
+    /// historical) capped with a "New" divider — both into the ring AND
+    /// fanned out to live subscribers.
     ///
     /// Nothing missed → nothing appended: a clean blip doesn't litter the
     /// transcript with dividers.
@@ -912,9 +919,11 @@ public actor ChannelSession {
     }
 
     /// Pure gap computation: which of the freshly-fetched rustlog messages are
-    /// NOT already in the ring, prefixed with a `.newMessagesDivider` when the
-    /// gap is non-empty. Returns `[]` when nothing was missed — the caller
-    /// then appends nothing (no divider for a clean reconnect).
+    /// NOT already in the ring (flagged historical), followed by a
+    /// `.newMessagesDivider` when the gap is non-empty — the divider trails
+    /// the gap so it always marks where LIVE messages resume; the fetched
+    /// gap renders dimmed above it. Returns `[]` when nothing was missed —
+    /// the caller then appends nothing (no divider for a clean reconnect).
     ///
     /// `static` + pure for the same testability reason as `mergeBackfill`.
     static func reconnectGapEvents(
@@ -925,14 +934,14 @@ public actor ChannelSession {
     ) -> [ChannelEvent] {
         var knownMessageIds = Set<String>()
         for event in ring {
-            if case .message(let message) = event {
+            if case .message(let message, _) = event {
                 knownMessageIds.insert(message.messageId)
             }
         }
         let missing = fetched.filter { !knownMessageIds.contains($0.messageId) }
         guard !missing.isEmpty else { return [] }
-        return [.newMessagesDivider(id: dividerId, timestamp: timestamp)]
-            + missing.map { ChannelEvent.message($0) }
+        return missing.map { ChannelEvent.message($0, isHistorical: true) }
+            + [.newMessagesDivider(id: dividerId, timestamp: timestamp)]
     }
 
     // MARK: - Event handling (driven by registry's dispatcher)
@@ -1033,7 +1042,7 @@ public actor ChannelSession {
     static func translate(event: EventSubEvent, expectedChannelId: String, accountUserId: String) -> ChannelEvent? {
         switch event {
         case .chatMessage(let m) where m.broadcasterUserId == expectedChannelId:
-            return .message(m)
+            return .message(m, isHistorical: false)
         case .chatNotification(let n) where n.broadcasterUserId == expectedChannelId:
             return .notification(n)
         case .raid(let r) where r.toBroadcasterUserId == expectedChannelId:
