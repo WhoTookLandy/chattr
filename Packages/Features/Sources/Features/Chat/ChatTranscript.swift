@@ -1,0 +1,352 @@
+import SwiftUI
+import ChatModel
+import Channels
+
+/// The transcript region: empty/connecting state, the scrolling message
+/// list, and the floating pills that ride on it. Everything here is moved
+/// verbatim from ChatScreen — only the row factory is abstracted into
+/// `rowContent` so this view stays ignorant of the row callbacks.
+///
+/// ## Why this is a separate view (observation scoping)
+///
+/// `@Observable` registers dependencies per view BODY that reads a
+/// property. `TabChatModel.lines` is derived from the stored `buffer`,
+/// which mutates on EVERY inbound message — so whichever body reads
+/// `lines` re-evaluates at chat-message rate (50-200x/sec during raids).
+/// When that body was `ChatScreen.body`, each message re-ran the whole
+/// screen: compose-bar closure construction, sheet/alert wiring, registry
+/// lookups. Isolating every `lines` read (and the scroll-rate @State)
+/// here confines per-message invalidation to this subtree.
+///
+/// To verify after touching this boundary: add `let _ = Self._printChanges()`
+/// to ChatScreen.body in a debug build and open a busy channel — ChatScreen
+/// should stay silent while messages flow; only ChatTranscript ticks.
+struct ChatTranscript: View {
+    /// Observed HERE, not in ChatScreen — see the doc comment above.
+    let chatModel: TabChatModel
+    let channelLoginName: String
+    /// Registry-owned per-account connection store; drives the
+    /// "Reconnecting… / Live again" pill.
+    let connectionStatus: ConnectionStatusStore?
+    /// Row factory — closes over ChatScreen's callbacks (retry, reply,
+    /// block, report). Runs from the cell provider, outside any body.
+    let rowContent: (ChatLine) -> ChatRow
+    /// Parent-owned: written by the report flow's row callbacks (built in
+    /// ChatScreen), read by the confirmation pill overlay here.
+    @Binding var showReportConfirmation: Bool
+
+    /// Chat appearance preferences — this view consumes `edgeToEdge`.
+    @Environment(\.chatAppearance) private var appearance
+
+    /// Block list for the signed-in account. Pushed into
+    /// `chatModel.blockedIds` reactively by the onChange/task in
+    /// `chatScrollView`.
+    @Environment(\.blockStore) private var blockStore
+
+    /// Currently-scrolled message id. Used by the auto-scroll-to-bottom logic
+    /// via `.scrollPosition(id:)`. Writing to this binding scrolls the view;
+    /// the binding also updates as the user scrolls manually (iOS 17+ API).
+    @State private var scrolledMessageId: String?
+
+    /// True when the scroll is at (or near) the bottom — i.e. the user is
+    /// "tailing" live chat. Driven by `.onScrollGeometryChange` reading
+    /// real scroll geometry. Gates the auto-scroll-on-new-message and
+    /// controls the jump-to-bottom pill's visibility (pill shows when
+    /// false).
+    @State private var isAtBottom = true
+
+    /// Count of messages that arrived while the user was scrolled up
+    /// (not tailing). Shown in the jump-to-bottom pill ("3 new
+    /// messages") so the user knows how much they're missing. Reset to
+    /// 0 whenever they return to the bottom.
+    @State private var unreadWhileScrolledUp = 0
+
+    /// Incremented to ask the UIKit chat list to scroll to the newest message
+    /// (jump-to-bottom pill). The collection view acts on each change.
+    @State private var scrollToBottomToken = 0
+
+    /// Current connection pill, derived from connection-state transitions via
+    /// `ConnectionBanner.next`. Driven by the `.onChange` in `chatScrollView`.
+    @State private var connectionBanner: ConnectionBanner = .hidden
+
+    /// Cancels the in-flight "Live again" auto-dismiss when state changes again.
+    @State private var liveAgainDismiss: Task<Void, Never>?
+
+    var body: some View {
+        if chatModel.lines.isEmpty {
+            // Distinguish "attaching" (sessions not yet subscribed) from
+            // "attached but quiet" (subscriptions live, but no messages
+            // have arrived yet). Without explicit state UI a quiet channel
+            // looks identical to a broken connection.
+            EmptyOrConnectingState(
+                isAttached: chatModel.attachState == .attached,
+                channelLoginName: channelLoginName
+            )
+        } else {
+            chatScrollView
+        }
+    }
+
+    /// Selects between the UICollectionView bridge (iOS) and the legacy
+    /// SwiftUI ScrollView (macOS / non-UIKit). The UIKit path is the spike
+    /// under validation; the legacy path is the known-good fallback.
+    @ViewBuilder
+    private var chatScrollView: some View {
+        #if canImport(UIKit)
+        // The ZStack is the safe-area-respecting anchor for the floating
+        // pills (overlays below) while the list itself may bleed past the
+        // top edge: `ignoresSafeArea` expands only the ChatListView, so
+        // with Edge-to-Edge Chat on, messages scroll underneath the
+        // toolbar glass but the connection/jump pills keep their
+        // positions inside the visible safe region.
+        ZStack {
+            ChatListView(
+                // Pass the publish VERSION (an Int), not the lines array — that's
+                // what keeps this body off the full-array dependency. The view
+                // pulls the change batch / snapshot via the closures only when it
+                // actually needs them, inside its own update pass.
+                changeVersion: chatModel.changeVersion,
+                latestChanges: { chatModel.latestChangeBatch },
+                snapshot: { chatModel.lines },
+                rowContent: { line in rowContent(line) },
+                isAtBottom: $isAtBottom,
+                scrollToBottomToken: scrollToBottomToken,
+                extendsToTop: appearance.edgeToEdge
+            )
+            .ignoresSafeArea(edges: appearance.edgeToEdge ? .top : [])
+        }
+        // New messages while scrolled up tally into the unread pill; while
+        // tailing, the collection view auto-scrolls and we reset the count.
+        // Counting `.appended` changes in the just-published batch replaces the
+        // old `lines.count` delta (which we no longer observe per message).
+        .onChange(of: chatModel.changeVersion) { _, _ in
+            if isAtBottom {
+                unreadWhileScrolledUp = 0
+            } else {
+                let appended = chatModel.latestChangeBatch.reduce(into: 0) { count, change in
+                    if case .appended = change { count += 1 }
+                }
+                if appended > 0 { unreadWhileScrolledUp += appended }
+            }
+        }
+        .onChange(of: isAtBottom) { _, atBottom in
+            if atBottom { unreadWhileScrolledUp = 0 }
+        }
+        // Jump-to-bottom pill (bottom edge).
+        .overlay(alignment: .bottom) {
+            if !isAtBottom {
+                JumpToBottomPill(unreadCount: unreadWhileScrolledUp, action: jumpToLatest)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: isAtBottom)
+        // Transient connection indicator (top edge) — carried over from the
+        // legacy path so the iOS collection-view list keeps the connection pill
+        // the concurrent connection-status workstream added.
+        .overlay(alignment: .top) {
+            ConnectionPill(banner: connectionBanner)
+                .padding(.top, 8)
+                .animation(.snappy, value: connectionBanner)
+        }
+        .overlay(alignment: .top) {
+            ReportConfirmationPill(isShown: showReportConfirmation)
+                .padding(.top, 8)
+                .animation(.snappy, value: showReportConfirmation)
+        }
+        .onChange(of: connectionStatus?.state) { previous, current in
+            guard let current else { return }
+            connectionBanner = ConnectionBanner.next(previous: previous, current: current)
+            liveAgainDismiss?.cancel()
+            if connectionBanner == .liveAgain {
+                liveAgainDismiss = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    if connectionBanner == .liveAgain { connectionBanner = .hidden }
+                }
+            }
+        }
+        // Keep the model's block filter in sync with the active account's
+        // BlockStore. `blockStore` is @Observable, so reading `.blockedIds` here
+        // re-fires this onChange whenever a block/unblock mutates the set.
+        .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
+            chatModel.blockedIds = ids
+        }
+        // Seed once on appear; .onChange above handles every subsequent
+        // mutation. Previously this was `.task(id: blockStore?.blockedIds ?? [])`,
+        // which re-hashed the entire Set on every block/unblock and cancelled +
+        // restarted the task each time — redundant with onChange.
+        .task {
+            chatModel.blockedIds = blockStore?.blockedIds ?? []
+        }
+        #else
+        legacyScrollView
+            // Same block-filter sync as the UIKit branch above — the legacy
+            // (macOS) path needs it too, else blocking has no effect there.
+            .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
+                chatModel.blockedIds = ids
+            }
+            .task {
+                chatModel.blockedIds = blockStore?.blockedIds ?? []
+            }
+        #endif
+    }
+
+    /// Jump the transcript to the newest message. On UIKit the collection view
+    /// owns scrolling (token bump); on other platforms the legacy ScrollView
+    /// scrolls via `scrolledMessageId`.
+    private func jumpToLatest() {
+        #if canImport(UIKit)
+        scrollToBottomToken += 1
+        #else
+        if let last = chatModel.lines.last { scrolledMessageId = last.id }
+        #endif
+    }
+
+    /// The scrolling chat content. Only mounted once we have at least one
+    /// message — keeps the empty-state cleanly separated and avoids feeding
+    /// an empty LazyVStack into `.scrollPosition` (which would no-op until
+    /// rows arrive but log-spams about a missing target).
+    ///
+    /// **Scroll edge effect**: `.hard` style is the right pick here because
+    /// our parent (`ChatTabsScreen`) renders a pinned glass tab strip
+    /// directly above this scroll. Per axiom-design's liquid-glass guidance:
+    /// "use `.hard` style for pinned accessory views" — that's exactly what
+    /// the tab strip is. The hard variant dissolves scrolling content into
+    /// the background just under the strip, giving a crisp visual shelf
+    /// without the old explicit Divider we used to have here.
+    @ViewBuilder
+    private var legacyScrollView: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                ForEach(chatModel.lines) { line in
+                    // Delegates to the injected `rowContent` factory so
+                    // block/report callbacks, badge lookup, and all other
+                    // row construction stay in one place (same as the UIKit
+                    // collection-view cell provider above).
+                    rowContent(line)
+                        .id(line.id)
+                }
+            }
+            // `.scrollTargetLayout` tells the enclosing ScrollView to treat
+            // this LazyVStack's children's `.id(...)` values as anchor points
+            // for `.scrollPosition(id:)`. Without it, the position binding
+            // has nothing to attach to.
+            .scrollTargetLayout()
+            .padding(.horizontal)
+        }
+        // Declarative replacement for `ScrollViewReader { proxy.scrollTo(...) }`.
+        // Writing to `scrolledMessageId` scrolls; the binding also updates as
+        // the user scrolls manually.
+        .scrollPosition(id: $scrolledMessageId, anchor: .bottom)
+        // Start at the bottom (most recent message) on fresh channel join.
+        //
+        // `.defaultScrollAnchor(.bottom)` alone doesn't reliably win
+        // against `.scrollPosition(id:)` — the combination is finicky and
+        // the scroll often starts at the TOP, which then reads as
+        // "not at bottom" and pops the jump-to-latest pill immediately.
+        //
+        // Instead we drive the initial scroll explicitly: on first appear
+        // (the chatScrollView only mounts once lines are non-empty, so the
+        // backfill is already present), write the last message's id to
+        // `scrolledMessageId`. With `anchor: .bottom` that pins the newest
+        // message to the viewport bottom. `isAtBottom` is seeded true so
+        // the pill never flashes during the initial settle.
+        .onAppear {
+            scrolledMessageId = chatModel.lines.last?.id
+            isAtBottom = true
+        }
+        // Scroll-edge dissolution under the pinned tab strip — see
+        // `chatScrollView` doc-comment above. `.hard` because the tab
+        // strip is a pinned accessory; `.top` because that's the edge
+        // meeting the chrome.
+        .scrollEdgeEffectStyle(.hard, for: .top)
+        // Pull-to-dismiss-keyboard: dragging the chat content downward
+        // dismisses the keyboard alongside the gesture. Matches Messages /
+        // most chat apps.
+        .scrollDismissesKeyboard(.interactively)
+        // Track whether we're at (near) the bottom using REAL scroll
+        // geometry (iOS 18+). More robust than comparing scrolledMessageId
+        // to lines.last — that breaks when the last message is taller than
+        // the viewport. The transform returns a Bool; `action` fires only
+        // when the Bool flips, so this isn't a per-frame cost during a
+        // tailing scroll.
+        //
+        // "Near the bottom" within 44pt absorbs the small offset jitter
+        // during rapid appends and means the pill doesn't flicker on at
+        // the exact bottom edge.
+        .onScrollGeometryChange(for: Bool.self) { geo in
+            let distanceFromBottom = geo.contentSize.height
+                - geo.contentOffset.y
+                - geo.containerSize.height
+                + geo.contentInsets.bottom
+            return distanceFromBottom <= 44
+        } action: { _, atBottom in
+            isAtBottom = atBottom
+        }
+        // "tail -f" semantics, now gated on the geometry-derived
+        // `isAtBottom` instead of a scrolledMessageId comparison:
+        //   - At bottom → auto-snap to the new last message + reset unread.
+        //   - Scrolled up → don't snap; tally the new message into the
+        //     unread count so the pill can show "N new."
+        //
+        // No animation on the snap — under burst traffic (50-200 msg/sec
+        // during raids) queued animations stutter; instant snap is more
+        // legible and at low throughput the missing animation is invisible.
+        .onChange(of: chatModel.lines.count) { oldCount, newCount in
+            if isAtBottom {
+                if let last = chatModel.lines.last {
+                    scrolledMessageId = last.id
+                }
+                unreadWhileScrolledUp = 0
+            } else if newCount > oldCount {
+                unreadWhileScrolledUp += (newCount - oldCount)
+            }
+        }
+        // Returning to the bottom (manual scroll down, or via the pill)
+        // clears the unread tally.
+        .onChange(of: isAtBottom) { _, atBottom in
+            if atBottom { unreadWhileScrolledUp = 0 }
+        }
+        // Jump-to-bottom pill. Floats at the bottom of the scroll area
+        // (just above the compose bar) whenever the user has scrolled up
+        // off the live edge. Tapping snaps to the newest message and
+        // resumes tailing.
+        .overlay(alignment: .bottom) {
+            if !isAtBottom {
+                JumpToBottomPill(unreadCount: unreadWhileScrolledUp, action: jumpToLatest)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: isAtBottom)
+        // Transient connection indicator floats at the top of the chat area.
+        .overlay(alignment: .top) {
+            ConnectionPill(banner: connectionBanner)
+                .padding(.top, 8)
+                .animation(.snappy, value: connectionBanner)
+        }
+        .overlay(alignment: .top) {
+            ReportConfirmationPill(isShown: showReportConfirmation)
+                .padding(.top, 8)
+                .animation(.snappy, value: showReportConfirmation)
+        }
+        // Drive the pill from connection-state transitions. `previous`/`current`
+        // are both `ConnectionState?` (the observed expression is one optional);
+        // pass `previous` straight through — the reducer treats nil as "no prior
+        // state → no Live-again flash."
+        .onChange(of: connectionStatus?.state) { previous, current in
+            guard let current else { return }
+            connectionBanner = ConnectionBanner.next(previous: previous, current: current)
+            liveAgainDismiss?.cancel()
+            if connectionBanner == .liveAgain {
+                liveAgainDismiss = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    if connectionBanner == .liveAgain { connectionBanner = .hidden }
+                }
+            }
+        }
+    }
+
+}
