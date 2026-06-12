@@ -48,6 +48,12 @@ public struct AppShell: View {
     @State private var selectedTab: AppTab = .home
     @State private var chatTabsModel = ChatTabsModel()
 
+    /// Subscription tokens for the per-tab mention watchers installed in
+    /// `onOpen`, keyed by tab id, one entry per channel in the tab. Held in
+    /// a reference type (not view `@State` value) so the long-stored
+    /// `onOpen`/`onClose` closures can mutate it.
+    @State private var mentionWatchTokens = MentionWatchTokens()
+
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
 
     /// The app's `ModelContext` (injected by `.modelContainer(...)` at
@@ -162,18 +168,32 @@ public struct AppShell: View {
             // behavior if multi-account/sign-out ever invalidates the
             // SwiftData context. Matches the existing `onClose` shape.
             chatTabsModel.onOpen = {
-                [weak channelSessionRegistry,
+                [weak channelSessionRegistry, chatTabsModel, mentionWatchTokens,
                  accountUserId = account.userId,
                  accountLogin = account.login] tab in
                 guard let registry = channelSessionRegistry else { return }
                 for channel in tab.channels {
                     do {
-                        _ = try await registry.acquire(
+                        let session = try await registry.acquire(
                             accountUserId: accountUserId,
                             accountLogin: accountLogin,
                             channelId: channel.channelId,
                             channelLoginName: channel.channelLoginName
                         )
+                        // Mention watcher: session-level (not TabChatModel)
+                        // so @-mentions land the red dot even for tabs whose
+                        // page isn't mounted. The handler is deliberately
+                        // tiny — a substring check, no normalization.
+                        let (token, _) = await session.subscribe { [tabId = tab.id] event in
+                            guard case .message(let message, let isHistorical) = event,
+                                  !isHistorical,
+                                  message.chatterUserId != accountUserId,
+                                  ChatTabsModel.containsMention(of: accountLogin, in: message.message.text)
+                            else { return }
+                            await chatTabsModel.markMention(tabId: tabId)
+                        }
+                        mentionWatchTokens.byTab[tab.id, default: []]
+                            .append((channelId: channel.channelId, token: token))
                     } catch is CancellationError {
                         // Expected if a release races acquire (rapid
                         // open-then-close). Swallow silently.
@@ -186,8 +206,26 @@ public struct AppShell: View {
                     }
                 }
             }
-            chatTabsModel.onClose = { [weak channelSessionRegistry, accountUserId = account.userId] tab in
+            chatTabsModel.onClose = {
+                [weak channelSessionRegistry, mentionWatchTokens,
+                 accountUserId = account.userId,
+                 accountLogin = account.login] tab in
                 guard let registry = channelSessionRegistry else { return }
+                // Unsubscribe the mention watchers BEFORE releasing: the
+                // tab's own refcount keeps the session alive here, so
+                // `registry.session` resolves via its fast path (returns
+                // the existing instance, constructs nothing).
+                for entry in mentionWatchTokens.byTab[tab.id] ?? [] {
+                    guard let channel = tab.channels.first(where: { $0.channelId == entry.channelId }),
+                          let session = try? await registry.session(
+                              accountUserId: accountUserId,
+                              accountLogin: accountLogin,
+                              channelId: entry.channelId,
+                              channelLoginName: channel.channelLoginName
+                          ) else { continue }
+                    await session.unsubscribe(entry.token)
+                }
+                mentionWatchTokens.byTab[tab.id] = nil
                 for channel in tab.channels {
                     await registry.release(accountUserId: accountUserId, channelId: channel.channelId)
                 }
@@ -211,6 +249,17 @@ public struct AppShell: View {
             logger.info("AppShell wired tab callbacks + persistence; hydration kicked off")
         }
     }
+}
+
+/// Mutable box for mention-watcher subscription tokens. A `@MainActor`
+/// class (not a `@State` value type) because the long-stored
+/// `onOpen`/`onClose` closures on `ChatTabsModel` need to mutate it
+/// outside the view-update cycle.
+@MainActor
+private final class MentionWatchTokens {
+    /// One entry per channel per open tab: which subscription to remove
+    /// from which session when the tab closes.
+    var byTab: [UUID: [(channelId: String, token: UUID)]] = [:]
 }
 
 private extension View {

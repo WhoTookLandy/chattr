@@ -74,6 +74,11 @@ public struct UIPreviewRoot: View {
         } else {
             model.activeTabId = model.tabs.first?.id
         }
+        // A background tab with an unseen mention, so screenshots of the
+        // quick-switcher popover show the red-dot state.
+        if model.tabs.count > 1 {
+            model.markMention(tabId: model.tabs[1].id)
+        }
         return model
     }()
 
@@ -86,7 +91,6 @@ public struct UIPreviewRoot: View {
                         userProfiles: [:],
                         liveLoadState: .loaded,
                         openTabs: HomePreviewData.openTabs,
-                        followCount: 87,
                         onStreamTap: { _ in },
                         onResumeChat: { _ in }
                     )

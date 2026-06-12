@@ -39,7 +39,27 @@ public struct ChannelListScreen: View {
 
     @AppStorage("followsViewMode") private var rawViewMode: String = ViewMode.live.rawValue
 
-    enum ViewMode: String, CaseIterable {
+    /// How the live segment is ordered. Viewer count (Twitch's own order)
+    /// is the default; the alternatives answer "what just went live?" and
+    /// "find the channel I'm thinking of" respectively. Session-scoped
+    /// (`@State`, not `@AppStorage`) — a sort is a momentary lens, and
+    /// resetting to the canonical order on the next visit is less
+    /// surprising than a sticky obscure sort.
+    enum LiveSort: String, CaseIterable {
+        case viewers, recentlyStarted, name
+
+        var displayName: String {
+            switch self {
+            case .viewers:         return "Viewers"
+            case .recentlyStarted: return "Recently started"
+            case .name:            return "Name"
+            }
+        }
+    }
+
+    @State private var liveSort: LiveSort = .viewers
+
+    public enum ViewMode: String, CaseIterable {
         case live, all
 
         var displayName: String {
@@ -50,9 +70,20 @@ public struct ChannelListScreen: View {
         }
     }
 
-    public init(account: Account, accountStore: AccountStore) {
+    /// When non-nil, overrides the persisted segment on first appear —
+    /// e.g. Home's "Show all live" row pushes with `.live` so the push is
+    /// a continuation of the preview the user tapped, regardless of which
+    /// segment they last left this screen on.
+    private let initialMode: ViewMode?
+
+    public init(
+        account: Account,
+        accountStore: AccountStore,
+        initialMode: ViewMode? = nil
+    ) {
         self.account = account
         self.accountStore = accountStore
+        self.initialMode = initialMode
     }
 
     // MARK: - Convenience accessors
@@ -94,15 +125,28 @@ public struct ChannelListScreen: View {
         }
     }
 
-    /// Live channels filtered by search. `/streams/followed` already returns
-    /// them in descending viewer-count order, so no extra sort needed.
+    /// Live channels filtered by search, then ordered by the selected sort.
+    /// `/streams/followed` already returns descending viewer count, so the
+    /// default `.viewers` sort is a no-op passthrough.
     private var filteredLiveStreams: [TwitchStream] {
-        guard !searchText.isEmpty else { return liveStreamsOrdered }
-        let query = searchText.lowercased()
-        return liveStreamsOrdered.filter { stream in
-            stream.userName.lowercased().contains(query)
-                || stream.userLogin.lowercased().contains(query)
-                || stream.gameName.lowercased().contains(query)
+        var streams = liveStreamsOrdered
+        if !searchText.isEmpty {
+            let query = searchText.lowercased()
+            streams = streams.filter { stream in
+                stream.userName.lowercased().contains(query)
+                    || stream.userLogin.lowercased().contains(query)
+                    || stream.gameName.lowercased().contains(query)
+            }
+        }
+        switch liveSort {
+        case .viewers:
+            return streams
+        case .recentlyStarted:
+            return streams.sorted { $0.startedAt > $1.startedAt }
+        case .name:
+            return streams.sorted {
+                $0.userName.localizedCaseInsensitiveCompare($1.userName) == .orderedAscending
+            }
         }
     }
 
@@ -121,9 +165,16 @@ public struct ChannelListScreen: View {
             case .all:  allSegment
             }
         }
+        // Same background world as Home: transparent rows over the shared
+        // accent wash, so the Home → Following push doesn't jump from a
+        // tinted screen onto a flat black one.
+        .scrollContentBackground(.hidden)
+        .background(alignment: .top) { AccentTopWash() }
         // Soft progressive blur where rows scroll out at the bottom edge —
         // same treatment as the chat transcript's top edge. Applied to the
-        // Group so both segments' Lists pick it up.
+        // Group so both segments' Lists pick it up. Top edge hard, matching
+        // Home — soft lets thumbnails ghost through the bar.
+        .scrollEdgeEffectStyle(.hard, for: .top)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
         // "Following" matches the convention every social app uses (Twitter/X,
         // Instagram, Bluesky). Shorter than the previous "@displayName's Follows".
@@ -153,6 +204,24 @@ public struct ChannelListScreen: View {
         // "+" to open a channel that isn't followed (search + manual
         // entry). `.primaryAction` lands trailing on iOS, cross-platform.
         .toolbar {
+            // Sort applies only to the live segment (the All list keeps
+            // its memoized live-first order), so the menu hides on All —
+            // a sort control that silently does nothing erodes trust in
+            // the one that works.
+            if selectedMode == .live {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Picker("Sort live by", selection: $liveSort) {
+                            ForEach(LiveSort.allCases, id: \.self) { sort in
+                                Text(sort.displayName).tag(sort)
+                            }
+                        }
+                    } label: {
+                        Label("Sort", systemImage: "arrow.up.arrow.down")
+                    }
+                    .accessibilityLabel("Sort live channels")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingAddChannel = true
@@ -160,6 +229,14 @@ public struct ChannelListScreen: View {
                     Image(systemName: "plus")
                 }
                 .accessibilityLabel("Add a channel")
+            }
+        }
+        // Land on the segment the pushing context promised (see
+        // `initialMode`). onAppear, not init: @AppStorage can't be
+        // written before the view installs.
+        .onAppear {
+            if let initialMode {
+                rawViewMode = initialMode.rawValue
             }
         }
         .sheet(isPresented: $showingAddChannel) {
@@ -252,6 +329,7 @@ public struct ChannelListScreen: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .listRowBackground(Color.clear)
                 }
             }
             .listStyle(.plain)
@@ -357,8 +435,10 @@ public struct ChannelListScreen: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .listRowBackground(Color.clear)
                 }
                 allLoadingMoreFooter
+                    .listRowBackground(Color.clear)
             }
             .listStyle(.plain)
         }

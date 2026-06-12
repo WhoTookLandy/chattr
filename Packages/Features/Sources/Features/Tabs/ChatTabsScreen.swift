@@ -63,6 +63,17 @@ public struct ChatTabsScreen: View {
     private let goHome: (() -> Void)?
 
     @State private var showSwitcher = false
+    /// The compact anchored popover the channel pill opens — quick tab
+    /// switching only; `showSwitcher` remains the full management sheet.
+    /// `-uiPreviewQuickSwitcher` (DEBUG) opens it at launch so the design-
+    /// review harness can screenshot it without driving the UI.
+    @State private var showQuickSwitcher: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-uiPreviewQuickSwitcher")
+        #else
+        false
+        #endif
+    }()
     @State private var showFollows = false
 
     @Environment(\.chatTabs) private var chatTabs
@@ -255,9 +266,10 @@ public struct ChatTabsScreen: View {
         .listStyle(.plain)
     }
 
-    /// 40pt circle avatar for a list row. Placeholder symbol while the
-    /// image loads or when the descriptor has no profile URL.
-    private func tabAvatar(_ tab: ChatTab) -> some View {
+    /// Circle avatar for a list row (40pt) or quick-switcher row (28pt).
+    /// Placeholder symbol while the image loads or when the descriptor has
+    /// no profile URL.
+    private func tabAvatar(_ tab: ChatTab, size: CGFloat = 40) -> some View {
         LazyImage(url: tab.profileImageURL) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
@@ -268,7 +280,7 @@ public struct ChatTabsScreen: View {
                     .foregroundStyle(.secondary.opacity(0.5))
             }
         }
-        .frame(width: 40, height: 40)
+        .frame(width: size, height: size)
         .clipShape(Circle())
     }
 
@@ -280,7 +292,7 @@ public struct ChatTabsScreen: View {
     @ToolbarContentBuilder
     private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
         ToolbarItem(placement: .principal) {
-            Button { showSwitcher = true } label: {
+            Button { showQuickSwitcher = true } label: {
                 VStack(spacing: 3) {
                     HStack(spacing: 5) {
                         Text(activeTabTitle(chatTabs: chatTabs))
@@ -289,6 +301,17 @@ public struct ChatTabsScreen: View {
                         Image(systemName: "chevron.down")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.secondary)
+                    }
+                    // Unseen mention in a BACKGROUND tab: dot the pill so
+                    // the ping is visible from inside another chat.
+                    .overlay(alignment: .topTrailing) {
+                        if hasBackgroundMention(chatTabs: chatTabs) {
+                            Circle()
+                                .fill(.red)
+                                .frame(width: 7, height: 7)
+                                .offset(x: 10, y: -3)
+                                .accessibilityLabel("Unread mention in another chat")
+                        }
                     }
                     pillPageDots(chatTabs: chatTabs)
                 }
@@ -301,10 +324,86 @@ public struct ChatTabsScreen: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Switch channel")
             .disabled(chatTabs?.tabs.isEmpty ?? true)
+            // Quick switcher: a compact anchored popover, not the
+            // management sheet — switching chats is a two-tap flick, and
+            // the popover keeps the transcript visible behind it. The
+            // full sheet (reorder, close, browse) remains reachable via
+            // the popover's footer.
+            .popover(isPresented: $showQuickSwitcher, arrowEdge: .top) {
+                if let chatTabs {
+                    quickSwitcherContent(chatTabs: chatTabs)
+                        .presentationCompactAdaptation(.popover)
+                }
+            }
         }
         // The pill carries its own glass above; hide the bar's shared
         // item background so the two don't stack into a double capsule.
         .sharedBackgroundVisibility(.hidden)
+    }
+
+    /// True when any non-active tab holds an unseen mention.
+    private func hasBackgroundMention(chatTabs: ChatTabsModel?) -> Bool {
+        guard let chatTabs else { return false }
+        return !chatTabs.mentionedTabIds.subtracting([chatTabs.activeTabId].compactMap { $0 }).isEmpty
+    }
+
+    /// Body of the quick-switcher popover: one row per open chat — avatar,
+    /// name, red mention dot, checkmark on the active row — plus an Edit
+    /// footer that escalates to the full management sheet.
+    private func quickSwitcherContent(chatTabs: ChatTabsModel) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(chatTabs.tabs) { tab in
+                Button {
+                    chatTabs.activeTabId = tab.id
+                    showQuickSwitcher = false
+                } label: {
+                    HStack(spacing: 10) {
+                        tabAvatar(tab, size: 28)
+                        Text(tab.displayName)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 12)
+                        if chatTabs.mentionedTabIds.contains(tab.id) {
+                            Circle()
+                                .fill(.red)
+                                .frame(width: 8, height: 8)
+                                .accessibilityLabel("Mentioned you")
+                        }
+                        if tab.id == visibleTabId(chatTabs: chatTabs) {
+                            Image(systemName: "checkmark")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Divider()
+                .padding(.vertical, 4)
+            Button {
+                showQuickSwitcher = false
+                showSwitcher = true
+            } label: {
+                Label("Edit chats", systemImage: "pencil")
+                    .font(.subheadline)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 6)
+        .frame(minWidth: 220, alignment: .leading)
+    }
+
+    /// The tab the pager is showing — `activeTabId`, falling back to the
+    /// first tab pre-restoration (mirrors `activeTabTitle`'s resolution).
+    private func visibleTabId(chatTabs: ChatTabsModel) -> UUID? {
+        chatTabs.activeTabId ?? chatTabs.tabs.first?.id
     }
 
     /// Miniature page dots inside the channel pill — one per open tab,
@@ -321,8 +420,14 @@ public struct ChatTabsScreen: View {
                 // that dot rather than leaving all of them dim.
                 let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
                 ForEach(chatTabs.tabs) { tab in
+                    // Mention beats position: a red dot says "that page
+                    // pinged you," which matters more than which page it is.
                     Circle()
-                        .fill(tab.id == visibleId ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.35)))
+                        .fill(chatTabs.mentionedTabIds.contains(tab.id)
+                            ? AnyShapeStyle(.red)
+                            : tab.id == visibleId
+                                ? AnyShapeStyle(.tint)
+                                : AnyShapeStyle(.secondary.opacity(0.35)))
                         .frame(width: 5, height: 5)
                 }
             }
