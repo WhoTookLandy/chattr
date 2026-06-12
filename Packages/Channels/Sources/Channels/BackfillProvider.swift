@@ -26,10 +26,10 @@ private let logger = AppLogger.make("Channels.Backfill")
 ///     a `ChatMessage` value per line.
 ///   - **Twitch-native emotes**: IRC encodes emotes via the `emotes` tag
 ///     in a different format from EventSub's pre-tokenized `fragments`.
-///     For MVP, backfilled Twitch-native emotes render as plain text;
-///     **third-party emotes (7TV/BTTV/FFZ) still resolve correctly**
-///     because the Normalizer tokenizes the message text against the
-///     emote index regardless of fragment shape.
+///     The parser converts the tag's UTF-16 ranges into interleaved
+///     text/emote fragments, so backfilled native emotes render the same
+///     as live ones; third-party emotes (7TV/BTTV/FFZ) resolve via the
+///     Normalizer tokenizing text fragments against the emote index.
 ///
 /// ## Concurrency
 ///
@@ -202,18 +202,11 @@ internal enum IRCMessageParser {
             "chatter_user_name": displayName,
             "message": [
                 "text": messageText,
-                // Single text fragment for the whole message. The Normalizer
-                // will tokenize this against the third-party emote index;
-                // Twitch-native emote tags (the `emotes=` IRC tag) are NOT
-                // converted to fragments in MVP — backfilled native emotes
-                // render as text. Follow-up could parse `emotes=` and
-                // construct `.emote` fragments here.
-                "fragments": [
-                    [
-                        "type": "text",
-                        "text": messageText,
-                    ]
-                ],
+                // Interleaved text + emote fragments from the `emotes=` IRC
+                // tag, matching EventSub's pre-tokenized shape. The Normalizer
+                // tokenizes the text fragments against the third-party emote
+                // index and passes emote fragments through as native emotes.
+                "fragments": makeFragments(messageText: messageText, emotesTag: tags["emotes"]),
             ],
             "color": color,
             "badges": badges.map { ["set_id": $0.setId, "id": $0.id, "info": $0.info] },
@@ -228,6 +221,85 @@ internal enum IRCMessageParser {
             // whole backfill for one malformed message.
             return nil
         }
+    }
+
+    /// Build the EventSub-shaped `fragments` array from the message text
+    /// and the `emotes=` IRC tag (`emoteId:start-end,start-end/emoteId:...`).
+    ///
+    /// The tag's offsets index UTF-16 code units of the message text and
+    /// the end offset is inclusive, so slicing goes through the UTF-16
+    /// view — Character-based indexing would misalign on any message
+    /// containing a non-BMP scalar (emoji) before an emote.
+    private static func makeFragments(messageText: String, emotesTag: String?) -> [[String: Any]] {
+        let occurrences = parseEmotesTag(emotesTag, in: messageText)
+        guard !occurrences.isEmpty else {
+            return [["type": "text", "text": messageText]]
+        }
+
+        let codeUnits = Array(messageText.utf16)
+        var fragments: [[String: Any]] = []
+        var cursor = 0
+        for occurrence in occurrences {
+            if cursor < occurrence.start {
+                fragments.append([
+                    "type": "text",
+                    "text": String(decoding: codeUnits[cursor..<occurrence.start], as: UTF16.self),
+                ])
+            }
+            fragments.append([
+                "type": "emote",
+                "text": String(decoding: codeUnits[occurrence.start...occurrence.end], as: UTF16.self),
+                // IRC doesn't carry emote_set_id (EventSub does); the
+                // renderer only needs the id to build the CDN URL.
+                "emote": ["id": occurrence.id, "emote_set_id": ""],
+            ])
+            cursor = occurrence.end + 1
+        }
+        if cursor < codeUnits.count {
+            fragments.append([
+                "type": "text",
+                "text": String(decoding: codeUnits[cursor...], as: UTF16.self),
+            ])
+        }
+        return fragments
+    }
+
+    /// Parse the `emotes=` tag into occurrences sorted by message position.
+    /// Offsets are UTF-16 code units; `end` is inclusive. Entries with
+    /// malformed or out-of-bounds ranges are dropped (rustlog occasionally
+    /// relays lines whose ranges don't fit the text), as are overlaps,
+    /// so the caller can always emit contiguous fragments.
+    private static func parseEmotesTag(
+        _ tag: String?,
+        in messageText: String
+    ) -> [(start: Int, end: Int, id: String)] {
+        guard let tag, !tag.isEmpty else { return [] }
+        let utf16Count = messageText.utf16.count
+
+        var occurrences: [(start: Int, end: Int, id: String)] = []
+        for entry in tag.split(separator: "/") {
+            let parts = entry.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2, !parts[0].isEmpty else { continue }
+            let emoteId = String(parts[0])
+            for range in parts[1].split(separator: ",") {
+                let bounds = range.split(separator: "-")
+                guard bounds.count == 2,
+                      let start = Int(bounds[0]),
+                      let end = Int(bounds[1]),
+                      start >= 0, start <= end, end < utf16Count
+                else { continue }
+                occurrences.append((start: start, end: end, id: emoteId))
+            }
+        }
+
+        // Ranges arrive grouped by emote id, not by position.
+        occurrences.sort { $0.start < $1.start }
+        var nonOverlapping: [(start: Int, end: Int, id: String)] = []
+        for occurrence in occurrences {
+            if let last = nonOverlapping.last, occurrence.start <= last.end { continue }
+            nonOverlapping.append(occurrence)
+        }
+        return nonOverlapping
     }
 
     /// Parse `@key1=value1;key2=value2;...` into `[String: String]`.
