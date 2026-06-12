@@ -13,7 +13,7 @@ let package = Package(
         .package(path: "../Accounts"),
         .package(path: "../EmoteSources"),
         .package(path: "../ChatModel"),
-        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.3"),
+        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.4"),
     ],
     targets: [
         .target(
