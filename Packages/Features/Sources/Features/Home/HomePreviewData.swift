@@ -17,7 +17,7 @@ enum HomePreviewData {
             "gameId": "509658", "gameName": "Just Chatting", "type": "live",
             "title": "LIVE 🔴 CLICK HERE 🔴 GAMBA 🔴 REACT 🔴 VIDEOS 🔴",
             "tags": ["English", "Variety"], "viewerCount": 48213,
-            "startedAt": "2026-06-13T14:02:11Z", "language": "en",
+            "startedAt": "2026-06-12T14:02:11Z", "language": "en",
             "thumbnailUrl": "https://static-cdn.jtvnw.net/previews-ttv/live_user_xqc-{width}x{height}.jpg",
             "isMature": false
           },
@@ -26,7 +26,7 @@ enum HomePreviewData {
             "gameId": "32982", "gameName": "Grand Theft Auto V", "type": "live",
             "title": "speedrun monday",
             "tags": ["English"], "viewerCount": 12440,
-            "startedAt": "2026-06-13T15:30:00Z", "language": "en",
+            "startedAt": "2026-06-12T15:30:00Z", "language": "en",
             "thumbnailUrl": "https://static-cdn.jtvnw.net/previews-ttv/live_user_forsen-{width}x{height}.jpg",
             "isMature": false
           },
@@ -35,7 +35,7 @@ enum HomePreviewData {
             "gameId": "263490", "gameName": "Rust", "type": "live",
             "title": "big day big plays | !schedule",
             "tags": ["English", "Variety"], "viewerCount": 9106,
-            "startedAt": "2026-06-13T16:00:00Z", "language": "en",
+            "startedAt": "2026-06-12T16:00:00Z", "language": "en",
             "thumbnailUrl": "https://static-cdn.jtvnw.net/previews-ttv/live_user_lirik-{width}x{height}.jpg",
             "isMature": false
           },
@@ -44,7 +44,7 @@ enum HomePreviewData {
             "gameId": "490100", "gameName": "Lost Ark", "type": "live",
             "title": "gaming time",
             "tags": ["English"], "viewerCount": 7311,
-            "startedAt": "2026-06-13T13:00:00Z", "language": "en",
+            "startedAt": "2026-06-12T13:00:00Z", "language": "en",
             "thumbnailUrl": "https://static-cdn.jtvnw.net/previews-ttv/live_user_moonmoon-{width}x{height}.jpg",
             "isMature": true
           }
