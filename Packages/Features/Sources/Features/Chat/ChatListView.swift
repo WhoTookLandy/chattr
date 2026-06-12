@@ -386,11 +386,11 @@ extension ChatListViewController: UICollectionViewDelegate {
         resumeTailingIfNearBottom(scrollView)
     }
 
-    /// Status-bar tap scrolls to the top — that's an explicit "leave the
-    /// live edge", so unpin before the system scroll starts.
+    /// Refuse the status-bar-tap scroll-to-top gesture: the quick-switcher
+    /// pill sits just below the status bar, so near-miss taps were yanking
+    /// the transcript to the oldest line instead of opening the switcher.
     func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
-        isPinnedToBottom = false
-        return true
+        false
     }
 
     /// Re-enter tailing mode when a user-initiated scroll settles near the
