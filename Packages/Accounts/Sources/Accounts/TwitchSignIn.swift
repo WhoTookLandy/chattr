@@ -36,14 +36,45 @@ public enum TwitchSignIn {
     ///   accounts signed in before this scope was added must sign in
     ///   again to pick it up — until then the PATCH fails with
     ///   unauthorized and the sheet surfaces the error.
+    /// - `userReadModeratedChannels`: attach-time pre-seed of the
+    ///   mod-only affordances. `/moderation/channels` answers "which
+    ///   channels does THIS user moderate" with the user's own token —
+    ///   unlike `/moderation/moderators`, which needs the BROADCASTER's
+    ///   auth — so Delete Message appears the moment chat opens instead
+    ///   of after the user's first sent message echoes back with a mod
+    ///   badge. NOTE: same re-sign-in caveat as chat_settings — until
+    ///   then the fetch fails unauthorized and chattr falls back to
+    ///   badge observation (see
+    ///   `ChannelSessionRegistry.moderatedChannelIds(forAccountUserId:)`).
+    /// - `moderatorRead{BlockedTerms,UnbanRequests,BannedUsers,Warnings,
+    ///   Moderators,Vips}`: the remainder of the `channel.moderate` v2
+    ///   EventSub bundle. The subscription demands ALL of seven
+    ///   read-or-manage scope pairs; our existing
+    ///   `moderatorManageChatMessages` + `moderatorManageChatSettings`
+    ///   satisfy two, these six cover the rest. chattr only consumes the
+    ///   `mod`/`unmod` actions (live mod-status downgrade/upgrade — see
+    ///   `ChannelSession.enableModerationEvents`), but Twitch doesn't
+    ///   offer a narrower subscription. Same harmless-for-non-mods
+    ///   rationale as the manage scopes: the subscribe is only attempted
+    ///   once mod status is already established, and Twitch rejects it
+    ///   server-side otherwise. Same re-sign-in caveat too — pre-scope
+    ///   tokens get a swallowed 403 on subscribe and mod status simply
+    ///   stays attach-time-static, exactly the pre-existing behavior.
     public static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,
         .userWriteChat,
         .userReadFollows,
         .userReadEmotes,
+        .userReadModeratedChannels,
         .moderatorManageChatMessages,
         .moderatorManageChatSettings,
+        .moderatorReadBlockedTerms,
+        .moderatorReadUnbanRequests,
+        .moderatorReadBannedUsers,
+        .moderatorReadWarnings,
+        .moderatorReadModerators,
+        .moderatorReadVips,
     ]
 
     /// The redirect URI the Vercel bridge 302-redirects back to. Must

@@ -85,6 +85,22 @@ public final class ChannelSessionRegistry {
     /// alongside the event dispatcher; cancelled in `stopDispatcherIfIdle`.
     private var connectionDispatchTasks: [String: Task<Void, Never>] = [:]
 
+    /// Per-account moderated-channel fetches, keyed by `accountUserId`. The
+    /// value is the fetch Task rather than the resolved set so concurrent
+    /// channel-opens for the same account coalesce on a single Helix call —
+    /// same pattern as `inFlight` for session construction. `nil` inside the
+    /// Task's result means the fetch FAILED (as opposed to "user moderates
+    /// no channels", which is a successful empty set).
+    ///
+    /// Entry lifetime: a successful fetch is cached for the registry's
+    /// lifetime — being modded mid-run is covered by the badge-observation
+    /// upgrade in `TabChatModel.apply`, so staleness here only delays the
+    /// affordance, never breaks it. A FAILED fetch is evicted on completion
+    /// so the next channel-open retries: failure is usually a pre-scope
+    /// token (heals on re-sign-in, which can happen mid-run) or a transient
+    /// network error.
+    private var moderatedChannelsTasks: [String: Task<Set<String>?, Never>] = [:]
+
     /// Reference counts per session key. Each `acquire(...)` increments;
     /// each `release(...)` decrements. When a count hits 0, the underlying
     /// `ChannelSession` is stopped and removed.
@@ -415,6 +431,85 @@ public final class ChannelSessionRegistry {
         let new = ConnectionStatusStore()
         connectionStatusStores[accountUserId] = new
         return new
+    }
+
+    // MARK: - Moderated channels (mod-affordance pre-seed)
+
+    /// Returns the set of channel ids the account moderates, fetched once
+    /// per account from `GET /moderation/channels` and cached for the
+    /// registry's lifetime. The endpoint is the user-side inverse of
+    /// `/moderation/moderators`: it needs only the signed-in user's own
+    /// token (`user:read:moderated_channels` scope), not broadcaster auth.
+    ///
+    /// `TabChatModel.attach` consults this (via the provider closure
+    /// `ChatScreen` hands it) to show mod-only affordances the moment a
+    /// channel opens, instead of waiting for the user's own message echo
+    /// to carry a mod badge.
+    ///
+    /// Graceful degradation: any fetch error — most commonly unauthorized
+    /// on accounts signed in before the scope was added — returns an empty
+    /// set ("no pre-knowledge") and is NOT cached, so a later open retries.
+    /// The badge-observation upgrade path in `TabChatModel` still works, so
+    /// mod tools appear after the first sent message exactly as they did
+    /// before this fetch existed.
+    public func moderatedChannelIds(forAccountUserId accountUserId: String) async -> Set<String> {
+        // Joiner path — a fetch is cached or in flight; share its result.
+        // Joiners never evict: only the creator below manages the entry,
+        // which keeps eviction from racing a fresh task another caller
+        // stored after this one suspended.
+        if let existing = moderatedChannelsTasks[accountUserId] {
+            return await existing.value ?? []
+        }
+
+        let client = accountStore.client(forUserId: accountUserId)
+        let task = Task<Set<String>?, Never> {
+            do {
+                var ids: Set<String> = []
+                var cursor: String? = nil
+                repeat {
+                    let page = try await client.api.fetchModeratedChannelsPage(
+                        userID: accountUserId,
+                        first: 100,
+                        after: cursor
+                    )
+                    ids.formUnion(page.data.map(\.broadcasterId))
+                    cursor = page.pagination?.cursor
+                } while cursor != nil
+                return ids
+            } catch {
+                // .info (not .error): expected for every pre-scope account
+                // until they re-sign-in — noisy as an error, but worth a
+                // visible breadcrumb when investigating "why no Delete
+                // Message" reports.
+                logger.info("Moderated-channels fetch failed for account \(accountUserId, privacy: .public): \(error.localizedDescription, privacy: .public) — falling back to badge observation")
+                return nil
+            }
+        }
+        moderatedChannelsTasks[accountUserId] = task
+
+        guard let ids = await task.value else {
+            // Creator-only eviction (see joiner comment above).
+            moderatedChannelsTasks[accountUserId] = nil
+            return []
+        }
+        logger.info("Moderated-channels set for account \(accountUserId, privacy: .public): \(ids.count) channel(s)")
+        return ids
+    }
+
+    /// Drops the account's cached moderated-channel set so the next
+    /// channel-open refetches it. Called (via `TabChatModel`'s
+    /// `onModerationRevoked` hook) when a live `channel.moderate` event
+    /// reports the account was unmodded — the cached set still names the
+    /// channel, and without eviction a close-and-reopen would re-seed mod
+    /// affordances from that stale entry for the rest of the app run.
+    ///
+    /// Whole-account eviction rather than surgical removal on purpose:
+    /// the refetch is one Helix call, authoritative, and shared by all
+    /// channels — cheaper to re-ask than to mirror per-channel mutations
+    /// into a cached Task's resolved value.
+    public func invalidateModeratedChannels(forAccountUserId accountUserId: String) {
+        moderatedChannelsTasks[accountUserId] = nil
+        logger.debug("Evicted moderated-channels cache for account \(accountUserId, privacy: .public)")
     }
 
     // MARK: - Cold-start zombie cleanup

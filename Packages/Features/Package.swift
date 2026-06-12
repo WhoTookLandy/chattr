@@ -52,7 +52,15 @@ let package = Package(
         ),
         .testTarget(
             name: "FeaturesTests",
-            dependencies: ["Features", "ChatModel"],
+            dependencies: [
+                "Features",
+                "ChatModel",
+                // Channels + TwitchKit: TabChatModelModerationTests builds
+                // real (never-started) ChannelSessions around an offline
+                // TwitchClient to drive attach-time moderation seeding.
+                "Channels",
+                .product(name: "TwitchKit", package: "TwitchKit"),
+            ],
             path: "Tests/FeaturesTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

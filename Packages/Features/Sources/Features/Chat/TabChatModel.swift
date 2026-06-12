@@ -39,7 +39,10 @@ private let logger = AppLogger.make("Features.TabChatModel")
 public final class TabChatModel {
 
     /// Three-state attach lifecycle for ChatScreen's empty-state UI.
-    public enum AttachState: Sendable {
+    /// `Equatable` so the `@Observable` macro's generated setter can
+    /// short-circuit invalidation when the same state is re-assigned —
+    /// without it every set notifies observers, equal value or not.
+    public enum AttachState: Sendable, Equatable {
         case detached    // no sessions registered
         case attaching   // attach in flight
         case attached    // all subscriptions live
@@ -316,20 +319,51 @@ public final class TabChatModel {
     /// timeout users, etc.) in the attached channel. Drives the
     /// `Delete Message` affordance in ChatRow's context menu.
     ///
-    /// Set true via two paths:
+    /// Set true via three paths:
     ///   1. **Broadcaster instant**: at attach time, if the account
     ///      userId equals the channelId, we know we're the broadcaster
     ///      — true immediately, no waiting.
-    ///   2. **Moderator observation**: as our own chat-message echoes
+    ///   2. **Moderated-channels seed**: at attach time, a fire-and-forget
+    ///      task asks the caller-provided `moderatedChannelIds` closure
+    ///      (registry-cached `/moderation/channels` — which channels does
+    ///      THIS user moderate, user-side token) whether the attached
+    ///      channel is in the set. Lands within one Helix round-trip on
+    ///      the account's first channel-open, instantly after (the
+    ///      registry caches the set per account).
+    ///   3. **Moderator observation**: as our own chat-message echoes
     ///      arrive, we look at `chatMessage.badges` for "moderator" or
     ///      "broadcaster". Found → true.
     ///
-    /// The moderator path requires the user to chat at least once for
-    /// the affordance to appear. Acceptable for MVP — pre-fetching
-    /// `/moderation/moderators` requires an additional scope
-    /// (`moderation:read`) and Helix call per channel-open. The badge-
-    /// observation path is free.
+    /// Path 3 is the fallback for path 2's failure modes: accounts signed
+    /// in before `user:read:moderated_channels` was requested (fetch fails
+    /// unauthorized → empty set), transient fetch failures, and being
+    /// modded mid-session.
+    ///
+    /// Every path that flips this true ALSO calls
+    /// `ChannelSession.enableModerationEvents()` (via
+    /// `promoteToModerator`), which subscribes to `channel.moderate` v2.
+    /// From then on the flag is LIVE in both directions: a `mod`/`unmod`
+    /// action targeting our account — or Twitch revoking the subscription,
+    /// which it does when the subscriber is unmodded — arrives as
+    /// `.moderationStatusChanged` and is applied in `apply()`. The
+    /// downgrade also fires `onModerationRevoked` so the registry's
+    /// cached moderated-set doesn't re-seed the stale entry on reopen.
     public private(set) var currentUserCanModerate: Bool = false
+
+    /// Invoked when a live `channel.moderate` signal downgrades
+    /// `currentUserCanModerate` to false. `ChatScreen` wires this to
+    /// `ChannelSessionRegistry.invalidateModeratedChannels` — the model
+    /// can't reach the registry itself (Features ↔ Channels layering),
+    /// same reason `moderatedChannelIds` is injected as a closure.
+    /// Set by `attach(...)`; nil when no invalidation is needed (tests).
+    private var onModerationRevoked: (@Sendable () async -> Void)?
+
+    /// In-flight moderated-channels seed (path 2 above). Stored so
+    /// `detach` can cancel it (tab closed before the fetch landed — a
+    /// late flag-flip after re-attach to a DIFFERENT channel would be
+    /// wrong) and so tests can await its completion deterministically.
+    /// Internal rather than private for exactly that test access.
+    var moderationSeedTask: Task<Void, Never>?
 
     /// Forward a chat-mode change (emote-only, subs-only, followers-only,
     /// slow mode) to the attached channel's session — see
@@ -440,7 +474,9 @@ public final class TabChatModel {
         currentUserDisplayName: String = "",
         highlightKeywords: [String] = [],
         lineCap: Int = 500,
-        lineCache: NormalizedLineCache? = nil
+        lineCache: NormalizedLineCache? = nil,
+        moderatedChannelIds: (@Sendable () async -> Set<String>)? = nil,
+        onModerationRevoked: (@Sendable () async -> Void)? = nil
     ) async {
         // Synchronous re-entry guard — must precede any `await`.
         guard !isAttaching else {
@@ -475,6 +511,7 @@ public final class TabChatModel {
         self.currentUserDisplayName = currentUserDisplayName
         self.highlightKeywords = highlightKeywords
         self.lineCache = lineCache
+        self.onModerationRevoked = onModerationRevoked
 
         attachState = .attaching
 
@@ -506,7 +543,29 @@ public final class TabChatModel {
             // mod-observation path below upgrades it on first own
             // message echo carrying mod/broadcaster badges.
             if firstSession.isAccountBroadcaster {
-                currentUserCanModerate = true
+                promoteToModerator(session: firstSession)
+            }
+            // Moderated-channels seed — the hybrid pre-fetch path (path 2
+            // in `currentUserCanModerate`'s doc). Fire-and-forget so attach
+            // never blocks on the Helix round-trip; the registry caches the
+            // set per account, so every channel-open after the account's
+            // first resolves instantly. Skipped when the broadcaster check
+            // above already proved mod power. The badge-observation upgrade
+            // in `apply` remains the fallback when the set comes back
+            // empty (no scope on the token, fetch failure, modded
+            // mid-session).
+            if !currentUserCanModerate, let moderatedChannelIds {
+                let channelId = firstSession.channelId
+                moderationSeedTask = Task { [weak self] in
+                    let ids = await moderatedChannelIds()
+                    // Cancellation check AFTER the await: detach cancels
+                    // this task, and a result landing post-detach must not
+                    // flip the flag (the model may re-attach elsewhere).
+                    guard !Task.isCancelled, let self else { return }
+                    if ids.contains(channelId) {
+                        self.promoteToModerator(session: firstSession)
+                    }
+                }
             }
             // Seed the optimistic-row name color from /chat/color so even
             // the FIRST send of the session renders styled. Fire-and-forget
@@ -543,6 +602,22 @@ public final class TabChatModel {
         logger.info("TabChatModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
     }
 
+    /// The single funnel for "we just learned the user can moderate here."
+    /// Flips the flag AND fire-and-forget-enables the session's
+    /// `channel.moderate` v2 subscription so the status stays live from
+    /// here on (unmod/revocation downgrades arrive via `apply()`). All
+    /// three upgrade paths — broadcaster check, moderated-set seed, badge
+    /// observation — route through this so none of them can forget the
+    /// subscription half. Safe to call repeatedly: the flag set is
+    /// idempotent and `enableModerationEvents` self-guards.
+    private func promoteToModerator(session: ChannelSession?) {
+        currentUserCanModerate = true
+        guard let session else { return }
+        Task {
+            await session.enableModerationEvents()
+        }
+    }
+
     /// Unsubscribes from every session and clears local state. Safe to call
     /// multiple times; each call no-ops if already detached.
     public func detach() async {
@@ -554,6 +629,13 @@ public final class TabChatModel {
             task.cancel()
         }
         sendFallbackTimers.removeAll()
+
+        // Cancel an in-flight moderated-channels seed alongside the timers
+        // (also before the empty-guard, same rationale): a result landing
+        // after detach must not flip `currentUserCanModerate` for whatever
+        // channel this model attaches to next.
+        moderationSeedTask?.cancel()
+        moderationSeedTask = nil
 
         guard !subscriptions.isEmpty else { return }
 
@@ -1099,7 +1181,11 @@ public final class TabChatModel {
     /// messages received after the load completes will resolve their
     /// emotes correctly. Re-normalizing pre-load messages is deferred to
     /// a future iteration.
-    private func apply(_ event: ChannelSession.ChannelEvent) {
+    // Internal (not private) so FeaturesTests can drive event application
+    // directly — the visibility relaxation TabChatModelReplyTests' header
+    // note anticipated. Production callers remain the subscribe handlers
+    // registered in `attach`.
+    func apply(_ event: ChannelSession.ChannelEvent) {
         // Restrictions-update events don't produce a row — they're
         // pure state changes. Update the observed property and bail
         // before the rest of apply tries to add a line.
@@ -1112,6 +1198,26 @@ public final class TabChatModel {
         if case .restrictionsUpdated(let restrictions) = event {
             chatRestrictions = restrictions
             logger.info("Chat restrictions updated mid-session: hasAny=\(restrictions.hasAny)")
+            return
+        }
+
+        // Live mod-status change — also a pure state change, no row.
+        // Upgrades route through `promoteToModerator` (idempotent; the
+        // channel.moderate subscription that delivered this is already
+        // live, so the enable inside is a no-op). Downgrades additionally
+        // evict the registry's cached moderated-set via the injected hook
+        // — without that, a close-and-reopen would re-seed mod
+        // affordances from the stale cache entry.
+        if case .moderationStatusChanged(let canModerate) = event {
+            if canModerate {
+                promoteToModerator(session: subscriptions.first?.session)
+            } else {
+                currentUserCanModerate = false
+                if let onModerationRevoked {
+                    Task { await onModerationRevoked() }
+                }
+            }
+            logger.info("Mod status changed mid-session for #\(self.draftStorageChannelId, privacy: .public): canModerate=\(canModerate)")
             return
         }
 
@@ -1136,7 +1242,7 @@ public final class TabChatModel {
                     badge.setId == "moderator" || badge.setId == "broadcaster"
                 }
                 if hasModBadge {
-                    currentUserCanModerate = true
+                    promoteToModerator(session: subscriptions.first?.session)
                     logger.info("Detected mod status from echoed badges for #\(self.draftStorageChannelId, privacy: .public)")
                 }
             }
@@ -1367,6 +1473,13 @@ public final class TabChatModel {
         case .restrictionsUpdated:
             // Restrictions updates produce no row — they're pure state
             // changes consumed by `apply()` before this switch runs.
+            break
+
+        case .moderationStatusChanged:
+            // No row, same as restrictions. NOT re-applied from the ring
+            // on priming either: attach re-derives mod status from its
+            // own sources (broadcaster check, moderated-set seed, badge
+            // observation), all of which post-date a replayed ring event.
             break
         }
     }

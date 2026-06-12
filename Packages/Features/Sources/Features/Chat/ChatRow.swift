@@ -120,67 +120,72 @@ struct ChatRow: View, Equatable {
     }
 
     var body: some View {
-        // Wrap the actual content in a Group so we can attach modifiers
-        // (.contextMenu) once at the outer level without duplicating
-        // them across each case in the switch. The Group is layout-
-        // transparent — it doesn't affect sizing or stacking.
-        rowContent
-            .contextMenu {
-                // Reply only makes sense on actual chat messages — not
-                // on sub/raid/system bubbles or deleted placeholders.
-                // The menu is empty for those rows, which makes the
-                // long-press a no-op (no menu pops), matching the
-                // platform default.
-                if case .message = line.kind {
-                    if let onReply {
-                        Button {
-                            onReply()
-                        } label: {
-                            Label("Reply", systemImage: "arrowshape.turn.up.left")
-                        }
+        // The VStack makes the row "unary": rowContent's top-level switch
+        // branches between structurally different views, and a multi-shape
+        // row defeats the lazy-container fast path that templates row ids
+        // without running every row's body (matters on the macOS LazyVStack
+        // path; free on iOS where each row is its own hosting-cell root).
+        // Single child + spacing 0 — layout-neutral. The .contextMenu also
+        // attaches once here instead of per switch case.
+        VStack(alignment: .leading, spacing: 0) {
+            rowContent
+        }
+        .contextMenu {
+            // Reply only makes sense on actual chat messages — not
+            // on sub/raid/system bubbles or deleted placeholders.
+            // The menu is empty for those rows, which makes the
+            // long-press a no-op (no menu pops), matching the
+            // platform default.
+            if case .message = line.kind {
+                if let onReply {
+                    Button {
+                        onReply()
+                    } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
                     }
-                    if let onViewThread {
-                        Button {
-                            onViewThread()
-                        } label: {
-                            Label("View Thread", systemImage: "bubble.left.and.bubble.right")
-                        }
+                }
+                if let onViewThread {
+                    Button {
+                        onViewThread()
+                    } label: {
+                        Label("View Thread", systemImage: "bubble.left.and.bubble.right")
                     }
-                    // Moderation action — visually separated from the
-                    // benign read-only actions above by .destructive
-                    // role (red icon + label, slight visual gap in
-                    // the menu). Only present when `onDelete` is
-                    // non-nil, which `ChatScreen` only does for
-                    // moderators.
-                    //
-                    // Doesn't show on `.deletedPlaceholder` rows
-                    // (the outer `if case .message` covers that — a
-                    // placeholder's kind is `.deletedPlaceholder`,
-                    // not `.message`).
-                    if let onDelete {
-                        Button(role: .destructive) {
-                            onDelete()
-                        } label: {
-                            Label("Delete Message", systemImage: "trash")
-                        }
+                }
+                // Moderation action — visually separated from the
+                // benign read-only actions above by .destructive
+                // role (red icon + label, slight visual gap in
+                // the menu). Only present when `onDelete` is
+                // non-nil, which `ChatScreen` only does for
+                // moderators.
+                //
+                // Doesn't show on `.deletedPlaceholder` rows
+                // (the outer `if case .message` covers that — a
+                // placeholder's kind is `.deletedPlaceholder`,
+                // not `.message`).
+                if let onDelete {
+                    Button(role: .destructive) {
+                        onDelete()
+                    } label: {
+                        Label("Delete Message", systemImage: "trash")
                     }
-                    if let onBlock {
-                        Button(role: .destructive) {
-                            onBlock()
-                        } label: {
-                            Label("Block", systemImage: "hand.raised")
-                        }
+                }
+                if let onBlock {
+                    Button(role: .destructive) {
+                        onBlock()
+                    } label: {
+                        Label("Block", systemImage: "hand.raised")
                     }
-                    if let onReport {
-                        Menu {
-                            Button("Harassment") { onReport(.harassment) }
-                            Button("Spam") { onReport(.spam) }
-                        } label: {
-                            Label("Report…", systemImage: "exclamationmark.bubble")
-                        }
+                }
+                if let onReport {
+                    Menu {
+                        Button("Harassment") { onReport(.harassment) }
+                        Button("Spam") { onReport(.spam) }
+                    } label: {
+                        Label("Report…", systemImage: "exclamationmark.bubble")
                     }
                 }
             }
+        }
     }
 
     @ViewBuilder

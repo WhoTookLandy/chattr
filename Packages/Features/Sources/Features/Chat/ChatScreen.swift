@@ -598,7 +598,31 @@ public struct ChatScreen: View {
                 lineCache: registry.normalizedLineCache(
                     forAccountUserId: account.userId,
                     channelId: channelId
-                )
+                ),
+                // Hybrid mod detection: an async provider for the account's
+                // moderated-channel set (`/moderation/channels`, cached per
+                // account on the registry). attach fires it concurrently —
+                // it never blocks chat startup — and seeds
+                // `currentUserCanModerate` when this channel is in the set,
+                // so mods get Delete Message without sending a message
+                // first. Captures the userId string (not `account`, a
+                // non-Sendable @Model) and the registry weakly — if the
+                // registry is gone by resolution time the model just
+                // falls back to badge observation.
+                moderatedChannelIds: { [weak registry, accountUserId = account.userId] in
+                    await registry?.moderatedChannelIds(
+                        forAccountUserId: accountUserId
+                    ) ?? []
+                },
+                // Counterpart hook: a live unmod (channel.moderate event or
+                // subscription revocation) evicts the registry's cached
+                // moderated-set, so reopening the channel refetches instead
+                // of re-seeding mod affordances from the stale entry.
+                onModerationRevoked: { [weak registry, accountUserId = account.userId] in
+                    await registry?.invalidateModeratedChannels(
+                        forAccountUserId: accountUserId
+                    )
+                }
             )
         } catch is CancellationError {
             // Expected on view tear-down / channel-tab switch. The outgoing
@@ -688,40 +712,13 @@ private struct ChatTranscript: View {
             // "attached but quiet" (subscriptions live, but no messages
             // have arrived yet). Without explicit state UI a quiet channel
             // looks identical to a broken connection.
-            emptyOrConnectingView
+            EmptyOrConnectingState(
+                isAttached: chatModel.attachState == .attached,
+                channelLoginName: channelLoginName
+            )
         } else {
             chatScrollView
         }
-    }
-
-    /// Empty-state placeholder. Two flavors driven by `chatModel.attachState`:
-    ///   - `.detached` / `.attaching` → "Connecting to chat…" with a spinner
-    ///     (the model's `attach(sessions:)` is in flight — that includes
-    ///     registry.session() which subscribes to EventSub).
-    ///   - `.attached` → "Connected — waiting for messages" (everything's
-    ///     wired, the channel just hasn't had a chat message yet).
-    @ViewBuilder
-    private var emptyOrConnectingView: some View {
-        VStack(spacing: 12) {
-            if chatModel.attachState != .attached {
-                ProgressView()
-                Text("Connecting to chat…")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .font(.largeTitle)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.secondary)
-                Text("Connected to #\(channelLoginName)")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.primary)
-                Text("Waiting for messages…")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Selects between the UICollectionView bridge (iOS) and the legacy
@@ -772,7 +769,7 @@ private struct ChatTranscript: View {
         // Jump-to-bottom pill (bottom edge).
         .overlay(alignment: .bottom) {
             if !isAtBottom {
-                jumpToBottomPill
+                JumpToBottomPill(unreadCount: unreadWhileScrolledUp, action: jumpToLatest)
                     .padding(.bottom, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -782,12 +779,12 @@ private struct ChatTranscript: View {
         // legacy path so the iOS collection-view list keeps the connection pill
         // the concurrent connection-status workstream added.
         .overlay(alignment: .top) {
-            connectionPill
+            ConnectionPill(banner: connectionBanner)
                 .padding(.top, 8)
                 .animation(.snappy, value: connectionBanner)
         }
         .overlay(alignment: .top) {
-            reportConfirmationPill
+            ReportConfirmationPill(isShown: showReportConfirmation)
                 .padding(.top, 8)
                 .animation(.snappy, value: showReportConfirmation)
         }
@@ -951,7 +948,7 @@ private struct ChatTranscript: View {
         // resumes tailing.
         .overlay(alignment: .bottom) {
             if !isAtBottom {
-                jumpToBottomPill
+                JumpToBottomPill(unreadCount: unreadWhileScrolledUp, action: jumpToLatest)
                     .padding(.bottom, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -959,12 +956,12 @@ private struct ChatTranscript: View {
         .animation(.snappy(duration: 0.2), value: isAtBottom)
         // Transient connection indicator floats at the top of the chat area.
         .overlay(alignment: .top) {
-            connectionPill
+            ConnectionPill(banner: connectionBanner)
                 .padding(.top, 8)
                 .animation(.snappy, value: connectionBanner)
         }
         .overlay(alignment: .top) {
-            reportConfirmationPill
+            ReportConfirmationPill(isShown: showReportConfirmation)
                 .padding(.top, 8)
                 .animation(.snappy, value: showReportConfirmation)
         }
@@ -986,16 +983,62 @@ private struct ChatTranscript: View {
         }
     }
 
-    /// Transient connection indicator. "Reconnecting…" while the socket is down,
-    /// a brief "Live again" on recovery, hidden otherwise. Same quiet glass
-    /// capsule as the jump-to-latest pill.
-    @ViewBuilder
-    private var connectionPill: some View {
-        if connectionBanner != .hidden {
+}
+
+// MARK: - Transcript accessory views
+//
+// Separate `View` structs (not computed properties on ChatTranscript) on
+// purpose: ChatTranscript's body re-evaluates at chat-message rate, and a
+// computed property is inlined into that same invalidation boundary — its
+// builder would re-run per message. A struct with narrow inputs only
+// re-runs its body when those inputs actually change.
+
+/// Empty-state placeholder. Two flavors driven by the model's attach state:
+///   - `.detached` / `.attaching` → "Connecting to chat…" with a spinner
+///     (the model's `attach(sessions:)` is in flight — that includes
+///     registry.session() which subscribes to EventSub).
+///   - `.attached` → "Connected — waiting for messages" (everything's
+///     wired, the channel just hasn't had a chat message yet).
+private struct EmptyOrConnectingState: View {
+    let isAttached: Bool
+    let channelLoginName: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if !isAttached {
+                ProgressView()
+                Text("Connecting to chat…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.largeTitle)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                Text("Connected to #\(channelLoginName)")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.primary)
+                Text("Waiting for messages…")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Transient connection indicator. "Reconnecting…" while the socket is down,
+/// a brief "Live again" on recovery, hidden otherwise. Same quiet glass
+/// capsule as the jump-to-latest pill.
+private struct ConnectionPill: View {
+    let banner: ConnectionBanner
+
+    var body: some View {
+        if banner != .hidden {
             HStack(spacing: 4) {
-                Image(systemName: connectionBanner == .liveAgain ? "checkmark" : "wifi.exclamationmark")
+                Image(systemName: banner == .liveAgain ? "checkmark" : "wifi.exclamationmark")
                     .font(.caption2.weight(.semibold))
-                Text(connectionBanner == .liveAgain ? "Live again" : "Reconnecting…")
+                Text(banner == .liveAgain ? "Live again" : "Reconnecting…")
                     .font(.caption2.weight(.medium))
             }
             .foregroundStyle(.secondary)
@@ -1003,17 +1046,20 @@ private struct ChatTranscript: View {
             .padding(.vertical, 5)
             .glassEffect(.regular, in: Capsule())
             .transition(.move(edge: .top).combined(with: .opacity))
-            .accessibilityLabel(connectionBanner == .liveAgain ? "Connection restored" : "Reconnecting")
+            .accessibilityLabel(banner == .liveAgain ? "Connection restored" : "Reconnecting")
         }
     }
+}
 
-    /// Brief "Reported & blocked" confirmation pill. Appears after the user
-    /// reports a message and auto-dismisses after ~2s. Same quiet glass
-    /// capsule as the connection pill — reads as a transient status, not
-    /// a call-to-action.
-    @ViewBuilder
-    private var reportConfirmationPill: some View {
-        if showReportConfirmation {
+/// Brief "Reported & blocked" confirmation pill. Appears after the user
+/// reports a message and auto-dismisses after ~2s. Same quiet glass
+/// capsule as the connection pill — reads as a transient status, not
+/// a call-to-action.
+private struct ReportConfirmationPill: View {
+    let isShown: Bool
+
+    var body: some View {
+        if isShown {
             HStack(spacing: 4) {
                 Image(systemName: "checkmark.shield").font(.caption2.weight(.semibold))
                 Text("Reported & blocked").font(.caption2.weight(.medium))
@@ -1025,31 +1071,46 @@ private struct ChatTranscript: View {
             .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
+}
 
-    /// Floating "jump to latest" pill. Two moods: with unread messages it's
-    /// a proper call-to-action — footnote-weight primary text on a roomier
-    /// glass capsule, sized like Twitch's native "N new messages" chip —
-    /// because at caption2/5pt it read as an ignorable speck. Caught up,
-    /// it relaxes back to a quiet secondary "Latest" hint.
-    @ViewBuilder
-    private var jumpToBottomPill: some View {
+/// Floating "jump to latest" pill. Two moods: with unread messages it's
+/// a proper call-to-action — footnote-weight primary text on a roomier
+/// glass capsule, sized like Twitch's native "N new messages" chip —
+/// because at caption2/5pt it read as an ignorable speck. Caught up,
+/// it relaxes back to a quiet secondary "Latest" hint.
+///
+/// Explicit `Equatable` ignoring `action`: the closure is rebuilt on every
+/// parent body pass (and closures can't be compared), which would otherwise
+/// force a re-render per message while the pill is visible. `unreadCount`
+/// is the only render-affecting input — same rationale as ChatRow's
+/// conformance. Safe to keep a stale `action`: it only bumps parent
+/// @State / reads the @Observable model, both reference-backed.
+private struct JumpToBottomPill: View, Equatable {
+    let unreadCount: Int
+    let action: () -> Void
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.unreadCount == rhs.unreadCount
+    }
+
+    var body: some View {
         Button {
-            jumpToLatest()
+            action()
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.down")
                     .font(.footnote.weight(.semibold))
-                if unreadWhileScrolledUp > 0 {
+                if unreadCount > 0 {
                     // Apple's inflection markdown pluralizes "message"
                     // automatically (1 message / 2 messages).
-                    Text("^[\(unreadWhileScrolledUp) new message](inflect: true)")
+                    Text("^[\(unreadCount) new message](inflect: true)")
                         .font(.footnote.weight(.semibold))
                 } else {
                     Text("Latest")
                         .font(.footnote.weight(.medium))
                 }
             }
-            .foregroundStyle(unreadWhileScrolledUp > 0 ? Color.primary : Color.secondary)
+            .foregroundStyle(unreadCount > 0 ? Color.primary : Color.secondary)
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             // `.interactive()` so the glass responds to the press —
@@ -1058,12 +1119,11 @@ private struct ChatTranscript: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            unreadWhileScrolledUp > 0
-                ? "Jump to latest, \(unreadWhileScrolledUp) new messages"
+            unreadCount > 0
+                ? "Jump to latest, \(unreadCount) new messages"
                 : "Jump to latest"
         )
     }
-
 }
 
 // MARK: - ComposeBar

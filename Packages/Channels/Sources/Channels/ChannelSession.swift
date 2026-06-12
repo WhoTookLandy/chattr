@@ -82,6 +82,17 @@ public actor ChannelSession {
         /// restrictions snapshot so the compose bar's inline strip
         /// stays accurate without a tab reopen.
         case restrictionsUpdated(ChatRestrictions)
+
+        /// The signed-in account's mod status in this channel changed
+        /// mid-session. Emitted from two `channel.moderate` v2 signals
+        /// (see `enableModerationEvents`):
+        ///   - a `mod`/`unmod` action targeting OUR account → true/false.
+        ///   - Twitch revoking our `channel.moderate` subscription →
+        ///     false (Twitch revokes it when the subscriber stops being
+        ///     a mod, so revocation IS the unmod signal when the action
+        ///     event loses the race or doesn't arrive).
+        /// Consumers flip `currentUserCanModerate`; no row is produced.
+        case moderationStatusChanged(canModerate: Bool)
     }
 
     /// Type for subscriber handlers. `@Sendable` so they can be stored across
@@ -139,6 +150,14 @@ public actor ChannelSession {
     /// Injected at construction time by `ChannelSessionRegistry` so this actor
     /// doesn't need to know about `AccountStore` or `Account` directly.
     private let refreshTokenHandler: @Sendable () async throws -> Void
+
+    /// True while a `channel.moderate` v2 subscription is live (or being
+    /// created) for this session. Makes `enableModerationEvents()`
+    /// idempotent — every mod-status path in every attached tab calls it
+    /// on promotion, and only the first should subscribe. Reset by
+    /// `handle(event:)` on a `.moderationStatusChanged(false)` so a
+    /// re-promotion after an unmod/revocation can re-subscribe.
+    private var moderationEventsEnabled = false
 
     public init(
         client: TwitchClient,
@@ -245,8 +264,23 @@ public actor ChannelSession {
         do {
             let record = try await client.eventSub.subscribe(subscription)
             activeSubscriptionIds.append(record.id)
-        } catch HelixError.unauthorized {
-            logger.info("EventSub chat.message subscribe returned unauthorized; refreshing tokens and retrying")
+        } catch HelixError.unauthorized, HelixError.notAuthenticated, HelixError.oauth {
+            // Same auth-failure triage as `AccountStore.withTokenRefresh`
+            // (which wraps every plain-Helix call site — this is the
+            // EventSub-path equivalent, routed through the injected
+            // refreshTokenHandler):
+            //   - .unauthorized: stale access token → refresh + retry.
+            //   - .notAuthenticated: TwitchKit's token provider sees an
+            //     empty store. Most commonly a TRANSIENT Keychain miss at
+            //     cold start / after reboot (prewarming reads protected
+            //     items before first unlock) — the account is fine, the
+            //     bridge refresh re-mints and re-seats the token. Without
+            //     this case, chat-open surfaced "Not authenticated — login
+            //     required" while a reopen (riding a withTokenRefresh
+            //     recovery elsewhere) worked.
+            //   - .oauth: TwitchKit's internal auto-refresh fired and
+            //     failed (we ship no client_secret) → bridge it instead.
+            logger.info("EventSub chat.message subscribe hit an auth failure; refreshing tokens via bridge and retrying")
             try await refreshTokenHandler()
             let record = try await client.eventSub.subscribe(subscription)
             activeSubscriptionIds.append(record.id)
@@ -303,6 +337,48 @@ public actor ChannelSession {
             logger.info("Already subscribed to channel.raid for #\(self.channelLoginName, privacy: .public)")
         } catch {
             logger.warning("Failed to subscribe to channel.raid for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Subscribes to `channel.moderate` v2 — the live feed of moderation
+    /// actions in this channel, of which chattr currently consumes only
+    /// the `mod`/`unmod` actions (and the subscription's own revocation)
+    /// to keep `TabChatModel.currentUserCanModerate` accurate mid-session.
+    ///
+    /// NOT part of `start()`: Twitch rejects the subscription unless the
+    /// `moderator_user_id` user already IS a mod (or the broadcaster) of
+    /// the channel, so it can only be created once mod status is
+    /// established. `TabChatModel` calls this from every path that flips
+    /// `currentUserCanModerate` true (broadcaster check, moderated-set
+    /// seed, badge observation).
+    ///
+    /// Idempotent: the flag is set synchronously before the first await,
+    /// so concurrent calls (two tabs promoting at once — actor reentrancy)
+    /// collapse to one subscribe. Failure swallowed like the notification
+    /// topics — a 403 here (stale moderated-set cache, or a pre-scope
+    /// token missing the `channel.moderate` v2 read bundle) just means
+    /// mod status stays attach-time-static, the pre-existing behavior.
+    public func enableModerationEvents() async {
+        guard !moderationEventsEnabled else { return }
+        moderationEventsEnabled = true
+
+        let subscription = EventSubSubscription.Moderation.moderate(
+            broadcasterID: channelId,
+            moderatorID: accountUserId
+        )
+        do {
+            let record = try await client.eventSub.subscribe(subscription)
+            activeSubscriptionIds.append(record.id)
+            logger.info("Subscribed to channel.moderate for #\(self.channelLoginName, privacy: .public)")
+        } catch HelixError.conflict {
+            // Already live on this WebSocket from a prior session — keep
+            // the flag, events flow.
+            logger.info("Already subscribed to channel.moderate for #\(self.channelLoginName, privacy: .public)")
+        } catch {
+            // Roll back so a later promotion (e.g. after the user
+            // re-signs-in mid-run and picks up the scopes) can retry.
+            moderationEventsEnabled = false
+            logger.info("Failed to subscribe to channel.moderate for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public) — mod status stays attach-time-static")
         }
     }
 
@@ -707,7 +783,20 @@ public actor ChannelSession {
     /// dropped, for event types we don't render). The event is appended to
     /// the ring + fanned out to subscribers.
     func handle(event: EventSubEvent) async {
-        guard let channelEvent = Self.translate(event: event, expectedChannelId: channelId) else { return }
+        guard let channelEvent = Self.translate(
+            event: event,
+            expectedChannelId: channelId,
+            accountUserId: accountUserId
+        ) else { return }
+
+        // Side-effect: losing mod status invalidates the live
+        // channel.moderate subscription (Twitch revokes it server-side
+        // when the subscriber is unmodded). Clear the local flag so a
+        // re-promotion — re-modded later, badge observation proves it —
+        // re-subscribes instead of assuming the dead subscription works.
+        if case .moderationStatusChanged(false) = channelEvent {
+            moderationEventsEnabled = false
+        }
 
         // Side-effect: update the cached restrictions snapshot when the
         // event is a restrictions change. This way a freshly-attached
@@ -775,7 +864,15 @@ public actor ChannelSession {
     /// broadcaster ID doesn't match this session (defensive — the registry
     /// already routes by broadcaster, but a misrouted event would corrupt
     /// the ring).
-    private static func translate(event: EventSubEvent, expectedChannelId: String) -> ChannelEvent? {
+    ///
+    /// `accountUserId` filters `channel.moderate` traffic down to the two
+    /// actions that target OUR account (`mod`/`unmod`) — bans, timeouts,
+    /// and settings flips performed by other mods translate to nil until
+    /// chattr grows mod-feed features that render them.
+    ///
+    /// Internal (not private) so ChannelsTests can drive the
+    /// moderate/revocation mapping directly with decoded fixtures.
+    static func translate(event: EventSubEvent, expectedChannelId: String, accountUserId: String) -> ChannelEvent? {
         switch event {
         case .chatMessage(let m) where m.broadcasterUserId == expectedChannelId:
             return .message(m)
@@ -804,6 +901,33 @@ public actor ChannelSession {
                 emoteOnly: s.emoteMode
             )
             return .restrictionsUpdated(restrictions)
+        case .moderate(let m) where m.broadcasterUserId == expectedChannelId:
+            // Only the actions that change OUR mod status. The payload's
+            // `action` string discriminates; the matching nested object
+            // carries the target user. Defensive double-check on both —
+            // a `mod` action always carries `mod`, but trusting one field
+            // when two must agree invites decoding-drift bugs.
+            if m.action == "mod", m.mod?.userId == accountUserId {
+                return .moderationStatusChanged(canModerate: true)
+            }
+            if m.action == "unmod", m.unmod?.userId == accountUserId {
+                return .moderationStatusChanged(canModerate: false)
+            }
+            return nil
+        case .revocation(let r)
+            where r.type == "channel.moderate"
+                && r.condition["broadcaster_user_id"] == expectedChannelId
+                && r.condition["moderator_user_id"] == accountUserId:
+            // Twitch revokes our channel.moderate subscription when the
+            // account stops being a mod of the channel — so the revocation
+            // is itself an unmod signal, covering the case where the
+            // `unmod` action event never reaches us (revocation raced it).
+            // Other revocation causes (authorization revoked, version
+            // retired) also mean the live feed is dead; downgrading to
+            // "unknown" costs at most one badge-observation round-trip to
+            // re-prove status, while NOT downgrading would show mod tools
+            // backed by no live feed.
+            return .moderationStatusChanged(canModerate: false)
         default:
             return nil
         }
@@ -822,6 +946,12 @@ public actor ChannelSession {
         case let .chatClear(c):                    return c.broadcasterUserId
         case let .chatClearUserMessages(c):        return c.broadcasterUserId
         case let .chatSettingsUpdate(s):           return s.broadcasterUserId
+        case let .moderate(m):                     return m.broadcasterUserId
+        // Revocations of ANY subscription type route by the condition's
+        // broadcaster id — translate() then keeps only channel.moderate
+        // ones. Conditions without the key (e.g. user-scoped types we
+        // don't use) fall out as nil and are dropped, same as before.
+        case let .revocation(r):                   return r.condition["broadcaster_user_id"]
         default:                                    return nil
         }
     }
