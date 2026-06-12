@@ -14,11 +14,12 @@ import Channels
 ///     `chatModel.send(text:)`. Async-typed so the button can show a
 ///     disabled state while a send is in flight.
 ///
-/// Single-line by design: Twitch chat doesn't support newlines (the
-/// server strips them on receive). Using single-line also means the
-/// soft-keyboard's Return key acts as Send (with `.submitLabel(.send)`)
-/// instead of inserting a newline glyph — `axis: .vertical` would
-/// override `.submitLabel` and force Return to be newline.
+/// Multi-line growing input: Twitch chat doesn't support newlines (the
+/// server strips them before sending), but `axis: .vertical` lets the
+/// field expand as the user types long messages — matching the native
+/// Twitch iOS experience. `.submitLabel` / `.onSubmit` are intentionally
+/// omitted because `axis: .vertical` re-assigns Return to newline; the
+/// send button is the submit action instead.
 struct ComposeBar: View {
     let channelLoginName: String
     let channelDisplayName: String
@@ -298,11 +299,10 @@ struct ComposeBar: View {
                 .buttonStyle(.glass)
                 .accessibilityLabel("Emotes")
 
-                TextField(textFieldPrompt, text: $composeText)
+                TextField(textFieldPrompt, text: $composeText, axis: .vertical)
                     .textFieldStyle(.plain)
+                    .lineLimit(1...5)
                     .focused($focused)
-                    .submitLabel(.send)
-                    .onSubmit { Task { await sendDraft() } }
                     // Forward every text change to the parent so it can
                     // persist via DraftStorage. UserDefaults batches writes
                     // so per-keystroke saves don't actually hit disk on
@@ -367,8 +367,9 @@ struct ComposeBar: View {
     }
 
     private func sendDraft() async {
-        let draft = composeText
-        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let draft = composeText.components(separatedBy: .newlines).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        guard !draft.isEmpty else { return }
         guard !isSending else { return }
 
         isSending = true
