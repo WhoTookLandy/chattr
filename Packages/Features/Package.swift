@@ -55,7 +55,7 @@ let package = Package(
             dependencies: [
                 "Features",
                 "ChatModel",
-                // Channels + TwitchKit: TabChatModelModerationTests builds
+                // Channels + TwitchKit: ChatTranscriptModelModerationTests builds
                 // real (never-started) ChannelSessions around an offline
                 // TwitchClient to drive attach-time moderation seeding.
                 "Channels",

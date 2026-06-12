@@ -25,9 +25,9 @@ struct ComposeBar: View {
     let channelDisplayName: String
     /// When non-nil, the bar shows a "Replying to …" chip above the
     /// field and the next send threads against this parent. Owned by
-    /// `TabChatModel.replyContext` upstream — the bar is purely
+    /// `ChatTranscriptModel.replyContext` upstream — the bar is purely
     /// presentational.
-    let replyContext: TabChatModel.ReplyContext?
+    let replyContext: ChatTranscriptModel.ReplyContext?
     /// Channel-wide restrictions to surface above the input (slow mode,
     /// followers-only, etc.). nil before the first chat-settings fetch
     /// completes — same visual as a channel with no restrictions, which
@@ -71,7 +71,7 @@ struct ComposeBar: View {
     init(
         channelLoginName: String,
         channelDisplayName: String,
-        replyContext: TabChatModel.ReplyContext?,
+        replyContext: ChatTranscriptModel.ReplyContext?,
         chatRestrictions: ChatRestrictions?,
         seedDraft: String,
         onCancelReply: @escaping () -> Void,
@@ -221,7 +221,7 @@ struct ComposeBar: View {
     /// long-press menu icon — visual continuity between "I chose
     /// Reply" and "I'm now in reply mode."
     @ViewBuilder
-    private func replyChip(_ reply: TabChatModel.ReplyContext) -> some View {
+    private func replyChip(_ reply: ChatTranscriptModel.ReplyContext) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "arrowshape.turn.up.left.fill")
                 .symbolRenderingMode(.hierarchical)

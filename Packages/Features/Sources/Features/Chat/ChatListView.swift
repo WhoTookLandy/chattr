@@ -13,7 +13,7 @@ import ChatModel
 /// inverted-transform approach was rejected (it degrades the per-row context
 /// menu previews).
 struct ChatListView: UIViewControllerRepresentable {
-    /// Monotonic publish version from `TabChatModel`. The ONLY value that drives
+    /// Monotonic publish version from `ChatTranscriptModel`. The ONLY value that drives
     /// a data update — passing the `Int` (not the `[ChatLine]`) is what keeps
     /// `ChatScreen.body` off the full-array dependency on the per-message hot
     /// path. When it advances by exactly one, the controller applies the

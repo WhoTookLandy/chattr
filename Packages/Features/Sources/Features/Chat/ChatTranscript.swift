@@ -10,7 +10,7 @@ import Channels
 /// ## Why this is a separate view (observation scoping)
 ///
 /// `@Observable` registers dependencies per view BODY that reads a
-/// property. `TabChatModel.lines` is derived from the stored `buffer`,
+/// property. `ChatTranscriptModel.lines` is derived from the stored `buffer`,
 /// which mutates on EVERY inbound message — so whichever body reads
 /// `lines` re-evaluates at chat-message rate (50-200x/sec during raids).
 /// When that body was `ChatScreen.body`, each message re-ran the whole
@@ -23,7 +23,7 @@ import Channels
 /// should stay silent while messages flow; only ChatTranscript ticks.
 struct ChatTranscript: View {
     /// Observed HERE, not in ChatScreen — see the doc comment above.
-    let chatModel: TabChatModel
+    let chatModel: ChatTranscriptModel
     let channelLoginName: String
     /// Registry-owned per-account connection store; drives the
     /// "Reconnecting… / Live again" pill.

@@ -27,17 +27,14 @@ import TwitchKit
 /// Keeping these layers separate means the renderer has a stable input
 /// shape and the data layer can evolve without churning every view file.
 ///
-/// ## Why `Hashable + Equatable`
+/// ## Why `Equatable + Identifiable` (and not `Hashable`)
 ///
 /// `ForEach(chatLines) { line in ... }` needs `Identifiable` for stable
-/// row identity (we provide `id` via `messageId`), and `Equatable` for
-/// SwiftUI to skip diffs when nothing changed. Free-default `Hashable`
-/// conformance also makes ChatLine usable as a key/value type if a future
-/// commit needs that.
-// `Hashable` is intentionally omitted — `LineRun.twitchEmote` carries a
-// `TwitchKit.EmoteReference` which is `Equatable` but not `Hashable`,
-// blocking synthesis. SwiftUI's `ForEach` uses `Identifiable.id` for
-// stable row identity, so `Hashable` isn't needed.
+/// row identity (we provide `id` via `messageId`), and `Equatable` lets
+/// SwiftUI skip diffs when nothing changed. `Hashable` is intentionally
+/// omitted — `LineRun.twitchEmote` carries a `TwitchKit.EmoteReference`
+/// which is `Equatable` but not `Hashable`, blocking synthesis; `ForEach`
+/// keys rows off `id`, so hashing is never needed.
 public struct ChatLine: Sendable, Equatable, Identifiable {
 
     /// The Twitch `message_id`. Stable across the lifetime of the message,
@@ -181,7 +178,7 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// produce delivered lines without any code change). The other two
     /// states only apply to messages WE sent:
     ///
-    ///   - `.sending` — optimistic row inserted by `TabChatModel.send`,
+    ///   - `.sending` — optimistic row inserted by `ChatTranscriptModel.send`,
     ///     waiting for Twitch to broadcast the canonical echo.
     ///   - `.failed` — Helix returned `isSent=false` or threw; the row
     ///     stays on screen with a red treatment + tap-to-retry instead
@@ -325,11 +322,15 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// the row (vanishing mid-scroll is disorienting), we flip it. The
     /// renderer reads the kind and strikethroughs the content.
     ///
+    /// Named as a participle (`markingDeleted`, like `strippingNewlines`)
+    /// because it's nonmutating — call sites read as a pipeline:
+    /// `buffer.mutateAll { $0.markingDeleted() }`.
+    ///
     /// Idempotent: deleting a deleted line is a no-op (same returned value).
     /// `.newMessagesDivider` rows are also a no-op — the divider isn't a
     /// message, so a chat-clear (which calls this on every line) must leave
     /// the rule intact rather than render it as struck-through nothing.
-    public func withDeletedPlaceholder() -> ChatLine {
+    public func markingDeleted() -> ChatLine {
         if case .newMessagesDivider = kind { return self }
         return ChatLine(
             id: id,

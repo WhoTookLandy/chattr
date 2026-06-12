@@ -105,13 +105,7 @@ public struct AppShell: View {
         }
         .chatTabBarMinimize()
         .environment(\.chatTabs, chatTabsModel)
-        .environment(\.openChannel, OpenChannelAction { channelId, login, displayName, profileImageURL in
-            let descriptor = ChannelDescriptor(
-                channelId: channelId,
-                channelLoginName: login,
-                channelDisplayName: displayName,
-                profileImageURL: profileImageURL
-            )
+        .environment(\.openChannel, OpenChannelAction { descriptor in
             chatTabsModel.open(channel: descriptor)
             // Land the user in the chat they just opened, from any tab.
             selectedTab = .chats
@@ -180,7 +174,7 @@ public struct AppShell: View {
                             channelId: channel.channelId,
                             channelLoginName: channel.channelLoginName
                         )
-                        // Mention watcher: session-level (not TabChatModel)
+                        // Mention watcher: session-level (not ChatTranscriptModel)
                         // so @-mentions land the red dot even for tabs whose
                         // page isn't mounted. The handler is deliberately
                         // tiny — a substring check, no normalization.

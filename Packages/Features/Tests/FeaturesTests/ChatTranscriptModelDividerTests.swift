@@ -5,17 +5,17 @@ import ChatModel
 import Channels
 @testable import Features
 
-/// Tests for the "New" messages divider as it flows through `TabChatModel`:
+/// Tests for the "New" messages divider as it flows through `ChatTranscriptModel`:
 /// the `.newMessagesDivider` ChannelEvent must become a divider `ChatLine`
 /// with the ring-minted id, survive a chat-clear un-struck, and replay with
 /// stable identity when a tab re-primes.
 ///
 /// Sessions here are real but never `start()`ed — same offline pattern as
-/// `TabChatModelModerationTests`. Events are driven through the internal
+/// `ChatTranscriptModelModerationTests`. Events are driven through the internal
 /// `apply(_:)`, the same entry point the live subscriber callback uses.
-@Suite("TabChatModel new-messages divider")
+@Suite("ChatTranscriptModel new-messages divider")
 @MainActor
-struct TabChatModelDividerTests {
+struct ChatTranscriptModelDividerTests {
 
     /// Mirrors TwitchKit's wire decoding for `ChatMessage` — the only public
     /// construction path (no memberwise init), matching the EventSub
@@ -44,7 +44,7 @@ struct TabChatModelDividerTests {
         return try! decoder.decode(ChatMessage.self, from: Data(json.utf8))
     }
 
-    private func makeAttachedModel() async -> TabChatModel {
+    private func makeAttachedModel() async -> ChatTranscriptModel {
         struct NullTokenStore: TwitchTokenStore {
             func loadToken() async throws -> OAuthToken? { nil }
             func saveToken(_ token: OAuthToken) async throws {}
@@ -57,7 +57,7 @@ struct TabChatModelDividerTests {
             channelLoginName: "somechannel",
             accountUserId: "me-1"
         )
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         await model.attach(sessions: [session], currentUserId: "me-1")
         return model
     }
@@ -120,7 +120,7 @@ struct TabChatModelDividerTests {
         await model.detach()
     }
 
-    @Test("withDeletedPlaceholder is a no-op on divider lines")
+    @Test("markingDeleted is a no-op on divider lines")
     func deletedPlaceholderNoOpOnDivider() {
         let divider = ChatLine(
             id: "div-1",
@@ -128,6 +128,6 @@ struct TabChatModelDividerTests {
             authorDisplayName: "",
             runs: []
         )
-        #expect(divider.withDeletedPlaceholder() == divider)
+        #expect(divider.markingDeleted() == divider)
     }
 }

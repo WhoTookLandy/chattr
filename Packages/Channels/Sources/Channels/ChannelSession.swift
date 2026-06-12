@@ -31,7 +31,7 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 /// The pub-sub event type is `ChannelEvent` — a union covering chat messages,
 /// system notifications (subs/resubs/gift subs/raids/announcements), incoming
 /// raids on the dedicated `channel.raid` topic, message deletions, and chat
-/// clears. Consumers map each variant to whatever they need (TabChatModel
+/// clears. Consumers map each variant to whatever they need (ChatTranscriptModel
 /// converts each to a `ChatLine` via the Normalizer in `ChatModel`).
 ///
 /// Why `actor` (not `@MainActor`): ChannelSession operates only on `String`
@@ -119,7 +119,7 @@ public actor ChannelSession {
 
     private let client: TwitchClient
     /// Public + `nonisolated` because it's set once at init and never
-    /// changes. Callers outside the actor (e.g. `TabChatModel` reading
+    /// changes. Callers outside the actor (e.g. `ChatTranscriptModel` reading
     /// it to key `DraftStorage` lookups) can read without hopping the
     /// actor boundary.
     public nonisolated let channelId: String
@@ -393,12 +393,12 @@ public actor ChannelSession {
     /// Subscribes to `channel.moderate` v2 — the live feed of moderation
     /// actions in this channel, of which chattr currently consumes only
     /// the `mod`/`unmod` actions (and the subscription's own revocation)
-    /// to keep `TabChatModel.currentUserCanModerate` accurate mid-session.
+    /// to keep `ChatTranscriptModel.currentUserCanModerate` accurate mid-session.
     ///
     /// NOT part of `start()`: Twitch rejects the subscription unless the
     /// `moderator_user_id` user already IS a mod (or the broadcaster) of
     /// the channel, so it can only be created once mod status is
-    /// established. `TabChatModel` calls this from every path that flips
+    /// established. `ChatTranscriptModel` calls this from every path that flips
     /// `currentUserCanModerate` true (broadcaster check, moderated-set
     /// seed, badge observation).
     ///
@@ -494,7 +494,7 @@ public actor ChannelSession {
     /// Returns the current chat restrictions for this channel, fetching
     /// from Helix on first access and returning the cached value
     /// afterwards. The compose bar in `ChatScreen` reads from this via
-    /// `TabChatModel` to render an inline strip showing what's enabled
+    /// `ChatTranscriptModel` to render an inline strip showing what's enabled
     /// (slow mode, followers-only, subscribers-only, etc.).
     ///
     /// Returns nil if the fetch fails — restrictions are bonus polish,
@@ -598,7 +598,7 @@ public actor ChannelSession {
     /// Update the broadcaster's chat-mode settings (PATCH /chat/settings)
     /// on behalf of the signed-in account, which must be the broadcaster
     /// or a moderator — Twitch enforces that server-side (the UI gates
-    /// the controls behind `TabChatModel.currentUserCanModerate` too).
+    /// the controls behind `ChatTranscriptModel.currentUserCanModerate` too).
     /// Requires the `moderator:manage:chat_settings` scope on the token.
     ///
     /// nil parameters are omitted from the PATCH body and left unchanged
@@ -683,7 +683,7 @@ public actor ChannelSession {
     /// Does NOT touch the ring buffer. The send's success is observable via
     /// the EventSub echo, which arrives through the same dispatcher that
     /// drives every other chat event. The send call is fire-then-let-EventSub-
-    /// confirm — see `TabChatModel.send(...)` for the optimistic-insert /
+    /// confirm — see `ChatTranscriptModel.send(...)` for the optimistic-insert /
     /// dedup orchestration on top of that.
     public func send(
         _ text: String,
@@ -706,7 +706,7 @@ public actor ChannelSession {
         } catch HelixError.unauthorized {
             // Same shape as subscribeToChat's recovery: refresh tokens once,
             // retry once. A second unauthorized error propagates and lets
-            // the caller (TabChatModel.send → ChatScreen) surface the
+            // the caller (ChatTranscriptModel.send → ChatScreen) surface the
             // sign-in-expired UX.
             logger.info("sendChatMessage unauthorized; refreshing tokens and retrying once")
             try await refreshTokenHandler()
@@ -729,7 +729,7 @@ public actor ChannelSession {
     /// Does NOT mutate local state directly. The deletion arrives
     /// through the existing `channel.chat.message_delete` EventSub
     /// subscription as a `messageDeleted` ChannelEvent — `apply()` in
-    /// `TabChatModel` already flips the corresponding row to
+    /// `ChatTranscriptModel` already flips the corresponding row to
     /// `.deletedPlaceholder` when that arrives, so the visual update
     /// flows through the same path as a moderator's web-UI delete.
     ///
@@ -757,7 +757,7 @@ public actor ChannelSession {
     /// signed-in user IS the broadcaster of this channel. This is an
     /// instant, no-network mod-check that's true for broadcasters
     /// before they've sent any message. For mods-who-aren't-the-
-    /// broadcaster, we infer from echoed badges (see `TabChatModel`).
+    /// broadcaster, we infer from echoed badges (see `ChatTranscriptModel`).
     public nonisolated var isAccountBroadcaster: Bool {
         accountUserId == channelId
     }
@@ -962,7 +962,7 @@ public actor ChannelSession {
 
         // Fan out after the ring commit, one event at a time in order —
         // same TaskGroup shape as `handle(event:)`. Subscribers that dedup
-        // by id (TabChatModel Path 1) absorb any overlap with rows they
+        // by id (ChatTranscriptModel Path 1) absorb any overlap with rows they
         // already hold (e.g. a self-send whose lost echo was locally
         // synthesized).
         let handlers = Array(subscribers.values)
@@ -1028,7 +1028,7 @@ public actor ChannelSession {
 
         // Side-effect: update the cached restrictions snapshot when the
         // event is a restrictions change. This way a freshly-attached
-        // TabChatModel that reads `currentChatRestrictions()` AFTER the
+        // ChatTranscriptModel that reads `currentChatRestrictions()` AFTER the
         // event arrived gets the up-to-date value, not the stale
         // session-start fetch.
         //

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Core
 
 /// Owns the *UI* state for the Chat tab: which tabs are open, which one is
 /// currently visible. Tab-centric rather than channel-centric — a tab is the
@@ -46,7 +47,7 @@ public final class ChatTabsModel {
     /// Tabs holding an unseen @-mention of the signed-in user — drives the
     /// red dots in the quick-switcher popover and the channel pill.
     /// Populated by the session-level watcher AppShell installs in `onOpen`
-    /// (session-level because `TabChatModel` only receives events while its
+    /// (session-level because `ChatTranscriptModel` only receives events while its
     /// page is mounted — a background tab's mentions would be missed).
     /// Cleared when the tab becomes active or closes.
     public private(set) var mentionedTabIds: Set<UUID> = []

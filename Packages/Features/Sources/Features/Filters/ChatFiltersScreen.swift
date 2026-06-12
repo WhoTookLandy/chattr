@@ -2,7 +2,7 @@ import SwiftUI
 
 /// You → Chat → Filters. Toggles for dropping transcript noise:
 /// command messages and well-known bots. Writes through
-/// `ChatFilterSettings`; `TabChatModel` reads the values at attach.
+/// `ChatFilterSettings`; `ChatTranscriptModel` reads the values at attach.
 struct ChatFiltersScreen: View {
 
     /// Working copies seeded from persisted values (HighlightSettings

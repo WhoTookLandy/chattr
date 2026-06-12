@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import Core
 
 /// SwiftData on-disk projection of a `ChatTab`. Survives cold start so the
 /// user's open tabs persist across app launches.

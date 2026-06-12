@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import TwitchKit
+import Core
 
 /// Sample data for Home previews. `TwitchStream` / `TwitchUser` are
 /// Decodable-only (no public memberwise init — they mirror Helix wire

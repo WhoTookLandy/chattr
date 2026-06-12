@@ -1,42 +1,10 @@
 import Foundation
 import Core
 
-// ChatPlatform moved to Core — the Accounts package needs it for the
-// platform-aware Account model, and Accounts can't depend on Features.
-
-/// A single channel on a single platform. Replaces the previous
-/// `OpenChannelDescriptor` (which was implicitly Twitch-only and 1:1 with
-/// a tab). A channel may now appear in multiple tabs simultaneously; the
-/// registry deduplicates the underlying `ChannelSession` so we still only
-/// open one EventSub subscription per channel regardless of how many tabs
-/// reference it.
-///
-/// Composite identity (`platform/channelId`) means same-named channels on
-/// different platforms are treated as distinct (e.g., `twitch/xqc` ≠
-/// `kick/xqc`).
-public struct ChannelDescriptor: Hashable, Codable, Sendable, Identifiable {
-    public let platform: ChatPlatform
-    public let channelId: String
-    public let channelLoginName: String
-    public let channelDisplayName: String
-    public let profileImageURL: URL?
-
-    public var id: String { "\(platform.rawValue)/\(channelId)" }
-
-    public init(
-        platform: ChatPlatform = .twitch,
-        channelId: String,
-        channelLoginName: String,
-        channelDisplayName: String,
-        profileImageURL: URL?
-    ) {
-        self.platform = platform
-        self.channelId = channelId
-        self.channelLoginName = channelLoginName
-        self.channelDisplayName = channelDisplayName
-        self.profileImageURL = profileImageURL
-    }
-}
+// ChatPlatform and ChannelDescriptor both live in Core — the Accounts
+// package needs the former for the platform-aware Account model, the
+// Channels package needs the latter for platform-safe keying, and
+// neither can depend on Features.
 
 /// A tab in the Chat screen's horizontal navigation. Always contains at
 /// least one channel; today exactly one for the MVP, future allows N for
@@ -49,7 +17,13 @@ public struct ChannelDescriptor: Hashable, Codable, Sendable, Identifiable {
 /// and the SwiftData primary key (commit E).
 public struct ChatTab: Hashable, Codable, Sendable, Identifiable {
     public let id: UUID
-    public var channels: [ChannelDescriptor]
+
+    /// The channels this tab renders. `private(set)` so the non-empty
+    /// invariant established in `init` actually holds — when the
+    /// multi-channel feature needs mutation, it gets named mutating
+    /// methods here that preserve the invariant (e.g. a `remove` that
+    /// refuses to drop the last channel) rather than open-ended access.
+    public private(set) var channels: [ChannelDescriptor]
 
     public init(id: UUID = UUID(), channels: [ChannelDescriptor]) {
         precondition(!channels.isEmpty, "ChatTab must have at least one channel")
@@ -62,18 +36,42 @@ public struct ChatTab: Hashable, Codable, Sendable, Identifiable {
         self.init(id: id, channels: [channel])
     }
 
+    /// Validating decoder — `Codable` synthesis would otherwise bypass the
+    /// non-empty precondition, letting a corrupted persistence blob
+    /// construct the one state the type promises is impossible. Throwing
+    /// here surfaces corruption as a decode error the persistence layer
+    /// already handles, instead of a later index-out-of-range crash in
+    /// `displayName`. (`encode(to:)` stays synthesized.)
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(UUID.self, forKey: .id)
+        let channels = try container.decode([ChannelDescriptor].self, forKey: .channels)
+        guard !channels.isEmpty else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .channels,
+                in: container,
+                debugDescription: "ChatTab requires at least one channel"
+            )
+        }
+        self.id = id
+        self.channels = channels
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, channels
+    }
+
     // MARK: - Display
 
     /// Tab pill label, derived from the contained channels:
     ///   - 1 channel:  "Lirik"          → broadcaster display name verbatim
     ///   - 2 channels: "Lirik · shroud" → middle-dot separator (Twitch convention)
     ///   - 3+:         "Lirik + 2"      → first + count-of-others, pill-width friendly
+    ///
+    /// `channels` is non-empty by construction (`private(set)` + the init
+    /// precondition), so the switch needs no empty case.
     public var displayName: String {
         switch channels.count {
-        case 0:
-            // Precondition guards against this in init, but if a future code
-            // path mutates `channels` to empty, render something reasonable.
-            return "Chat"
         case 1:
             return channels[0].channelDisplayName
         case 2:
@@ -88,12 +86,5 @@ public struct ChatTab: Hashable, Codable, Sendable, Identifiable {
     /// avatars later. Today: just the leader.
     public var profileImageURL: URL? {
         channels.first?.profileImageURL
-    }
-
-    /// Convenience for view code that needs to know "does this tab include
-    /// channel X?" — used by the FollowsStore-aware UI to mark already-open
-    /// channels visually in the list.
-    public func contains(channelId: String, platform: ChatPlatform = .twitch) -> Bool {
-        channels.contains { $0.platform == platform && $0.channelId == channelId }
     }
 }

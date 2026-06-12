@@ -3,7 +3,7 @@ import ChatModel
 @testable import Features
 
 /// Tests for `ChatBuffer` — the sliding-window store that replaces
-/// `TabChatModel`'s `allLines` array + per-message `BlockFilter.apply`
+/// `ChatTranscriptModel`'s `allLines` array + per-message `BlockFilter.apply`
 /// full-rescan + `Array.removeFirst` trim.
 ///
 /// Two invariants matter most and are pinned hard here:
@@ -129,7 +129,7 @@ struct ChatBufferTests {
     func mutateOne() {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("a")); buf.append(line("b"))
-        buf.mutate(id: "b") { $0.withDeletedPlaceholder() }
+        buf.mutate(id: "b") { $0.markingDeleted() }
         #expect(buf.line(id: "b")?.kind == .deletedPlaceholder)
     }
 
@@ -137,7 +137,7 @@ struct ChatBufferTests {
     func mutateEveryLine() {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("a")); buf.append(line("b"))
-        buf.mutateAll { $0.withDeletedPlaceholder() }
+        buf.mutateAll { $0.markingDeleted() }
         #expect(buf.lines.allSatisfy { $0.kind == .deletedPlaceholder })
     }
 
@@ -147,7 +147,7 @@ struct ChatBufferTests {
         buf.append(line("a", author: "alice"))
         buf.append(line("v", author: "villain"))
         buf.append(line("v2", author: "villain"))
-        buf.mutateMatching(authorUserId: "villain") { $0.withDeletedPlaceholder() }
+        buf.mutateMatching(authorUserId: "villain") { $0.markingDeleted() }
         #expect(buf.line(id: "a")?.kind == .message)
         #expect(buf.line(id: "v")?.kind == .deletedPlaceholder)
         #expect(buf.line(id: "v2")?.kind == .deletedPlaceholder)

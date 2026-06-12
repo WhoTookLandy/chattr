@@ -2,6 +2,7 @@ import SwiftUI
 import Accounts
 import DesignSystem
 import NukeUI
+import Core
 
 /// Root content of the Chats tab.
 ///
@@ -46,12 +47,12 @@ import NukeUI
 ///
 /// `LazyHStack` lazily mounts ChatScreens — only the visible page (plus
 /// a small adjacent buffer) actually exists in the view tree. When the user
-/// swipes far away, off-screen ChatScreens unmount and their TabChatModels
+/// swipes far away, off-screen ChatScreens unmount and their ChatTranscriptModels
 /// release their subscriptions.
 ///
 /// **The underlying `ChannelSession` stays alive in the registry, though.**
 /// It keeps receiving events, keeps appending to its ring buffer. When the
-/// user swipes back and the ChatScreen remounts, `TabChatModel.attach`
+/// user swipes back and the ChatScreen remounts, `ChatTranscriptModel.attach`
 /// primes from the ring's current snapshot — so the user sees every message
 /// that arrived while the page was off-screen.
 public struct ChatTabsScreen: View {
@@ -496,7 +497,7 @@ public struct ChatTabsScreen: View {
 
     /// One paged ChatScreen for a tab. MVP: renders the tab's first (and
     /// today, only) channel. When multi-channel-per-tab ships, ChatScreen
-    /// will take the full ChatTab and TabChatModel will attach to ALL its
+    /// will take the full ChatTab and ChatTranscriptModel will attach to ALL its
     /// channels in one go — the rest of this paged container won't change.
     @ViewBuilder
     private func chatPage(for tab: ChatTab) -> some View {
@@ -504,9 +505,7 @@ public struct ChatTabsScreen: View {
             ChatScreen(
                 account: account,
                 accountStore: accountStore,
-                channelId: primaryChannel.channelId,
-                channelLoginName: primaryChannel.channelLoginName,
-                channelDisplayName: primaryChannel.channelDisplayName
+                channel: primaryChannel
             )
         } else {
             // Defensive — ChatTab.init has a precondition against empty

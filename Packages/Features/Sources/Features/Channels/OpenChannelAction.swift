@@ -1,14 +1,16 @@
 import SwiftUI
+import Core
 import TwitchKit
 
 /// Environment action invoked when the user taps a channel anywhere in the
-/// app (Follows tab — Live OR All view). Opens the channel as a new chat
-/// tab and makes it active.
+/// app (Home, Follows — Live OR All view, search). Opens the channel as a
+/// new chat tab and makes it active.
 ///
-/// Takes plain fields rather than a `FollowedChannel` so the Live view can
-/// dispatch from a `TwitchStream` source without synthesizing a fake
-/// `FollowedChannel` (which would also imply a fake `followedAt` date that
-/// downstream code might trust).
+/// The core currency is `ChannelDescriptor` — the platform-qualified
+/// channel identity — so this seam never erases which platform a channel
+/// lives on. The Twitch-typed conveniences below are the only places that
+/// say `.twitch`; when a second platform arrives it adds its own overload
+/// and the core path is already correct.
 ///
 /// `Sendable` so the environment-key static default (`nil`) doesn't trip
 /// Swift 6's mutable-global-variable check.
@@ -16,46 +18,41 @@ import TwitchKit
 /// The captured closure is `@MainActor` because AppShell's implementation
 /// mutates `chatTabsModel` — `@MainActor`-isolated SwiftUI state.
 public struct OpenChannelAction: Sendable {
-    private let perform: @MainActor @Sendable (
-        _ channelId: String,
-        _ login: String,
-        _ displayName: String,
-        _ profileImageURL: URL?
-    ) -> Void
+    private let perform: @MainActor @Sendable (ChannelDescriptor) -> Void
 
-    public init(
-        perform: @MainActor @Sendable @escaping (
-            _ channelId: String,
-            _ login: String,
-            _ displayName: String,
-            _ profileImageURL: URL?
-        ) -> Void
-    ) {
+    public init(perform: @MainActor @Sendable @escaping (ChannelDescriptor) -> Void) {
         self.perform = perform
     }
 
-    /// `callAsFunction` lets call sites read as
-    /// `openChannel(channelId: x, login: y, displayName: z, profileImageURL: w)`.
+    /// Primary entry point — `callAsFunction` lets call sites read as
+    /// `openChannel(descriptor)`.
     @MainActor
-    public func callAsFunction(
-        channelId: String,
-        login: String,
-        displayName: String,
-        profileImageURL: URL?
-    ) {
-        perform(channelId, login, displayName, profileImageURL)
+    public func callAsFunction(_ channel: ChannelDescriptor) {
+        perform(channel)
     }
 
     /// Convenience for FollowedChannel call sites (the All view).
     @MainActor
     public func callAsFunction(channel: FollowedChannel, profileImageURL: URL?) {
-        perform(channel.broadcasterId, channel.broadcasterLogin, channel.broadcasterName, profileImageURL)
+        perform(ChannelDescriptor(
+            platform: .twitch,
+            channelId: channel.broadcasterId,
+            channelLoginName: channel.broadcasterLogin,
+            channelDisplayName: channel.broadcasterName,
+            profileImageURL: profileImageURL
+        ))
     }
 
-    /// Convenience for TwitchStream call sites (the Live view).
+    /// Convenience for TwitchStream call sites (the Live view, Home).
     @MainActor
     public func callAsFunction(stream: TwitchStream, profileImageURL: URL?) {
-        perform(stream.userId, stream.userLogin, stream.userName, profileImageURL)
+        perform(ChannelDescriptor(
+            platform: .twitch,
+            channelId: stream.userId,
+            channelLoginName: stream.userLogin,
+            channelDisplayName: stream.userName,
+            profileImageURL: profileImageURL
+        ))
     }
 }
 
