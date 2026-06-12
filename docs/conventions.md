@@ -4,6 +4,91 @@ Operating conventions for the chattr codebase — what to do, why, and the
 gotchas that drove each rule. Pair this with the existing inline doc-comments
 on specific types.
 
+## Code organization
+
+### Packages are layers; dependencies only point down
+
+The app is a thin `@main` shell (`chattr/chattrApp.swift`, composition root
+only) over a strict-DAG of local SPM packages:
+
+```
+Core  DesignSystem          ← leaves: zero internal deps
+  ↑        ↑
+EmoteSources  Accounts(+DS)  ← depend on Core / DesignSystem
+  ↑
+ChatModel(+EmoteSources)
+  ↑
+Channels(+Accounts,EmoteSources,ChatModel)
+  ↑
+Features(+everything, +Nuke) ← all SwiftUI lives here
+  ↑
+chattr app target            ← bootstrap + DI wiring only
+```
+
+A new dependency edge must never point *up* this list (nothing imports
+`Features` except the app target; `Core`/`DesignSystem` import nothing
+internal). The direction is also documented in each `Package.swift` header —
+keep those in sync. This is what prevents import cycles that force everything
+back into one module.
+
+**Where new code goes:** UI (views, view models, screens) → `Features`.
+Network/IO/persistence and the types they produce → the matching domain
+package (`Channels`, `Accounts`, `EmoteSources`). Pure presentation transforms
+→ `ChatModel`. Cross-cutting primitives (logging, errors, endpoints, disk
+cache) → `Core`. Color/typography/appearance tokens → `DesignSystem`.
+
+### Group by feature, not by type
+
+Inside `Features`, files are grouped into **feature folders** (vertical
+slices): `Chat/`, `Channels/`, `Emotes/`, `Highlights/`, `Settings/`,
+`Tabs/`, `App/`, plus a `Shared/` folder for genuinely cross-feature UI
+primitives. A feature's screen, its `@Observable` model, its stores, and its
+private helper views all live **together** in that folder. Do NOT add
+`Views/` / `Models/` / `Stores/` subfolders — splitting one feature across
+type-named folders fragments it and buries the thing you actually navigate by
+(the feature). Co-location wins.
+
+Domain packages (`Core`, `Channels`, …) keep a **flat** `Sources/<Pkg>/` until
+they outgrow it (see thresholds below) — they're small and single-purpose.
+
+### File-role naming taxonomy
+
+The suffix tells you the role at a glance — keep it consistent:
+
+| Suffix          | Role                                                        |
+|-----------------|-------------------------------------------------------------|
+| `*Screen`       | Top-level navigable destination (pushed/presented)         |
+| `*View`         | Reusable or composed sub-view                               |
+| `*Row`          | A single list/collection row                                |
+| `*Sheet`        | Modal sheet content                                         |
+| `*Model`        | `@MainActor @Observable` view model (per-screen state)     |
+| `*Store`        | `@Observable` shared state outliving a single view         |
+| `*+Environment` | `EnvironmentKey` + `EnvironmentValues` extension for a type |
+
+### One type per file; split by sibling files in the same module
+
+A file should hold **one** primary type. When a SwiftUI file grows because
+nested `private struct` sub-views pile up (they're invisible outside the file,
+so they accrete), extract each into its own file in the **same folder** and
+promote it from `private` to `internal` (just drop the `private`). Within a
+single module (`Features` is one module) cross-file access to an `internal`
+type is free, and the library's public surface is unchanged — only `public`
+types are API. Precedent: `ChatScreen.swift` (1742 LOC, 10 view types) was
+split into `ChatScreen` + `ChatTranscript` + `ComposeBar` + `ThreadView` +
+`ChatStatusPills`, all siblings in `Chat/`.
+
+### Thresholds (when structure should change)
+
+- **Split a file** when it exceeds ~500 LOC *and* holds more than one type, or
+  any single type's sub-views can stand alone.
+- **Add a subfolder** when a flat directory passes ~10 files *or* a clear
+  sub-grouping emerges. A one-file folder (e.g. `Connection/`) is fine if it
+  marks a real seam; don't manufacture them.
+- **Promote a feature folder to its own package** only when build times hurt —
+  cut along the heaviest folders (`Chat/`, `Channels/`, `Emotes/`) first, and
+  extract any shared bits *downward* into a lower layer rather than sideways.
+  Premature package-splitting trades velocity for theoretical boundaries.
+
 ## Logging (`os.Logger` via `AppLogger.make(_:)`)
 
 ### Severity hierarchy
