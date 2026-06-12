@@ -315,7 +315,14 @@ struct ComposeBar: View {
                     .padding(.vertical, 8)
                     // Regular glass (not interactive) — typing happens inside
                     // the field, no glass-on-press animation needed.
-                    .glassEffect(.regular, in: Capsule())
+                    //
+                    // Fixed-radius rounded rect, NOT a Capsule: a capsule's
+                    // corner radius is always half its height, so once the
+                    // field grows multi-line (lineLimit 1...5) the corners
+                    // balloon and the box reads as an over-rounded blob. A
+                    // constant 20pt continuous radius keeps the single-line
+                    // look pill-ish while staying tidy as the field grows.
+                    .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
                     .accessibilityLabel("Message input")
                     .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
 
