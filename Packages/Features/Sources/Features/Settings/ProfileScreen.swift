@@ -8,36 +8,26 @@ import os
 
 private let logger = AppLogger.make("Features.Profile")
 
-/// The "Profile" tab — entry point for everything user-centric: account
-/// header (avatar + display name + login), appearance settings, developer
-/// tools, and sign out.
+/// The You tab — entry point for everything user-centric: account
+/// switching, settings, and sign out. Hosted by AppShell's TabView
+/// inside its own NavigationStack; every child screen is a push.
 ///
-/// ## Why this replaces the gear-in-toolbar pattern
+/// ## Grouping rule
 ///
-/// Previously: ChannelListScreen had a gear icon in its toolbar that
-/// pushed to a SettingsScreen. That worked but:
-///   - The gear icon sat alone at the right edge of the toolbar (the
-///     "lonely island" finding from earlier review).
-///   - It meant "settings is hidden inside Follows," which is wrong —
-///     settings is account-level, not follows-level.
-///   - It also meant the bottom tab bar was only 2 tabs wide
-///     (Follows + Chat), making iOS 26's tab bar capsule look
-///     visually thin and "floaty."
-///
-/// Promoting Profile to its own tab fixes all three: the bar gets a third
-/// affordance (wider, reads as proper chrome), the toolbar gets simpler
-/// (no gear), and settings lives in the right place semantically.
-///
-/// ## Content
-///
-/// One Form with three sections:
-///   1. Account header — avatar circle + display name + @login. Read-only
-///      summary; tapping nothing for now (future: edit profile would go here).
-///   2. Appearance — theme picker (system / light / dark).
-///   3. Developer — Recent Logs nav link.
-///   4. Sign-out destructive button at the bottom.
-///
-/// The previous `SettingsScreen` is deleted — its contents migrate here.
+/// Sections group by what the user is *thinking about*, not by what the
+/// code touches:
+///   1. Account header — avatar + display name + @login; tap (or
+///      long-press for the hot-switch menu) → account switcher.
+///   2. **Chat** — how the transcript looks and behaves: Appearance,
+///      Emotes, Filters, Highlights. Pure navigation rows; each feature
+///      owns ALL its controls on its own page (no lone toggles mixed in
+///      with links — that's how the old Highlight Sound toggle got
+///      separated from the keywords it modified).
+///   3. **Privacy** — Blocked Users. An account-level relationship, not
+///      a chat-display preference.
+///   4. **App** — chattr itself: Theme, Resume Last Chat, Storage.
+///   5. **About** — What's New, Version (the 7-tap dev-tools unlock).
+///   6. Developer (conditional) + destructive sign-out at the bottom.
 public struct ProfileScreen: View {
     private let account: Account
     private let accountStore: AccountStore
