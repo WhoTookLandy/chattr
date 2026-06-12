@@ -383,9 +383,21 @@ public final class ChannelSessionRegistry {
         if let existing = emoteIndexes[key] {
             return existing
         }
-        let new = EmoteIndex()
+        let new = EmoteIndex(providers: Self.enabledEmoteProviders())
         emoteIndexes[key] = new
         return new
+    }
+
+    /// The third-party providers the user has enabled (You → Chat →
+    /// Emotes). Read at index construction, so a toggle change applies
+    /// the next time a channel's index is built (channel reopen) — same
+    /// at-attach lifecycle as the chat filters and highlight keywords.
+    private static func enabledEmoteProviders() -> [any EmoteProvider] {
+        var providers: [any EmoteProvider] = []
+        if EmoteSourceSettings.sevenTVEnabled() { providers.append(SevenTVProvider()) }
+        if EmoteSourceSettings.bttvEnabled() { providers.append(BTTVProvider()) }
+        if EmoteSourceSettings.ffzEnabled() { providers.append(FFZProvider()) }
+        return providers
     }
 
     /// Returns the shared `ChatBadgeStore` for this account × channel pair,

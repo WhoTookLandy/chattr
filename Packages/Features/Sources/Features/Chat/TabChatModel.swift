@@ -177,6 +177,25 @@ public final class TabChatModel {
     /// by default — keyword highlighting disabled.
     private var highlightKeywords: [String] = []
 
+    /// At-attach snapshots of the chat filters (You → Chat → Filters).
+    /// See `ChatFilterSettings` — read once in `attach`, consulted by
+    /// both `apply` (live) and `ingest` (live + priming).
+    private var filterHideCommands = false
+    private var filterHideBots = false
+
+    /// Whether the message should be dropped before it touches the
+    /// buffer. The user's own messages are always exempt — hiding your
+    /// own "!drops" the moment you send it reads as a send failure.
+    private func isFiltered(_ chatMessage: ChatMessage) -> Bool {
+        guard chatMessage.chatterUserId != currentUserId else { return false }
+        return ChatFilterSettings.shouldHide(
+            authorLogin: chatMessage.chatterUserLogin,
+            text: chatMessage.message.text,
+            hideCommands: filterHideCommands,
+            hideBots: filterHideBots
+        )
+    }
+
     /// Registry-owned memo of normalize results for this channel — survives
     /// this model's detach/re-attach across tab swipes, which is the whole
     /// point: re-priming from the session ring becomes dictionary hits
@@ -510,6 +529,12 @@ public final class TabChatModel {
         self.currentUserLogin = currentUserLogin
         self.currentUserDisplayName = currentUserDisplayName
         self.highlightKeywords = highlightKeywords
+        // Chat filters: snapshot the toggles once per attach (same
+        // lifecycle as highlight keywords). Both ingest paths — live
+        // apply() and the priming loop — consult these copies, so a
+        // mid-session toggle can't make live and re-primed history drift.
+        self.filterHideCommands = ChatFilterSettings.hideCommands()
+        self.filterHideBots = ChatFilterSettings.hideBots()
         self.lineCache = lineCache
         self.onModerationRevoked = onModerationRevoked
 
@@ -1221,6 +1246,15 @@ public final class TabChatModel {
             return
         }
 
+        // Chat filters: drop hidden messages before ANY processing —
+        // echo reconciliation, ingest, and (critically) the highlight
+        // sound below, which reads `buffer.last` and would otherwise
+        // ping off a stale row when the filtered message never landed.
+        // Own messages are exempt inside `isFiltered`.
+        if case .message(let chatMessage, _) = event, isFiltered(chatMessage) {
+            return
+        }
+
         // Special handling for chat-message events: reconcile against the
         // optimistic rows we inserted from `send(...)`. Pulled out of the
         // shared static helper because reconciliation needs read access to
@@ -1419,6 +1453,11 @@ public final class TabChatModel {
     private func ingest(_ event: ChannelSession.ChannelEvent) {
         switch event {
         case .message(let chatMessage, let isHistorical):
+            // Chat filters, priming-path edition: `apply` already guards
+            // the live path, but the priming loop in `attach` calls this
+            // directly — without this check, re-primed history would
+            // resurrect messages the live path dropped.
+            if isFiltered(chatMessage) { return }
             // EmoteIndex.snapshot() is nonisolated + lock-protected, so
             // it's safe to call from @MainActor without an await.
             let snapshot = emoteIndex?.snapshot() ?? [:]

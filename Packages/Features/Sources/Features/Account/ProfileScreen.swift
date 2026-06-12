@@ -45,16 +45,13 @@ public struct ProfileScreen: View {
     private let clientId: String
 
     @AppStorage(AppearanceMode.storageKey) private var appearanceModeRaw: String = AppearanceMode.system.rawValue
+    /// Whether visiting the Chats tab re-pushes the chat that was open
+    /// when the scene was torn down. Read by ChatTabsScreen's scene
+    /// restoration; default on (resume) matches pre-toggle behavior.
+    @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
     @State private var isSigningOut = false
     @State private var showingSignOutConfirm = false
     @State private var errorMessage: String?
-
-    /// Mirror of `HighlightSettings.soundEnabled()`, seeded at init so the
-    /// toggle reflects the persisted value. Writes go through both this
-    /// @State (for instant UI) AND `HighlightSettings.setSoundEnabled`
-    /// (for persistence). We don't use @AppStorage because the key lives
-    /// in `HighlightSettings`'s namespace, not a SwiftUI-owned default.
-    @State private var highlightSoundEnabled: Bool = HighlightSettings.soundEnabled()
 
     /// Whether the account-switcher sheet is presented.
     @State private var showingAccountSwitcher = false
@@ -81,13 +78,14 @@ public struct ProfileScreen: View {
         #endif
     }
 
-    /// "chattr 1.2 (34)" — the first thing support asks for. Reads the
-    /// app bundle (Bundle.main is the host app at runtime, not the
-    /// Features package bundle).
+    /// "1.2 (34)" — the first thing support asks for. Reads the app
+    /// bundle (Bundle.main is the host app at runtime, not the Features
+    /// package bundle). Shown as the detail of the About → Version row,
+    /// which is also the 7-tap dev-tools unlock target.
     private var versionString: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-        return "chattr \(version) (\(build))"
+        return "\(version) (\(build))"
     }
 
     public init(account: Account, accountStore: AccountStore, clientId: String) {
@@ -163,66 +161,104 @@ public struct ProfileScreen: View {
                 .listRowBackground(Color.clear)
             }
 
+            // Chat — how the transcript looks and behaves. Pure
+            // navigation rows: every control lives on its feature's own
+            // page (mixed altitudes — a lone toggle among links — read
+            // as clutter and made features hard to find).
             Section {
-                // Segmented picker for theme — three mutually-exclusive
-                // options where one-tap selection beats menu-reveal.
-                Picker("Theme", selection: Binding(
+                NavigationLink {
+                    ChatAppearanceScreen(currentUserLogin: account.login)
+                } label: {
+                    Label("Appearance", systemImage: "textformat.size")
+                }
+                NavigationLink {
+                    EmoteSettingsScreen()
+                } label: {
+                    Label("Emotes", systemImage: "face.smiling")
+                }
+                NavigationLink {
+                    ChatFiltersScreen()
+                } label: {
+                    Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                NavigationLink {
+                    HighlightKeywordsScreen()
+                } label: {
+                    Label("Highlights", systemImage: "sparkles")
+                }
+            } header: {
+                Text("Chat")
+            } footer: {
+                Text("How chat looks, which emotes show, what gets hidden, and the words that light up a message.")
+            }
+
+            // Privacy — who you don't want to hear from. Separate from
+            // Chat: blocking is an account-level relationship, not a
+            // display preference.
+            Section {
+                NavigationLink {
+                    BlockedUsersScreen()
+                } label: {
+                    Label("Blocked Users", systemImage: "hand.raised")
+                }
+            } header: {
+                Text("Privacy")
+            }
+
+            // App — preferences about chattr itself rather than chat
+            // content. Theme stays inline (three exclusive options;
+            // one-tap beats a page round-trip).
+            Section {
+                Picker(selection: Binding(
                     get: { appearanceMode },
                     set: { appearanceModeRaw = $0.rawValue }
                 )) {
                     ForEach(AppearanceMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
-                }
-                .pickerStyle(.segmented)
-            } header: {
-                Text("Appearance")
-            } footer: {
-                Text("System follows your device's appearance setting.")
-            }
-
-            // Chat preferences — appearance, highlight keywords + the
-            // sound toggle.
-            Section {
-                NavigationLink {
-                    ChatAppearanceScreen(currentUserLogin: account.login)
                 } label: {
-                    Label("Chat Appearance", systemImage: "textformat.size")
+                    Label("Theme", systemImage: "circle.lefthalf.filled")
                 }
-                NavigationLink {
-                    HighlightKeywordsScreen()
-                } label: {
-                    Label("Highlight Keywords", systemImage: "text.magnifyingglass")
+                Toggle(isOn: $resumeLastChatOnLaunch) {
+                    Label("Resume Last Chat", systemImage: "arrow.uturn.forward")
                 }
-                NavigationLink {
-                    BlockedUsersScreen()
-                } label: {
-                    Label("Blocked Users", systemImage: "hand.raised")
-                }
-                Toggle(isOn: Binding(
-                    get: { highlightSoundEnabled },
-                    set: {
-                        highlightSoundEnabled = $0
-                        HighlightSettings.setSoundEnabled($0)
-                    }
-                )) {
-                    Label("Highlight Sound", systemImage: "speaker.wave.2.fill")
-                }
-            } header: {
-                Text("Chat")
-            } footer: {
-                Text("Messages that @-mention you or match a keyword are highlighted. Turn on the sound for an audible ping on highlights.")
-            }
-
-            // Storage — cache usage breakdown + clear button.
-            Section {
                 NavigationLink {
                     StorageSettingsScreen()
                 } label: {
                     Label("Storage", systemImage: "internaldrive")
                 }
+            } header: {
+                Text("App")
             } footer: {
-                Text("See how much space cached emotes and images use, and clear them.")
+                Text("Resume drops you straight back into the chat you had open. Theme follows your device's appearance when set to System.")
+            }
+
+            // About — version as a proper row (copy-friendly, and the
+            // 7-tap dev-tools unlock target) instead of a floating
+            // footer at the very bottom of the form.
+            Section {
+                NavigationLink {
+                    WhatsNewScreen()
+                } label: {
+                    Label("What's New", systemImage: "megaphone")
+                }
+                HStack {
+                    Label("Version", systemImage: "info.circle")
+                    Spacer()
+                    Text(versionString)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    versionTapCount += 1
+                    if versionTapCount >= 7 {
+                        versionTapCount = 0
+                        devToolsUnlocked.toggle()
+                    }
+                }
+            } header: {
+                Text("About")
             }
 
             // Developer tools — always visible in DEBUG; in release builds
@@ -268,28 +304,10 @@ public struct ProfileScreen: View {
                         .font(.footnote)
                 }
             }
-
-            // Version footer — the first thing support asks for, and the
-            // 7-tap dev-tools unlock target in release builds (toggles,
-            // so another 7 taps re-hides).
-            Section {
-            } footer: {
-                Text(versionString)
-                    .frame(maxWidth: .infinity)
-                    .multilineTextAlignment(.center)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        versionTapCount += 1
-                        if versionTapCount >= 7 {
-                            versionTapCount = 0
-                            devToolsUnlocked.toggle()
-                        }
-                    }
-            }
         }
         // Subtle confirmation when the 7th tap lands (either direction).
         .sensoryFeedback(.success, trigger: devToolsUnlocked)
-        .navigationTitle("Profile")
+        .navigationTitle("You")
         // `.inlineLarge` keeps the title in the toolbar (no big drop-down
         // title) — consistent with the ChannelListScreen treatment. Saves
         // ~60pt of vertical space vs the default large-title mode.

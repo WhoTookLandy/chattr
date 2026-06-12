@@ -3,19 +3,30 @@ import Accounts
 import DesignSystem
 import NukeUI
 
-/// Root content of the Chat surface — now also the app's home screen.
+/// Root content of the Chats tab.
+///
+/// Structured like Messages: the tab's root is a *list* of open chats;
+/// tapping one pushes the transcript full-screen with the tab bar hidden
+/// (`.toolbar(.hidden, for: .tabBar)` on the pushed destination). A chat
+/// transcript is an immersive surface — compose bar at the bottom, every
+/// point of height mattering — so app-level chrome gets out of the way
+/// and the system back button is the exit. The tab bar reappears at the
+/// list root.
 ///
 /// Layout:
-///   1. A single `NavigationStack` with a toolbar header that reflects the
-///      active tab (account avatar leading → Profile, floating channel-name
-///      pill principal → switcher, heart trailing → Follows).
-///   2. A horizontally-paged `ScrollView` of `ChatScreen` pages — one page
-///      per open tab. Swipe left/right to switch tabs.
-///   3. Page-dots live INSIDE the channel pill (hidden for a single tab) —
-///      they used to occupy a dedicated strip below the transcript, which
-///      read as a dead black bar between the chat surface and the home
-///      indicator. Folding them into the pill returns that strip's height
-///      to the transcript.
+///   1. A single `NavigationStack`. Root: open-chats list (reorder /
+///      swipe-to-close) or the empty state. Pushed: the chat pager.
+///   2. The pushed pager is a horizontally-paged `ScrollView` of
+///      `ChatScreen` pages — one page per open tab. Swipe left/right to
+///      switch chats without popping back.
+///   3. The toolbar header of the pushed pager is the floating channel
+///      pill (name + page dots) → opens the switcher sheet.
+///
+/// Push state is *derived from* `ChatTabsModel.activeTabId` (non-nil =
+/// a chat is open) rather than a separate Bool — opening a channel from
+/// Home/Search sets `activeTabId`, which both selects the page and
+/// presents the push; popping back clears it. One source of truth, no
+/// sync bugs between "which chat" and "is a chat showing."
 ///
 /// ## How the paging works
 ///
@@ -46,12 +57,13 @@ import NukeUI
 public struct ChatTabsScreen: View {
     private let account: Account
     private let accountStore: AccountStore
-    /// Twitch client id, forwarded to the Profile sheet's account switcher.
-    private let clientId: String
+    /// Injected by AppShell: switches the app to the Home tab. Used by the
+    /// empty state's CTA — with no chats open, the useful next step is the
+    /// Home surface (live follows), not a modal.
+    private let goHome: (() -> Void)?
 
     @State private var showSwitcher = false
     @State private var showFollows = false
-    @State private var showProfile = false
 
     @Environment(\.chatTabs) private var chatTabs
 
@@ -80,52 +92,52 @@ public struct ChatTabsScreen: View {
     /// in this scene."
     @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
 
+    /// You → App → Resume Last Chat. When off, the Chats tab always
+    /// starts at the list; the saved active-tab id is still recorded so
+    /// turning the toggle back on resumes again.
+    @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
+
     public init(
         account: Account,
         accountStore: AccountStore,
-        clientId: String
+        goHome: (() -> Void)? = nil
     ) {
         self.account = account
         self.accountStore = accountStore
-        self.clientId = clientId
+        self.goHome = goHome
     }
 
     public var body: some View {
         NavigationStack {
             Group {
                 if let chatTabs, !chatTabs.tabs.isEmpty {
-                    pagedChatContent(chatTabs: chatTabs)
-                    .onAppear {
-                        if let savedId = persistedActiveTabId,
-                           let uuid = UUID(uuidString: savedId),
-                           chatTabs.tabs.contains(where: { $0.id == uuid }) {
-                            chatTabs.activeTabId = uuid
-                        }
-                    }
-                    .onChange(of: chatTabs.activeTabId) { _, newValue in
-                        persistedActiveTabId = newValue?.uuidString
-                    }
+                    openChatsList(chatTabs: chatTabs)
                 } else {
                     emptyState
                 }
             }
-            // Same surface as the transcript itself (ChatScreen applies it
-            // too) — without this, the page-gutters and empty state sit on
-            // pure system black and read as dead bars around the chat.
-            .background(Color.chatSurface.ignoresSafeArea())
-            .toolbar { headerToolbar(chatTabs: chatTabs) }
-            .toolbarTitleDisplayMode(.inline)
-            // Edge-to-Edge Chat: no bar background at all — the three
-            // toolbar items float free-standing over the transcript,
-            // each carrying its own glass. Default (.automatic) restores
-            // the system bar treatment for the inset layout. Placement
-            // `.automatic` = the primary bar (nav bar on iOS) and, unlike
-            // `.navigationBar`, also compiles for the package's macOS
-            // target.
-            .toolbarBackgroundVisibility(
-                appearance.edgeToEdge ? .hidden : .automatic,
-                for: .automatic
-            )
+            .navigationTitle("Chats")
+            .toolbarTitleDisplayMode(.inlineLarge)
+            .onAppear {
+                // Scene restoration: resume the chat that was open when
+                // the scene was last torn down (user-controllable via
+                // You → App → Resume Last Chat). Setting `activeTabId`
+                // both selects the page and (via the derived binding
+                // below) presents the push.
+                if resumeLastChatOnLaunch,
+                   chatTabs?.activeTabId == nil,
+                   let savedId = persistedActiveTabId,
+                   let uuid = UUID(uuidString: savedId),
+                   chatTabs?.tabs.contains(where: { $0.id == uuid }) == true {
+                    chatTabs?.activeTabId = uuid
+                }
+            }
+            .onChange(of: chatTabs?.activeTabId) { _, newValue in
+                persistedActiveTabId = newValue?.uuidString
+            }
+            .navigationDestination(isPresented: chatIsPresented) {
+                chatDetail
+            }
         }
         // Open-chats switcher.
         .sheet(isPresented: $showSwitcher) {
@@ -139,53 +151,134 @@ public struct ChatTabsScreen: View {
                 )
             }
         }
-        // Follows browse — its own NavigationStack inside the sheet.
+        // Follows browse — kept as a sheet for the switcher's "Browse
+        // Follows" shortcut. The primary Follows surface is the Home tab.
         .sheet(isPresented: $showFollows) {
             NavigationStack {
                 ChannelListScreen(account: account, accountStore: accountStore)
             }
         }
-        // Profile / settings — its own NavigationStack inside the sheet.
-        .sheet(isPresented: $showProfile) {
-            NavigationStack {
-                ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
+    }
+
+    /// Push state, derived from the model: a chat is presented exactly
+    /// when a tab is active. Popping (interactive swipe-back included)
+    /// writes `false`, which clears the selection — the list root never
+    /// shows with a stale "active" chat.
+    private var chatIsPresented: Binding<Bool> {
+        Binding(
+            get: {
+                guard let chatTabs else { return false }
+                return chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
+            },
+            set: { presented in
+                if !presented {
+                    chatTabs?.activeTabId = nil
+                }
+            }
+        )
+    }
+
+    /// The pushed, full-screen chat surface: the paged transcript with the
+    /// channel pill header and — the point of the push — no tab bar.
+    @ViewBuilder
+    private var chatDetail: some View {
+        Group {
+            if let chatTabs {
+                pagedChatContent(chatTabs: chatTabs)
             }
         }
-    }
-
-    /// `.topBar*` placements are iOS-only; map to cross-platform equivalents
-    /// on macOS so the Features package still compiles for its declared
-    /// `.macOS` platform — matching the rest of the target's semantic-
-    /// placement convention.
-    private var leadingHeaderPlacement: ToolbarItemPlacement {
+        // Same surface as the transcript itself (ChatScreen applies it
+        // too) — without this, the page-gutters sit on pure system black
+        // and read as dead bars around the chat.
+        .background(Color.chatSurface.ignoresSafeArea())
+        .toolbar { headerToolbar(chatTabs: chatTabs) }
+        .toolbarTitleDisplayMode(.inline)
+        // Edge-to-Edge Chat: no bar background at all — the toolbar items
+        // float free-standing over the transcript, each carrying its own
+        // glass. Default (.automatic) restores the system bar treatment
+        // for the inset layout. Placement `.automatic` = the primary bar
+        // (nav bar on iOS) and, unlike `.navigationBar`, also compiles
+        // for the package's macOS target.
+        .toolbarBackgroundVisibility(
+            appearance.edgeToEdge ? .hidden : .automatic,
+            for: .automatic
+        )
+        // The immersive part: chat owns the whole screen; the system
+        // back chevron is the way out. (`.tabBar` visibility control is
+        // iOS-only; macOS has no tab bar to hide.)
         #if os(iOS)
-        .topBarLeading
-        #else
-        .navigation
+        .toolbar(.hidden, for: .tabBar)
         #endif
     }
-    private var trailingHeaderPlacement: ToolbarItemPlacement {
-        #if os(iOS)
-        .topBarTrailing
-        #else
-        .primaryAction
-        #endif
+
+    /// Root list of open chats — Messages-style rows: avatar, channel
+    /// name, login. Swipe to close (releases the session via the model's
+    /// `onClose`), drag to reorder (defines the pager's swipe order).
+    @ViewBuilder
+    private func openChatsList(chatTabs: ChatTabsModel) -> some View {
+        List {
+            ForEach(chatTabs.tabs) { tab in
+                Button {
+                    chatTabs.activeTabId = tab.id
+                } label: {
+                    HStack(spacing: 12) {
+                        tabAvatar(tab)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(tab.displayName)
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                            if let login = tab.channels.first?.channelLoginName {
+                                Text("#\(login)")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .onMove { source, destination in
+                chatTabs.move(fromOffsets: source, toOffset: destination)
+            }
+            .onDelete { offsets in
+                let ids = offsets.map { chatTabs.tabs[$0].id }
+                for id in ids {
+                    chatTabs.close(tabId: id)
+                }
+            }
+        }
+        .listStyle(.plain)
     }
 
-    /// The toolbar header, Reddit-style: the account's actual avatar
-    /// leading, a floating glass pill with the channel name (and page
-    /// dots, when several tabs are open) in the center, follows trailing.
-    /// Three STABLE items whose labels reflect the active tab — never
+    /// 40pt circle avatar for a list row. Placeholder symbol while the
+    /// image loads or when the descriptor has no profile URL.
+    private func tabAvatar(_ tab: ChatTab) -> some View {
+        LazyImage(url: tab.profileImageURL) { state in
+            if let image = state.image {
+                image.resizable().scaledToFill()
+            } else {
+                Image(systemName: "person.crop.circle.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.secondary.opacity(0.5))
+            }
+        }
+        .frame(width: 40, height: 40)
+        .clipShape(Circle())
+    }
+
+    /// The toolbar header of the pushed pager: a floating glass pill with
+    /// the channel name (and page dots, when several tabs are open) in the
+    /// center. One STABLE item whose label reflects the active tab — never
     /// inserted/removed conditionally (that would rebuild the bar and
     /// flicker; see axiom toolbars guidance).
     @ToolbarContentBuilder
     private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
-        ToolbarItem(placement: leadingHeaderPlacement) {
-            Button { showProfile = true } label: {
-                avatarImage
-            }
-            .accessibilityLabel("Profile")
-        }
         ToolbarItem(placement: .principal) {
             Button { showSwitcher = true } label: {
                 VStack(spacing: 3) {
@@ -212,32 +305,6 @@ public struct ChatTabsScreen: View {
         // The pill carries its own glass above; hide the bar's shared
         // item background so the two don't stack into a double capsule.
         .sharedBackgroundVisibility(.hidden)
-        ToolbarItem(placement: trailingHeaderPlacement) {
-            Button { showFollows = true } label: {
-                Image(systemName: "heart")
-                    .symbolRenderingMode(.hierarchical)
-            }
-            .accessibilityLabel("Follows")
-        }
-    }
-
-    /// The signed-in account's avatar, circle-cropped to toolbar-icon
-    /// size. Falls back to the old SF Symbol while loading or when the
-    /// profile-image URL is missing (first sign-in before the /users
-    /// probe completes).
-    private var avatarImage: some View {
-        LazyImage(url: URL(string: account.profileImageURL)) { state in
-            if let image = state.image {
-                image.resizable().scaledToFill()
-            } else {
-                Image(systemName: "person.crop.circle")
-                    .resizable()
-                    .scaledToFit()
-                    .symbolRenderingMode(.hierarchical)
-            }
-        }
-        .frame(width: 28, height: 28)
-        .clipShape(Circle())
     }
 
     /// Miniature page dots inside the channel pill — one per open tab,
@@ -353,16 +420,22 @@ public struct ChatTabsScreen: View {
         }
     }
 
-    /// Shown when no channel tabs are open. Invites the user to browse Follows.
+    /// Shown when no channel tabs are open. Points at the Home tab (live
+    /// follows) — falls back to the Follows sheet when AppShell didn't
+    /// inject `goHome` (previews, tests).
     @ViewBuilder
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("No channels open", systemImage: "bubble.left.and.bubble.right")
+            Label("No chats open", systemImage: "bubble.left.and.bubble.right")
         } description: {
-            Text("Browse your Follows to start watching a channel's chat.")
+            Text("Pick a live channel from Home to start chatting.")
         } actions: {
-            Button("Go to Follows") {
-                showFollows = true
+            Button("See who's live") {
+                if let goHome {
+                    goHome()
+                } else {
+                    showFollows = true
+                }
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)
