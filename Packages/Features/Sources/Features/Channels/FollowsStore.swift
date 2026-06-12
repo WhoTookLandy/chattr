@@ -318,13 +318,6 @@ public final class FollowsStore {
 
 // MARK: - Environment plumbing
 
-private struct FollowsStoreKey: EnvironmentKey {
-    static let defaultValue: FollowsStore? = nil
-}
-
 public extension EnvironmentValues {
-    var followsStore: FollowsStore? {
-        get { self[FollowsStoreKey.self] }
-        set { self[FollowsStoreKey.self] = newValue }
-    }
+    @Entry var followsStore: FollowsStore? = nil
 }

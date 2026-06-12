@@ -221,22 +221,16 @@ public final class ChatImagePrefetcher {
 
 // MARK: - Environment plumbing
 
-/// Default is nil because `ChatImagePrefetcher()` is `@MainActor`-isolated
-/// (the class is) and `EnvironmentKey.defaultValue` is evaluated in a
-/// nonisolated context. The Optional shape is the idiomatic SwiftUI
-/// workaround — same pattern used by `GlobalCatalog` and
-/// `ChannelSessionRegistry`.
-private struct ChatImagePrefetcherKey: EnvironmentKey {
-    static let defaultValue: ChatImagePrefetcher? = nil
-}
-
 public extension EnvironmentValues {
     /// App-wide chat image prefetcher. Injected by `RootView`. Callers
     /// (`ChatScreen` for channel-badge prefetch on mount) read this and
     /// call the appropriate `prefetch...` method. Reading `nil` from
     /// previews / detached views is fine — the call site just skips.
-    var chatImagePrefetcher: ChatImagePrefetcher? {
-        get { self[ChatImagePrefetcherKey.self] }
-        set { self[ChatImagePrefetcherKey.self] = newValue }
-    }
+    ///
+    /// Default is nil because `ChatImagePrefetcher()` is `@MainActor`-isolated
+    /// (the class is) and the entry's default value is evaluated in a
+    /// nonisolated context. The Optional shape is the idiomatic SwiftUI
+    /// workaround — same pattern used by `GlobalCatalog` and
+    /// `ChannelSessionRegistry`.
+    @Entry var chatImagePrefetcher: ChatImagePrefetcher? = nil
 }

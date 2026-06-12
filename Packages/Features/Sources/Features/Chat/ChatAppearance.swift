@@ -140,18 +140,11 @@ public struct ChatAppearance: Equatable, Sendable {
 
 // MARK: - Environment
 
-private struct ChatAppearanceKey: EnvironmentKey {
-    static let defaultValue = ChatAppearance()
-}
-
 extension EnvironmentValues {
     /// The active chat appearance. Defaults match the pre-settings
     /// rendering exactly, so views that render chat rows outside the
     /// injected scope (previews, tests) look unchanged.
-    public var chatAppearance: ChatAppearance {
-        get { self[ChatAppearanceKey.self] }
-        set { self[ChatAppearanceKey.self] = newValue }
-    }
+    @Entry public var chatAppearance = ChatAppearance()
 }
 
 // MARK: - Login annotation rule

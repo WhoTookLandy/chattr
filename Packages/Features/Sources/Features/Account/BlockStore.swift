@@ -130,16 +130,9 @@ public final class BlockStore {
 
 // MARK: - Environment plumbing (mirrors GlobalCatalog's Optional/RootView-injected shape)
 
-private struct BlockStoreKey: EnvironmentKey {
-    static let defaultValue: BlockStore? = nil
-}
-
 public extension EnvironmentValues {
     /// App-wide blocked-user store for the active account. Injected by RootView.
     /// `nil` outside a RootView ancestor (e.g. previews) — treat absence as
     /// "nothing blocked."
-    var blockStore: BlockStore? {
-        get { self[BlockStoreKey.self] }
-        set { self[BlockStoreKey.self] = newValue }
-    }
+    @Entry var blockStore: BlockStore? = nil
 }

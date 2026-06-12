@@ -149,23 +149,18 @@ public final class GlobalCatalog {
 
 // MARK: - Environment plumbing
 
-/// Default is nil because `GlobalCatalog()` is `@MainActor`-isolated (the class
-/// is) and `EnvironmentKey.defaultValue` is evaluated in a nonisolated context.
-/// Constructing a `@MainActor` instance there trips Swift 6's actor-isolation
-/// check. The Optional shape is the idiomatic SwiftUI workaround:
-///   - RootView always provides a real catalog via `.environment(\.globalCatalog, …)`.
-///   - Previews / detached views read nil and fall back gracefully.
-private struct GlobalCatalogKey: EnvironmentKey {
-    static let defaultValue: GlobalCatalog? = nil
-}
-
 public extension EnvironmentValues {
     /// App-wide global Twitch catalog. Injected by RootView once an Account
     /// becomes active. `nil` when read outside a RootView ancestor chain
     /// (e.g. SwiftUI previews) — callers should treat absence as "no cached
     /// data, fetch yourself if needed."
-    var globalCatalog: GlobalCatalog? {
-        get { self[GlobalCatalogKey.self] }
-        set { self[GlobalCatalogKey.self] = newValue }
-    }
+    ///
+    /// Default is nil because `GlobalCatalog()` is `@MainActor`-isolated (the
+    /// class is) and the entry's default value is evaluated in a nonisolated
+    /// context. Constructing a `@MainActor` instance there trips Swift 6's
+    /// actor-isolation check. The Optional shape is the idiomatic SwiftUI
+    /// workaround:
+    ///   - RootView always provides a real catalog via `.environment(\.globalCatalog, …)`.
+    ///   - Previews / detached views read nil and fall back gracefully.
+    @Entry var globalCatalog: GlobalCatalog? = nil
 }

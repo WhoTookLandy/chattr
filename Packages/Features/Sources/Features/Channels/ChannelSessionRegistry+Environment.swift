@@ -10,16 +10,9 @@ import Channels
 /// with nil default is the standard SwiftUI workaround — see GlobalCatalog /
 /// FollowsStore for the same pattern. RootView always provides a real value;
 /// nil only appears in previews / detached views.
-private struct ChannelSessionRegistryKey: EnvironmentKey {
-    static let defaultValue: ChannelSessionRegistry? = nil
-}
-
 public extension EnvironmentValues {
     /// App-wide registry of live `ChannelSession`s, keyed by (userId, channelId).
     /// Injected by RootView. Reading nil means there's no registry available
     /// (e.g. previews) — callers should treat it as "can't open chat."
-    var channelSessionRegistry: ChannelSessionRegistry? {
-        get { self[ChannelSessionRegistryKey.self] }
-        set { self[ChannelSessionRegistryKey.self] = newValue }
-    }
+    @Entry var channelSessionRegistry: ChannelSessionRegistry? = nil
 }

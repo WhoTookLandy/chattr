@@ -59,15 +59,8 @@ public struct OpenChannelAction: Sendable {
     }
 }
 
-private struct OpenChannelActionKey: EnvironmentKey {
-    static let defaultValue: OpenChannelAction? = nil
-}
-
 public extension EnvironmentValues {
     /// Open the given channel in the Chat tab. `nil` when the action hasn't
     /// been injected (e.g. in previews); call sites should fall back gracefully.
-    var openChannel: OpenChannelAction? {
-        get { self[OpenChannelActionKey.self] }
-        set { self[OpenChannelActionKey.self] = newValue }
-    }
+    @Entry var openChannel: OpenChannelAction? = nil
 }

@@ -220,17 +220,10 @@ public final class ChatTabsModel {
 
 // MARK: - Environment plumbing
 
-private struct ChatTabsModelKey: EnvironmentKey {
+public extension EnvironmentValues {
+    /// UI state for the Chat tab's open channels. Injected by `AppShell`.
     /// nil default for the same MainActor-isolation reason as other Features
     /// environment values — `@MainActor` instances can't be constructed in
     /// a nonisolated static context. AppShell provides the real value.
-    static let defaultValue: ChatTabsModel? = nil
-}
-
-public extension EnvironmentValues {
-    /// UI state for the Chat tab's open channels. Injected by `AppShell`.
-    var chatTabs: ChatTabsModel? {
-        get { self[ChatTabsModelKey.self] }
-        set { self[ChatTabsModelKey.self] = newValue }
-    }
+    @Entry var chatTabs: ChatTabsModel? = nil
 }
