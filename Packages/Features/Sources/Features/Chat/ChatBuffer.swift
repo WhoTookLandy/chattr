@@ -4,7 +4,7 @@ import ChatModel
 /// block-filtered projection, that also emits a typed `[ChatChange]` for every
 /// mutation.
 ///
-/// Replaces `TabChatModel`'s old `allLines` array + per-message
+/// Replaces `ChatTranscriptModel`'s old `allLines` array + per-message
 /// `BlockFilter.apply` full rescan + `Array.removeFirst` front trim, and now
 /// additionally records *what changed* so the view can apply it directly
 /// instead of re-diffing the whole array:
@@ -127,7 +127,7 @@ struct ChatBuffer {
 
     /// Transforms every line in the window (chat-clear shape). `transform` must
     /// preserve `authorUserId` (so visibility is unchanged) — true for the only
-    /// caller, `withDeletedPlaceholder()`.
+    /// caller, `markingDeleted()`.
     mutating func mutateAll(_ transform: (ChatLine) -> ChatLine) {
         guard head < storage.count else { return }
         for i in head..<storage.count {

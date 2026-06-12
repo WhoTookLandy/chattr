@@ -28,7 +28,7 @@ private let logger = AppLogger.make("Features.HighlightSound")
 ///
 /// ## Why @MainActor
 ///
-/// The trigger is `TabChatModel.apply` (already @MainActor). Keeping the
+/// The trigger is `ChatTranscriptModel.apply` (already @MainActor). Keeping the
 /// player on MainActor means no actor hop on the hot message path and
 /// the `lastPlayedAt` throttle state is single-threaded by construction.
 /// The actual audio playback is async inside the audio framework — we

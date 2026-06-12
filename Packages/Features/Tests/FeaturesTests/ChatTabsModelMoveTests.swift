@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Core
 @testable import Features
 
 @MainActor

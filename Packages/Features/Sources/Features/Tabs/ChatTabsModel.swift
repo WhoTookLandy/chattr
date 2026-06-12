@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Core
 
 /// Owns the *UI* state for the Chat tab: which tabs are open, which one is
 /// currently visible. Tab-centric rather than channel-centric — a tab is the
@@ -32,7 +33,56 @@ public final class ChatTabsModel {
     /// shows its empty-state CTA in that case). Public-settable so the
     /// `.scrollPosition(id:)` binding in the paged ScrollView (commit C)
     /// can write back when the user swipes between pages.
-    public var activeTabId: UUID?
+    ///
+    /// Activating a tab marks its mention as seen — looking at the chat IS
+    /// acknowledging the ping, no separate "mark read" affordance needed.
+    public var activeTabId: UUID? {
+        didSet {
+            if let activeTabId {
+                mentionedTabIds.remove(activeTabId)
+            }
+        }
+    }
+
+    /// Tabs holding an unseen @-mention of the signed-in user — drives the
+    /// red dots in the quick-switcher popover and the channel pill.
+    /// Populated by the session-level watcher AppShell installs in `onOpen`
+    /// (session-level because `ChatTranscriptModel` only receives events while its
+    /// page is mounted — a background tab's mentions would be missed).
+    /// Cleared when the tab becomes active or closes.
+    public private(set) var mentionedTabIds: Set<UUID> = []
+
+    /// Flags `tabId` as carrying an unseen mention. No-ops for the active
+    /// tab (the user is looking at it) and for unknown ids (a stale watcher
+    /// firing after its tab closed).
+    public func markMention(tabId: UUID) {
+        guard tabId != activeTabId,
+              tabs.contains(where: { $0.id == tabId }) else { return }
+        mentionedTabIds.insert(tabId)
+    }
+
+    /// Whether `text` @-mentions `login` as a whole word — "@landy" matches,
+    /// "@landyish" doesn't. Twitch logins are `[a-z0-9_]`, so any other
+    /// following character (or end of text) terminates the mention.
+    // nonisolated: pure text predicate, called from the @Sendable session
+    // event handler off the main actor.
+    public nonisolated static func containsMention(of login: String, in text: String) -> Bool {
+        guard !login.isEmpty else { return false }
+        let haystack = text.lowercased()
+        let needle = "@\(login.lowercased())"
+        var searchRange = haystack.startIndex..<haystack.endIndex
+        while let match = haystack.range(of: needle, range: searchRange) {
+            if match.upperBound == haystack.endIndex {
+                return true
+            }
+            let next = haystack[match.upperBound]
+            if !(next.isLetter || next.isNumber || next == "_") {
+                return true
+            }
+            searchRange = match.upperBound..<haystack.endIndex
+        }
+        return false
+    }
 
     /// Called when a tab is opened — either freshly via `open(channel:)` /
     /// `open(_:)`, or restored from persistence at cold start. AppShell
@@ -66,6 +116,19 @@ public final class ChatTabsModel {
     /// completes. Without this, the Task would run to completion against
     /// a potentially-gone registry, firing no-op acquires.
     private var hydrationTask: Task<Void, Never>?
+
+    /// In-flight `onOpen` tasks, keyed by tab id. Tracked so that:
+    ///   - a `close` for the same tab can await the acquire before releasing
+    ///     (preventing a release-before-acquire race that underflows the
+    ///     registry refcount and leaks the channel's EventSub subscription on
+    ///     Twitch's side), and
+    ///   - teardown (`cancelHydration`) can cancel pending acquires.
+    ///
+    /// Bounded by the number of currently-open tabs: `close` clears its entry,
+    /// and a completed open leaves a single harmless finished `Task` per open
+    /// tab. Previously these were fire-and-forget `Task {}`s with neither
+    /// tracking nor race protection.
+    private var openTasks: [UUID: Task<Void, Never>] = [:]
 
     public init() {}
 
@@ -129,6 +192,10 @@ public final class ChatTabsModel {
     public func cancelHydration() {
         hydrationTask?.cancel()
         hydrationTask = nil
+        // Pending tab acquires would otherwise fire onOpen against a stale
+        // registry after teardown.
+        for task in openTasks.values { task.cancel() }
+        openTasks.removeAll()
     }
 
     // MARK: - Open
@@ -148,7 +215,7 @@ public final class ChatTabsModel {
         }
         activeTabId = tab.id
         if isNew, let onOpen {
-            Task { await onOpen(tab) }
+            openTasks[tab.id] = Task { await onOpen(tab) }
         }
     }
 
@@ -172,7 +239,7 @@ public final class ChatTabsModel {
         activeTabId = tab.id
         persistTabs()
         if let onOpen {
-            Task { await onOpen(tab) }
+            openTasks[tab.id] = Task { await onOpen(tab) }
         }
         return tab.id
     }
@@ -201,6 +268,7 @@ public final class ChatTabsModel {
     public func close(tabId: UUID) {
         guard let closedIndex = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         let closed = tabs.remove(at: closedIndex)
+        mentionedTabIds.remove(tabId)
         let wasActive = (activeTabId == tabId)
         if wasActive {
             // Prefer the tab to the left for "natural" rightward-close UX.
@@ -213,7 +281,16 @@ public final class ChatTabsModel {
         }
         persistTabs()
         if let onClose {
-            Task { await onClose(closed) }
+            // Await any in-flight acquire for this tab before releasing, so the
+            // registry refcount is settled first. Closing mid-acquire would
+            // otherwise let release run ahead of acquire, underflowing the
+            // count and leaking the channel's EventSub subscription.
+            let pendingOpen = openTasks[tabId]
+            openTasks[tabId] = nil
+            Task {
+                await pendingOpen?.value
+                await onClose(closed)
+            }
         }
     }
 }

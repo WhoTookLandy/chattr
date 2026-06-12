@@ -18,16 +18,27 @@ private let signposter = AppLogger.signposter("Features.ChatScreen")
 public struct ChatScreen: View {
     private let account: Account
     private let accountStore: AccountStore
-    private let channelId: String
-    private let channelLoginName: String
-    private let channelDisplayName: String
+
+    /// The channel this screen renders — the platform-qualified identity.
+    /// Taking the descriptor whole (instead of the previous three loose
+    /// String fields) keeps the platform tag attached and spares the
+    /// caller from destructuring a descriptor it already holds.
+    private let channel: ChannelDescriptor
+
+    // Conveniences so the body reads `channelLoginName` rather than
+    // `channel.channelLoginName` everywhere. Twitch-facing call sites
+    // (Helix, EventSub) take the bare `channelId`; storage keys take
+    // the composite `channel.id`.
+    private var channelId: String { channel.channelId }
+    private var channelLoginName: String { channel.channelLoginName }
+    private var channelDisplayName: String { channel.channelDisplayName }
 
     /// Per-tab chat state — owns the rendered `lines` and the session
     /// subscriptions. Replaces the previous `@State session` + `@State lines`
     /// pair plus the `for-await session.lines` loop. New messages arrive via
     /// the model's pub-sub subscriber callback, which appends to `lines` on
     /// MainActor (the model is `@MainActor @Observable`).
-    @State private var chatModel = TabChatModel()
+    @State private var chatModel = ChatTranscriptModel()
 
     @State private var errorMessage: String?
 
@@ -150,20 +161,16 @@ public struct ChatScreen: View {
     public init(
         account: Account,
         accountStore: AccountStore,
-        channelId: String,
-        channelLoginName: String,
-        channelDisplayName: String
+        channel: ChannelDescriptor
     ) {
         self.account = account
         self.accountStore = accountStore
-        self.channelId = channelId
-        self.channelLoginName = channelLoginName
-        self.channelDisplayName = channelDisplayName
+        self.channel = channel
         // Read the persisted draft once, here at construction. `State(initial-
         // Value:)` is the correct home for a value that only matters at first
         // mount — a `.task`-based seed would arrive AFTER `ComposeBar` has
         // already captured its initial draft, silently breaking restoration.
-        self._draftSeed = State(initialValue: DraftStorage.load(forChannelId: channelId))
+        self._draftSeed = State(initialValue: DraftStorage.load(forChannel: channel.id))
     }
 
     public var body: some View {
@@ -421,8 +428,8 @@ public struct ChatScreen: View {
             // pass was wasted UserDefaults work on the per-message hot path.
             seedDraft: draftSeed,
             onCancelReply: { chatModel.cancelReply() },
-            onDraftChange: { newDraft in
-                DraftStorage.save(forChannelId: channelId, text: newDraft)
+            onDraftChange: { [channelKey = channel.id] newDraft in
+                DraftStorage.save(forChannel: channelKey, text: newDraft)
             },
             // Captures the concrete EmoteIndex instance + globals dict
             // (resolved above), NOT @Environment — so it returns real
@@ -469,11 +476,11 @@ public struct ChatScreen: View {
             onRetry: { Task { await chatModel.retry(failedLineId: line.id) } },
             onReply: { chatModel.beginReply(to: line) },
             onViewThread: {
-                viewingThreadRootId = ThreadRootID(id: TabChatModel.threadRoot(of: line))
+                viewingThreadRootId = ThreadRootID(id: ChatTranscriptModel.threadRoot(of: line))
             },
             onDelete: (chatModel.currentUserCanModerate
                        && line.authorUserId != account.userId)
-                ? { Task { await chatModel.deleteMessage(line.id) } }
+                ? { Task { await chatModel.deleteMessage(withId: line.id) } }
                 : nil,
             onBlock: line.authorUserId == account.userId ? nil : {
                 Task {
@@ -599,6 +606,11 @@ public struct ChatScreen: View {
                     forAccountUserId: account.userId,
                     channelId: channelId
                 ),
+                // Composite draft key — the model clears the persisted
+                // draft under this key after a successful send. Passed
+                // from the descriptor here so the model never has to
+                // compose platform-qualified keys itself.
+                draftKey: channel.id,
                 // Hybrid mod detection: an async provider for the account's
                 // moderated-channel set (`/moderation/channels`, cached per
                 // account on the registry). attach fires it concurrently —

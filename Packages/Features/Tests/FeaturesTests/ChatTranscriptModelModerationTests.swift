@@ -8,7 +8,7 @@ import Channels
 /// the instant broadcaster check and the moderated-channels pre-seed
 /// (`moderatedChannelIds` provider). The badge-observation upgrade path
 /// lives in the private `apply(_:)` and stays untested here for the same
-/// reason noted in `TabChatModelReplyTests` — it's driven by
+/// reason noted in `ChatTranscriptModelReplyTests` — it's driven by
 /// `ChannelSession.ChannelEvent` and needs a visibility relaxation first.
 ///
 /// The `ChannelSession`s here are real but never `start()`ed, so nothing
@@ -16,9 +16,9 @@ import Channels
 /// members: `subscribe` registers a handler on the actor,
 /// `currentChatRestrictions()` reads a nil cache, and the chat-color
 /// fetch is fire-and-forget and swallows its offline failure.
-@Suite("TabChatModel moderation seeding")
+@Suite("ChatTranscriptModel moderation seeding")
 @MainActor
-struct TabChatModelModerationTests {
+struct ChatTranscriptModelModerationTests {
 
     /// Token store that holds nothing — keeps the offline `TwitchClient`
     /// away from the real Keychain during tests.
@@ -40,7 +40,7 @@ struct TabChatModelModerationTests {
 
     @Test("Broadcaster is seeded instantly at attach, no fetch involved")
     func broadcasterInstant() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         // accountUserId == channelId → the broadcaster check fires.
         let session = makeSession(channelId: "user-1", accountUserId: "user-1")
 
@@ -54,7 +54,7 @@ struct TabChatModelModerationTests {
 
     @Test("Channel in the moderated set → flag flips once the seed lands")
     func moderatedChannelSeeds() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         let session = makeSession(channelId: "chan-9", accountUserId: "user-1")
 
         await model.attach(
@@ -71,7 +71,7 @@ struct TabChatModelModerationTests {
 
     @Test("Channel NOT in the moderated set → flag stays false")
     func unmoderatedChannelStaysFalse() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         let session = makeSession(channelId: "chan-9", accountUserId: "user-1")
 
         await model.attach(
@@ -87,7 +87,7 @@ struct TabChatModelModerationTests {
 
     @Test("Fetch failure (empty set, the registry's degraded result) → flag stays false")
     func fetchFailureStaysFalse() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         let session = makeSession(channelId: "chan-9", accountUserId: "user-1")
 
         // `ChannelSessionRegistry.moderatedChannelIds` maps every fetch
@@ -107,7 +107,7 @@ struct TabChatModelModerationTests {
 
     @Test("Broadcaster short-circuits the seed — no task spawned even with a provider")
     func broadcasterSkipsSeed() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         let session = makeSession(channelId: "user-1", accountUserId: "user-1")
 
         await model.attach(
@@ -125,7 +125,7 @@ struct TabChatModelModerationTests {
 
     @Test("Live unmod downgrades the flag and fires the revocation hook")
     func liveUnmodDowngrades() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         // Broadcaster attach so the flag starts true without any fetch.
         let session = makeSession(channelId: "user-1", accountUserId: "user-1")
         let (hookFired, continuation) = AsyncStream.makeStream(of: Void.self)
@@ -150,7 +150,7 @@ struct TabChatModelModerationTests {
 
     @Test("Live mod event upgrades the flag mid-session")
     func liveModUpgrades() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         let session = makeSession(channelId: "chan-9", accountUserId: "user-1")
 
         await model.attach(sessions: [session], currentUserId: "user-1")
@@ -164,7 +164,7 @@ struct TabChatModelModerationTests {
 
     @Test("detach cancels an unresolved seed so it can't flip the flag late")
     func detachCancelsSeed() async {
-        let model = TabChatModel()
+        let model = ChatTranscriptModel()
         let session = makeSession(channelId: "chan-9", accountUserId: "user-1")
 
         // A provider that parks until cancellation, simulating a slow

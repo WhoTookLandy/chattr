@@ -94,7 +94,7 @@ public final class ChannelSessionRegistry {
     ///
     /// Entry lifetime: a successful fetch is cached for the registry's
     /// lifetime — being modded mid-run is covered by the badge-observation
-    /// upgrade in `TabChatModel.apply`, so staleness here only delays the
+    /// upgrade in `ChatTranscriptModel.apply`, so staleness here only delays the
     /// affordance, never breaks it. A FAILED fetch is evicted on completion
     /// so the next channel-open retries: failure is usually a pre-scope
     /// token (heals on re-sign-in, which can happen mid-run) or a transient
@@ -453,7 +453,7 @@ public final class ChannelSessionRegistry {
     /// `/moderation/moderators`: it needs only the signed-in user's own
     /// token (`user:read:moderated_channels` scope), not broadcaster auth.
     ///
-    /// `TabChatModel.attach` consults this (via the provider closure
+    /// `ChatTranscriptModel.attach` consults this (via the provider closure
     /// `ChatScreen` hands it) to show mod-only affordances the moment a
     /// channel opens, instead of waiting for the user's own message echo
     /// to carry a mod badge.
@@ -461,7 +461,7 @@ public final class ChannelSessionRegistry {
     /// Graceful degradation: any fetch error — most commonly unauthorized
     /// on accounts signed in before the scope was added — returns an empty
     /// set ("no pre-knowledge") and is NOT cached, so a later open retries.
-    /// The badge-observation upgrade path in `TabChatModel` still works, so
+    /// The badge-observation upgrade path in `ChatTranscriptModel` still works, so
     /// mod tools appear after the first sent message exactly as they did
     /// before this fetch existed.
     public func moderatedChannelIds(forAccountUserId accountUserId: String) async -> Set<String> {
@@ -509,7 +509,7 @@ public final class ChannelSessionRegistry {
     }
 
     /// Drops the account's cached moderated-channel set so the next
-    /// channel-open refetches it. Called (via `TabChatModel`'s
+    /// channel-open refetches it. Called (via `ChatTranscriptModel`'s
     /// `onModerationRevoked` hook) when a live `channel.moderate` event
     /// reports the account was unmodded — the cached set still names the
     /// channel, and without eviction a close-and-reopen would re-seed mod
@@ -684,6 +684,22 @@ public final class ChannelSessionRegistry {
 
     // MARK: - Helpers
 
+    /// Cache key for everything this registry owns per account × channel
+    /// (sessions, emote indexes, badge stores, line caches).
+    ///
+    /// ## Twitch-scoped until sessions are platform-abstracted
+    ///
+    /// `channelId` here is the BARE Twitch broadcaster id, not the
+    /// composite `ChannelDescriptor.ID` ("platform/channelId") that
+    /// platform-safe storage (e.g. `DraftStorage`) keys on. That's
+    /// deliberate for now: this whole registry is Twitch-coupled
+    /// (EventSub subscribe, Helix badge fetch), and acquire / release /
+    /// lookup all share THIS one key function — migrating only the
+    /// lookup half to composite keys would desync `release(...)`'s
+    /// cleanup and leak stores. When a second platform lands, sessions
+    /// get platform-abstracted and this key switches to
+    /// `ChannelDescriptor.ID` in the same change, keeping all keyed
+    /// paths in lockstep.
     private static func key(accountUserId: String, channelId: String) -> String {
         "\(accountUserId)/\(channelId)"
     }

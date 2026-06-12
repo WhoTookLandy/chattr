@@ -331,7 +331,7 @@ public enum Normalizer {
 
     /// Tokenize a plain string into word-level runs. Public entry point
     /// for callers that have raw text rather than a `ChatMessage` —
-    /// e.g. `TabChatModel`'s optimistic-send row.
+    /// e.g. `ChatTranscriptModel`'s optimistic-send row.
     public static func wordRuns(
         text: String,
         emoteSnapshot: [String: Emote] = [:]

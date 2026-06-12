@@ -119,7 +119,7 @@ struct ChatChangeContractTests {
     func mutateOne() {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("a")); _ = buf.takeChanges()
-        assertContract(&buf) { $0.mutate(id: "a") { $0.withDeletedPlaceholder() } }
+        assertContract(&buf) { $0.mutate(id: "a") { $0.markingDeleted() } }
         #expect(buf.lines.first?.kind == .deletedPlaceholder)
     }
 
@@ -127,7 +127,7 @@ struct ChatChangeContractTests {
     func mutateAll() {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("a")); buf.append(line("b")); _ = buf.takeChanges()
-        assertContract(&buf) { $0.mutateAll { $0.withDeletedPlaceholder() } }
+        assertContract(&buf) { $0.mutateAll { $0.markingDeleted() } }
         #expect(buf.lines.allSatisfy { $0.kind == .deletedPlaceholder })
     }
 
@@ -137,7 +137,7 @@ struct ChatChangeContractTests {
         buf.append(line("a", author: "alice"))
         buf.append(line("v", author: "villain"))
         _ = buf.takeChanges()
-        assertContract(&buf) { $0.mutateMatching(authorUserId: "villain") { $0.withDeletedPlaceholder() } }
+        assertContract(&buf) { $0.mutateMatching(authorUserId: "villain") { $0.markingDeleted() } }
         #expect(buf.line(id: "a")?.kind == .message)
         #expect(buf.line(id: "v")?.kind == .deletedPlaceholder)
     }
@@ -182,7 +182,7 @@ struct ChatChangeContractTests {
             case 0: step { $0.append(line("m\(i)")) }
             case 1: step { $0.append(line("s\(i)", author: "spammer")) }   // blocked
             case 2: step { _ = $0.replace(id: "m\(i - 2)", with: line("m\(i - 2)", "edit")) }
-            default: step { $0.mutate(id: "m\(i - 3)") { $0.withDeletedPlaceholder() } }
+            default: step { $0.mutate(id: "m\(i - 3)") { $0.markingDeleted() } }
             }
         }
         #expect(mirror == buf.lines)

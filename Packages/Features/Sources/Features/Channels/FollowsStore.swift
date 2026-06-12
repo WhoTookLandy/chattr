@@ -105,6 +105,14 @@ public final class FollowsStore {
     /// Reloads the Live list. Not cached — every call refetches. Drives
     /// `.task` on the Live view appearance + pull-to-refresh.
     public func refreshLive(account: Account, accountStore: AccountStore) async {
+        // Cancel + clear any enrichment tasks from a prior load before
+        // appending new ones. Without this, every Follows-tab visit appended
+        // a fresh batch of (completed) tasks to `enrichmentTasks` that were
+        // only ever cleared by `loadAll` — an unbounded accumulation that
+        // retained each task's captured Account/AccountStore. Mirrors loadAll.
+        for task in enrichmentTasks { task.cancel() }
+        enrichmentTasks = []
+
         liveLoadState = .loading
         liveErrorMessage = nil
 
@@ -142,7 +150,10 @@ public final class FollowsStore {
 
                 // Kick off profile enrichment for live channels not already cached.
                 let liveIds = page.data.map(\.userId)
-                let task = Task { await self.enrichProfiles(ids: liveIds, account: account, accountStore: accountStore) }
+                let task = Task { [weak self] in
+                    guard let self else { return }
+                    await self.enrichProfiles(ids: liveIds, account: account, accountStore: accountStore)
+                }
                 enrichmentTasks.append(task)
 
                 cursor = page.pagination?.cursor
@@ -271,7 +282,10 @@ public final class FollowsStore {
                 // Enrich profile images for this page. We DON'T do live-stream
                 // enrichment here anymore — refreshLive() handles that path.
                 let pageIds = page.data.map(\.broadcasterId)
-                let profileTask = Task { await self.enrichProfiles(ids: pageIds, account: account, accountStore: accountStore) }
+                let profileTask = Task { [weak self] in
+                    guard let self else { return }
+                    await self.enrichProfiles(ids: pageIds, account: account, accountStore: accountStore)
+                }
                 enrichmentTasks.append(profileTask)
 
                 cursor = page.pagination?.cursor
@@ -305,6 +319,11 @@ public final class FollowsStore {
             let users = try await accountStore.withTokenRefresh(for: account) {
                 try await client.api.fetchUsers(ids: missing)
             }
+            // Bail if cancelled while the request was in flight (account swap):
+            // the fetch can return *after* loadAll has cancelled us and wiped
+            // userProfiles, and writing here would re-populate the new account's
+            // dict with the previous account's profiles.
+            guard !Task.isCancelled else { return }
             for user in users {
                 userProfiles[user.id] = user
             }

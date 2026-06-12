@@ -102,7 +102,7 @@ public struct ChatAppearance: Equatable, Sendable {
 
     /// How many messages each chat retains, stored separately from the
     /// appearance struct because its consumers are the data layer
-    /// (`ChannelSession`'s ring, `TabChatModel`'s buffer), not row
+    /// (`ChannelSession`'s ring, `ChatTranscriptModel`'s buffer), not row
     /// rendering. Lives here anyway so all chat-preference keys share one
     /// namespace and one settings screen.
     public static let chatHistoryLinesKey = "chattr.chatAppearance.chatHistoryLines"

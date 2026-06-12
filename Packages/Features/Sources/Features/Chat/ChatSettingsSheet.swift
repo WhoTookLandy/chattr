@@ -6,7 +6,7 @@ import ChatModel
 ///
 /// Two sections:
 ///   - **Chat Modes** — emote-only / subscribers-only / followers-only /
-///     slow mode, PATCHed to Helix via `TabChatModel.updateChatSettings`.
+///     slow mode, PATCHed to Helix via `ChatTranscriptModel.updateChatSettings`.
 ///     Shown ONLY when `chatModel.currentUserCanModerate` (broadcaster
 ///     detected at attach, moderator detected from own-message badges).
 ///     Twitch enforces the same gate server-side, so the UI gate is
@@ -29,7 +29,7 @@ import ChatModel
 /// and makes error-revert silent (revert lands the local value back on
 /// the authoritative one → guard skips the would-be PATCH).
 struct ChatSettingsSheet: View {
-    let chatModel: TabChatModel
+    let chatModel: ChatTranscriptModel
     let channelLoginName: String
     /// Signed-in user's login, forwarded to `ChatAppearanceScreen` for
     /// its "@you" mention preview row.

@@ -194,12 +194,13 @@ struct AddChannelView: View {
     /// broadcaster's profile image (per Twitch docs), so it doubles as
     /// the tab-strip avatar.
     private func open(_ channel: SearchChannel) {
-        openChannel?(
+        openChannel?(ChannelDescriptor(
+            platform: .twitch,
             channelId: channel.id,
-            login: channel.broadcasterLogin,
-            displayName: channel.displayName,
+            channelLoginName: channel.broadcasterLogin,
+            channelDisplayName: channel.displayName,
             profileImageURL: URL(string: channel.thumbnailUrl)
-        )
+        ))
         dismiss()
     }
 
@@ -217,12 +218,13 @@ struct AddChannelView: View {
             let user = try await accountStore.withTokenRefresh(for: account) { [login] in
                 try await client.api.fetchUser(login: login)
             }
-            openChannel?(
+            openChannel?(ChannelDescriptor(
+                platform: .twitch,
                 channelId: user.id,
-                login: user.login,
-                displayName: user.displayName,
+                channelLoginName: user.login,
+                channelDisplayName: user.displayName,
                 profileImageURL: URL(string: user.profileImageUrl)
-            )
+            ))
             dismiss()
         } catch {
             logger.warning("Manual channel resolve failed for \(login, privacy: .public): \(error.localizedDescription)")

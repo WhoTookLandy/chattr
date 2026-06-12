@@ -179,7 +179,7 @@ struct ChannelSessionResyncTests {
 
     /// Real but never-`start()`ed session — the injected `fetchBackfill`
     /// keeps the resync path entirely offline (same NullTokenStore pattern
-    /// as TabChatModelModerationTests).
+    /// as ChatTranscriptModelModerationTests).
     private func makeSession(
         recorder: Recorder,
         fetched: [ChatMessage]

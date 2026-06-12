@@ -45,7 +45,7 @@ struct ThreadView: View {
     // any wrapper to be observed — `let` is correct since ThreadView
     // never reassigns it, and dropping @Bindable removes the false
     // "this view uses bindings" signal.
-    let chatModel: TabChatModel
+    let chatModel: ChatTranscriptModel
     let badgeStore: ChatBadgeStore?
     let channelLoginName: String
     let channelDisplayName: String
@@ -60,8 +60,8 @@ struct ThreadView: View {
         // Reply target for the thread compose bar — latest message in
         // the thread, built via the centralized factory so it matches
         // the main compose bar's reply chip formatting exactly.
-        let threadReplyTarget: TabChatModel.ReplyContext? = threadLines.last.map {
-            TabChatModel.replyContext(for: $0)
+        let threadReplyTarget: ChatTranscriptModel.ReplyContext? = threadLines.last.map {
+            ChatTranscriptModel.replyContext(for: $0)
         }
         NavigationStack {
             VStack(spacing: 0) {
@@ -170,7 +170,7 @@ struct ThreadView: View {
 struct ThreadComposeBar: View {
     let channelLoginName: String
     let channelDisplayName: String
-    let replyTarget: TabChatModel.ReplyContext?
+    let replyTarget: ChatTranscriptModel.ReplyContext?
     let onSend: @MainActor (String) async -> Void
 
     @State private var composeText: String = ""

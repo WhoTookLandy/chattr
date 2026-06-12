@@ -11,7 +11,7 @@
 
 	<!-- Required-reason API declarations (iOS 17+ App Store requirement).
 	     Only APIs actually used by chattr's first-party code + local SPM
-	     packages are listed. Scan source: only UserDefaults is used. -->
+	     packages are listed. Scan source: UserDefaults and file-timestamp. -->
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
 		<dict>
@@ -25,6 +25,19 @@
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- File timestamps: Core/JSONDiskCache reads .contentModificationDate
+			     (via resourceValues / contentsOfDirectory) on its OWN cache files
+			     in the app container to enforce TTL expiry on cached emote
+			     metadata. Reason C617.1 = "access timestamps of files inside the
+			     app's container." -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
 			</array>
 		</dict>
 	</array>

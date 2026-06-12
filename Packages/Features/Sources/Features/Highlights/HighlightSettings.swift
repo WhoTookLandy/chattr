@@ -20,7 +20,7 @@ import Foundation
 /// ## Reactivity
 ///
 /// `keywords` is read by `ChatScreen` at attach time (passed into
-/// `TabChatModel.attach(highlightKeywords:)`). Changing keywords
+/// `ChatTranscriptModel.attach(highlightKeywords:)`). Changing keywords
 /// mid-session doesn't re-attach already-open chats — the new list
 /// applies the next time a chat attaches (channel reopen / app
 /// relaunch). Acceptable for MVP; keywords are typically set once.

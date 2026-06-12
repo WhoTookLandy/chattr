@@ -28,7 +28,7 @@ import Foundation
 /// the emote table loaded kept their emotes as plain text for the tab's
 /// whole life; now the version bump re-normalizes them on the next prime.
 ///
-/// `@MainActor` because both writers (`TabChatModel.ingest`, on the live
+/// `@MainActor` because both writers (`ChatTranscriptModel.ingest`, on the live
 /// path) and the owner (`ChannelSessionRegistry`) are main-actor isolated.
 @MainActor
 public final class NormalizedLineCache {

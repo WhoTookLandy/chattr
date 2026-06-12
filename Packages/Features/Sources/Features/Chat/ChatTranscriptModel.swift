@@ -8,7 +8,7 @@ import EmoteSources
 import Core
 import os
 
-private let logger = AppLogger.make("Features.TabChatModel")
+private let logger = AppLogger.make("Features.ChatTranscriptModel")
 
 /// Per-tab message store. Subscribes to one or more `ChannelSession`s and
 /// surfaces a unified, observable `lines` array for `ChatScreen` to render.
@@ -36,7 +36,7 @@ private let logger = AppLogger.make("Features.TabChatModel")
 /// (cheap in practice — chat throughput is ~tens of messages/sec at peak).
 @MainActor
 @Observable
-public final class TabChatModel {
+public final class ChatTranscriptModel {
 
     /// Three-state attach lifecycle for ChatScreen's empty-state UI.
     /// `Equatable` so the `@Observable` macro's generated setter can
@@ -494,12 +494,18 @@ public final class TabChatModel {
         highlightKeywords: [String] = [],
         lineCap: Int = 500,
         lineCache: NormalizedLineCache? = nil,
+        // The composite `ChannelDescriptor.ID` used to clear the persisted
+        // draft after a successful send. Passed in by the view (which owns
+        // the descriptor) rather than derived from the session's bare
+        // channelId — the model shouldn't compose platform-qualified keys
+        // itself. Empty (the default, used by tests) skips draft clearing.
+        draftKey: ChannelDescriptor.ID = "",
         moderatedChannelIds: (@Sendable () async -> Set<String>)? = nil,
         onModerationRevoked: (@Sendable () async -> Void)? = nil
     ) async {
         // Synchronous re-entry guard — must precede any `await`.
         guard !isAttaching else {
-            logger.info("TabChatModel attach skipped — already in flight")
+            logger.info("ChatTranscriptModel attach skipped — already in flight")
             return
         }
         isAttaching = true
@@ -552,15 +558,13 @@ public final class TabChatModel {
             combined.append(contentsOf: snapshot)
         }
 
-        // Snapshot chat restrictions + capture the channel id used by
-        // `send(...)` to clear the persisted draft on successful send.
-        // Single-channel-per-tab MVP — we use the first session's id;
+        // Stash the caller-provided draft key for `send(...)` to clear the
+        // persisted draft on successful send. Single-channel-per-tab MVP;
         // multi-channel will need a per-channel draft mapping.
+        self.draftKey = draftKey
+
         if let firstSession = sessions.first {
             chatRestrictions = await firstSession.currentChatRestrictions()
-            // channelId is nonisolated on ChannelSession — no await
-            // hop needed for this set-once property.
-            draftStorageChannelId = firstSession.channelId
             // Instant broadcaster check — `isAccountBroadcaster` is
             // nonisolated and just compares the two ids. For broadcasters
             // this gives us mod-power before any chat has happened.
@@ -624,7 +628,7 @@ public final class TabChatModel {
         }
         publishPending()
         attachState = .attached
-        logger.info("TabChatModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
+        logger.info("ChatTranscriptModel attached to \(sessions.count) session(s), primed with \(self.lines.count) line(s)")
     }
 
     /// The single funnel for "we just learned the user can moderate here."
@@ -672,7 +676,7 @@ public final class TabChatModel {
         for sub in toRemove {
             await sub.session.unsubscribe(sub.token)
         }
-        logger.info("TabChatModel detached \(toRemove.count) subscription(s)")
+        logger.info("ChatTranscriptModel detached \(toRemove.count) subscription(s)")
     }
 
     // MARK: - Send
@@ -703,11 +707,13 @@ public final class TabChatModel {
     ///
     /// Returns nothing — observable side effects (`lines`, `sendError`)
     /// drive the UI.
-    /// Channel id used by `send(...)` to clear the persisted draft once
-    /// a send commits. Set at attach time from the first session's
-    /// channelId (single-channel-per-tab MVP — multi-channel sends will
-    /// need a per-channel draft mapping, deferred until that ships).
-    private var draftStorageChannelId: String = ""
+    /// Composite `ChannelDescriptor.ID` used by `send(...)` to clear the
+    /// persisted draft once a send commits. Provided by the view at
+    /// attach time (single-channel-per-tab MVP — multi-channel sends
+    /// will need a per-channel draft mapping, deferred until that
+    /// ships). Empty when no caller supplied one (tests) — draft
+    /// clearing is skipped.
+    private var draftKey: ChannelDescriptor.ID = ""
 
     public func send(text: String, replyOverride: ReplyContext? = nil) async {
         // Trim here too (in addition to ChannelSession.send) — we don't
@@ -776,8 +782,8 @@ public final class TabChatModel {
         // long-press the failed row → Retry (which re-sends the
         // captured `retryText`) — they don't need the draft restored
         // for that path.
-        if !draftStorageChannelId.isEmpty {
-            DraftStorage.clear(forChannelId: draftStorageChannelId)
+        if !draftKey.isEmpty {
+            DraftStorage.clear(forChannel: draftKey)
         }
 
         let pendingId = "pending-\(UUID().uuidString)"
@@ -1053,7 +1059,7 @@ public final class TabChatModel {
     /// flips the row to `.deletedPlaceholder`. The visual update
     /// therefore flows through the SAME path as a moderator's web-UI
     /// delete — no special-case rendering needed.
-    public func deleteMessage(_ messageId: String) async {
+    public func deleteMessage(withId messageId: String) async {
         guard let session = subscriptions.first?.session else {
             sendError = "Not connected to chat."
             return
@@ -1207,7 +1213,7 @@ public final class TabChatModel {
     /// emotes correctly. Re-normalizing pre-load messages is deferred to
     /// a future iteration.
     // Internal (not private) so FeaturesTests can drive event application
-    // directly — the visibility relaxation TabChatModelReplyTests' header
+    // directly — the visibility relaxation ChatTranscriptModelReplyTests' header
     // note anticipated. Production callers remain the subscribe handlers
     // registered in `attach`.
     func apply(_ event: ChannelSession.ChannelEvent) {
@@ -1242,7 +1248,7 @@ public final class TabChatModel {
                     Task { await onModerationRevoked() }
                 }
             }
-            logger.info("Mod status changed mid-session for #\(self.draftStorageChannelId, privacy: .public): canModerate=\(canModerate)")
+            logger.info("Mod status changed mid-session for #\(self.draftKey, privacy: .public): canModerate=\(canModerate)")
             return
         }
 
@@ -1277,7 +1283,7 @@ public final class TabChatModel {
                 }
                 if hasModBadge {
                     promoteToModerator(session: subscriptions.first?.session)
-                    logger.info("Detected mod status from echoed badges for #\(self.draftStorageChannelId, privacy: .public)")
+                    logger.info("Detected mod status from echoed badges for #\(self.draftKey, privacy: .public)")
                 }
             }
 
@@ -1500,19 +1506,19 @@ public final class TabChatModel {
             // a vanishing line is disorienting mid-scroll, and keeping
             // it as a strikethrough is the Twitch web convention. A no-op
             // when the target already aged out of the buffer.
-            buffer.mutate(id: targetMessageId) { $0.withDeletedPlaceholder() }
+            buffer.mutate(id: targetMessageId) { $0.markingDeleted() }
 
         case .chatCleared:
             // Flip every existing line to deletedPlaceholder. Future
             // messages still arrive normally — this only retroactively
             // hides the scrollback.
-            buffer.mutateAll { $0.withDeletedPlaceholder() }
+            buffer.mutateAll { $0.markingDeleted() }
 
         case .messagesClearedFromUser(let targetUserId):
             // Flip every line whose author is the timed-out/banned user.
             // Required field `authorUserId` on ChatLine is what makes
             // this work — without it we'd have no key to match against.
-            buffer.mutateMatching(authorUserId: targetUserId) { $0.withDeletedPlaceholder() }
+            buffer.mutateMatching(authorUserId: targetUserId) { $0.markingDeleted() }
 
         case .newMessagesDivider(let id, let timestamp):
             // The red "New" rule. Pure presentation — empty author, empty

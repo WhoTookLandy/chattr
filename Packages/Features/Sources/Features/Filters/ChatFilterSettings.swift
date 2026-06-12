@@ -4,7 +4,7 @@ import Foundation
 /// (`!so`, `!drops`, …) and messages from well-known chat bots.
 ///
 /// Same shape and lifecycle as `HighlightSettings`: static accessors over
-/// `UserDefaults`, read once by `TabChatModel.attach(...)` and applied to
+/// `UserDefaults`, read once by `ChatTranscriptModel.attach(...)` and applied to
 /// every message that channel session ingests afterwards — live arrivals
 /// AND re-primed history. Changes apply the next time a chat attaches
 /// (reopen / app relaunch); the Filters screen's footer says so.

@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import TwitchKit
+import Core
 
 /// Sample data for Home previews. `TwitchStream` / `TwitchUser` are
 /// Decodable-only (no public memberwise init — they mirror Helix wire
@@ -83,7 +84,6 @@ enum HomePreviewData {
             userProfiles: [:],
             liveLoadState: .loaded,
             openTabs: HomePreviewData.openTabs,
-            followCount: 87,
             onStreamTap: { _ in },
             onResumeChat: { _ in }
         )
@@ -99,7 +99,6 @@ enum HomePreviewData {
             userProfiles: [:],
             liveLoadState: .loaded,
             openTabs: [],
-            followCount: 87,
             onStreamTap: { _ in },
             onResumeChat: { _ in }
         )
@@ -115,7 +114,6 @@ enum HomePreviewData {
             userProfiles: [:],
             liveLoadState: .loading,
             openTabs: HomePreviewData.openTabs,
-            followCount: nil,
             onStreamTap: { _ in },
             onResumeChat: { _ in }
         )
