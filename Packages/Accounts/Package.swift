@@ -11,7 +11,7 @@ let package = Package(
     dependencies: [
         .package(path: "../Core"),
         .package(path: "../DesignSystem"),
-        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.2"),
+        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.3"),
     ],
     targets: [
         .target(

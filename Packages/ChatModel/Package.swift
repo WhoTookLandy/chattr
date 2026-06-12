@@ -33,7 +33,7 @@ let package = Package(
         .package(path: "../EmoteSources"),
         // TwitchKit pulled in transitively via... no, it's not — we need it directly.
         // ChatModel needs TwitchKit.ChatMessage as input to Normalizer.
-        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.2"),
+        .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.3"),
     ],
     targets: [
         .target(
