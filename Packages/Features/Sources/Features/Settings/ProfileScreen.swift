@@ -34,7 +34,12 @@ public struct ProfileScreen: View {
     /// Twitch client id, used by the account switcher's "Add Account".
     private let clientId: String
 
-    @AppStorage(AppearanceMode.storageKey) private var appearanceModeRaw: String = AppearanceMode.system.rawValue
+    /// Stored as the enum directly — `AppearanceMode` is `RawRepresentable`
+    /// over `String`, which `@AppStorage` supports natively (same pattern as
+    /// `ChatAppearanceScreen`'s `loginNameDisplay`). A drifted/unknown raw
+    /// value falls back to the `.system` default, so the explicit
+    /// `?? .system` guard the old `String`-backed mirror needed is gone.
+    @AppStorage(AppearanceMode.storageKey) private var appearanceMode: AppearanceMode = .system
     /// Whether visiting the Chats tab re-pushes the chat that was open
     /// when the scene was torn down. Read by ChatTabsScreen's scene
     /// restoration; default on (resume) matches pre-toggle behavior.
@@ -82,13 +87,6 @@ public struct ProfileScreen: View {
         self.account = account
         self.accountStore = accountStore
         self.clientId = clientId
-    }
-
-    /// Parsed appearance mode with safe fallback when the raw value drifts
-    /// (e.g. a future build adds a new case, the user downgrades). Fallback
-    /// to `.system` is the safest default — never traps the user.
-    private var appearanceMode: AppearanceMode {
-        AppearanceMode(rawValue: appearanceModeRaw) ?? .system
     }
 
     public var body: some View {
@@ -199,10 +197,7 @@ public struct ProfileScreen: View {
             // content. Theme stays inline (three exclusive options;
             // one-tap beats a page round-trip).
             Section {
-                Picker(selection: Binding(
-                    get: { appearanceMode },
-                    set: { appearanceModeRaw = $0.rawValue }
-                )) {
+                Picker(selection: $appearanceMode) {
                     ForEach(AppearanceMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }

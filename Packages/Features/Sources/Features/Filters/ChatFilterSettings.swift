@@ -14,8 +14,13 @@ import Foundation
 /// count toward unread state. The user's own messages are always exempt
 /// (hiding your own "!drops" the moment you send it reads as a bug).
 public enum ChatFilterSettings {
-    private static let hideCommandsKey = "chattr.filters.hideCommands"
-    private static let hideBotsKey = "chattr.filters.hideBots"
+    // Internal (not private) so the Filters screen can bind to these
+    // directly via `@AppStorage(...)` instead of closure `Binding`s. The
+    // `hideCommands()` / `hideBots()` accessors below stay the canonical path
+    // for `ChatTranscriptModel.attach`; both touch the same
+    // `UserDefaults.standard` keys, so they never disagree.
+    static let hideCommandsKey = "chattr.filters.hideCommands"
+    static let hideBotsKey = "chattr.filters.hideBots"
 
     // MARK: - Toggles
 

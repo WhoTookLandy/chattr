@@ -29,23 +29,19 @@ struct HighlightKeywordsScreen: View {
     @State private var newKeyword: String = ""
     @FocusState private var addFieldFocused: Bool
 
-    /// Mirror of `HighlightSettings.soundEnabled()`, seeded at init so the
-    /// toggle reflects the persisted value. Writes go through both this
-    /// @State (instant UI) AND `HighlightSettings.setSoundEnabled`
-    /// (persistence) — the key lives in HighlightSettings' namespace, not
-    /// a SwiftUI-owned default, so @AppStorage doesn't apply.
-    @State private var soundEnabled: Bool = HighlightSettings.soundEnabled()
+    /// Bound straight to the persisted key via @AppStorage. Defaults to `true`
+    /// — matching `HighlightSettings.soundEnabled()`, which reads the same key
+    /// (unset → on) for `HighlightSoundPlayer`. The projected `$soundEnabled`
+    /// binding replaces the previous @State mirror + closure `Binding` +
+    /// manual `setSoundEnabled` write-through. (`keywords` stays @State below:
+    /// @AppStorage can't hold a `[String]`, so that list keeps its
+    /// load-once-then-persist-on-edit shape.)
+    @AppStorage(HighlightSettings.soundEnabledKey) private var soundEnabled = true
 
     var body: some View {
         Form {
             Section {
-                Toggle(isOn: Binding(
-                    get: { soundEnabled },
-                    set: {
-                        soundEnabled = $0
-                        HighlightSettings.setSoundEnabled($0)
-                    }
-                )) {
+                Toggle(isOn: $soundEnabled) {
                     Label("Highlight Sound", systemImage: "speaker.wave.2.fill")
                 }
             } footer: {

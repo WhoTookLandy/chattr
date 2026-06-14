@@ -29,7 +29,13 @@ import Foundation
 public enum HighlightSettings {
 
     private static let keywordsKey = "chattr.highlight.keywords"
-    private static let soundEnabledKey = "chattr.highlight.soundEnabled"
+    /// Internal (not private) so the settings screen can bind to it directly
+    /// via `@AppStorage(HighlightSettings.soundEnabledKey)` instead of a
+    /// closure `Binding`. The `soundEnabled()` / `setSoundEnabled(_:)`
+    /// accessors below stay the canonical path for non-view readers
+    /// (`HighlightSoundPlayer`); both touch this same `UserDefaults.standard`
+    /// key, so they never disagree.
+    static let soundEnabledKey = "chattr.highlight.soundEnabled"
 
     // MARK: - Keywords
 

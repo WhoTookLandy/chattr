@@ -21,12 +21,13 @@ private let logger = AppLogger.make("Features.AppShell")
 /// switcher); primary destinations are tabs.
 ///
 /// AppShell owns:
-///   - `selectedTab`: which top-level tab is visible. `openChannel` and
-///     Home's resume-chat action write `.chats` here so "tap a channel
-///     anywhere → land in its chat" works from every tab.
-///   - `chatTabsModel`: the open-channel tab state (which channels are open,
-///     which is active), injected via `\.chatTabs` and surfaced in the
-///     chat header's switcher.
+///   - `navigation`: an `@Observable` holding `selectedTab` (which top-level
+///     tab is visible) and `chatTabs` (the open-channel tab state). The
+///     open-channel / resume-chat / go-home intents are methods on it, so the
+///     three "switch to the Chats tab" call sites share one definition.
+///     Injected by identity, which keeps `\.openChannel` a stable environment
+///     value (see `OpenChannelAction`). `chatTabs` is also injected via
+///     `\.chatTabs` and surfaced in the chat header's switcher.
 ///
 /// It also injects the `\.openChannel` action (open a channel as a new chat
 /// tab — used by Home, Following, and Search row taps) and, in a single
@@ -45,8 +46,7 @@ public struct AppShell: View {
         case home, chats, you, search
     }
 
-    @State private var selectedTab: AppTab = .home
-    @State private var chatTabsModel = ChatTabsModel()
+    @State private var navigation = AppNavigation()
 
     /// Subscription tokens for the per-tab mention watchers installed in
     /// `onOpen`, keyed by tab id, one entry per channel in the tab. Held in
@@ -70,22 +70,20 @@ public struct AppShell: View {
     }
 
     public var body: some View {
-        TabView(selection: $selectedTab) {
+        @Bindable var navigation = navigation
+        TabView(selection: $navigation.selectedTab) {
             Tab("Home", systemImage: "house", value: AppTab.home) {
                 HomeScreen(
                     account: account,
                     accountStore: accountStore,
-                    onResumeChat: { tab in
-                        chatTabsModel.activeTabId = tab.id
-                        selectedTab = .chats
-                    }
+                    onResumeChat: { tab in navigation.resumeChat(tab) }
                 )
             }
             Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: AppTab.chats) {
                 ChatTabsScreen(
                     account: account,
                     accountStore: accountStore,
-                    goHome: { selectedTab = .home }
+                    goHome: { navigation.goHome() }
                 )
             }
             Tab("You", systemImage: "person.crop.circle", value: AppTab.you) {
@@ -104,12 +102,11 @@ public struct AppShell: View {
             }
         }
         .chatTabBarMinimize()
-        .environment(\.chatTabs, chatTabsModel)
-        .environment(\.openChannel, OpenChannelAction { descriptor in
-            chatTabsModel.open(channel: descriptor)
-            // Land the user in the chat they just opened, from any tab.
-            selectedTab = .chats
-        })
+        .environment(\.chatTabs, navigation.chatTabs)
+        // Injected by identity: `OpenChannelAction` stores the stable
+        // `navigation` reference (not a per-body closure), so this env value
+        // compares equal across body passes and doesn't churn its readers.
+        .environment(\.openChannel, OpenChannelAction(navigation))
         // Single appearance task that does, in this exact order:
         //
         //   1. Wire `onOpen` / `onClose` on the ChatTabsModel — these
@@ -152,6 +149,11 @@ public struct AppShell: View {
         // boundary. `onClose` captures `accountUserId` alone (String) for
         // the same reason but at the value-type level.
         .task {
+            // The open-channel tab state lives on `navigation`; bind it once
+            // so the wiring below reads the same way it did when ChatTabsModel
+            // was a direct `@State`.
+            let chatTabs = navigation.chatTabs
+
             // 1. Wire callbacks.
             //
             // Capture stable Strings (`userId`, `login`) rather than the
@@ -161,8 +163,8 @@ public struct AppShell: View {
             // (no `weak` possible on `@Model`) and create undefined
             // behavior if multi-account/sign-out ever invalidates the
             // SwiftData context. Matches the existing `onClose` shape.
-            chatTabsModel.onOpen = {
-                [weak channelSessionRegistry, chatTabsModel, mentionWatchTokens,
+            chatTabs.onOpen = {
+                [weak channelSessionRegistry, chatTabs, mentionWatchTokens,
                  accountUserId = account.userId,
                  accountLogin = account.login] tab in
                 guard let registry = channelSessionRegistry else { return }
@@ -184,7 +186,7 @@ public struct AppShell: View {
                                   message.chatterUserId != accountUserId,
                                   ChatTabsModel.containsMention(of: accountLogin, in: message.message.text)
                             else { return }
-                            await chatTabsModel.markMention(tabId: tabId)
+                            await chatTabs.markMention(tabId: tabId)
                         }
                         mentionWatchTokens.byTab[tab.id, default: []]
                             .append((channelId: channel.channelId, token: token))
@@ -200,7 +202,7 @@ public struct AppShell: View {
                     }
                 }
             }
-            chatTabsModel.onClose = {
+            chatTabs.onClose = {
                 [weak channelSessionRegistry, mentionWatchTokens,
                  accountUserId = account.userId,
                  accountLogin = account.login] tab in
@@ -231,7 +233,7 @@ public struct AppShell: View {
             //    an init parameter — `@Environment(\.modelContext)` is
             //    the canonical SwiftUI accessor.
             let persistence = TabPersistence(modelContainer: modelContext.container)
-            chatTabsModel.persistence = persistence
+            chatTabs.persistence = persistence
 
             // 3. Hydrate. This fires `onOpen` for each restored tab in
             //    order, which acquires sessions in the registry. The
@@ -239,9 +241,49 @@ public struct AppShell: View {
             //    inside each acquire — the UI shows the restored tab
             //    pills immediately, and messages start flowing in the
             //    chat panel as soon as each subscription confirms.
-            chatTabsModel.hydrateFromPersistence()
+            chatTabs.hydrateFromPersistence()
             logger.info("AppShell wired tab callbacks + persistence; hydration kicked off")
         }
+    }
+}
+
+/// Top-level navigation state for a signed-in user: which tab is showing
+/// (`selectedTab`) and the open-channel tab state (`chatTabs`). A reference
+/// type so it can be injected into the environment by identity — that's what
+/// keeps `\.openChannel` (which stores this model, see `OpenChannelAction`) a
+/// stable environment value across `AppShell.body` re-evaluations.
+///
+/// The three "switch to the Chats tab" intents — opening a channel, resuming
+/// a chat from Home, and the empty-state "go Home" — are methods here so the
+/// `selectedTab` write lives in one place instead of being duplicated at each
+/// call site.
+@MainActor
+@Observable
+final class AppNavigation {
+    /// Which top-level tab is visible.
+    var selectedTab: AppShell.AppTab = .home
+
+    /// Open-channel tab state (which channels are open, which is active).
+    /// Owned here so navigation state has a single home; injected separately
+    /// via `\.chatTabs` for the chat header's switcher.
+    let chatTabs = ChatTabsModel()
+
+    /// Open `channel` as a chat tab and land the user in the Chats tab —
+    /// "tap a channel anywhere → land in its chat," from any tab.
+    func openChannel(_ channel: ChannelDescriptor) {
+        chatTabs.open(channel: channel)
+        selectedTab = .chats
+    }
+
+    /// Re-focus an already-open tab (Home's resume-chat row) and show Chats.
+    func resumeChat(_ tab: ChatTab) {
+        chatTabs.activeTabId = tab.id
+        selectedTab = .chats
+    }
+
+    /// Return to Home (the Chats empty-state CTA when nothing is open).
+    func goHome() {
+        selectedTab = .home
     }
 }
 

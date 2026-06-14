@@ -5,18 +5,18 @@ import SwiftUI
 /// `ChatFilterSettings`; `ChatTranscriptModel` reads the values at attach.
 struct ChatFiltersScreen: View {
 
-    /// Working copies seeded from persisted values (HighlightSettings
-    /// pattern — the keys live in ChatFilterSettings' namespace).
-    @State private var hideCommands: Bool = ChatFilterSettings.hideCommands()
-    @State private var hideBots: Bool = ChatFilterSettings.hideBots()
+    // Bind straight to the persisted keys via @AppStorage. These default to
+    // `false` (matching `ChatFilterSettings.hideCommands()/hideBots()`, which
+    // read the same keys for `ChatTranscriptModel.attach`), and the projected
+    // `$` bindings replace the previous closure `Binding(get:set:)` mirrors —
+    // no per-body closure allocation, no manual setX write-through.
+    @AppStorage(ChatFilterSettings.hideCommandsKey) private var hideCommands = false
+    @AppStorage(ChatFilterSettings.hideBotsKey) private var hideBots = false
 
     var body: some View {
         Form {
             Section {
-                Toggle(isOn: Binding(
-                    get: { hideCommands },
-                    set: { hideCommands = $0; ChatFilterSettings.setHideCommands($0) }
-                )) {
+                Toggle(isOn: $hideCommands) {
                     Label("Hide Commands", systemImage: "exclamationmark.circle")
                 }
             } footer: {
@@ -24,10 +24,7 @@ struct ChatFiltersScreen: View {
             }
 
             Section {
-                Toggle(isOn: Binding(
-                    get: { hideBots },
-                    set: { hideBots = $0; ChatFilterSettings.setHideBots($0) }
-                )) {
+                Toggle(isOn: $hideBots) {
                     Label("Hide Known Bots", systemImage: "cpu")
                 }
             } footer: {
