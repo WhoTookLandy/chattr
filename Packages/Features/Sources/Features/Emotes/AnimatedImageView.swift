@@ -54,7 +54,6 @@ struct AnimatedImageView<Placeholder: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var decoded: DecodedAnimation?
-    @State private var failed = false
 
     var body: some View {
         content
@@ -111,7 +110,6 @@ struct AnimatedImageView<Placeholder: View>: View {
     private func load() async {
         // Reset for a new URL (id-keyed .task re-runs on url change).
         decoded = nil
-        failed = false
         guard let url else { return }
 
         // Cache hit: skip BOTH the network/disk fetch and the frame decode.
@@ -130,19 +128,21 @@ struct AnimatedImageView<Placeholder: View>: View {
                 DecodedAnimation(data: data)
             }.value
             guard !Task.isCancelled else { return }
+            // A nil result means the bytes weren't decodable as an animation;
+            // leave `decoded` nil so the caller's placeholder (the emote name)
+            // stays — the same fallback the loading state already shows. There
+            // is no distinct error treatment, so we don't track a failure flag.
             if let result {
                 DecodedAnimationCache.shared.store(result, for: url)
                 decoded = result
-            } else {
-                failed = true
             }
         } catch {
             // A url change or view teardown cancels the `.task(id:)`, which
             // cancels the in-flight pipeline fetch — that's expected churn,
-            // not a real failure, so don't flip to the error state.
+            // not a real failure. Either way `decoded` stays nil and the
+            // placeholder remains; nothing to record.
             guard !Task.isCancelled else { return }
             logger.debug("Animated decode load failed for \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            failed = true
         }
     }
 }
