@@ -1,5 +1,6 @@
-import SwiftUI
 import Channels
+import DesignSystem
+import SwiftUI
 
 // MARK: - ComposeBar
 
@@ -46,11 +47,6 @@ struct ComposeBar: View {
     /// Builds the emote-picker sections on demand (when the emote button
     /// is tapped) so we don't recompute them on every body eval.
     let emoteSectionsProvider: () -> [EmoteSection]
-    /// Opens the in-chat settings sheet. Lives in the compose bar's
-    /// trailing slot, time-shared with Send: gear while the draft is
-    /// empty, send button once there's text (Twitch-native pattern —
-    /// the slot is never wasted on a no-op send button).
-    let onOpenSettings: () -> Void
     let onSend: @MainActor (String) async -> Void
 
     @State private var composeText: String
@@ -77,7 +73,6 @@ struct ComposeBar: View {
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
         emoteSectionsProvider: @escaping () -> [EmoteSection],
-        onOpenSettings: @escaping () -> Void,
         onSend: @escaping @MainActor (String) async -> Void
     ) {
         self.channelLoginName = channelLoginName
@@ -87,7 +82,6 @@ struct ComposeBar: View {
         self.onCancelReply = onCancelReply
         self.onDraftChange = onDraftChange
         self.emoteSectionsProvider = emoteSectionsProvider
-        self.onOpenSettings = onOpenSettings
         self.onSend = onSend
         self._composeText = State(initialValue: seedDraft)
     }
@@ -270,35 +264,28 @@ struct ComposeBar: View {
     }
 
     /// True when the draft has at least one non-whitespace character.
-    /// Drives the trailing-slot swap: settings gear when false, send
-    /// button when true. (Send clears `composeText` synchronously at
-    /// send-start, so the slot reverts to the gear the instant a send
-    /// is committed — no separate isSending check needed for the swap.)
+    /// Drives the send button's appearance: hidden while empty (the bar
+    /// reads as a clean pill with just the emote button), faded in once
+    /// there's text. (Send clears `composeText` synchronously at
+    /// send-start, so the button disappears the instant a send is
+    /// committed — no separate isSending check needed for the swap.)
     private var hasDraft: Bool {
         !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// The TextField + Send button row, pulled out of the body for
-    /// readability now that the reply chip is also a sibling.
+    /// The compose pill: a single glass surface holding the text field,
+    /// the always-present emote button, and the send button (which only
+    /// appears once there's a draft). One unified pill — not three
+    /// separate glass shapes — so the bar reads calm; the only filled
+    /// shape is the prominent send button, which carries the
+    /// call-to-action signal (axiom-design Liquid Glass guidance).
     @ViewBuilder
     private var inputRow: some View {
-        GlassEffectContainer(spacing: 8) {
-            HStack(spacing: 8) {
-                // Emote-picker button. Snapshots the sections (built on
-                // demand) and presents the grid sheet. Glass circle to match
-                // the send button's chrome.
-                Button {
-                    pickerSections = emoteSectionsProvider()
-                    showingEmotePicker = true
-                } label: {
-                    Image(systemName: "face.smiling")
-                        .font(.system(size: 17, weight: .regular))
-                        .symbolRenderingMode(.hierarchical)
-                        .padding(2)
-                }
-                .buttonStyle(.glass)
-                .accessibilityLabel("Emotes")
-
+        GlassEffectContainer(spacing: 6) {
+            // `.bottom` alignment so the trailing buttons stay pinned to
+            // the bottom of the pill as the field grows multi-line, rather
+            // than floating to the vertical center of a tall field.
+            HStack(alignment: .bottom, spacing: 2) {
                 TextField(textFieldPrompt, text: $composeText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
@@ -311,65 +298,80 @@ struct ComposeBar: View {
                     .onChange(of: composeText) { _, newValue in
                         onDraftChange(newValue)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    // Regular glass (not interactive) — typing happens inside
-                    // the field, no glass-on-press animation needed.
-                    //
-                    // Fixed-radius rounded rect, NOT a Capsule: a capsule's
-                    // corner radius is always half its height, so once the
-                    // field grows multi-line (lineLimit 1...5) the corners
-                    // balloon and the box reads as an over-rounded blob. A
-                    // constant 20pt continuous radius keeps the single-line
-                    // look pill-ish while staying tidy as the field grows.
-                    .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
+                    .padding(.leading, 16)
+                    .padding(.vertical, 9)
                     .accessibilityLabel("Message input")
                     .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
 
-                // Trailing slot, time-shared: settings gear while the draft
-                // is empty, accent send button once there's text. An
-                // always-present-but-disabled send button was dead space
-                // (and a dead tap target) for the 95% of time spent
-                // reading, and the gear gives chat settings a home without
-                // adding a fourth item to the row.
+                // Emote-picker button — always present, pinned right.
+                // Borderless glyph (no glass circle of its own): it sits
+                // *on* the pill glass, keeping a single surface. Snapshots
+                // the sections (built on demand) and presents the grid.
+                Button {
+                    pickerSections = emoteSectionsProvider()
+                    showingEmotePicker = true
+                } label: {
+                    Image(systemName: "face.smiling")
+                        // 28pt so the glyph's circle reads at the same
+                        // diameter as the send button's 30pt disc — the two
+                        // trailing controls match in size even though only
+                        // send is filled.
+                        .font(.system(size: 17, weight: .regular))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                        // Borderless grey glyph (no fill) — styled like the
+                        // mic icon in the Claude composer: a quiet control
+                        // sitting directly on the pill, leaving the orange
+                        // send circle as the only filled shape in the bar.
+                        .frame(width: 30, height: 30)
+                        .background(Color.emoteButton, in: Circle())
+                        .frame(width: 40, height: 40)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Emotes")
+
+                // Send — only once there's text. The single filled/tinted
+                // shape in the bar; `.glassProminent` reads as a control
+                // sitting on the pill, matching the iMessage send affordance.
                 if hasDraft {
                     Button {
                         Task { await sendDraft() }
                     } label: {
-                        Image(systemName: "paperplane.fill")
-                            .font(.system(size: 17, weight: .semibold))
-                            .symbolRenderingMode(.hierarchical)
-                            .padding(2)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                            // Flat orange circle (Color.sendButton, not the
+                            // blue app accent) — the single warm CTA in the
+                            // bar, mirroring the Claude composer's send
+                            // affordance. An explicit Circle (not
+                            // `.glassProminent`, whose ~44pt min height made
+                            // the button hang below the emote) so the inner
+                            // 30pt disc and the emote share one 40pt frame and
+                            // sit perfectly level under `.bottom` alignment.
+                            .frame(width: 30, height: 30)
+                            .background(Color.sendButton, in: Circle())
+                            .frame(width: 40, height: 40)
+                            .contentShape(Circle())
                     }
-                    // Always prominent + tinted: the button only exists
-                    // when sending is meaningful, so the call-to-action
-                    // signal is unconditional now. Per axiom-design's
-                    // Liquid Glass guidance, the tint conveys "next step."
-                    .buttonStyle(.glassProminent)
-                    .tint(Color.accentColor)
+                    .buttonStyle(.plain)
                     .disabled(isSending)
                     .transition(.blurReplace)
                     .accessibilityLabel("Send message")
-                } else {
-                    Button {
-                        onOpenSettings()
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 17, weight: .regular))
-                            .symbolRenderingMode(.hierarchical)
-                            .padding(2)
-                    }
-                    .buttonStyle(.glass)
-                    .transition(.blurReplace)
-                    .accessibilityLabel("Chat settings")
                 }
             }
-            // Animate the gear ⇄ send swap (and the field width change it
-            // causes). Value-scoped so unrelated re-renders don't animate.
+            // Trailing inset keeps the emote/send off the pill's right edge.
+            .padding(.trailing, 5)
+            // The pill's single glass surface. Fixed continuous radius
+            // (NOT a Capsule): a capsule's radius is always half its
+            // height, so once the field grows multi-line (lineLimit 1...5)
+            // the corners balloon into an over-rounded blob. A constant
+            // 24pt radius stays pill-ish at one line and tidy as it grows.
+            .glassEffect(.regular, in: .rect(cornerRadius: 24, style: .continuous))
+            // Animate the send button fading in/out (and the field width
+            // change it causes). Value-scoped so unrelated re-renders don't
+            // animate.
             .animation(.snappy(duration: 0.2), value: hasDraft)
-            // No padding modifiers here — `composeBarView`'s own VStack owns
-            // the horizontal + vertical padding for the whole compose bar
-            // (including the reply chip); the bar is pinned via `.safeAreaBar`.
         }
     }
 
@@ -390,3 +392,45 @@ struct ComposeBar: View {
         await onSend(draft)
     }
 }
+
+#if DEBUG
+// Live design harness for the compose bar. Pinned to the bottom over the
+// chat surface so it reads like the real `.safeAreaBar` placement. The
+// TextField is interactive in the canvas — type to watch the orange send
+// button fade in next to the emote glyph.
+#Preview("Compose bar – empty") {
+    VStack(spacing: 0) {
+        Spacer()
+        ComposeBar(
+            channelLoginName: "xqc",
+            channelDisplayName: "xQc",
+            replyContext: nil,
+            chatRestrictions: nil,
+            seedDraft: "",
+            onCancelReply: {},
+            onDraftChange: { _ in },
+            emoteSectionsProvider: { [] },
+            onSend: { _ in }
+        )
+    }
+    .background(Color.chatSurface)
+}
+
+#Preview("Compose bar – with draft") {
+    VStack(spacing: 0) {
+        Spacer()
+        ComposeBar(
+            channelLoginName: "xqc",
+            channelDisplayName: "xQc",
+            replyContext: nil,
+            chatRestrictions: nil,
+            seedDraft: "Okay",
+            onCancelReply: {},
+            onDraftChange: { _ in },
+            emoteSectionsProvider: { [] },
+            onSend: { _ in }
+        )
+    }
+    .background(Color.chatSurface)
+}
+#endif

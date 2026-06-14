@@ -158,14 +158,23 @@ public struct ChatScreen: View {
     /// nil during previews / detached views just skips the prefetch.
     @Environment(\.chatImagePrefetcher) private var chatImagePrefetcher
 
+    /// True only for the tab currently centered in the pager. Gates the
+    /// top-bar settings gear so it's contributed by exactly ONE live
+    /// `ChatScreen` — every page is alive in the pager's `LazyHStack`, so
+    /// an ungated `.toolbar` would stack a gear per page and flicker the
+    /// bar (the same reason the channel pill is one stable item).
+    private let isActiveTab: Bool
+
     public init(
         account: Account,
         accountStore: AccountStore,
-        channel: ChannelDescriptor
+        channel: ChannelDescriptor,
+        isActiveTab: Bool = true
     ) {
         self.account = account
         self.accountStore = accountStore
         self.channel = channel
+        self.isActiveTab = isActiveTab
         // Read the persisted draft once, here at construction. `State(initial-
         // Value:)` is the correct home for a value that only matters at first
         // mount — a `.task`-based seed would arrive AFTER `ComposeBar` has
@@ -275,6 +284,24 @@ public struct ChatScreen: View {
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        // Chat settings entry point. Moved here from the compose bar's
+        // trailing slot (which now hosts only emote + send) into the top
+        // bar — the standard iOS home for per-screen settings. Gated on
+        // `isActiveTab` so only the centered page contributes the gear;
+        // see the property's note on why an ungated toolbar would stack.
+        .toolbar {
+            if isActiveTab {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showChatSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .symbolRenderingMode(.hierarchical)
+                    }
+                    .accessibilityLabel("Chat settings")
+                }
+            }
         }
         // No `.navigationTitle` here — the parent ChatTabsScreen sets it to
         // "Chat" and the active tab pill in the strip already identifies the
@@ -444,7 +471,6 @@ public struct ChatScreen: View {
                     twitchGlobal: resolvedTwitchGlobals
                 )
             },
-            onOpenSettings: { showChatSettings = true },
             onSend: { draft in
                 // Self-heal: if the model lost its live session under us (a
                 // lifecycle race, or a session teardown+rebuild that left it
