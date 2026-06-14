@@ -293,34 +293,13 @@ public struct ChatTabsScreen: View {
     @ToolbarContentBuilder
     private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
         ToolbarItem(placement: .principal) {
+            // The label is its own `View` (`ChannelPillLabel`) so that
+            // unseen-mention updates (`mentionedTabIds`) invalidate ONLY the
+            // pill, not this `ChatTabsScreen` body — which also builds the
+            // paged transcript. A ping arriving in a background tab redraws
+            // the dot without re-evaluating the pager. See `ChannelPillLabel`.
             Button { showQuickSwitcher = true } label: {
-                VStack(spacing: 3) {
-                    HStack(spacing: 5) {
-                        Text(activeTabTitle(chatTabs: chatTabs))
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                        Image(systemName: "chevron.down")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    // Unseen mention in a BACKGROUND tab: dot the pill so
-                    // the ping is visible from inside another chat.
-                    .overlay(alignment: .topTrailing) {
-                        if hasBackgroundMention(chatTabs: chatTabs) {
-                            Circle()
-                                .fill(.red)
-                                .frame(width: 7, height: 7)
-                                .offset(x: 10, y: -3)
-                                .accessibilityLabel("Unread mention in another chat")
-                        }
-                    }
-                    pillPageDots(chatTabs: chatTabs)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                // The pill's own glass — `.interactive()` so it responds
-                // to the press like the standalone control it looks like.
-                .glassEffect(.regular.interactive(), in: Capsule())
+                ChannelPillLabel(chatTabs: chatTabs)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Switch channel")
@@ -340,12 +319,6 @@ public struct ChatTabsScreen: View {
         // The pill carries its own glass above; hide the bar's shared
         // item background so the two don't stack into a double capsule.
         .sharedBackgroundVisibility(.hidden)
-    }
-
-    /// True when any non-active tab holds an unseen mention.
-    private func hasBackgroundMention(chatTabs: ChatTabsModel?) -> Bool {
-        guard let chatTabs else { return false }
-        return !chatTabs.mentionedTabIds.subtracting([chatTabs.activeTabId].compactMap { $0 }).isEmpty
     }
 
     /// Body of the quick-switcher popover: one row per open chat — avatar,
@@ -407,47 +380,6 @@ public struct ChatTabsScreen: View {
         chatTabs.activeTabId ?? chatTabs.tabs.first?.id
     }
 
-    /// Miniature page dots inside the channel pill — one per open tab,
-    /// active highlighted. Rendered only with 2+ tabs; with a single tab
-    /// the pill is just the name (nothing to switch between). These
-    /// replace the dedicated dots strip that used to sit below the
-    /// transcript eating vertical space.
-    @ViewBuilder
-    private func pillPageDots(chatTabs: ChatTabsModel?) -> some View {
-        if let chatTabs, chatTabs.tabs.count > 1 {
-            HStack(spacing: 4) {
-                // Resolve the same way the title does: the pager shows
-                // `tabs.first` when `activeTabId` is still nil, so highlight
-                // that dot rather than leaving all of them dim.
-                let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
-                ForEach(chatTabs.tabs) { tab in
-                    // Mention beats position: a red dot says "that page
-                    // pinged you," which matters more than which page it is.
-                    Circle()
-                        .fill(chatTabs.mentionedTabIds.contains(tab.id)
-                            ? AnyShapeStyle(.red)
-                            : tab.id == visibleId
-                                ? AnyShapeStyle(.tint)
-                                : AnyShapeStyle(.secondary.opacity(0.35)))
-                        .frame(width: 5, height: 5)
-                }
-            }
-            .accessibilityHidden(true)
-        }
-    }
-
-    /// Title for the principal item — the display name of the *visible* tab.
-    /// When `activeTabId` hasn't been set yet (e.g. cold launch before scene
-    /// restoration runs), the pager shows `tabs.first`, so the title resolves
-    /// to it too instead of a generic fallback. "Chat" shows only when no
-    /// tabs are open.
-    private func activeTabTitle(chatTabs: ChatTabsModel?) -> String {
-        guard let chatTabs,
-              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
-              let tab = chatTabs.tabs.first(where: { $0.id == visibleId })
-        else { return "Chat" }
-        return tab.displayName
-    }
 
 
     /// Horizontally-paged ScrollView with one ChatScreen per open tab.
@@ -543,6 +475,95 @@ public struct ChatTabsScreen: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)
+        }
+    }
+}
+
+/// The channel-pill *label*: the visible tab's name, a chevron, an
+/// unseen-mention dot, and (with 2+ tabs) miniature page dots.
+///
+/// Extracted from `ChatTabsScreen` into its own `View` purely for
+/// invalidation isolation. The pill reads `chatTabs.mentionedTabIds`, which
+/// changes whenever a ping lands in a *background* tab; left inline in
+/// `ChatTabsScreen.body` that read made every mention re-evaluate the whole
+/// screen body, including the paged `ScrollView` of `ChatScreen`s. As its own
+/// view the mention dependency is scoped here, so a background ping redraws
+/// the dot without touching the pager. (`ChatScreen` pages are protected by
+/// their own identity regardless; this avoids the wasted container rebuild.)
+private struct ChannelPillLabel: View {
+    let chatTabs: ChatTabsModel?
+
+    var body: some View {
+        VStack(spacing: 3) {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            // Unseen mention in a BACKGROUND tab: dot the pill so the ping is
+            // visible from inside another chat.
+            .overlay(alignment: .topTrailing) {
+                if hasBackgroundMention {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 7, height: 7)
+                        .offset(x: 10, y: -3)
+                        .accessibilityLabel("Unread mention in another chat")
+                }
+            }
+            pageDots
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        // The pill's own glass — `.interactive()` so it responds to the
+        // press like the standalone control it looks like.
+        .glassEffect(.regular.interactive(), in: Capsule())
+    }
+
+    /// Display name of the *visible* tab — `activeTabId`, falling back to
+    /// `tabs.first` before scene restoration runs (matching the pager). "Chat"
+    /// only when no tabs are open.
+    private var title: String {
+        guard let chatTabs,
+              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
+              let tab = chatTabs.tabs.first(where: { $0.id == visibleId })
+        else { return "Chat" }
+        return tab.displayName
+    }
+
+    /// True when any non-active tab holds an unseen mention.
+    private var hasBackgroundMention: Bool {
+        guard let chatTabs else { return false }
+        return !chatTabs.mentionedTabIds.subtracting([chatTabs.activeTabId].compactMap { $0 }).isEmpty
+    }
+
+    /// Miniature page dots — one per open tab, active highlighted, mention
+    /// dots red. Rendered only with 2+ tabs; with a single tab the pill is
+    /// just the name (nothing to switch between).
+    @ViewBuilder
+    private var pageDots: some View {
+        if let chatTabs, chatTabs.tabs.count > 1 {
+            HStack(spacing: 4) {
+                // Resolve the same way the title does: the pager shows
+                // `tabs.first` when `activeTabId` is still nil, so highlight
+                // that dot rather than leaving all of them dim.
+                let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
+                ForEach(chatTabs.tabs) { tab in
+                    // Mention beats position: a red dot says "that page
+                    // pinged you," which matters more than which page it is.
+                    Circle()
+                        .fill(chatTabs.mentionedTabIds.contains(tab.id)
+                            ? AnyShapeStyle(.red)
+                            : tab.id == visibleId
+                                ? AnyShapeStyle(.tint)
+                                : AnyShapeStyle(.secondary.opacity(0.35)))
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .accessibilityHidden(true)
         }
     }
 }
