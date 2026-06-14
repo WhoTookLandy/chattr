@@ -397,7 +397,7 @@ public struct ChatTabsScreen: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(chatTabs.tabs) { tab in
-                    chatPage(for: tab)
+                    chatPage(for: tab, isActive: tab.id == chatTabs.activeTabId)
                         // `.containerRelativeFrame(.horizontal)` sizes each
                         // page to exactly the ScrollView's width — full-page
                         // panels instead of children at intrinsic width.
@@ -432,12 +432,13 @@ public struct ChatTabsScreen: View {
     /// will take the full ChatTab and ChatTranscriptModel will attach to ALL its
     /// channels in one go — the rest of this paged container won't change.
     @ViewBuilder
-    private func chatPage(for tab: ChatTab) -> some View {
+    private func chatPage(for tab: ChatTab, isActive: Bool) -> some View {
         if let primaryChannel = tab.channels.first {
             ChatScreen(
                 account: account,
                 accountStore: accountStore,
-                channel: primaryChannel
+                channel: primaryChannel,
+                isActiveTab: isActive
             )
         } else {
             // Defensive — ChatTab.init has a precondition against empty
