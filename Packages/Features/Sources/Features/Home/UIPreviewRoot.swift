@@ -84,7 +84,9 @@ public struct UIPreviewRoot: View {
 
     public var body: some View {
         TabView(selection: $selectedTab) {
-            Tab("Home", systemImage: "house", value: PreviewTab.home) {
+            // Icon-only tabs — mirrors AppShell's custom-`label` tabs so the
+            // design-review harness reflects the shipping tab bar.
+            Tab(value: PreviewTab.home) {
                 NavigationStack {
                     HomeContent(
                         liveStreams: HomePreviewData.streams,
@@ -97,22 +99,34 @@ public struct UIPreviewRoot: View {
                     .navigationTitle("Home")
                     .toolbarTitleDisplayMode(.inlineLarge)
                 }
+            } label: {
+                Image(systemName: "house")
             }
-            Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: PreviewTab.chats) {
+            .accessibilityLabel("Home")
+            Tab(value: PreviewTab.chats) {
                 ChatTabsScreen(account: account, accountStore: accountStore)
+            } label: {
+                Image(systemName: "bubble.left.and.bubble.right")
             }
-            Tab("You", systemImage: "person.crop.circle", value: PreviewTab.you) {
+            .accessibilityLabel("Chats")
+            Tab(value: PreviewTab.you) {
                 NavigationStack {
                     ProfileScreen(account: account, accountStore: accountStore, clientId: "preview")
                 }
+            } label: {
+                Image(systemName: "person.crop.circle")
             }
+            .accessibilityLabel("You")
             Tab(value: PreviewTab.search, role: .search) {
                 AddChannelView(
                     account: account,
                     accountStore: accountStore,
                     showsCancelButton: false
                 )
+            } label: {
+                Image(systemName: "magnifyingglass")
             }
+            .accessibilityLabel("Search")
         }
         .modelContainer(container)
         .environment(\.chatTabs, chatTabsModel)

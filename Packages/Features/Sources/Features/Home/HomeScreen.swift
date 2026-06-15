@@ -121,10 +121,12 @@ struct HomeContent: View {
                 liveSection
             }
             .listStyle(.plain)
-            // Rows must be transparent for the ambient top wash to read
-            // through; the wash itself is drawn behind the list below.
+            // Rows stay transparent so the shared chat surface reads through;
+            // the surface itself is drawn behind the list below. Same flat
+            // `Color.chatSurface` the chat screen uses, so Home and Chats share
+            // one background world instead of Home wearing a tinted gradient.
             .scrollContentBackground(.hidden)
-            .background(alignment: .top) { AccentTopWash() }
+            .background(Color.chatSurface.ignoresSafeArea())
             // Hard top edge: a defined boundary under the title. The soft
             // style let scrolled thumbnails ghost through the bar area,
             // which read as smudge over a media-heavy feed. Bottom stays
