@@ -658,8 +658,11 @@ public final class ChannelSessionRegistry {
         guard !accountSessions.isEmpty else { return }
         logger.info("EventSub reconnected for account \(accountUserId, privacy: .public) — resyncing \(accountSessions.count) session(s)")
         for session in accountSessions {
-            Task {
-                await session.resyncAfterReconnect()
+            // Weak-capture: if the tab is closed (and the session released)
+            // between this reconnect and the gap-fill running, the session must
+            // be free to deallocate rather than be pinned by a best-effort Task.
+            Task { [weak session] in
+                await session?.resyncAfterReconnect()
             }
         }
     }

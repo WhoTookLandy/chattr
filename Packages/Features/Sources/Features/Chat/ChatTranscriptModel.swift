@@ -1324,7 +1324,8 @@ public final class ChatTranscriptModel {
             // Unambiguous — Twitch's messageId is globally unique per send.
             // Handles every case except "echo arrived before Helix
             // returned" (Path 2 catches that one).
-            if let matchedPendingId = helixMessageIdByPendingId.first(where: { $0.value == chatMessage.messageId })?.key {
+            if !helixMessageIdByPendingId.isEmpty,
+               let matchedPendingId = helixMessageIdByPendingId.first(where: { $0.value == chatMessage.messageId })?.key {
                 cleanupPending(pendingId: matchedPendingId)
                 if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
                 // Optimistic row was removed under us (e.g., a Helix
@@ -1366,9 +1367,14 @@ public final class ChatTranscriptModel {
             // apply the same trim so Twitch-side whitespace handling
             // (e.g. trailing newlines stripped server-side) doesn't
             // cause a miss.
-            let echoLookupKey = chatMessage.message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Trim only on the own-message path: `trimmingCharacters` allocates
+            // a fresh String unconditionally, and this Path-2 fallback only
+            // matters for the current user's own echoes (rare), not every
+            // incoming message.
             if chatMessage.chatterUserId == currentUserId,
-               let matchedPendingId = pendingSendIDByText[echoLookupKey]?.first {
+               let matchedPendingId = pendingSendIDByText[
+                   chatMessage.message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+               ]?.first {
                 // FIFO: oldest pending matches first echo, matching
                 // Twitch's broadcast order.
                 cleanupPending(pendingId: matchedPendingId)

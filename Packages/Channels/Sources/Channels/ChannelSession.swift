@@ -163,6 +163,12 @@ public actor ChannelSession {
     /// disconnects.
     private var activeSubscriptionIds: [String] = []
 
+    /// The non-blocking chat-restrictions fetch kicked off by `start()`. Stored
+    /// so `stop()` can cancel it — otherwise the fire-and-forget Task strongly
+    /// retains this actor (plus its event ring) until the Helix round-trip
+    /// resolves, leaving a zombie session alive across a fast channel switch.
+    private var chatRestrictionsTask: Task<Void, Never>?
+
     /// Called by `start()` when EventSub subscribe returns unauthorized.
     /// Injected at construction time by `ChannelSessionRegistry` so this actor
     /// doesn't need to know about `AccountStore` or `Account` directly.
@@ -275,7 +281,7 @@ public actor ChannelSession {
         // path a live `channel.chat_settings.update` takes. If the fetch happens
         // to resolve before a tab attaches, `attach`'s `currentChatRestrictions()`
         // read picks up the seeded cache instead; either ordering is correct.
-        Task { await self.refreshChatRestrictions() }
+        chatRestrictionsTask = Task { [weak self] in await self?.refreshChatRestrictions() }
 
         // NOTE: We deliberately do NOT iterate `client.eventSub.events` here.
         // That AsyncStream is single-consumer — if every ChannelSession had
@@ -442,6 +448,11 @@ public actor ChannelSession {
     /// garbage-collect each subscription when the WebSocket disconnects.
     public func stop() async {
         logger.info("Stopping session for #\(self.channelLoginName)")
+
+        // Cancel the in-flight restrictions fetch so it stops retaining the
+        // actor past teardown (and skips its now-pointless subscriber fan-out).
+        chatRestrictionsTask?.cancel()
+        chatRestrictionsTask = nil
 
         let ids = activeSubscriptionIds
         activeSubscriptionIds = []

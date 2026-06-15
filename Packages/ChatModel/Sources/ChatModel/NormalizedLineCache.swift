@@ -59,8 +59,12 @@ public final class NormalizedLineCache {
     private var context: Context?
     private var linesByID: [String: ChatLine] = [:]
     /// Insertion order for FIFO eviction. Ids arrive in ring order, so
-    /// evicting the front mirrors the ring dropping its oldest event.
+    /// evicting the front mirrors the ring dropping its oldest event. Backed by
+    /// a head-index ring (`insertionOrder[orderHead...]` is live): evicting the
+    /// oldest is an O(1) pointer bump + amortized batch compaction, not an
+    /// O(capacity) `removeFirst` memmove on every live message at capacity.
     private var insertionOrder: [String] = []
+    private var orderHead: Int = 0
 
     public init(capacity: Int) {
         self.capacity = max(1, capacity)
@@ -82,12 +86,20 @@ public final class NormalizedLineCache {
         if context != self.context {
             linesByID.removeAll(keepingCapacity: true)
             insertionOrder.removeAll(keepingCapacity: true)
+            orderHead = 0
             self.context = context
         }
         if linesByID.updateValue(line, forKey: line.id) == nil {
             insertionOrder.append(line.id)
-            if insertionOrder.count > capacity {
-                linesByID.removeValue(forKey: insertionOrder.removeFirst())
+            if insertionOrder.count - orderHead > capacity {
+                // Evict the oldest live id by advancing the head — O(1).
+                linesByID.removeValue(forKey: insertionOrder[orderHead])
+                orderHead += 1
+                // Reclaim the dead prefix in one batch once it reaches the cap.
+                if orderHead >= capacity {
+                    insertionOrder.removeFirst(orderHead)
+                    orderHead = 0
+                }
             }
         }
     }
