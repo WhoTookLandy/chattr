@@ -1,7 +1,6 @@
 import SwiftUI
 import TwitchKit
 import Core      // For Endpoints.TwitchCDN.emote(...)
-import NukeUI
 
 /// Loads and displays a single Twitch native emote from the CDN, using
 /// Nuke's `LazyImage` for memory + disk caching and prefetching.
@@ -36,23 +35,17 @@ struct TwitchEmoteImage: View {
     }
 
     var body: some View {
-        Group {
-            if isAnimated {
-                AnimatedImageView(url: emoteURL, width: 28, height: 24) {
-                    Text(displayName).font(.callout).foregroundStyle(.secondary)
-                }
-            } else {
-                LazyImage(url: emoteURL) { state in
-                    if let image = state.image {
-                        image.resizable().scaledToFit().frame(height: 24)
-                    } else if state.isLoading {
-                        Text(displayName).font(.callout).foregroundStyle(.secondary)
-                    } else {
-                        Text(displayName).font(.callout)
-                    }
-                }
-            }
+        EmoteImageView(
+            url: emoteURL,
+            isAnimated: isAnimated,
+            width: 28, height: 24,
+            accessibilityLabel: displayName
+        ) { image in
+            image.resizable().scaledToFit().frame(height: 24)
+        } placeholder: { failed in
+            // Default (primary) colour once the load fails; secondary while
+            // it's still in flight.
+            Text(displayName).font(.callout).foregroundStyle(failed ? .primary : .secondary)
         }
-        .accessibilityLabel(Text(displayName))
     }
 }

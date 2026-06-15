@@ -72,34 +72,51 @@ public struct AppShell: View {
     public var body: some View {
         @Bindable var navigation = navigation
         TabView(selection: $navigation.selectedTab) {
-            Tab("Home", systemImage: "house", value: AppTab.home) {
+            // Icon-only tabs: the custom-`label` initializer renders just the
+            // SF Symbol (no caption), with `.accessibilityLabel` preserving the
+            // VoiceOver name the visible title used to carry. The `.search` tab
+            // keeps its role-driven treatment below.
+            Tab(value: AppTab.home) {
                 HomeScreen(
                     account: account,
                     accountStore: accountStore,
                     onResumeChat: { tab in navigation.resumeChat(tab) }
                 )
+            } label: {
+                Image(systemName: "house")
             }
-            Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: AppTab.chats) {
+            .accessibilityLabel("Home")
+            Tab(value: AppTab.chats) {
                 ChatTabsScreen(
                     account: account,
                     accountStore: accountStore,
                     goHome: { navigation.goHome() }
                 )
+            } label: {
+                Image(systemName: "bubble.left.and.bubble.right")
             }
-            Tab("You", systemImage: "person.crop.circle", value: AppTab.you) {
+            .accessibilityLabel("Chats")
+            Tab(value: AppTab.you) {
                 NavigationStack {
                     ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
                 }
+            } label: {
+                Image(systemName: "person.crop.circle")
             }
+            .accessibilityLabel("You")
             // `role: .search` separates the tab on the trailing edge and
-            // morphs it into the search field on activation (iOS 26).
+            // morphs it into the search field on activation (iOS 26). Custom
+            // icon-only label so it matches the other tabs (no caption).
             Tab(value: AppTab.search, role: .search) {
                 AddChannelView(
                     account: account,
                     accountStore: accountStore,
                     showsCancelButton: false
                 )
+            } label: {
+                Image(systemName: "magnifyingglass")
             }
+            .accessibilityLabel("Search")
         }
         .chatTabBarMinimize()
         .environment(\.chatTabs, navigation.chatTabs)

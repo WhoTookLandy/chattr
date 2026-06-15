@@ -59,9 +59,10 @@ struct AccountSwitcherView: View {
                         Button {
                             switchTo(account)
                         } label: {
-                            AccountRowLabel(
+                            AccountRow(
                                 account: account,
-                                isActive: account.userId == activeUserId
+                                isActive: account.userId == activeUserId,
+                                style: .listRow
                             )
                         }
                         .buttonStyle(.plain)
@@ -178,67 +179,5 @@ struct AccountSwitcherView: View {
                 }
             }
         }
-    }
-}
-
-// MARK: - Row label
-
-/// One account row: avatar + display name + @login, with a checkmark on
-/// the active account.
-private struct AccountRowLabel: View {
-    let account: Account
-    let isActive: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            LazyImage(url: URL(string: account.profileImageURL)) { state in
-                if let image = state.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    Image(systemName: "person.crop.circle.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(.secondary.opacity(0.5))
-                }
-            }
-            .frame(width: 40, height: 40)
-            .clipShape(Circle())
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(account.displayName)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.primary)
-                if account.needsReauth {
-                    // Orange + clock, matching SignInView's banner tone —
-                    // a routine session timeout, not a security incident.
-                    Text("Session expired — tap to re-authorize")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                } else {
-                    Text("@\(account.login)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Spacer()
-
-            if account.needsReauth {
-                Image(systemName: "clock.badge.exclamationmark")
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.orange)
-            } else if isActive {
-                Image(systemName: "checkmark.circle.fill")
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(Color.accentColor)
-            }
-        }
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            account.needsReauth
-                ? "\(account.displayName), session expired, tap to re-authorize"
-                : "\(account.displayName)\(isActive ? ", active" : "")"
-        )
     }
 }

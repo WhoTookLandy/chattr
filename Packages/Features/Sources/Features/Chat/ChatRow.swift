@@ -543,19 +543,44 @@ struct ChatRow: View, Equatable {
 //   - Subtle tinted backgrounds (`opacity(0.15)` on accent colors) — not
 //     opaque, not loud. The row is information, not an alert.
 
+/// The shared shell behind every system bubble: a leading 20pt hierarchical
+/// symbol and a tinted capsule background, with the event-specific content
+/// slotted in. Tint drives both the icon colour and the background fill
+/// (`tint.opacity(fillOpacity)`), so a bubble reads as one coherent accent.
+private struct SystemEventBubble<Content: View>: View {
+    let icon: String
+    var iconWeight: Font.Weight = .semibold
+    let tint: Color
+    var fillOpacity: Double = 0.15
+    var alignment: VerticalAlignment = .top
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        HStack(alignment: alignment, spacing: 10) {
+            Image(systemName: icon)
+                .font(.body.weight(iconWeight))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(tint)
+                .frame(width: 20)
+
+            content()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(tint.opacity(fillOpacity))
+        )
+    }
+}
+
 /// Sub/resub/gift/Prime bubble. Tier drives the leading symbol's tint
 /// (Tier 1 / Prime → blue, Tier 2 → purple, Tier 3 → gold).
 private struct SubBubbleRow: View {
     let bubble: ChatLine.SubBubble
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: bubble.isGift ? "gift.fill" : "star.fill")
-                .font(.body.weight(.semibold))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(tierColor)
-                .frame(width: 20)
-
+        SystemEventBubble(icon: bubble.isGift ? "gift.fill" : "star.fill", tint: tierColor) {
             VStack(alignment: .leading, spacing: 4) {
                 // Twitch-formatted system message — the authoritative text.
                 // We don't rebuild it because Twitch's localization is
@@ -573,12 +598,6 @@ private struct SubBubbleRow: View {
                 }
             }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(tierColor.opacity(0.15))
-        )
     }
 
     /// Tier-driven accent color. Maps to Twitch's conventional tier tints
@@ -597,13 +616,7 @@ private struct RaidBubbleRow: View {
     let bubble: ChatLine.RaidBubble
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Image(systemName: "person.3.fill")
-                .font(.body.weight(.semibold))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.pink)
-                .frame(width: 20)
-
+        SystemEventBubble(icon: "person.3.fill", tint: .pink, alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(bubble.fromBroadcasterDisplayName) raided!")
                     .font(.callout.weight(.semibold))
@@ -612,12 +625,6 @@ private struct RaidBubbleRow: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.pink.opacity(0.15))
-        )
     }
 }
 
@@ -628,23 +635,11 @@ private struct SystemBubbleRow: View {
     let text: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle.fill")
-                .font(.body)
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
-                .frame(width: 20)
-
+        SystemEventBubble(icon: "info.circle.fill", iconWeight: .regular, tint: .secondary, fillOpacity: 0.1) {
             Text(text)
                 .font(.callout)
                 .foregroundStyle(.primary)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.secondary.opacity(0.1))
-        )
     }
 }
 

@@ -166,10 +166,10 @@ public struct ChannelListScreen: View {
             }
         }
         // Same background world as Home: transparent rows over the shared
-        // accent wash, so the Home → Following push doesn't jump from a
-        // tinted screen onto a flat black one.
+        // flat chat surface, so the Home → Following push doesn't jump between
+        // two different backgrounds.
         .scrollContentBackground(.hidden)
-        .background(alignment: .top) { AccentTopWash() }
+        .background(Color.chatSurface.ignoresSafeArea())
         // Soft progressive blur where rows scroll out at the bottom edge —
         // same treatment as the chat transcript's top edge. Applied to the
         // Group so both segments' Lists pick it up. Top edge hard, matching
