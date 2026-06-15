@@ -155,9 +155,21 @@ public final class ChatBadgeStore {
         let key = badges.map { ChatBadgeKey(setId: $0.setId, id: $0.id) }
         if let cached = resolvedCache[key] { return cached }
         let resolved = key.compactMap { entries[$0] }
+        // Safety valve: distinct badge combinations are normally well under this
+        // cap, but a long session on a large channel can keep minting new ones.
+        // Drop an arbitrary entry rather than grow without bound — every entry
+        // is equally cheap to re-resolve (pure dictionary lookups).
+        if resolvedCache.count >= Self.resolvedCacheCapacity, let evict = resolvedCache.keys.first {
+            resolvedCache.removeValue(forKey: evict)
+        }
         resolvedCache[key] = resolved
         return resolved
     }
+
+    /// Upper bound on memoized badge-combination resolutions. Generous — a real
+    /// channel shows far fewer distinct combinations than this; the cap exists
+    /// only to stop unbounded growth over a multi-hour session.
+    private static let resolvedCacheCapacity = 512
 
     // MARK: - Private fetch helpers
 

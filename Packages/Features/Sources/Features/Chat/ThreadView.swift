@@ -50,19 +50,23 @@ struct ThreadView: View {
     let channelLoginName: String
     let channelDisplayName: String
 
+    /// Snapshot of the thread's lines. Audit fix (axiom MEDIUM): the body used
+    /// to call `lines(inThreadRootedAt:)` — an O(buffer) filter — on every body
+    /// evaluation, and because it read `chatModel.lines` that meant a full
+    /// re-filter on every incoming message (devastating during a raid with the
+    /// sheet open). Snapshotting into @State and refreshing only on a
+    /// `changeVersion` bump runs the filter at most once per publish, and keeps
+    /// renders driven by compose/focus/scroll off the filter entirely.
+    @State private var threadLines: [ChatLine] = []
+
+    /// Reply target for the thread compose bar — latest message in the thread,
+    /// built via the centralized factory so it matches the main compose bar's
+    /// reply chip formatting exactly. O(1) over the snapshot.
+    private var threadReplyTarget: ChatTranscriptModel.ReplyContext? {
+        threadLines.last.map { ChatTranscriptModel.replyContext(for: $0) }
+    }
+
     var body: some View {
-        // Audit fix (axiom LOW): compute the filter result ONCE per body
-        // and reuse it for both `ForEach` and the reply-target factory.
-        // Previously each body call evaluated `lines(inThreadRootedAt:)`
-        // twice (via the `threadLines` and `threadReplyTarget`
-        // computed properties).
-        let threadLines = chatModel.lines(inThreadRootedAt: rootMessageId)
-        // Reply target for the thread compose bar — latest message in
-        // the thread, built via the centralized factory so it matches
-        // the main compose bar's reply chip formatting exactly.
-        let threadReplyTarget: ChatTranscriptModel.ReplyContext? = threadLines.last.map {
-            ChatTranscriptModel.replyContext(for: $0)
-        }
         NavigationStack {
             VStack(spacing: 0) {
                 if threadLines.isEmpty {
@@ -152,6 +156,13 @@ struct ThreadView: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+        // Seed on open, then refresh only when the transcript actually changes
+        // (one Int comparison), instead of re-filtering the whole buffer on
+        // every render pass.
+        .onAppear { threadLines = chatModel.lines(inThreadRootedAt: rootMessageId) }
+        .onChange(of: chatModel.changeVersion) { _, _ in
+            threadLines = chatModel.lines(inThreadRootedAt: rootMessageId)
         }
     }
 }

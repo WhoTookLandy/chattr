@@ -30,9 +30,26 @@ struct ChatBuffer {
     private var storage: [ChatLine] = []
     private var head: Int = 0
 
+    /// Backing store for the block-filtered projection. The live visible
+    /// window is `_lines[linesHead...]`; everything before `linesHead` is dead
+    /// and reclaimed at the next compaction — the same head-index ring trick
+    /// `storage` uses, applied to the projection so a front-trim is an O(1)
+    /// pointer bump instead of an O(visible) `removeFirst` memmove on every
+    /// message once the buffer is at cap.
+    private var _lines: [ChatLine] = []
+    private var linesHead: Int = 0
+
     /// Block-filtered projection — the array the view renders. Maintained
-    /// incrementally; the emitted changes mirror every transition.
-    private(set) var lines: [ChatLine] = []
+    /// incrementally; the emitted changes mirror every transition. Reading is
+    /// a cold path (reset/first-mount/`isEmpty`), so materializing the window
+    /// here is fine; the per-message hot path appends + bumps, never reads this.
+    private(set) var lines: [ChatLine] {
+        get { linesHead == 0 ? _lines : Array(_lines[linesHead...]) }
+        set { _lines = newValue; linesHead = 0 }
+    }
+
+    /// Number of currently-visible lines — O(1), avoids materializing `lines`.
+    private var visibleCount: Int { _lines.count - linesHead }
 
     /// Blocked author user-ids. Lines whose `authorUserId` is in this set stay
     /// in `storage` (so dedup/echo logic still sees them) but are excluded
@@ -87,7 +104,7 @@ struct ChatBuffer {
     mutating func append(_ line: ChatLine) {
         storage.append(line)
         if !blocked.contains(line.authorUserId) {
-            lines.append(line)
+            _lines.append(line)
             pendingChanges.append(.appended(line))
         }
         trimToCap()
@@ -110,7 +127,7 @@ struct ChatBuffer {
         let removed = storage[idx]
         storage.remove(at: idx)
         if !blocked.contains(removed.authorUserId) {
-            lines.removeAll { $0.id == id }
+            if let vi = visibleIndex(of: id) { _lines.remove(at: vi) }
             pendingChanges.append(.removed(id: id))
         }
         return true
@@ -133,9 +150,9 @@ struct ChatBuffer {
         for i in head..<storage.count {
             storage[i] = transform(storage[i])
         }
-        for vi in lines.indices {
-            let new = transform(lines[vi])
-            lines[vi] = new
+        for i in linesHead..<_lines.count {
+            let new = transform(_lines[i])
+            _lines[i] = new
             pendingChanges.append(.reconfigured(new))
         }
     }
@@ -146,9 +163,9 @@ struct ChatBuffer {
         for i in head..<storage.count where storage[i].authorUserId == authorUserId {
             storage[i] = transform(storage[i])
         }
-        for vi in lines.indices where lines[vi].authorUserId == authorUserId {
-            let new = transform(lines[vi])
-            lines[vi] = new
+        for i in linesHead..<_lines.count where _lines[i].authorUserId == authorUserId {
+            let new = transform(_lines[i])
+            _lines[i] = new
             pendingChanges.append(.reconfigured(new))
         }
     }
@@ -157,7 +174,8 @@ struct ChatBuffer {
     mutating func reset() {
         storage.removeAll(keepingCapacity: true)
         head = 0
-        lines.removeAll(keepingCapacity: true)
+        _lines.removeAll(keepingCapacity: true)
+        linesHead = 0
         pendingChanges.append(.reset([]))
     }
 
@@ -171,6 +189,16 @@ struct ChatBuffer {
         return nil
     }
 
+    /// Index into `_lines` of the visible line with `id`, scanning only the
+    /// live window (`linesHead...`). Nil if not visible.
+    private func visibleIndex(of id: String) -> Int? {
+        guard linesHead < _lines.count else { return nil }
+        for i in linesHead..<_lines.count where _lines[i].id == id {
+            return i
+        }
+        return nil
+    }
+
     /// Emits the right change for a single-line value edit, accounting for a
     /// (rare) change in whether the line is visible. The common case — author
     /// unchanged, line stays visible — is a single `.reconfigured`.
@@ -179,12 +207,12 @@ struct ChatBuffer {
         let nowVisible = !blocked.contains(new.authorUserId)
         switch (wasVisible, nowVisible) {
         case (true, true):
-            if let vi = lines.firstIndex(where: { $0.id == id }) {
-                lines[vi] = new
+            if let vi = visibleIndex(of: id) {
+                _lines[vi] = new
             }
             pendingChanges.append(.reconfigured(new))
         case (true, false):
-            lines.removeAll { $0.id == id }
+            if let vi = visibleIndex(of: id) { _lines.remove(at: vi) }
             pendingChanges.append(.removed(id: id))
         case (false, true):
             // Now-visible line has to slot back in at its window position —
@@ -200,15 +228,23 @@ struct ChatBuffer {
         while count > cap {
             let dropped = storage[head]
             head += 1
-            // The oldest logical line, if not filtered, is exactly `lines.first`.
-            if !blocked.contains(dropped.authorUserId), !lines.isEmpty {
-                lines.removeFirst()
+            // The oldest logical line, if not filtered, is exactly the visible
+            // window's front (`_lines[linesHead]`). Drop it by bumping the head
+            // — O(1) — instead of an O(visible) `removeFirst` memmove.
+            if !blocked.contains(dropped.authorUserId), linesHead < _lines.count {
+                linesHead += 1
                 pendingChanges.append(.removed(id: dropped.id))
             }
         }
         if head >= cap {
             storage.removeFirst(head)
             head = 0
+        }
+        // Reclaim the dead prefix in one batch once it grows past the cap —
+        // the same amortized-compaction the `storage` ring uses above.
+        if linesHead >= cap {
+            _lines.removeFirst(linesHead)
+            linesHead = 0
         }
     }
 

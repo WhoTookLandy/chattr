@@ -340,7 +340,7 @@ struct ChatRow: View, Equatable {
     /// Takes the row's already-computed body font: `appearance.font`
     /// allocates a fresh `Font` per access, so `messageBody` computes it
     /// once and threads it through here and every `runView`.
-    private func usernamePrefix(bodyFont: Font) -> Text {
+    private func usernamePrefix(bodyFont: Font, color: Color) -> Text {
         let nameFont = bodyFont.weight(.semibold)
         guard let pair = ChatAppearance.loginAnnotation(
             displayName: line.authorDisplayName,
@@ -349,11 +349,11 @@ struct ChatRow: View, Equatable {
         ) else {
             return Text(line.authorDisplayName)
                 .font(nameFont)
-                .foregroundStyle(usernameColor)
+                .foregroundStyle(color)
         }
         let primary = Text(pair.primary)
             .font(nameFont)
-            .foregroundStyle(usernameColor)
+            .foregroundStyle(color)
         let secondary = Text(" (\(pair.secondary))")
             .font(nameFont)
             .foregroundStyle(Color.secondary)
@@ -369,6 +369,13 @@ struct ChatRow: View, Equatable {
         // `Font.system(size:)` on every access, and this body would
         // otherwise read it once per text run plus timestamp + username.
         let bodyFont = appearance.font
+        // Computed ONCE per body too — `usernameColor` runs a hex parse +
+        // RGB→HSL→clamp→RGB conversion, and the username prefix would otherwise
+        // read it once per name component.
+        let nameColor = usernameColor
+        // `imageScale` is also a computed property (a division); read it once
+        // rather than per badge + per emote run.
+        let imgScale = appearance.imageScale
         // No hanging indent — wrapped lines continue flush at the leading
         // edge, matching Twitch's native chat. The 14pt indent we shipped
         // briefly made continuations look misaligned ("starts a little bit
@@ -391,13 +398,13 @@ struct ChatRow: View, Equatable {
             // a row re-rendered (e.g., on `.deletedPlaceholder` flip).
             if appearance.showBadges {
                 ForEach(badgeEntries, id: \.url) { entry in
-                    BadgeImage(entry: entry, scale: appearance.imageScale)
+                    BadgeImage(entry: entry, scale: imgScale)
                 }
             }
             // Username prefix. The colon is interpolated into the same Text
             // so it hugs the name ("Landy:") instead of floating 4pt away as
             // its own flow item — and the pair can never wrap apart.
-            Text("\(usernamePrefix(bodyFont: bodyFont))\(Text(":").foregroundStyle(.secondary))")
+            Text("\(usernamePrefix(bodyFont: bodyFont, color: nameColor))\(Text(":").foregroundStyle(.secondary))")
 
             // Walk the pre-normalized runs in order. `line.runs` is immutable
             // after `Normalizer.normalize(...)` returns (we replace the whole
@@ -407,7 +414,7 @@ struct ChatRow: View, Equatable {
             // tripping AsyncImage's identity-change re-fetch for runs that
             // contain `.emote` / `.twitchEmote` cases.
             ForEach(line.runs.indices, id: \.self) { idx in
-                runView(for: line.runs[idx], bodyFont: bodyFont)
+                runView(for: line.runs[idx], bodyFont: bodyFont, imageScale: imgScale)
             }
         }
         // Highlighted lines get an accent-tinted backplate so a "@me ..."
@@ -476,7 +483,7 @@ struct ChatRow: View, Equatable {
     /// the Normalizer already did all the tokenization work, so this is
     /// purely "given run X, what view?"
     @ViewBuilder
-    private func runView(for run: LineRun, bodyFont: Font) -> some View {
+    private func runView(for run: LineRun, bodyFont: Font, imageScale: CGFloat) -> some View {
         // All text runs derive their font from the appearance setting —
         // passed in by `messageBody`, which computes it once per row.
         switch run {
@@ -490,7 +497,7 @@ struct ChatRow: View, Equatable {
             // not-too-large render.
             EmoteImage(
                 emote: emote,
-                scale: appearance.imageScale,
+                scale: imageScale,
                 allowAnimation: appearance.animatedEmotes
             )
 
