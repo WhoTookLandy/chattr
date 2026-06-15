@@ -29,7 +29,7 @@ struct ChannelRow: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if let stream {
-                        liveBadge(viewerCount: stream.viewerCount)
+                        LiveBadge(viewerCount: stream.viewerCount, style: .listRow)
                     }
                 }
                 subtitle
@@ -37,6 +37,8 @@ struct ChannelRow: View {
         }
         .padding(.vertical, 2)
     }
+
+    // The "LIVE • 12.3K" pill lives in the shared `LiveBadge` (style `.listRow`).
 
     /// Two-line layout uses the second line for either game/title (live) or
     /// the login handle (offline).
@@ -73,36 +75,6 @@ struct ChannelRow: View {
         .clipShape(Circle())
     }
 
-    /// Compact "LIVE • 12.3K" pill. The red dot is an SF Symbol so it can
-    /// pulse via `.symbolEffect(.pulse, options: .repeating)` — communicates
-    /// "live, right now" more clearly than a static circle. The system
-    /// down-modulates the effect under Reduce Motion automatically.
-    @ViewBuilder
-    private func liveBadge(viewerCount: Int) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 6))
-                .foregroundStyle(.red)
-                .symbolEffect(.pulse, options: .repeating)
-                .accessibilityHidden(true)
-            Text(viewerCount.formatted(.number.notation(.compactName)))
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.primary)
-                .contentTransition(.numericText())
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        // Liquid Glass capsule — same visual family as `ChatTabStrip`'s
-        // tab pills (small chrome indicator, capsule shape, sits over
-        // varying content). Regular variant, not Clear: ChannelRow is a
-        // standard list row, not media-rich content, so the Clear
-        // variant's three-condition requirement (media + dimming +
-        // bold/bright content) doesn't apply. Regular gives automatic
-        // legibility over whatever's behind, which is what we want here.
-        .glassEffect(in: Capsule())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Live, \(viewerCount.formatted(.number.notation(.compactName))) viewers")
-    }
 }
 
 // MARK: - Convenience inits

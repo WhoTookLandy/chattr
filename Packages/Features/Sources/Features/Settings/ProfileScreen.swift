@@ -103,7 +103,7 @@ public struct ProfileScreen: View {
                     showingAccountSwitcher = true
                 } label: {
                     HStack {
-                        AccountHeaderRow(account: account)
+                        AccountRow(account: account, style: .banner)
                         Spacer(minLength: 8)
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.footnote.weight(.semibold))
@@ -329,44 +329,5 @@ public struct ProfileScreen: View {
             logger.error("Sign out had an error: \(error.localizedDescription, privacy: .public)")
             errorMessage = "Sign out: \(error.localizedDescription)"
         }
-    }
-}
-
-/// Banner-style account row showing avatar + display name + @login.
-/// Sits at the top of `ProfileScreen` as the visual identity anchor.
-private struct AccountHeaderRow: View {
-    let account: Account
-
-    var body: some View {
-        HStack(spacing: 14) {
-            LazyImage(url: URL(string: account.profileImageURL)) { state in
-                if let image = state.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    // Placeholder while loading or when the URL is nil
-                    // (first sign-in before profile fetch completes).
-                    Image(systemName: "person.crop.circle.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(.secondary.opacity(0.5))
-                }
-            }
-            .frame(width: 64, height: 64)
-            .clipShape(Circle())
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(account.displayName)
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(1)
-                Text("@\(account.login)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
     }
 }
