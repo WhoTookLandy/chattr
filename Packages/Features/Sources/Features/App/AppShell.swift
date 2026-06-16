@@ -118,7 +118,6 @@ public struct AppShell: View {
             }
             .accessibilityLabel("Search")
         }
-        .chatTabBarMinimize()
         .environment(\.chatTabs, navigation.chatTabs)
         // Injected by identity: `OpenChannelAction` stores the stable
         // `navigation` reference (not a per-body closure), so this env value
@@ -315,15 +314,3 @@ private final class MentionWatchTokens {
     var byTab: [UUID: [(channelId: String, token: UUID)]] = [:]
 }
 
-private extension View {
-    /// `.tabBarMinimizeBehavior` is iOS/iPadOS-only; the Features package
-    /// also compiles for macOS where the modifier doesn't exist.
-    @ViewBuilder
-    func chatTabBarMinimize() -> some View {
-        #if os(iOS)
-        self.tabBarMinimizeBehavior(.onScrollDown)
-        #else
-        self
-        #endif
-    }
-}
