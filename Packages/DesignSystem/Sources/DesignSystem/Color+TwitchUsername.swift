@@ -16,10 +16,36 @@ import SwiftUI
 /// Twitch's own web client.
 public extension Color {
 
+    /// Memoized results keyed by `(scheme, hex)`. The parse → HSL → clamp →
+    /// RGB pipeline is pure and stable for a given pair, but it runs on the
+    /// chat-row hot path — once per `ChatRow.body`, up to thousands of times a
+    /// second during a raid. Twitch chatters share a tiny palette (15 preset
+    /// colors plus the occasional custom hex), so the cache hit-rate is near
+    /// total and each repeat call collapses to a dictionary lookup.
+    ///
+    /// `@MainActor`-isolated rather than locked because the only caller is
+    /// `ChatRow.body` (SwiftUI views are main-actor) — same rationale as
+    /// `ChatListViewController.estimatedRowHeight`.
+    @MainActor private static var twitchUsernameCache: [String: Color] = [:]
+
     /// Parse a Twitch user color (e.g. `"#FFD700"`) and return a SwiftUI Color
     /// with lightness clamped for the given color scheme. Falls back to
-    /// `.primary` when the hex string is empty or malformed.
+    /// `.primary` when the hex string is empty or malformed. Result is
+    /// memoized — see `twitchUsernameCache`.
+    @MainActor
     static func twitchUsername(hex: String, scheme: ColorScheme) -> Color {
+        // Prefix the key with the scheme so the two clamps for one hex never
+        // collide. `==` over a Bool keeps this off the allocation path.
+        let key = (scheme == .dark ? "d:" : "l:") + hex
+        if let cached = twitchUsernameCache[key] { return cached }
+        let color = computeTwitchUsername(hex: hex, scheme: scheme)
+        twitchUsernameCache[key] = color
+        return color
+    }
+
+    /// The uncached pipeline. Kept nonisolated and separate so the math stays
+    /// pure and trivially testable; `twitchUsername` is the memoizing front.
+    static func computeTwitchUsername(hex: String, scheme: ColorScheme) -> Color {
         guard let rgb = RGB(hex: hex) else { return .primary }
         let hsl = rgb.toHSL()
         let clamped: HSL

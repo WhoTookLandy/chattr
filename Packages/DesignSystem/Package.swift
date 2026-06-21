@@ -14,5 +14,11 @@ let package = Package(
             path: "Sources/DesignSystem",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .testTarget(
+            name: "DesignSystemTests",
+            dependencies: ["DesignSystem"],
+            path: "Tests/DesignSystemTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
     ]
 )
