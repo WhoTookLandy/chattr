@@ -42,15 +42,25 @@ public struct ChatAppearance: Equatable, Sendable {
     /// Type setting still scales chat text — the slider picks the base,
     /// Dynamic Type scales the result. Replaced the old four-step
     /// Small/Default/Large/XL enum (see `migrateLegacyTextSizeIfNeeded`).
-    public var textSizePoints: Double = ChatAppearance.defaultTextSizePoints
+    ///
+    /// `let`, not `var`: `font` and `imageScale` below are derived from it
+    /// and cached at `init`, so the three must move together. Every
+    /// construction already goes through `init` (RootView / settings both
+    /// build a fresh value), so immutability costs nothing.
+    public let textSizePoints: Double
 
-    /// Font for message body text, usernames, and timestamps.
-    public var font: Font { .system(size: textSizePoints) }
+    /// Font for message body text, usernames, and timestamps. Stored, not
+    /// computed: `.system(size:)` allocates a CoreText descriptor, and this
+    /// is read once per `ChatRow.body` on the per-message hot path. Since it
+    /// only depends on `textSizePoints` (fixed at init), compute it once here
+    /// rather than on every body evaluation.
+    public let font: Font
 
     /// Multiplier for fixed-size inline images (emotes, badges) so they
     /// track the text size instead of towering over small text or
-    /// vanishing next to large text. 1.0 at the default size.
-    public var imageScale: CGFloat { textSizePoints / Self.defaultTextSizePoints }
+    /// vanishing next to large text. 1.0 at the default size. Stored for the
+    /// same hot-path reason as `font` — was a per-body division.
+    public let imageScale: CGFloat
     /// Leading HH:mm timestamp on each message row.
     public var showTimestamps: Bool = false
     /// Chat badges (mod / sub / VIP …) before the username.
@@ -74,6 +84,9 @@ public struct ChatAppearance: Equatable, Sendable {
         loginNameDisplay: LoginNameDisplay = .displayFirst
     ) {
         self.textSizePoints = textSizePoints
+        // Derive the hot-path values once — see `font` / `imageScale`.
+        self.font = .system(size: textSizePoints)
+        self.imageScale = textSizePoints / Self.defaultTextSizePoints
         self.showTimestamps = showTimestamps
         self.showBadges = showBadges
         self.animatedEmotes = animatedEmotes
