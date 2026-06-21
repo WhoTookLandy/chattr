@@ -342,11 +342,17 @@ struct ChatRow: View, Equatable {
     /// once and threads it through here and every `runView`.
     private func usernamePrefix(bodyFont: Font, color: Color) -> Text {
         let nameFont = bodyFont.weight(.semibold)
-        guard let pair = ChatAppearance.loginAnnotation(
-            displayName: line.authorDisplayName,
-            login: line.authorUserLogin,
-            style: appearance.loginNameDisplay
-        ) else {
+        // Fast path: only a genuinely localized name needs the annotation
+        // lookup. `hasLocalizedDisplayName` is precomputed on the line, so the
+        // common case (display name is just the login) short-circuits here and
+        // skips `loginAnnotation`'s two `.lowercased()` allocations per body.
+        // The flag mirrors that trigger, so this is behavior-preserving.
+        guard line.hasLocalizedDisplayName,
+              let pair = ChatAppearance.loginAnnotation(
+                  displayName: line.authorDisplayName,
+                  login: line.authorUserLogin,
+                  style: appearance.loginNameDisplay
+              ) else {
             return Text(line.authorDisplayName)
                 .font(nameFont)
                 .foregroundStyle(color)

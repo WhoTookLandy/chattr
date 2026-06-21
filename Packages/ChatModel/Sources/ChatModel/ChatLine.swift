@@ -92,6 +92,16 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// picked one — the renderer falls back to `.primary` in that case.
     public let authorColor: String
 
+    /// True when `authorDisplayName` is a genuinely localized variant of
+    /// `authorUserLogin` (differs by more than capitalization) — i.e. the
+    /// row should annotate the name with its login. Precomputed at init from
+    /// the two name fields so the renderer's per-`body` username path skips
+    /// the `displayName.lowercased() != login.lowercased()` comparison (two
+    /// heap allocations) on the common case where they match. Mirrors the
+    /// trigger in `ChatAppearance.loginAnnotation`; the renderer still calls
+    /// that for the rare localized case to pick the display order.
+    public let hasLocalizedDisplayName: Bool
+
     /// The ordered runs that compose the message body. Empty for system
     /// kinds (sub bubble, raid bubble, etc.) where the visual is generated
     /// from the kind payload, not from text content.
@@ -380,6 +390,11 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         self.authorDisplayName = authorDisplayName
         self.authorUserLogin = authorUserLogin
         self.authorColor = authorColor
+        // Precompute the localized-name flag once — see the property doc.
+        self.hasLocalizedDisplayName =
+            !authorDisplayName.isEmpty
+            && !authorUserLogin.isEmpty
+            && authorDisplayName.lowercased() != authorUserLogin.lowercased()
         self.runs = runs
         self.isHighlighted = isHighlighted
         self.timestamp = timestamp

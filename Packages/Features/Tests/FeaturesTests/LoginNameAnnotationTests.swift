@@ -1,8 +1,33 @@
 import Testing
+import ChatModel
 @testable import Features
 
 @Suite("Login-name annotation rule")
 struct LoginNameAnnotationTests {
+
+    /// `ChatLine.hasLocalizedDisplayName` (precomputed in ChatModel) is the
+    /// fast-path gate the renderer uses to skip `loginAnnotation` on the
+    /// common case. The two carry the same trigger in different modules, so
+    /// this locks them together: for any non-`.off` style, the flag must
+    /// agree with "annotation would be produced". Catches drift if one
+    /// formula changes without the other.
+    @Test("Flag agrees with annotation trigger", arguments: [
+        ("デレク", "derek"),   // localized → both true
+        ("Shroud", "shroud"), // case-only → both false
+        ("ninja", "ninja"),   // exact → both false
+        ("デレク", ""),         // no login → both false
+        ("", "derek"),        // no display → both false
+    ])
+    func flagMatchesAnnotationTrigger(_ pair: (display: String, login: String)) {
+        let line = ChatLine(
+            id: "1", authorDisplayName: pair.display,
+            authorUserLogin: pair.login, runs: []
+        )
+        let annotates = ChatAppearance.loginAnnotation(
+            displayName: pair.display, login: pair.login, style: .displayFirst
+        ) != nil
+        #expect(line.hasLocalizedDisplayName == annotates)
+    }
 
     @Test("Localized name, display-first → (display, login)")
     func localizedDisplayFirst() {
