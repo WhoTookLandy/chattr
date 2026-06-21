@@ -23,6 +23,12 @@ public final class AccountStore {
     private let modelContainer: ModelContainer
     private let clientId: String
 
+    /// URLSession used for the Vercel-bridge refresh POST. Injectable so the
+    /// refresh branch tree (4xx → sign-out, 5xx → transient, 200 → persist)
+    /// can be exercised with a stubbed `URLProtocol` in tests. Defaults to
+    /// `.shared` in production.
+    private let urlSession: URLSession
+
     /// Cached per-account TwitchClient instances. Keyed by `userId`.
     private var clients: [String: TwitchClient] = [:]
 
@@ -37,9 +43,10 @@ public final class AccountStore {
     /// per-platform slot, not a single global.
     private var activeUserId: [ChatPlatform: String] = [:]
 
-    public init(modelContainer: ModelContainer, clientId: String) {
+    public init(modelContainer: ModelContainer, clientId: String, urlSession: URLSession = .shared) {
         self.modelContainer = modelContainer
         self.clientId = clientId
+        self.urlSession = urlSession
     }
 
     // MARK: - Public API
@@ -204,7 +211,13 @@ public final class AccountStore {
             profileImageURL: user.profileImageUrl,
             tokenNamespace: namespace
         )
-        let context = ModelContext(modelContainer)
+        // mainContext, not a throwaway ModelContext(modelContainer): the
+        // returned `account` is a live @Model that must outlive this call, and
+        // RootView's @Query observes mainContext — inserting into a separate
+        // context can fail to propagate the new row, leaving the just-added
+        // account invisible until relaunch. Same reasoning as remove() /
+        // forceSignOut() / allAccounts().
+        let context = modelContainer.mainContext
         context.insert(account)
         try context.save()
         activeUserId[.twitch] = user.id
@@ -398,13 +411,6 @@ public final class AccountStore {
 
 extension AccountStore {
 
-    /// URL of chattr-auth's refresh endpoint. Centralized in `Core.Endpoints`
-    /// alongside the corresponding `callback` URL that `SignInView` uses;
-    /// both live on the same Vercel bridge that holds the client_secret.
-    private static var refreshURL: URL {
-        Endpoints.ChattrAuth.refresh
-    }
-
     /// Refreshes the OAuth tokens for the given account via the Vercel bridge.
     ///
     /// Reads the current refresh_token from this account's TwitchAuth (which reads
@@ -484,35 +490,76 @@ extension AccountStore {
             refreshToken = cached
         }
 
-        var request = URLRequest(url: Self.refreshURL)
+        switch try await Self.performBridgeRefresh(refreshToken: refreshToken, using: urlSession) {
+        case .rejected(let status, let body):
+            // body is server-side debug text (no secrets) — public is fine.
+            // 4xx → Twitch rejected the refresh_token (revoked, expired, or
+            //       associated with a different client_id). Terminal — the
+            //       refresh credential we have can never work again, so drop
+            //       the Account row and show the session-expired banner on the
+            //       next render.
+            logger.error("Bridge refresh rejected for @\(login, privacy: .public) (HTTP \(status)): \(body, privacy: .public)")
+            await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
+            throw AppError.sessionExpired(login: login)
+
+        case .transient(let status, let body):
+            // 5xx → Bridge / Twitch is having a bad day. Transient. Throw so
+            //       the caller can decide whether to retry or show a "couldn't
+            //       reach server" toast, but DON'T sign the user out — their
+            //       credentials are probably still good.
+            logger.error("Bridge refresh transient failure for @\(login, privacy: .public) (HTTP \(status)): \(body, privacy: .public)")
+            throw AppError.bridgeRefreshFailed(status: status)
+
+        case .refreshed(let newToken):
+            try await twitchClient.auth.setToken(newToken)
+            // Mirror to chattr-side cache so the next failure has somewhere
+            // to recover from even if TwitchKit clears its store again.
+            OAuthRefreshTokenCache.save(refreshToken: newToken.refreshToken, for: userId)
+            logger.info("Refreshed tokens for @\(login, privacy: .public) (expires_in=\(newToken.expiresIn ?? -1))")
+            return newToken
+        }
+    }
+
+    /// Outcome of a single bridge-refresh POST. Separates the pure HTTP/JSON
+    /// branch tree from the Keychain/TwitchKit/SwiftData side effects in
+    /// `refreshTokens`, so the status → outcome and carry-forward logic is
+    /// unit-testable with a stubbed `URLSession`.
+    enum BridgeRefreshOutcome {
+        /// 200 + parsed token. Its `refreshToken` is already carry-forward
+        /// resolved (the response's, or the one we sent if Twitch omitted it).
+        case refreshed(OAuthToken)
+        /// 4xx — the refresh credential is dead. Caller signs the user out.
+        case rejected(status: Int, body: String)
+        /// 5xx — transient bridge/Twitch problem. Caller may retry.
+        case transient(status: Int, body: String)
+    }
+
+    /// POSTs `refreshToken` to the Vercel bridge and classifies the response.
+    /// Pure with respect to app state — no Keychain, no SwiftData, no sign-out
+    /// — so the status/parse/carry-forward branch tree can be tested in
+    /// isolation with a mocked `URLProtocol`.
+    static func performBridgeRefresh(
+        refreshToken: String,
+        using session: URLSession,
+        url: URL = Endpoints.ChattrAuth.refresh
+    ) async throws -> BridgeRefreshOutcome {
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         struct RequestBody: Encodable { let refresh_token: String }
         request.httpBody = try JSONEncoder().encode(RequestBody(refresh_token: refreshToken))
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw AppError(message: "Bridge refresh: no HTTP response")
         }
 
         if http.statusCode != 200 {
             let body = String(data: data, encoding: .utf8) ?? "(no body)"
-            // body is server-side debug text (no secrets) — public is fine.
-            logger.error("Bridge refresh failed for @\(login, privacy: .public) (HTTP \(http.statusCode)): \(body, privacy: .public)")
-            // 4xx → Twitch rejected the refresh_token (revoked, expired, or
-            //       associated with a different client_id). Terminal — the
-            //       refresh credential we have can never work again, so
-            //       drop the Account row and show the session-expired
-            //       banner on the next render.
-            // 5xx → Bridge / Twitch is having a bad day. Transient. Throw
-            //       so the caller can decide whether to retry or show a
-            //       "couldn't reach server" toast, but DON'T sign the user
-            //       out — their credentials are probably still good.
             if (400..<500).contains(http.statusCode) {
-                await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
-                throw AppError.sessionExpired(login: login)
+                return .rejected(status: http.statusCode, body: body)
             }
-            throw AppError.bridgeRefreshFailed(status: http.statusCode)
+            return .transient(status: http.statusCode, body: body)
         }
 
         // Twitch's response is snake_case. Use `.convertFromSnakeCase` so the struct
@@ -530,23 +577,17 @@ extension AccountStore {
         let parsed = try decoder.decode(TwitchRefreshResponse.self, from: data)
         // Twitch's `/oauth2/token` refresh sometimes returns a new
         // refresh_token, sometimes not (rotation is conditional on Twitch's
-        // own policy). When the response omits it, carry forward the one
-        // we *used* — otherwise persisting `refreshToken: nil` would leave
-        // the next refresh empty-handed.
+        // own policy). When the response omits it, carry forward the one we
+        // *used* — otherwise persisting `refreshToken: nil` would leave the
+        // next refresh empty-handed.
         let nextRefreshToken = parsed.refreshToken ?? refreshToken
-        let newToken = OAuthToken(
+        return .refreshed(OAuthToken(
             accessToken: parsed.accessToken,
             refreshToken: nextRefreshToken,
             expiresIn: parsed.expiresIn,
             scope: parsed.scope,
             tokenType: parsed.tokenType
-        )
-        try await twitchClient.auth.setToken(newToken)
-        // Mirror to chattr-side cache so the next failure has somewhere
-        // to recover from even if TwitchKit clears its store again.
-        OAuthRefreshTokenCache.save(refreshToken: nextRefreshToken, for: userId)
-        logger.info("Refreshed tokens for @\(login, privacy: .public) (expires_in=\(parsed.expiresIn ?? -1))")
-        return newToken
+        ))
     }
 
     /// Wraps an async throwing operation with one retry-after-refresh-on-auth-failure.

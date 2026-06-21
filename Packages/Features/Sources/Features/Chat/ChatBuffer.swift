@@ -56,6 +56,14 @@ struct ChatBuffer {
     /// from `lines`.
     private var blocked: Set<String> = []
 
+    /// `id` → absolute index into `storage` for every live line (`head...`).
+    /// Maintained alongside `storage` so `index(of:)` — hit by every dedup
+    /// `contains` check, moderation edit, echo upgrade, and retry — is O(1)
+    /// instead of an O(window) linear scan. Dead-prefix entries are dropped
+    /// as `head` advances and indices are rebased on compaction, so values
+    /// always point at the line's current physical slot.
+    private var indexByID: [String: Int] = [:]
+
     /// Undrained changes since the last `takeChanges()`. Each mutation appends
     /// the visible-list effect it produced.
     private var pendingChanges: [ChatChange] = []
@@ -103,6 +111,7 @@ struct ChatBuffer {
     /// Appends a line and trims to the cap. Hot path: O(1) amortized.
     mutating func append(_ line: ChatLine) {
         storage.append(line)
+        indexByID[line.id] = storage.count - 1
         if !blocked.contains(line.authorUserId) {
             _lines.append(line)
             pendingChanges.append(.appended(line))
@@ -116,6 +125,12 @@ struct ChatBuffer {
         guard let idx = index(of: id) else { return false }
         let old = storage[idx]
         storage[idx] = newLine
+        // An echo upgrade swaps the pending id for the canonical Helix id at
+        // the same slot — rekey the index so lookups by the new id resolve.
+        if newLine.id != id {
+            indexByID[id] = nil
+            indexByID[newLine.id] = idx
+        }
         applyVisibilityTransition(id: id, old: old, new: newLine)
         return true
     }
@@ -126,6 +141,10 @@ struct ChatBuffer {
         guard let idx = index(of: id) else { return false }
         let removed = storage[idx]
         storage.remove(at: idx)
+        // `remove(at:)` shifts every later element down one — already O(n), so
+        // rebasing the affected index entries here doesn't change the cost.
+        indexByID[id] = nil
+        for (k, v) in indexByID where v > idx { indexByID[k] = v - 1 }
         if !blocked.contains(removed.authorUserId) {
             if let vi = visibleIndex(of: id) { _lines.remove(at: vi) }
             pendingChanges.append(.removed(id: id))
@@ -139,6 +158,10 @@ struct ChatBuffer {
         let old = storage[idx]
         let new = transform(old)
         storage[idx] = new
+        if new.id != old.id {
+            indexByID[old.id] = nil
+            indexByID[new.id] = idx
+        }
         applyVisibilityTransition(id: id, old: old, new: new)
     }
 
@@ -174,6 +197,7 @@ struct ChatBuffer {
     mutating func reset() {
         storage.removeAll(keepingCapacity: true)
         head = 0
+        indexByID.removeAll(keepingCapacity: true)
         _lines.removeAll(keepingCapacity: true)
         linesHead = 0
         pendingChanges.append(.reset([]))
@@ -182,11 +206,11 @@ struct ChatBuffer {
     // MARK: - Internals
 
     private func index(of id: String) -> Int? {
-        guard head < storage.count else { return nil }
-        for i in head..<storage.count where storage[i].id == id {
-            return i
-        }
-        return nil
+        // O(1) via `indexByID`. The `>= head` guard is a defensive net: live
+        // entries are pruned as `head` advances, so a stale dead-prefix hit
+        // shouldn't occur, but we never want to return a reclaimed slot.
+        guard let i = indexByID[id], i >= head else { return nil }
+        return i
     }
 
     /// Index into `_lines` of the visible line with `id`, scanning only the
@@ -228,6 +252,9 @@ struct ChatBuffer {
         while count > cap {
             let dropped = storage[head]
             head += 1
+            // The dropped line leaves the live window — drop its index entry so
+            // it can't resolve a future lookup or block its id from reuse.
+            indexByID[dropped.id] = nil
             // The oldest logical line, if not filtered, is exactly the visible
             // window's front (`_lines[linesHead]`). Drop it by bumping the head
             // — O(1) — instead of an O(visible) `removeFirst` memmove.
@@ -237,8 +264,13 @@ struct ChatBuffer {
             }
         }
         if head >= cap {
-            storage.removeFirst(head)
+            let shift = head
+            storage.removeFirst(shift)
             head = 0
+            // Compaction shifted every surviving slot down by `shift`; rebase
+            // the index to match. All dead-prefix keys were already pruned in
+            // the loop above, so every remaining entry is a live line >= shift.
+            for (k, v) in indexByID { indexByID[k] = v - shift }
         }
         // Reclaim the dead prefix in one batch once it grows past the cap —
         // the same amortized-compaction the `storage` ring uses above.

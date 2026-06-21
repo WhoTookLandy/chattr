@@ -245,6 +245,13 @@ public final class ChatTranscriptModel {
     /// returns isSent=true.
     private var helixMessageIdByPendingId: [String: String] = [:]
 
+    /// Reverse of `helixMessageIdByPendingId` (messageId → pendingId), kept
+    /// 1:1 in sync at the same two mutation sites. Path 0 matches an incoming
+    /// echo by its (globally unique) messageId on every own-message echo; this
+    /// makes that an O(1) lookup instead of an O(pending) `first(where:)`
+    /// value-scan.
+    private var pendingIdByHelixMessageId: [String: String] = [:]
+
     /// Fallback echo-correlation map. Populated synchronously in `send(...)`
     /// — covers the race window before Helix responds.
     ///
@@ -861,6 +868,7 @@ public final class ChatTranscriptModel {
                 // a future event with the same messageId.
                 if buffer.contains(id: pendingId) {
                     helixMessageIdByPendingId[pendingId] = response.messageId
+                    pendingIdByHelixMessageId[response.messageId] = pendingId
                     // Defensive: start a fallback timer that fires if
                     // the echo never arrives. See `synthesizeStuckUpgrade`
                     // for what it does. The timer is cancelled by
@@ -1324,8 +1332,7 @@ public final class ChatTranscriptModel {
             // Unambiguous — Twitch's messageId is globally unique per send.
             // Handles every case except "echo arrived before Helix
             // returned" (Path 2 catches that one).
-            if !helixMessageIdByPendingId.isEmpty,
-               let matchedPendingId = helixMessageIdByPendingId.first(where: { $0.value == chatMessage.messageId })?.key {
+            if let matchedPendingId = pendingIdByHelixMessageId[chatMessage.messageId] {
                 cleanupPending(pendingId: matchedPendingId)
                 if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
                 // Optimistic row was removed under us (e.g., a Helix
@@ -1457,7 +1464,11 @@ public final class ChatTranscriptModel {
     /// is keyed by text; the cost is bounded by the number of pending
     /// sends, typically 0–1.
     private func cleanupPending(pendingId: String) {
-        helixMessageIdByPendingId.removeValue(forKey: pendingId)
+        // Drop both directions together so the reverse index never outlives
+        // its forward entry. `removeValue` hands back the messageId to key it.
+        if let messageId = helixMessageIdByPendingId.removeValue(forKey: pendingId) {
+            pendingIdByHelixMessageId.removeValue(forKey: messageId)
+        }
         // FIFO-aware removal: find which text key contains this
         // pendingId in its queue, remove it from the queue, and drop
         // the key entirely if the queue is now empty. Two-step scan
