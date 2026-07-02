@@ -254,6 +254,20 @@ public struct ChannelListScreen: View {
         } message: {
             Text("You'll need to authorize chattr with Twitch again to use this account.")
         }
+        // Sign-out failures get their own alert. Previously the message was
+        // folded into allFailedView's description, which only renders when
+        // the *load* state is .failed — a failed sign-out was invisible.
+        .alert(
+            "Couldn't sign out",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
         // Search applies to whichever view is showing — the filter logic is
         // mode-aware inside `filteredAllChannels` / `filteredLiveStreams`.
         //
@@ -401,13 +415,21 @@ public struct ChannelListScreen: View {
             ContentUnavailableView(
                 "Couldn't load channels",
                 systemImage: "exclamationmark.triangle",
-                description: Text(errorMessage ?? allErrorMessage ?? "Unknown error")
+                description: Text(allErrorMessage ?? "Unknown error")
             )
-            Button("Sign out and try again") {
-                showingSignOutConfirm = true
+            // Plain retry first — most failures here are transient network
+            // errors, same as liveFailedView. Sign-out stays available as
+            // the escalation for genuinely broken auth, not the default.
+            Button("Retry") {
+                guard let store = followsStore else { return }
+                Task { await store.refreshAll(account: account, accountStore: accountStore) }
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)
+            Button("Sign out and try again") {
+                showingSignOutConfirm = true
+            }
+            .buttonStyle(.bordered)
             .disabled(isSigningOut)
             .padding(.bottom, 32)
         }

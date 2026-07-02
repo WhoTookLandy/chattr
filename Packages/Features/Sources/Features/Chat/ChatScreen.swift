@@ -503,6 +503,13 @@ public struct ChatScreen: View {
                 .foregroundStyle(.red)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
+            // Without an in-place retry this screen is a dead end: the error
+            // never clears and `.task(id: channelId)` won't re-fire for the
+            // same channel — the only escape was closing the tab.
+            Button("Retry") {
+                Task { await startSession() }
+            }
+            .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -562,6 +569,10 @@ public struct ChatScreen: View {
     ///   sentinel — a teardown keyed on it no-ops unless nothing ever attached.
     @discardableResult
     private func startSession() async -> Int {
+        // Clear any prior failure so a retry (button or compose-bar
+        // self-heal) actually dismisses the error view; a repeat failure
+        // re-sets it below.
+        errorMessage = nil
         // Badge load runs in a sibling .task modifier (see body) — gives us
         // structured-cancellation parity with this session-start task.
         guard let registry = channelSessionRegistry else {
