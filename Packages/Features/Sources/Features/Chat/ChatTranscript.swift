@@ -73,7 +73,10 @@ struct ChatTranscript: View {
     @State private var liveAgainDismiss: Task<Void, Never>?
 
     var body: some View {
-        if chatModel.lines.isEmpty {
+        // `isEmpty` (not `lines.isEmpty`): the `lines` getter materializes the
+        // full visible window once the ring wraps, and this body re-runs per
+        // message — see ChatTranscriptModel.isEmpty's doc comment.
+        if chatModel.isEmpty {
             // Distinguish "attaching" (sessions not yet subscribed) from
             // "attached but quiet" (subscriptions live, but no messages
             // have arrived yet). Without explicit state UI a quiet channel

@@ -204,7 +204,10 @@ public final class AccountStore {
             profileImageURL: user.profileImageUrl,
             tokenNamespace: namespace
         )
-        let context = ModelContext(modelContainer)
+        // mainContext (not an ephemeral ModelContext): the returned Account
+        // must keep a live backing context, and the insert must propagate to
+        // RootView's @Query — same rationale as forceSignOut/remove below.
+        let context = modelContainer.mainContext
         context.insert(account)
         try context.save()
         activeUserId[.twitch] = user.id
