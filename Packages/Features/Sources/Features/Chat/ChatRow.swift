@@ -220,8 +220,10 @@ struct ChatRow: View, Equatable {
                 // We don't add a spinner — chat updates fast enough
                 // (~150ms to echo) that a spinner would barely render.
                 // The opacity dip is more legible than animation churn.
+                // 0.65 floor: a send stuck in flight on a slow connection can
+                // be the only visible copy — keep it above AA contrast.
                 messageWithOptionalQuote
-                    .opacity(0.55)
+                    .opacity(0.65)
             case .failed(let reason, _):
                 // Stack the row + a compact failure footer. Tap the
                 // whole failure footer to retry.
@@ -236,9 +238,12 @@ struct ChatRow: View, Equatable {
             // We don't change the data shape — the original `runs` stays
             // available — so future "moderator-only reveal" features
             // can show the original content behind the strike.
+            // 0.75 (matching the isHistorical dim), not 0.6: `.secondary` is
+            // already reduced-contrast — stacking a deep opacity cut on top
+            // compounds below the AA floor in light mode.
             messageBody
                 .foregroundStyle(.secondary)
-                .opacity(0.6)
+                .opacity(0.75)
                 .overlay(alignment: .leading) {
                     // Subtle strikethrough line across the row's text run.
                     Rectangle()
@@ -434,6 +439,11 @@ struct ChatRow: View, Equatable {
                     .fill(Color.accentColor.opacity(0.12))
             }
         }
+        // One VoiceOver stop per message. Without this, every timestamp,
+        // badge, name, and text/emote run is its own swipe stop — a single
+        // message reads as 5-8 fragments. Pure accessibility-tree modifier;
+        // adds nothing to the render hot path.
+        .accessibilityElement(children: .combine)
     }
 
     /// Failure-state footer rendered below a `.failed` message row.
@@ -575,6 +585,8 @@ private struct SystemEventBubble<Content: View>: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(tint)
                 .frame(width: 20)
+                // Decorative once the bubble reads as one combined element.
+                .accessibilityHidden(true)
 
             content()
         }
@@ -584,6 +596,9 @@ private struct SystemEventBubble<Content: View>: View {
             RoundedRectangle(cornerRadius: 10)
                 .fill(tint.opacity(fillOpacity))
         )
+        // One VoiceOver stop per event bubble (sub/raid/announcement),
+        // matching ChatRow.messageBody's grouping.
+        .accessibilityElement(children: .combine)
     }
 }
 
