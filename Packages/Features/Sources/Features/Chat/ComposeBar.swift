@@ -239,8 +239,16 @@ struct ComposeBar: View {
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.secondary)
                     .imageScale(.medium)
+                    // Inner padding grows the tap target toward the 44pt HIG
+                    // minimum (the bare glyph was ~20pt); the negative outer
+                    // padding below cancels the layout growth so the chip
+                    // keeps its compact height. Net: bigger hit area, same
+                    // visual.
+                    .padding(12)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
+            .padding(-12)
             .accessibilityLabel("Cancel reply")
         }
         .padding(.horizontal, 10)
@@ -323,9 +331,12 @@ struct ComposeBar: View {
                         // mic icon in the Claude composer: a quiet control
                         // sitting directly on the pill, leaving the orange
                         // send circle as the only filled shape in the bar.
+                        // 44pt outer frame (Apple HIG minimum touch target;
+                        // this and send are the most-tapped controls in the
+                        // app) around the unchanged 30pt visual disc.
                         .frame(width: 30, height: 30)
                         .background(Color.emoteButton, in: Circle())
-                        .frame(width: 40, height: 40)
+                        .frame(width: 44, height: 44)
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -349,9 +360,11 @@ struct ComposeBar: View {
                             // the button hang below the emote) so the inner
                             // 30pt disc and the emote share one 40pt frame and
                             // sit perfectly level under `.bottom` alignment.
+                            // 44pt outer frame to match the emote button —
+                            // HIG-minimum touch target, unchanged 30pt disc.
                             .frame(width: 30, height: 30)
                             .background(Color.sendButton, in: Circle())
-                            .frame(width: 40, height: 40)
+                            .frame(width: 44, height: 44)
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)

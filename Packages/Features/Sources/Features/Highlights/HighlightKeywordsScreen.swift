@@ -69,6 +69,7 @@ struct HighlightKeywordsScreen: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(trimmedNew.isEmpty)
+                    .accessibilityLabel("Add keyword")
                 }
             } footer: {
                 Text("Case-insensitive. A message containing any keyword is highlighted.")

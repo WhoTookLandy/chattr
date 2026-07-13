@@ -318,7 +318,11 @@ struct ChatRow: View, Equatable {
                     .lineLimit(1)
                 Text(reply.parentBody)
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    // `.secondary`, not `.tertiary`: this is real content the
+                    // reader needs (what's being replied to), and `.tertiary`
+                    // at caption size commonly fails WCAG AA's 4.5:1 contrast.
+                    // `.tertiary` stays reserved for decoration (the arrow).
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -369,6 +373,39 @@ struct ChatRow: View, Equatable {
             .font(nameFont)
             .foregroundStyle(Color.secondary)
         return Text("\(primary)\(secondary)")
+    }
+
+    /// Combined VoiceOver label for the whole message row, e.g.
+    /// "Landy, Moderator: hello chat KappaPride". Without the combined
+    /// element, every timestamp/badge/word/emote run is its own VoiceOver
+    /// stop — one message becomes 10+ swipes, and a full scrollback
+    /// thousands. O(runs) string joins; only rebuilt when the row's body
+    /// actually re-evaluates (the Equatable short-circuit still applies).
+    private var accessibilityMessageLabel: String {
+        var words: [String] = []
+        words.reserveCapacity(line.runs.count)
+        for run in line.runs {
+            switch run {
+            case .text(let word): words.append(word)
+            case .emote(let emote): words.append(emote.name)
+            case .twitchEmote(_, let displayName): words.append(displayName)
+            case .mention(let login, _): words.append("@\(login)")
+            case .url(let url): words.append(url)
+            case .cheermote(let prefix, let bits, _): words.append("\(prefix) \(bits) bits")
+            }
+        }
+        var speaker = line.authorDisplayName
+        if appearance.showBadges {
+            let titles = badgeEntries.compactMap(\.title)
+            if !titles.isEmpty {
+                speaker += ", " + titles.joined(separator: ", ")
+            }
+        }
+        let body = words.joined(separator: " ")
+        if case .deletedPlaceholder = line.kind {
+            return "\(speaker): message deleted. \(body)"
+        }
+        return "\(speaker): \(body)"
     }
 
     /// `highlightPlate: false` lets the reply container own the tint —
@@ -441,9 +478,13 @@ struct ChatRow: View, Equatable {
         }
         // One VoiceOver stop per message. Without this, every timestamp,
         // badge, name, and text/emote run is its own swipe stop — a single
-        // message reads as 5-8 fragments. Pure accessibility-tree modifier;
-        // adds nothing to the render hot path.
+        // message reads as 5-8 fragments. The explicit label replaces the
+        // awkward child concatenation ("14 32 Moderator Landy colon hello…")
+        // with a purpose-built read-out (author, badge titles, emote names).
+        // Only rebuilt when the row's body re-evaluates — the Equatable
+        // short-circuit still gates that.
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityMessageLabel)
     }
 
     /// Failure-state footer rendered below a `.failed` message row.
