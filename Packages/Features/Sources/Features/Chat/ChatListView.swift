@@ -172,14 +172,32 @@ final class ChatListViewController: UIViewController {
         view.addSubview(collectionView)
     }
 
+    /// Learned average chat-row height, used as the self-sizing ESTIMATE for
+    /// the compositional layout (refined in `refineEstimatedRowHeight`).
+    ///
+    /// Why it matters for swipe feel: with `.estimated` cells the collection
+    /// view computes total content height from this value BEFORE it measures
+    /// off-screen cells. For a bottom-pinned transcript, a stale estimate means
+    /// the initial bottom offset is wrong by `lineCount × per-row-error`, so a
+    /// freshly-mounted page (every swipe to a new chat) thrashes through
+    /// estimate→actual corrections to settle — the dominant cost in swipe
+    /// profiling. Seeded at a single-line guess and refined from the real
+    /// heights of laid-out cells on each mount. Process-wide (`static`) so
+    /// every page you swipe to inherits heights the previous pages measured,
+    /// instead of every page re-learning from 44pt.
+    ///
+    /// Main-thread only (every touch is from a UIKit method on this VC), hence
+    /// `@MainActor` rather than any locking.
+    @MainActor private static var estimatedRowHeight: CGFloat = 44
+
     /// Full-width, self-sizing rows (`.estimated`), 4pt inter-row spacing, and
     /// horizontal insets matching `ChatScreen`'s former `.padding(.horizontal)`.
     /// A custom compositional layout (not a list config) avoids the list's
     /// default separators/insets fighting the bubble rows.
-    private static func makeLayout() -> UICollectionViewLayout {
+    @MainActor private static func makeLayout() -> UICollectionViewLayout {
         let itemSize = NSCollectionLayoutSize(
             widthDimension: .fractionalWidth(1),
-            heightDimension: .estimated(44)
+            heightDimension: .estimated(estimatedRowHeight)
         )
         let item = NSCollectionLayoutItem(layoutSize: itemSize)
         let group = NSCollectionLayoutGroup.vertical(layoutSize: itemSize, subitems: [item])
@@ -309,14 +327,23 @@ final class ChatListViewController: UIViewController {
         if snapshot.numberOfSections == 0 { snapshot.appendSections([.main]) }
         var toReconfigure: [String] = []
 
+        // Set mirror of `snapshot.itemIdentifiers`, kept in sync with the
+        // loop's edits. `itemIdentifiers` is a plain Array, so a per-element
+        // `contains` is O(rows) — and a chat-clear / user-timeout batch emits
+        // one `.reconfigured` per matching line, which would make the checks
+        // below O(rows × batch) on the main thread at the moment chat is
+        // busiest. The Set makes each check O(1).
+        var liveIds = Set(snapshot.itemIdentifiers)
+
         for change in changes {
             switch change {
             case .appended(let line):
                 linesByID[line.id] = line
                 snapshot.appendItems([line.id], toSection: .main)
+                liveIds.insert(line.id)
             case .removed(let id):
                 linesByID[id] = nil
-                if snapshot.itemIdentifiers.contains(id) { snapshot.deleteItems([id]) }
+                if liveIds.remove(id) != nil { snapshot.deleteItems([id]) }
             case .reconfigured(let line):
                 linesByID[line.id] = line
                 toReconfigure.append(line.id)
@@ -324,7 +351,9 @@ final class ChatListViewController: UIViewController {
                 linesByID = lines.reduce(into: [:]) { $0[$1.id] = $1 }
                 snapshot = NSDiffableDataSourceSnapshot<Section, String>()
                 snapshot.appendSections([.main])
-                snapshot.appendItems(lines.map(\.id), toSection: .main)
+                let ids = lines.map(\.id)
+                snapshot.appendItems(ids, toSection: .main)
+                liveIds = Set(ids)
                 toReconfigure.removeAll()
             }
         }
@@ -333,7 +362,7 @@ final class ChatListViewController: UIViewController {
 
         // Reconfigure only ids that survived the batch (a line can be
         // reconfigured then removed within one batch).
-        let liveReconfigure = toReconfigure.filter { snapshot.itemIdentifiers.contains($0) }
+        let liveReconfigure = toReconfigure.filter { liveIds.contains($0) }
         if !liveReconfigure.isEmpty {
             var reconfig = dataSource.snapshot()
             reconfig.reconfigureItems(liveReconfigure)
@@ -352,6 +381,29 @@ final class ChatListViewController: UIViewController {
         } else if let anchor {
             restoreTopAnchor(anchor)
         }
+
+        // A `.reset` is a mount / wholesale reload — the swipe-in path. The
+        // cells are laid out now (the pin/anchor blocks above forced layout),
+        // so this is the cheapest moment to learn the real row height for the
+        // NEXT page's layout. Gated on reset so the per-message `.appended`
+        // hot path never pays for it.
+        let didReset = changes.contains { if case .reset = $0 { return true } else { return false } }
+        if didReset { Self.refineEstimatedRowHeight(from: collectionView) }
+    }
+
+    /// Refine the process-wide row-height estimate from the cells that are
+    /// actually laid out right now. O(visible cells) — a dozen-ish `bounds`
+    /// reads — and only ever called on reset/mount, never per message.
+    /// Exponential smoothing keeps one atypical screenful (e.g. an all-emote
+    /// raid) from whipsawing the estimate, and the clamp stops a glitchy
+    /// layout pass from poisoning every future page's layout.
+    @MainActor
+    private static func refineEstimatedRowHeight(from collectionView: UICollectionView) {
+        let heights = collectionView.visibleCells.map(\.bounds.height).filter { $0 > 1 }
+        guard !heights.isEmpty else { return }
+        let average = heights.reduce(0, +) / CGFloat(heights.count)
+        let smoothed = estimatedRowHeight * 0.6 + average * 0.4
+        estimatedRowHeight = min(max(smoothed, 24), 240)
     }
 }
 

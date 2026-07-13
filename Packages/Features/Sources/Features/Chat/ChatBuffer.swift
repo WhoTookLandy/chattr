@@ -49,7 +49,10 @@ struct ChatBuffer {
     }
 
     /// Number of currently-visible lines — O(1), avoids materializing `lines`.
-    private var visibleCount: Int { _lines.count - linesHead }
+    /// Internal (not private): `ChatTranscriptModel.isEmpty` reads it so the
+    /// empty-state check matches the *filtered* projection without paying the
+    /// `lines` getter's window copy.
+    var visibleCount: Int { _lines.count - linesHead }
 
     /// Blocked author user-ids. Lines whose `authorUserId` is in this set stay
     /// in `storage` (so dedup/echo logic still sees them) but are excluded
@@ -59,6 +62,13 @@ struct ChatBuffer {
     /// Undrained changes since the last `takeChanges()`. Each mutation appends
     /// the visible-list effect it produced.
     private var pendingChanges: [ChatChange] = []
+
+    /// id → absolute index into `storage`, maintained by every mutation so
+    /// `index(of:)` — and therefore the per-message dedup check
+    /// (`contains(id:)`) — is O(1) instead of a linear scan of the window.
+    /// Entries are removed as lines drop off the ring, and values are shifted
+    /// on the (rare) mid-array remove and the amortized compaction.
+    private var indexByID: [String: Int] = [:]
 
     init(cap: Int) {
         self.cap = cap
@@ -103,6 +113,7 @@ struct ChatBuffer {
     /// Appends a line and trims to the cap. Hot path: O(1) amortized.
     mutating func append(_ line: ChatLine) {
         storage.append(line)
+        indexByID[line.id] = storage.count - 1
         if !blocked.contains(line.authorUserId) {
             _lines.append(line)
             pendingChanges.append(.appended(line))
@@ -116,6 +127,11 @@ struct ChatBuffer {
         guard let idx = index(of: id) else { return false }
         let old = storage[idx]
         storage[idx] = newLine
+        if newLine.id != id {
+            // Pending-send rows get re-keyed to the server-issued id.
+            indexByID[id] = nil
+            indexByID[newLine.id] = idx
+        }
         applyVisibilityTransition(id: id, old: old, new: newLine)
         return true
     }
@@ -126,6 +142,11 @@ struct ChatBuffer {
         guard let idx = index(of: id) else { return false }
         let removed = storage[idx]
         storage.remove(at: idx)
+        // Mid-array remove shifts every later element down one. O(count),
+        // like the `storage.remove` above — this path is rare (moderation
+        // deletes), never the per-message hot path.
+        indexByID[id] = nil
+        indexByID = indexByID.mapValues { $0 > idx ? $0 - 1 : $0 }
         if !blocked.contains(removed.authorUserId) {
             if let vi = visibleIndex(of: id) { _lines.remove(at: vi) }
             pendingChanges.append(.removed(id: id))
@@ -139,12 +160,17 @@ struct ChatBuffer {
         let old = storage[idx]
         let new = transform(old)
         storage[idx] = new
+        if new.id != id {
+            indexByID[id] = nil
+            indexByID[new.id] = idx
+        }
         applyVisibilityTransition(id: id, old: old, new: new)
     }
 
     /// Transforms every line in the window (chat-clear shape). `transform` must
-    /// preserve `authorUserId` (so visibility is unchanged) — true for the only
-    /// caller, `markingDeleted()`.
+    /// preserve `authorUserId` (so visibility is unchanged) and `id` (so the
+    /// id→index side table stays valid) — true for the only caller,
+    /// `markingDeleted()`.
     mutating func mutateAll(_ transform: (ChatLine) -> ChatLine) {
         guard head < storage.count else { return }
         for i in head..<storage.count {
@@ -176,17 +202,18 @@ struct ChatBuffer {
         head = 0
         _lines.removeAll(keepingCapacity: true)
         linesHead = 0
+        indexByID.removeAll(keepingCapacity: true)
         pendingChanges.append(.reset([]))
     }
 
     // MARK: - Internals
 
     private func index(of id: String) -> Int? {
-        guard head < storage.count else { return nil }
-        for i in head..<storage.count where storage[i].id == id {
-            return i
-        }
-        return nil
+        // O(1) via the maintained side table. Dropped lines are pruned from
+        // the table as the head advances, so the `>= head` guard is pure
+        // defense against a maintenance bug, not an expected state.
+        guard let idx = indexByID[id], idx >= head, idx < storage.count else { return nil }
+        return idx
     }
 
     /// Index into `_lines` of the visible line with `id`, scanning only the
@@ -228,6 +255,7 @@ struct ChatBuffer {
         while count > cap {
             let dropped = storage[head]
             head += 1
+            indexByID[dropped.id] = nil
             // The oldest logical line, if not filtered, is exactly the visible
             // window's front (`_lines[linesHead]`). Drop it by bumping the head
             // — O(1) — instead of an O(visible) `removeFirst` memmove.
@@ -238,6 +266,10 @@ struct ChatBuffer {
         }
         if head >= cap {
             storage.removeFirst(head)
+            // Compaction shifted every survivor down by `head`; re-base the
+            // side table in the same batch. O(cap) once per `cap` appends —
+            // amortized O(1), same budget as the `removeFirst` itself.
+            indexByID = indexByID.mapValues { $0 - head }
             head = 0
         }
         // Reclaim the dead prefix in one batch once it grows past the cap —

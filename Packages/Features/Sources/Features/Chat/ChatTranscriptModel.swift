@@ -73,9 +73,11 @@ public final class ChatTranscriptModel {
 
     /// True when there are no visible lines — drives `ChatScreen`'s empty
     /// state. Reading this (instead of `lines.isEmpty`) keeps `ChatScreen.body`
-    /// off the full-array dependency on the hot path. Internal: only consumed
-    /// inside the Features module.
-    var isEmpty: Bool { buffer.isEmpty }
+    /// off the full-array dependency on the hot path. Counts the *visible*
+    /// (block-filtered) projection, matching what the transcript renders —
+    /// `buffer.isEmpty` would count blocked-but-retained lines too. Internal:
+    /// only consumed inside the Features module.
+    var isEmpty: Bool { buffer.visibleCount == 0 }
 
     // MARK: - Incremental change channel
     //

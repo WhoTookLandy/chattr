@@ -126,8 +126,21 @@ public actor ChannelSession {
     private let channelLoginName: String
     private let accountUserId: String
 
-    /// Ring buffer of received events, capped at `ringCapacity`.
+    /// Ring buffer of received events, capped at `ringCapacity`. Head-index
+    /// ring: the live window is `ring[ringHead...]`; everything before
+    /// `ringHead` is dead and reclaimed at the next batch compaction (see
+    /// `appendToRing`). Same technique as `ChatBuffer` — a front trim is an
+    /// O(1) pointer bump, not an O(count) `removeFirst` memmove per event.
+    /// Readers go through `ringSnapshot`, never `ring` directly.
     private var ring: [ChannelEvent] = []
+    private var ringHead: Int = 0
+
+    /// The live window, materialized. O(count) copy — acceptable on the cold
+    /// paths that read it (subscribe prime, one-shot snapshot, resync dedup),
+    /// never touched on the per-event hot path.
+    private var ringSnapshot: [ChannelEvent] {
+        ringHead == 0 ? ring : Array(ring[ringHead...])
+    }
     /// Set at construction from the user's Chat History setting (default
     /// 500). Fixed for the session's lifetime — a changed setting applies
     /// to sessions created after it (i.e. newly opened channel tabs).
@@ -787,7 +800,7 @@ public actor ChannelSession {
     public func subscribe(_ handler: @escaping EventHandler) -> (token: UUID, snapshot: [ChannelEvent]) {
         let token = UUID()
         subscribers[token] = handler
-        return (token, ring)
+        return (token, ringSnapshot)
     }
 
     /// Removes the handler for the given token. Idempotent — calling with an
@@ -803,18 +816,28 @@ public actor ChannelSession {
     /// ongoing updates, use `subscribe(_:)` — it primes AND subscribes in one
     /// atomic step.
     public func currentSnapshot() -> [ChannelEvent] {
-        ring
+        ringSnapshot
     }
 
     /// Appends one event to the ring, dropping the oldest past `ringCapacity`.
     /// The single owner of the cap invariant — every post-backfill ring write
     /// (live dispatch, local settings change, reconnect gap-fill) goes through
     /// here so the trim logic can't drift between call sites.
+    ///
+    /// O(1) amortized: at capacity (the steady state for any long-open
+    /// channel) each append bumps `ringHead` instead of paying an O(count)
+    /// `removeFirst` memmove — under raid bursts (50-200 events/sec) that
+    /// memmove compounded on every single event. The dead prefix is reclaimed
+    /// in one batch once per `ringCapacity` appends.
     private func appendToRing(_ event: ChannelEvent) {
-        if ring.count >= ringCapacity {
-            ring.removeFirst(ring.count - ringCapacity + 1)
-        }
         ring.append(event)
+        if ring.count - ringHead > ringCapacity {
+            ringHead += 1
+        }
+        if ringHead >= ringCapacity {
+            ring.removeFirst(ringHead)
+            ringHead = 0
+        }
     }
 
     // MARK: - Backfill merge
@@ -894,6 +917,7 @@ public actor ChannelSession {
             capacity: ringCapacity,
             divider: divider
         )
+        ringHead = 0
         let bufferedCount = pendingLive.count
         pendingLive = []
         backfillPending = false
@@ -954,7 +978,7 @@ public actor ChannelSession {
 
         let gapEvents = Self.reconnectGapEvents(
             fetched: fetched,
-            ring: ring,
+            ring: ringSnapshot,
             dividerId: "divider-\(UUID().uuidString)",
             timestamp: .now
         )
