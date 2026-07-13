@@ -218,7 +218,12 @@ internal enum IRCMessageParser {
             return try decoder.decode(ChatMessage.self, from: data)
         } catch {
             // One line failed to decode — log and skip. Don't fail the
-            // whole backfill for one malformed message.
+            // whole backfill for one malformed message. The log line is
+            // load-bearing: this hand-built dict must track TwitchKit's
+            // `ChatMessage` Codable shape by hand, so a TwitchKit bump that
+            // adds a required field makes EVERY line fail here — without
+            // telemetry that regression presents as "chat opens empty."
+            logger.warning("Backfill line failed to decode as ChatMessage: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
