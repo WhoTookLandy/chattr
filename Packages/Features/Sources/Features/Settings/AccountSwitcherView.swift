@@ -37,6 +37,14 @@ struct AccountSwitcherView: View {
     @State private var isAddingAccount = false
     @State private var errorMessage: String?
 
+    /// Accounts staged by a delete swipe, awaiting the user's confirmation.
+    /// Removal is at least as destructive as sign-out (Keychain teardown +
+    /// full re-OAuth to get back in), so it gets the same
+    /// `.confirmationDialog` gate every other destructive action in the app
+    /// has — a stray Mail-style swipe must not be enough.
+    @State private var pendingRemoval: [Account] = []
+    @State private var showingRemoveConfirm = false
+
     /// The effective active account's userId: the stored selection if it
     /// resolves to a real, healthy account, else the most-recently-added
     /// healthy one (fallback, mirroring RootView's `activeAccount` logic —
@@ -67,7 +75,10 @@ struct AccountSwitcherView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    .onDelete(perform: removeAccounts)
+                    .onDelete { offsets in
+                        pendingRemoval = offsets.map { accounts[$0] }
+                        showingRemoveConfirm = true
+                    }
                 }
 
                 Section {
@@ -95,6 +106,21 @@ struct AccountSwitcherView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .confirmationDialog(
+                pendingRemoval.count == 1
+                    ? "Remove @\(pendingRemoval.first?.login ?? "")?"
+                    : "Remove these accounts?",
+                isPresented: $showingRemoveConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Remove", role: .destructive) {
+                    removeAccounts(pendingRemoval)
+                    pendingRemoval = []
+                }
+                Button("Cancel", role: .cancel) { pendingRemoval = [] }
+            } message: {
+                Text("You'll need to authorize chattr with Twitch again to use \(pendingRemoval.count == 1 ? "this account" : "these accounts").")
             }
         }
     }
@@ -164,11 +190,12 @@ struct AccountSwitcherView: View {
         }
     }
 
-    /// Swipe-to-delete. Removing the active account tears down AppShell
-    /// (RootView `.id` change) and thus this sheet — acceptable: you land
-    /// on the next account, or SignInView if it was the last.
-    private func removeAccounts(at offsets: IndexSet) {
-        let toRemove = offsets.map { accounts[$0] }
+    /// Confirmed removal (the swipe only stages accounts; the
+    /// `.confirmationDialog` above calls this). Removing the active account
+    /// tears down AppShell (RootView `.id` change) and thus this sheet —
+    /// acceptable: you land on the next account, or SignInView if it was
+    /// the last.
+    private func removeAccounts(_ toRemove: [Account]) {
         Task {
             for account in toRemove {
                 do {
