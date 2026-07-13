@@ -179,8 +179,13 @@ public struct AppShell: View {
             // (no `weak` possible on `@Model`) and create undefined
             // behavior if multi-account/sign-out ever invalidates the
             // SwiftData context. Matches the existing `onClose` shape.
+            // `chatTabs` MUST be weak here: this closure is stored on
+            // `chatTabs.onOpen` itself, so a strong capture is a self-retain
+            // cycle — the old ChatTabsModel (plus its tabs, TabPersistence,
+            // and MentionWatchTokens) would leak on every account switch,
+            // since RootView's `.id(userId)` rebuilds AppShell each time.
             chatTabs.onOpen = {
-                [weak channelSessionRegistry, chatTabs, mentionWatchTokens,
+                [weak channelSessionRegistry, weak chatTabs, mentionWatchTokens,
                  accountUserId = account.userId,
                  accountLogin = account.login] tab in
                 guard let registry = channelSessionRegistry else { return }
@@ -196,13 +201,13 @@ public struct AppShell: View {
                         // so @-mentions land the red dot even for tabs whose
                         // page isn't mounted. The handler is deliberately
                         // tiny — a substring check, no normalization.
-                        let (token, _) = await session.subscribe { [tabId = tab.id] event in
+                        let (token, _) = await session.subscribe { [weak chatTabs, tabId = tab.id] event in
                             guard case .message(let message, let isHistorical) = event,
                                   !isHistorical,
                                   message.chatterUserId != accountUserId,
                                   ChatTabsModel.containsMention(of: accountLogin, in: message.message.text)
                             else { return }
-                            await chatTabs.markMention(tabId: tabId)
+                            await chatTabs?.markMention(tabId: tabId)
                         }
                         mentionWatchTokens.byTab[tab.id, default: []]
                             .append((channelId: channel.channelId, token: token))
