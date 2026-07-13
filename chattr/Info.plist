@@ -2,24 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!--
-	  Export-compliance declaration. chattr uses only standard HTTPS/TLS
-	  (URLSession, WebSocket-over-TLS for EventSub) and the OS Keychain —
-	  all exempt under the U.S. Export Administration Regulations. Declaring
-	  NO here lets every TestFlight/App Store upload skip the manual
-	  export-compliance questionnaire. If chattr ever ships its own
-	  (non-exempt) cryptography, flip this and file the annual
-	  self-classification report.
-	-->
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
-
-	<!--
-	  URL scheme registration for the OAuth callback path. The Vercel bridge
-	  (chattr-auth.vercel.app) 302-redirects to chattr://oauth-complete after
-	  exchanging Twitch's authorization code for tokens; ASWebAuthenticationSession
-	  intercepts that scheme via its `callbackURLScheme: "chattr"` parameter.
-	-->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
