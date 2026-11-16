@@ -101,8 +101,18 @@ public struct RootView: View {
         self.channelSessionRegistry = channelSessionRegistry
         // Carry the pre-slider discrete text-size choice into the points
         // key (no-op once migrated or when the user has set the slider).
-        ChatAppearance.migrateLegacyTextSizeIfNeeded()
+        // Touching the lazy static runs it once per process, not on every
+        // RootView re-init from the parent's body.
+        _ = Self.legacyTextSizeMigration
     }
+
+    /// Lazily-initialized (`static let` ⇒ exactly once, thread-safe) so the
+    /// UserDefaults migration doesn't re-run on every RootView recompute.
+    private static let legacyTextSizeMigration: Void = ChatAppearance.migrateLegacyTextSizeIfNeeded()
+
+    /// Observed to refresh the live follow list when the app returns to the
+    /// foreground (see the `.onChange(of: scenePhase)` below).
+    @Environment(\.scenePhase) private var scenePhase
 
     /// The account to show. Resolves the stored active-account selection
     /// against the current account list; falls back to most-recently-added
@@ -249,6 +259,14 @@ public struct RootView: View {
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
             await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
+        }
+        // Foregrounding: live status goes stale while backgrounded. Non-forced
+        // — FollowsStore's staleness throttle skips it after a quick
+        // background/foreground hop, and coalesces it with any in-flight
+        // refresh (e.g. the launch-time `.task` above).
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, let active = activeAccount else { return }
+            Task { await followsStore.refreshLive(account: active, accountStore: accountStore) }
         }
         // Create the active account's BlockStore (loads its persisted cache in
         // init) and seed it from Twitch's authoritative block list. `.task(id:)`
