@@ -229,7 +229,7 @@ public actor ChannelSession {
     /// + notification + raid + delete + clear topics, and primes the ring
     /// from rustlog backfill.
     public func start() async throws {
-        logger.info("Starting session for #\(self.channelLoginName) (channelId=\(self.channelId))")
+        logger.info("Starting session for #\(self.channelLoginName, privacy: .public) (channelId=\(self.channelId, privacy: .public))")
 
         // Kick off rustlog backfill in parallel with the WebSocket connect.
         // See BackfillProvider for the design rationale.
@@ -481,7 +481,7 @@ public actor ChannelSession {
     /// expiry, server error), we still proceed with local cleanup. Twitch will
     /// garbage-collect each subscription when the WebSocket disconnects.
     public func stop() async {
-        logger.info("Stopping session for #\(self.channelLoginName)")
+        logger.info("Stopping session for #\(self.channelLoginName, privacy: .public)")
 
         // Cancel the in-flight restrictions fetch so it stops retaining the
         // actor past teardown (and skips its now-pointless subscriber fan-out).
