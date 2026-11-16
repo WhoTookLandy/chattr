@@ -4,17 +4,15 @@ import Channels
 import ChatModel
 import EmoteSources
 import DesignSystem
-import NukeUI
 
 /// One chat-message row: badges → bold username → inline-rendered runs
 /// (text, third-party emote images, Twitch native emote images, @mention
-/// highlights, cheermote text).
+/// highlights, cheermote text) — or, for non-message lines, the matching
+/// bubble / divider row.
 ///
-/// **Phase 2.2 change**: input type is now `ChatModel.ChatLine` (the
-/// display-ready, pre-normalized form) instead of `TwitchKit.ChatMessage`.
-/// The `LineRun`s in the line are already tokenized — this view does
-/// nothing more than dispatch each run to the right inline subview.
-/// No regex, no string scanning, no per-render allocation.
+/// The input is a display-ready `ChatLine`: its `LineRun`s are already
+/// tokenized, so this view only dispatches each run to the right inline
+/// subview. No regex, no string scanning, no per-render allocation.
 ///
 /// Username color is HSL-lightness-clamped per color scheme — see
 /// `Color.twitchUsername(hex:scheme:)` in DesignSystem. Twitch's user-picked
@@ -136,59 +134,52 @@ struct ChatRow: View, Equatable {
         // boundary, the dim confirms it row by row. 0.75 sits above the
         // 0.55 in-flight treatment so the two states stay distinguishable.
         .opacity(line.isHistorical ? 0.75 : 1)
-        .contextMenu {
-            // Reply only makes sense on actual chat messages — not
-            // on sub/raid/system bubbles or deleted placeholders.
-            // The menu is empty for those rows, which makes the
-            // long-press a no-op (no menu pops), matching the
-            // platform default.
-            if case .message = line.kind {
-                if let onReply {
-                    Button {
-                        onReply()
-                    } label: {
-                        Label("Reply", systemImage: "arrowshape.turn.up.left")
-                    }
+        .contextMenu { contextMenuItems }
+    }
+
+    /// Long-press actions. Only real chat messages get any — not bubbles,
+    /// the divider, or deleted placeholders (whose kind isn't `.message`);
+    /// for those the menu is empty and the long-press is a no-op, matching
+    /// the platform default. Each item is present only when its callback is.
+    @ViewBuilder
+    private var contextMenuItems: some View {
+        if case .message = line.kind {
+            if let onReply {
+                Button {
+                    onReply()
+                } label: {
+                    Label("Reply", systemImage: "arrowshape.turn.up.left")
                 }
-                if let onViewThread {
-                    Button {
-                        onViewThread()
-                    } label: {
-                        Label("View Thread", systemImage: "bubble.left.and.bubble.right")
-                    }
+            }
+            if let onViewThread {
+                Button {
+                    onViewThread()
+                } label: {
+                    Label("View Thread", systemImage: "bubble.left.and.bubble.right")
                 }
-                // Moderation action — visually separated from the
-                // benign read-only actions above by .destructive
-                // role (red icon + label, slight visual gap in
-                // the menu). Only present when `onDelete` is
-                // non-nil, which `ChatScreen` only does for
-                // moderators.
-                //
-                // Doesn't show on `.deletedPlaceholder` rows
-                // (the outer `if case .message` covers that — a
-                // placeholder's kind is `.deletedPlaceholder`,
-                // not `.message`).
-                if let onDelete {
-                    Button(role: .destructive) {
-                        onDelete()
-                    } label: {
-                        Label("Delete Message", systemImage: "trash")
-                    }
+            }
+            // Moderation and safety actions are `.destructive` — red, and
+            // visually set apart from the benign read-only actions above.
+            if let onDelete {
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label("Delete Message", systemImage: "trash")
                 }
-                if let onBlock {
-                    Button(role: .destructive) {
-                        onBlock()
-                    } label: {
-                        Label("Block", systemImage: "hand.raised")
-                    }
+            }
+            if let onBlock {
+                Button(role: .destructive) {
+                    onBlock()
+                } label: {
+                    Label("Block", systemImage: "hand.raised")
                 }
-                if let onReport {
-                    Menu {
-                        Button("Harassment") { onReport(.harassment) }
-                        Button("Spam") { onReport(.spam) }
-                    } label: {
-                        Label("Report…", systemImage: "exclamationmark.bubble")
-                    }
+            }
+            if let onReport {
+                Menu {
+                    Button("Harassment") { onReport(.harassment) }
+                    Button("Spam") { onReport(.spam) }
+                } label: {
+                    Label("Report…", systemImage: "exclamationmark.bubble")
                 }
             }
         }
@@ -205,13 +196,6 @@ struct ChatRow: View, Equatable {
             // sub/raid/system bubbles can't be in `.sending` or
             // `.failed` since we don't send those (they always arrive
             // via EventSub already-delivered).
-            //
-            // If this row is a reply (`line.replyParent != nil`), we
-            // stack a quoted-preview block above the message body so
-            // the reader sees what's being responded to. Twitch web
-            // does the same thing — replaces the "@parentUser " prefix
-            // Twitch normally puts in the message body with a distinct
-            // visual treatment.
             switch line.deliveryState {
             case .delivered:
                 messageWithOptionalQuote
@@ -230,7 +214,7 @@ struct ChatRow: View, Equatable {
                 VStack(alignment: .leading, spacing: 4) {
                     messageWithOptionalQuote
                         .opacity(0.7)
-                    failureFooter(reason: reason)
+                    FailedSendFooter(reason: reason, onRetry: onRetry)
                 }
             }
         case .deletedPlaceholder:
@@ -265,6 +249,8 @@ struct ChatRow: View, Equatable {
     /// Wraps `messageBody` with a quoted-preview line above it when
     /// the line is a reply (and quoting isn't suppressed). For non-reply
     /// messages, this is just `messageBody` unchanged — no layout cost.
+    /// Twitch web does the same: the "@parentUser " prefix Twitch puts in
+    /// the body is replaced by a distinct quote.
     ///
     /// Quote + body share ONE container background so they read as a
     /// single unit. Proximity alone doesn't bind them in a dense chat
@@ -276,7 +262,7 @@ struct ChatRow: View, Equatable {
     private var messageWithOptionalQuote: some View {
         if showsQuotedReply, let reply = line.replyParent {
             VStack(alignment: .leading, spacing: 3) {
-                quotedPreview(reply)
+                QuotedReplyPreview(reply: reply, onViewThread: onViewThread)
                 messageBody(highlightPlate: false)
             }
             .padding(.horizontal, 6)
@@ -290,48 +276,6 @@ struct ChatRow: View, Equatable {
         } else {
             messageBody
         }
-    }
-
-    /// Quoted-parent preview: ONE line — reply arrow, parent author,
-    /// truncated parent body. Single-line (vs the old stacked author/body)
-    /// because vertical space is the scarcest resource in a fast chat;
-    /// the quote is a glanceable hint, not content to read, and the full
-    /// context is one tap away.
-    ///
-    /// The whole line is a button that opens the thread sheet — same
-    /// action as the long-press "View Thread" menu item, but actually
-    /// discoverable. Read-only contexts (thread sheet, previews) pass
-    /// `onViewThread == nil`, which disables the tap without changing
-    /// the visual.
-    @ViewBuilder
-    private func quotedPreview(_ reply: ChatLine.ReplyParent) -> some View {
-        Button {
-            onViewThread?()
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "arrowshape.turn.up.left.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Text(reply.parentAuthorDisplayName)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text(reply.parentBody)
-                    .font(.caption)
-                    // `.secondary`, not `.tertiary`: this is real content the
-                    // reader needs (what's being replied to), and `.tertiary`
-                    // at caption size commonly fails WCAG AA's 4.5:1 contrast.
-                    // `.tertiary` stays reserved for decoration (the arrow).
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(onViewThread == nil)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Replying to \(reply.parentAuthorDisplayName): \(reply.parentBody)")
-        .accessibilityHint(onViewThread == nil ? "" : "Opens the thread")
     }
 
     /// The standard inline message body (badges + username + runs).
@@ -381,18 +325,9 @@ struct ChatRow: View, Equatable {
     /// stop — one message becomes 10+ swipes, and a full scrollback
     /// thousands. O(runs) string joins; only rebuilt when the row's body
     /// actually re-evaluates (the Equatable short-circuit still applies).
+    /// Runs read through the shared `LineRun.plainText(.spoken)` mapping.
     private var accessibilityMessageLabel: String {
-        var words: [String] = []
-        words.reserveCapacity(line.runs.count)
-        for run in line.runs {
-            switch run {
-            case .text(let word): words.append(word)
-            case .emote(let emote): words.append(emote.name)
-            case .twitchEmote(_, let displayName): words.append(displayName)
-            case .mention(let login, _): words.append("@\(login)")
-            case .cheermote(let prefix, let bits, _): words.append("\(prefix) \(bits) bits")
-            }
-        }
+        let body = line.runs.map { $0.plainText(.spoken) }.joined(separator: " ")
         var speaker = line.authorDisplayName
         if appearance.showBadges {
             let titles = badgeEntries.compactMap(\.title)
@@ -400,7 +335,6 @@ struct ChatRow: View, Equatable {
                 speaker += ", " + titles.joined(separator: ", ")
             }
         }
-        let body = words.joined(separator: " ")
         if case .deletedPlaceholder = line.kind {
             return "\(speaker): message deleted. \(body)"
         }
@@ -438,11 +372,11 @@ struct ChatRow: View, Equatable {
                     .font(bodyFont.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            // Badges keyed by `url` — stable per-badge identity across row
-            // re-renders means SwiftUI doesn't destroy + re-create the
-            // underlying AsyncImage (which would re-fetch the badge image).
-            // Pre-fix: `id: \.offset` triggered AsyncImage churn whenever
-            // a row re-rendered (e.g., on `.deletedPlaceholder` flip).
+            // Badges keyed by `url` — a stable per-badge identity across row
+            // re-renders, so SwiftUI keeps each badge's `LazyImage` (and its
+            // loaded image) instead of destroying and re-creating it. Keying
+            // by offset churned them whenever a row re-rendered (e.g. on a
+            // `.deletedPlaceholder` flip).
             if appearance.showBadges {
                 ForEach(badgeEntries, id: \.url) { entry in
                     BadgeImage(entry: entry, scale: imgScale)
@@ -453,13 +387,13 @@ struct ChatRow: View, Equatable {
             // its own flow item — and the pair can never wrap apart.
             Text("\(usernamePrefix(bodyFont: bodyFont, color: nameColor))\(Text(":").foregroundStyle(.secondary))")
 
-            // Walk the pre-normalized runs in order. `line.runs` is immutable
-            // after `Normalizer.normalize(...)` returns (we replace the whole
-            // ChatLine on mutation, never patch runs in place), so positional
-            // indices are safe identity here. Critically, this avoids
-            // `Array(...enumerated())` allocation per body call AND avoids
-            // tripping AsyncImage's identity-change re-fetch for runs that
-            // contain `.emote` / `.twitchEmote` cases.
+            // Walk the pre-normalized runs in order. `line.runs` never
+            // changes shape for a given line id (a mutation replaces the
+            // whole ChatLine; see `ChatLineRunsInvariantTests`), so
+            // positional indices are safe identity here — and they avoid an
+            // `Array(...enumerated())` allocation per body without disturbing
+            // the stateful emote image views (`LazyImage` /
+            // `AnimatedImageView`) of unchanged runs.
             ForEach(line.runs.indices, id: \.self) { idx in
                 runView(for: line.runs[idx], bodyFont: bodyFont, imageScale: imgScale)
             }
@@ -486,55 +420,6 @@ struct ChatRow: View, Equatable {
         .accessibilityLabel(accessibilityMessageLabel)
     }
 
-    /// Failure-state footer rendered below a `.failed` message row.
-    /// Shows the drop reason from Twitch / the network error, and the
-    /// whole strip is tappable to retry the send.
-    ///
-    /// Design choices:
-    ///   - `exclamationmark.triangle.fill` with hierarchical rendering
-    ///     in `.red` reads as "error" at any size without needing a
-    ///     filled background — the symbol carries the meaning.
-    ///   - "Tap to retry" reads better than a separate icon-button.
-    ///     The whole strip is one tap target → bigger hit area, less
-    ///     visual clutter than a 44pt circle next to the row.
-    ///   - Disabling the tap when `onRetry` is nil keeps the same
-    ///     visual for read-only contexts (priming, previews) without
-    ///     a broken affordance.
-    @ViewBuilder
-    private func failureFooter(reason: String) -> some View {
-        Button {
-            onRetry?()
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.red)
-                    .imageScale(.small)
-                Text(reason)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                Spacer(minLength: 4)
-                if onRetry != nil {
-                    Image(systemName: "arrow.clockwise")
-                        .imageScale(.small)
-                        .foregroundStyle(.red)
-                    Text("Retry")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.red)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.red.opacity(0.10))
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(onRetry == nil)
-        .accessibilityLabel("Failed to send: \(reason). Tap to retry.")
-    }
-
     /// Dispatch a single run to its inline view. Each case is a one-liner —
     /// the Normalizer already did all the tokenization work, so this is
     /// purely "given run X, what view?"
@@ -548,17 +433,14 @@ struct ChatRow: View, Equatable {
                 .font(bodyFont)
 
         case .emote(let emote):
-            // 7TV / BTTV / FFZ inline. Prefer the 2x size (matches the
-            // approx 24pt height of a chat row's line) for a sharp,
-            // not-too-large render.
-            EmoteImage(
+            // 7TV / BTTV / FFZ inline, through the shared `EmoteImageView`.
+            ThirdPartyEmoteImage(
                 emote: emote,
                 scale: imageScale,
                 allowAnimation: appearance.animatedEmotes
             )
 
         case .twitchEmote(let reference, let displayName):
-            // Existing Twitch CDN renderer — same component used pre-2.2.
             TwitchEmoteImage(emote: reference, displayName: displayName)
 
         case .mention(let login, let isMe):
@@ -583,269 +465,5 @@ struct ChatRow: View, Equatable {
     private var usernameColor: Color {
         guard !line.authorColor.isEmpty else { return .primary }
         return .twitchUsername(hex: line.authorColor, scheme: colorScheme)
-    }
-}
-
-// MARK: - System bubbles
-//
-// Three distinct row types for system events. Each shares a common visual
-// foundation: a tinted capsule background, a leading SF Symbol, and the
-// Twitch-formatted system message. They diverge in tint and icon so the
-// user can tell at a glance which kind of event happened.
-//
-// Design intent (from axiom-design's HIG guidance — see docs/conventions.md):
-//   - Use semantic colors that adapt to light/dark mode automatically.
-//   - Hierarchical symbol rendering for depth without explicit shadowing.
-//   - Subtle tinted backgrounds (`opacity(0.15)` on accent colors) — not
-//     opaque, not loud. The row is information, not an alert.
-
-/// The shared shell behind every system bubble: a leading 20pt hierarchical
-/// symbol and a tinted capsule background, with the event-specific content
-/// slotted in. Tint drives both the icon colour and the background fill
-/// (`tint.opacity(fillOpacity)`), so a bubble reads as one coherent accent.
-private struct SystemEventBubble<Content: View>: View {
-    let icon: String
-    var iconWeight: Font.Weight = .semibold
-    let tint: Color
-    var fillOpacity: Double = 0.15
-    var alignment: VerticalAlignment = .top
-    @ViewBuilder var content: () -> Content
-
-    var body: some View {
-        HStack(alignment: alignment, spacing: 10) {
-            Image(systemName: icon)
-                .font(.body.weight(iconWeight))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(tint)
-                .frame(width: 20)
-                // Decorative once the bubble reads as one combined element.
-                .accessibilityHidden(true)
-
-            content()
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(tint.opacity(fillOpacity))
-        )
-        // One VoiceOver stop per event bubble (sub/raid/announcement),
-        // matching ChatRow.messageBody's grouping.
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// Sub/resub/gift/Prime bubble. Tier drives the leading symbol's tint
-/// (Tier 1 / Prime → blue, Tier 2 → purple, Tier 3 → gold).
-private struct SubBubbleRow: View {
-    let bubble: ChatLine.SubBubble
-
-    var body: some View {
-        SystemEventBubble(icon: bubble.isGift ? "gift.fill" : "star.fill", tint: tierColor) {
-            VStack(alignment: .leading, spacing: 4) {
-                // Twitch-formatted system message — the authoritative text.
-                // We don't rebuild it because Twitch's localization is
-                // already correct for the user's selected language.
-                Text(bubble.systemMessage)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.primary)
-
-                // If the resub included a user message, render it dimmed
-                // below — matches the Twitch web layout.
-                if let userMessage = bubble.userMessage, !userMessage.isEmpty {
-                    Text(userMessage)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    /// Tier-driven accent color. Maps to Twitch's conventional tier tints
-    /// (T1 = blue / T2 = purple / T3 = gold / Prime = blue).
-    private var tierColor: Color {
-        switch bubble.tier {
-        case .prime, .t1: return .blue
-        case .t2:         return .purple
-        case .t3:         return .yellow
-        }
-    }
-}
-
-/// "Someone raided you with N viewers" bubble.
-private struct RaidBubbleRow: View {
-    let bubble: ChatLine.RaidBubble
-
-    var body: some View {
-        SystemEventBubble(icon: "person.3.fill", tint: .pink, alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(bubble.fromBroadcasterDisplayName) raided!")
-                    .font(.callout.weight(.semibold))
-                Text("^[\(bubble.viewers) viewer](inflect: true)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-/// Generic system bubble — announcements, charity events, bits-badge-tier
-/// upgrades, etc. Same visual treatment as the typed bubbles but with a
-/// neutral icon and accent tint.
-private struct SystemBubbleRow: View {
-    let text: String
-
-    var body: some View {
-        SystemEventBubble(icon: "info.circle.fill", iconWeight: .regular, tint: .secondary, fillOpacity: 0.1) {
-            Text(text)
-                .font(.callout)
-                .foregroundStyle(.primary)
-        }
-    }
-}
-
-/// The red "New" rule — separates messages from before the user was watching
-/// (join backfill or a reconnect gap-fill) from live messages, matching the
-/// Twitch-native treatment: a thin red line with a trailing "New" caption.
-///
-/// Pure presentation: no content, no context menu (the `.message`-only guard
-/// in `ChatRow.body` keeps the long-press a no-op), and a single combined
-/// accessibility element so VoiceOver reads one "New messages" landmark
-/// instead of a meaningless 1pt rectangle. The `.isHeader` trait makes the
-/// divider rotor-navigable — a VoiceOver user can jump straight to it in a
-/// 500-row transcript, which is the divider's whole purpose.
-private struct NewMessagesDividerRow: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            Rectangle()
-                .fill(.red)
-                .frame(height: 1)
-            Text("New")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.red)
-        }
-        .padding(.vertical, 2)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("New messages")
-        .accessibilityAddTraits(.isHeader)
-    }
-}
-
-// MARK: - Third-party emote rendering
-
-/// Inline image view for a 7TV / BTTV / FFZ emote. Matches the visual
-/// scale of `TwitchEmoteImage` (24×24pt nominal) so the rows look
-/// consistent regardless of which CDN provided each emote.
-///
-/// **Format note**: 7TV serves WebP, BTTV serves PNG/GIF, FFZ serves PNG
-/// (with optional animated variants). All three are decoded natively by
-/// AsyncImage on iOS 14+ via ImageIO — **for static (first-frame only)**.
-/// Phase 2.2 ships static rendering; animation lands in a follow-up.
-private struct EmoteImage: View {
-    let emote: Emote
-    /// Size multiplier from the chat text-size setting, so emotes track
-    /// the surrounding text instead of staying fixed at 24pt.
-    let scale: CGFloat
-    /// From `ChatAppearance.animatedEmotes`. When false, animated emotes
-    /// take the static `LazyImage` path below and render their first
-    /// frame — cheaper (no per-frame decode loop) and calmer.
-    let allowAnimation: Bool
-    /// Pre-resolved CDN URL, computed once in `init`. Storing as `let`
-    /// (vs a `var` computed property) ensures `AsyncImage(url:)` sees a
-    /// stable URL across re-renders — without this, the computed
-    /// expression can appear different to SwiftUI between body calls
-    /// and cause AsyncImage to abandon its in-flight load.
-    private let imageURL: URL?
-
-    init(emote: Emote, scale: CGFloat = 1, allowAnimation: Bool = true) {
-        self.emote = emote
-        self.scale = scale
-        self.allowAnimation = allowAnimation
-        // Pick the 2x size (the middle of x1/x2/x4) — matches chat row
-        // line height on @2x/@3x displays. Fall back to whatever size
-        // we have if 2x is missing (rare but possible for partial-
-        // variant emotes).
-        self.imageURL = emote.urls[.x2] ?? emote.urls[.x1] ?? emote.urls[.x4]
-    }
-
-    var body: some View {
-        // Fixed line height, natural width: wide 7TV/FFZ emotes get their
-        // real aspect ratio instead of being crushed into a square-ish box.
-        // Computed from API metadata (not the loaded image) so the row
-        // reserves the right width before the image arrives — no reflow
-        // when a wide emote pops in.
-        //
-        // Every state — loading, failed, static, animated — renders in the
-        // same fixed box, so the row's layout is final on the first pass.
-        let emoteHeight = EmoteDisplayMetrics.lineHeight * scale
-        let emoteWidth = EmoteDisplayMetrics.width(aspectRatio: emote.aspectRatio, height: emoteHeight)
-        Group {
-            if emote.isAnimated {
-                // Animated 7TV WebP / BTTV GIF / FFZ APNG — decode frames
-                // via ImageIO and cycle them. Only animated emotes pay
-                // this cost; the static majority use the cheap LazyImage
-                // path below.
-                //
-                // With animations off this STILL goes through the frame
-                // decoder (with `animate: false`) rather than LazyImage:
-                // a first-frame-only decode renders delta-encoded WebPs
-                // (blank opening frame) as empty space, while the decoder
-                // picks the first VISIBLE frame as the static poster.
-                AnimatedImageView(url: imageURL, width: emoteWidth, height: emoteHeight, animate: allowAnimation) { failed in
-                    EmotePlaceholder(name: emote.name, failed: failed)
-                }
-            } else {
-                // Static emote. LazyImage: sync memory-cache hit on first
-                // frame (no flash on re-scroll), off-main decode, auto
-                // memory+disk cache.
-                LazyImage(url: imageURL) { state in
-                    if let image = state.image {
-                        image
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                    } else {
-                        // Box-sized stand-in; on failure it shows the
-                        // name (shrunk to fit) — the name often hints at
-                        // the emote.
-                        EmotePlaceholder(name: emote.name, failed: state.error != nil)
-                    }
-                }
-            }
-        }
-        .frame(width: emoteWidth, height: emoteHeight)
-        .accessibilityLabel(emote.name)
-    }
-}
-
-// MARK: - Badge rendering
-
-/// 18pt-square inline badge image. Failed/loading badges collapse to nothing
-/// (`Color.clear` at zero size) rather than showing a placeholder — chat rows
-/// look cleaner without a stand-in icon, and the username + message still
-/// render correctly while images load.
-///
-/// `interpolation(.high)` is important: badges are bitmaps being downsampled
-/// from 72px (source 4x) to 54px physical pixels on @3x devices. Without
-/// high-quality interpolation, edges look jagged on small icons.
-private struct BadgeImage: View {
-    let entry: ChatBadgeEntry
-    /// Size multiplier from the chat text-size setting — see `EmoteImage`.
-    var scale: CGFloat = 1
-
-    var body: some View {
-        LazyImage(url: entry.url) { state in
-            if let image = state.image {
-                image
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-            } else {
-                // Don't reserve space — let layout flow as if the badge weren't there.
-                Color.clear.frame(width: 0, height: 0)
-            }
-        }
-        .frame(width: 18 * scale, height: 18 * scale)
-        .accessibilityLabel(entry.title ?? "Chat badge")
     }
 }
