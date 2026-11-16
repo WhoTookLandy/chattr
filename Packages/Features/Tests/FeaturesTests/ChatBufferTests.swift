@@ -125,6 +125,49 @@ struct ChatBufferTests {
         #expect(buf.remove(id: "b") == false)
     }
 
+    @Test("remove re-points only the shifted tail and keeps the id table exact across later trims")
+    func removeKeepsIndexExact() {
+        var buf = ChatBuffer(cap: 4)
+        for i in 0..<6 { buf.append(line("m\(i)")) }   // window m2…m5, ring head advanced
+        #expect(buf.remove(id: "m3"))
+        #expect(buf.lines.map(\.id) == ["m2", "m4", "m5"])
+        for id in ["m2", "m4", "m5"] { #expect(buf.line(id: id)?.id == id) }
+        #expect(!buf.contains(id: "m3"))
+
+        // Edits after the shift still land on the right rows…
+        buf.mutate(id: "m5") { $0.markingDeleted() }
+        #expect(buf.lines.last?.kind == .deletedPlaceholder)
+        // …and trims past the removal point stay consistent.
+        buf.append(line("m6")); buf.append(line("m7"))
+        #expect(buf.lines.map(\.id) == ["m4", "m5", "m6", "m7"])
+        #expect(buf.line(id: "m4")?.id == "m4")
+        #expect(buf.remove(id: "m7"))
+        #expect(buf.lines.map(\.id) == ["m4", "m5", "m6"])
+    }
+
+    @Test("visible-row lookups stay correct when blocked lines break index alignment")
+    func visibleLookupWithBlockedAuthors() {
+        var buf = ChatBuffer(cap: 100)
+        buf.blockedIds = ["villain"]
+        buf.append(line("a")); buf.append(line("v", author: "villain"))
+        buf.append(line("b")); buf.append(line("c"))
+        buf.mutate(id: "c") { $0.markingDeleted() }
+        #expect(buf.lines.map(\.kind) == [.message, .message, .deletedPlaceholder])
+        #expect(buf.remove(id: "b"))
+        #expect(buf.lines.map(\.id) == ["a", "c"])
+        _ = buf.replace(id: "a", with: line("a", "edited"))
+        #expect(buf.lines.first?.runs == [.text("edited")])
+    }
+
+    @Test("takeChanges drains once, then returns empty")
+    func takeChangesDrains() {
+        var buf = ChatBuffer(cap: 100)
+        #expect(buf.takeChanges().isEmpty)
+        buf.append(line("a"))
+        #expect(buf.takeChanges() == [.appended(line("a"))])
+        #expect(buf.takeChanges().isEmpty)
+    }
+
     @Test("mutate transforms one line by id")
     func mutateOne() {
         var buf = ChatBuffer(cap: 100)

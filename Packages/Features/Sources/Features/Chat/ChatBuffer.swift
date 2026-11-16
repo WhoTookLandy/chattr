@@ -103,9 +103,18 @@ struct ChatBuffer {
     }
 
     /// Drains and returns the changes accumulated since the last call.
+    ///
+    /// Empty is the common case (a view pull or flush that finds nothing
+    /// new), so that path returns without writing the stored array at all.
     mutating func takeChanges() -> [ChatChange] {
-        defer { pendingChanges.removeAll(keepingCapacity: true) }
-        return pendingChanges
+        guard !pendingChanges.isEmpty else { return [] }
+        let drained = pendingChanges
+        // Fresh storage sized like the last batch: the drained array keeps
+        // the old buffer, so `removeAll(keepingCapacity:)` would have had to
+        // copy-allocate anyway.
+        pendingChanges = []
+        pendingChanges.reserveCapacity(drained.count)
+        return drained
     }
 
     // MARK: - Mutation
@@ -132,7 +141,7 @@ struct ChatBuffer {
             indexByID[id] = nil
             indexByID[newLine.id] = idx
         }
-        applyVisibilityTransition(id: id, old: old, new: newLine)
+        applyVisibilityTransition(id: id, storageIndex: idx, old: old, new: newLine)
         return true
     }
 
@@ -141,14 +150,23 @@ struct ChatBuffer {
     mutating func remove(id: String) -> Bool {
         guard let idx = index(of: id) else { return false }
         let removed = storage[idx]
+        let isVisible = !blocked.contains(removed.authorUserId)
+        // Locate the visible copy BEFORE the storage shift: the aligned fast
+        // path in `visibleIndex` reads `idx` against the current layout.
+        let vi = isVisible ? visibleIndex(of: id, storageIndex: idx) : nil
         storage.remove(at: idx)
-        // Mid-array remove shifts every later element down one. O(count),
-        // like the `storage.remove` above — this path is rare (moderation
-        // deletes), never the per-message hot path.
+        // Only the lines after `idx` shifted down one, so re-point just those
+        // instead of rebuilding the whole table with `mapValues`. Removes hit
+        // recent lines in practice (retry / stuck-send cleanup of the user's
+        // own sends), so this is a short walk from the tail.
         indexByID[id] = nil
-        indexByID = indexByID.mapValues { $0 > idx ? $0 - 1 : $0 }
-        if !blocked.contains(removed.authorUserId) {
-            if let vi = visibleIndex(of: id) { _lines.remove(at: vi) }
+        if idx < storage.count {
+            for i in idx..<storage.count {
+                indexByID[storage[i].id] = i
+            }
+        }
+        if isVisible {
+            if let vi { _lines.remove(at: vi) }
             pendingChanges.append(.removed(id: id))
         }
         return true
@@ -164,7 +182,7 @@ struct ChatBuffer {
             indexByID[id] = nil
             indexByID[new.id] = idx
         }
-        applyVisibilityTransition(id: id, old: old, new: new)
+        applyVisibilityTransition(id: id, storageIndex: idx, old: old, new: new)
     }
 
     /// Transforms every line in the window (chat-clear shape). `transform` must
@@ -216,11 +234,24 @@ struct ChatBuffer {
         return idx
     }
 
-    /// Index into `_lines` of the visible line with `id`, scanning only the
-    /// live window (`linesHead...`). Nil if not visible.
-    private func visibleIndex(of id: String) -> Int? {
+    /// Index into `_lines` of the visible line with `id` (stored at absolute
+    /// `storageIndex`), or nil if not visible.
+    ///
+    /// O(1) when nobody is blocked: the visible window is then exactly the
+    /// storage window (every append lands in both, every trim / remove /
+    /// rebuild drops from both), so the offsets line up — verified against
+    /// the id, never assumed. Otherwise a scan of the live window from the
+    /// NEWEST end, since edits overwhelmingly target recent lines (echo
+    /// upgrades, send failures, fresh moderation deletes).
+    private func visibleIndex(of id: String, storageIndex: Int) -> Int? {
+        if blocked.isEmpty {
+            let aligned = linesHead + (storageIndex - head)
+            if aligned >= linesHead, aligned < _lines.count, _lines[aligned].id == id {
+                return aligned
+            }
+        }
         guard linesHead < _lines.count else { return nil }
-        for i in linesHead..<_lines.count where _lines[i].id == id {
+        for i in stride(from: _lines.count - 1, through: linesHead, by: -1) where _lines[i].id == id {
             return i
         }
         return nil
@@ -229,19 +260,23 @@ struct ChatBuffer {
     /// Emits the right change for a single-line value edit, accounting for a
     /// (rare) change in whether the line is visible. The common case — author
     /// unchanged, line stays visible — is a single `.reconfigured`.
-    private mutating func applyVisibilityTransition(id: String, old: ChatLine, new: ChatLine) {
+    ///
+    /// `storageIndex` is the edited line's absolute index in `storage`; the
+    /// projection (`_lines`) still holds the OLD line (keyed by `id`) when
+    /// this runs.
+    private mutating func applyVisibilityTransition(id: String, storageIndex: Int, old: ChatLine, new: ChatLine) {
         let wasVisible = !blocked.contains(old.authorUserId)
         let nowVisible = !blocked.contains(new.authorUserId)
         switch (wasVisible, nowVisible) {
         case (true, true):
-            if let vi = visibleIndex(of: id) {
+            if let vi = visibleIndex(of: id, storageIndex: storageIndex) {
                 _lines[vi] = new
             }
             // A pending-send row re-keyed to its server id keeps its slot but
             // changes identity — only `.rekeyed` lets the view find the row.
             pendingChanges.append(new.id == id ? .reconfigured(new) : .rekeyed(from: id, to: new))
         case (true, false):
-            if let vi = visibleIndex(of: id) { _lines.remove(at: vi) }
+            if let vi = visibleIndex(of: id, storageIndex: storageIndex) { _lines.remove(at: vi) }
             pendingChanges.append(.removed(id: id))
         case (false, true):
             // Now-visible line has to slot back in at its window position —
