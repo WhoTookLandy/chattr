@@ -470,7 +470,7 @@ public struct ChatScreen: View {
             // (the snapshot read + section build runs only when tapped).
             emoteSectionsProvider: {
                 EmoteCatalog.buildSections(
-                    thirdParty: resolvedEmoteIndex?.snapshot() ?? [:],
+                    emoteIndex: resolvedEmoteIndex,
                     twitchGlobal: resolvedTwitchGlobals
                 )
             },
