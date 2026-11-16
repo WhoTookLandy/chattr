@@ -86,4 +86,70 @@ struct AccountStoreTests {
         #expect(twitch.count == 1)
         #expect(twitch.first?.userId == "1")
     }
+
+    // MARK: - Removal / forced sign-out
+    //
+    // These run the real best-effort Keychain cleanup (TwitchKit logout,
+    // refresh-token cache delete) against ids no real account uses; any
+    // Keychain failure is logged and ignored by design.
+
+    /// A store over an in-memory container and a throwaway defaults suite.
+    private static func makeIsolatedStore() throws -> (AccountStore, ModelContainer, UserDefaults) {
+        let container = try Self.makeContainer()
+        let defaults = UserDefaults(suiteName: "chattr.tests.accountstore.\(UUID().uuidString)")!
+        let store = AccountStore(
+            modelContainer: container,
+            clientId: "test-client",
+            defaults: defaults,
+            bridgeRefresh: BridgeTokenRefresh()
+        )
+        return (store, container, defaults)
+    }
+
+    private static func insertAccount(_ userId: String, into container: ModelContainer) throws -> Account {
+        let account = Account(
+            userId: userId,
+            login: "login\(userId)",
+            displayName: "Name\(userId)",
+            profileImageURL: "",
+            tokenNamespace: AccountStore.namespace(for: userId)
+        )
+        container.mainContext.insert(account)
+        try container.mainContext.save()
+        return account
+    }
+
+    @Test("remove deletes the row, clears a matching selection, and notifies onAccountRemoved")
+    func removeNotifies() async throws {
+        let (store, container, defaults) = try Self.makeIsolatedStore()
+        let userId = "test-remove-\(UUID().uuidString)"
+        let account = try Self.insertAccount(userId, into: container)
+        store.selectAccount(account)
+        var removed: [String] = []
+        store.onAccountRemoved = { removed.append($0) }
+
+        try await store.remove(account: account)
+
+        #expect(removed == [userId])
+        #expect(try await store.allAccounts().isEmpty)
+        #expect(defaults.string(forKey: AccountStore.activeAccountUserIdKey) == nil)
+    }
+
+    @Test("forceSignOut marks needsReauth, keeps the row, and stashes the banner when no healthy account remains")
+    func forceSignOutMarks() async throws {
+        let (store, container, defaults) = try Self.makeIsolatedStore()
+        let userId = "test-expire-\(UUID().uuidString)"
+        let account = try Self.insertAccount(userId, into: container)
+        store.selectAccount(account)
+        var removed: [String] = []
+        store.onAccountRemoved = { removed.append($0) }
+
+        await store.forceSignOut(userId: userId, reason: .sessionExpired(login: "loginX"))
+
+        #expect(account.needsReauth)
+        #expect(try await store.allAccounts().count == 1)
+        #expect(removed.isEmpty)
+        #expect(defaults.string(forKey: AccountStore.activeAccountUserIdKey) == nil)
+        #expect(defaults.string(forKey: AccountStore.lastSessionExpiredLoginKey) == "loginX")
+    }
 }
