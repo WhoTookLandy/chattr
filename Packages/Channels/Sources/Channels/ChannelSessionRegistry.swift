@@ -40,7 +40,45 @@ private let logger = AppLogger.make("Channels.Registry")
 /// only stores/dispenses them and hops to call `handle(event:)`.
 @MainActor
 public final class ChannelSessionRegistry {
-    private let accountStore: AccountStore
+
+    /// Everything the registry needs from outside to build, start and stop a
+    /// session. Production wires it to `AccountStore` + the real
+    /// `ChannelSession.start()` / `stop()` (see `init(accountStore:)`); tests
+    /// inject controllable start/stop closures so the acquire/release races
+    /// can be driven deterministically without a network or SwiftData.
+    struct Dependencies {
+        /// The account's shared `TwitchClient`.
+        var client: @MainActor (_ accountUserId: String) -> TwitchClient
+        /// Bridge token refresh, handed to each session for the
+        /// EventSub-unauthorized retry path.
+        var refreshTokens: @Sendable (_ accountUserId: String, _ accountLogin: String) async throws -> Void
+        /// "Is any channel open?" signal driving EventSub reconnect policy.
+        var sessionActivity: SessionActivitySignal
+        var startSession: @Sendable (ChannelSession) async throws -> Void
+        var stopSession: @Sendable (ChannelSession) async -> Void
+    }
+
+    private let dependencies: Dependencies
+
+    /// An in-flight `start()`: the session being started plus the Task every
+    /// caller for the key awaits. The session reference is the identity token
+    /// — a construction may only commit to `sessions`, or clean up after
+    /// itself, while `inFlight[key]` still holds ITS session. A `release`
+    /// (or `releaseAll`) that ends the key's lifetime mid-start removes the
+    /// entry and cancels the Task, so a late-finishing start can never
+    /// install a zombie session or clobber a newer acquire's state.
+    private struct PendingStart {
+        let session: ChannelSession
+        let task: Task<ChannelSession, Error>
+    }
+
+    /// A teardown that has been detached from the maps but may still be
+    /// unsubscribing on Twitch's side. `id` lets the Task clear its own
+    /// entry without clobbering a later teardown for the same key.
+    private struct PendingStop {
+        let id: UInt64
+        let task: Task<Void, Never>
+    }
 
     /// Active sessions, keyed by composite "accountUserId/channelId".
     ///
@@ -69,7 +107,27 @@ public final class ChannelSessionRegistry {
     /// call `start()` — the second `subscribe` then races Twitch's "already
     /// subscribed" rejection. Storing the in-flight Task here lets the second
     /// caller await the first's result instead.
-    private var inFlight: [String: Task<ChannelSession, Error>] = [:]
+    private var inFlight: [String: PendingStart] = [:]
+
+    /// Teardowns still in progress, keyed the same way as `sessions`. The
+    /// key's maps are cleared synchronously when its lifetime ends, so a
+    /// re-acquire during the teardown builds a NEW session rather than
+    /// receiving the stopping one — but that new session's `start()` first
+    /// awaits the entry here. Otherwise its subscribe could hit Twitch's 409
+    /// "already subscribed" (capturing no subscription id) and the old
+    /// session's unsubscribe would then delete the topic out from under it.
+    private var stopping: [String: PendingStop] = [:]
+
+    /// Lifetime token per key, minted when the refcount goes 0 → 1 and
+    /// dropped when it returns to 0. `acquire` only rolls back its own
+    /// increment on failure if the lifetime it incremented is still current
+    /// — if a `release` already ended that lifetime, the release consumed
+    /// the increment (refcount AND `sessionActivity`), and rolling back again
+    /// would steal a newer holder's refcount.
+    private var lifetimes: [String: UInt64] = [:]
+
+    /// Monotonic source for `lifetimes` and `PendingStop.id`.
+    private var lastToken: UInt64 = 0
 
     /// Shared event-dispatcher Tasks, one per accountUserId. Each owns the
     /// single iterator on its account's `client.eventSub.events` stream and
@@ -147,8 +205,21 @@ public final class ChannelSessionRegistry {
     /// next opened fresh.
     public var chatHistoryLimit: Int = 500
 
-    public init(accountStore: AccountStore) {
-        self.accountStore = accountStore
+    public convenience init(accountStore: AccountStore) {
+        self.init(dependencies: Dependencies(
+            client: { accountStore.client(forUserId: $0) },
+            refreshTokens: { [weak accountStore] userId, login in
+                guard let accountStore else { throw AppError(message: "AccountStore deallocated during refresh") }
+                try await accountStore.refreshTokens(userId: userId, login: login)
+            },
+            sessionActivity: accountStore.sessionActivity,
+            startSession: { try await $0.start() },
+            stopSession: { await $0.stop() }
+        ))
+    }
+
+    init(dependencies: Dependencies) {
+        self.dependencies = dependencies
     }
 
     /// Returns (creating if needed) the session for the given account × channel
@@ -176,23 +247,25 @@ public final class ChannelSessionRegistry {
             return existing
         }
         // Slow path with a peer already mid-creation — share its result.
+        // Every awaiter gets the SAME outcome: the commit-or-abandon decision
+        // is made inside the Task itself, not by whichever caller created it.
         if let pending = inFlight[key] {
-            return try await pending.value
+            return try await pending.task.value
         }
 
         // `client(forUserId:)` reconstructs the tokenNamespace from userId
         // — stable across launches, identical to what `client(for: account)`
         // would have produced.
-        let client = accountStore.client(forUserId: accountUserId)
+        let client = dependencies.client(accountUserId)
+        let refreshTokens = dependencies.refreshTokens
         let session = ChannelSession(
             client: client,
             channelId: channelId,
             channelLoginName: channelLoginName,
             accountUserId: accountUserId,
             ringCapacity: chatHistoryLimit,
-            refreshTokenHandler: { [weak accountStore] in
-                guard let accountStore else { throw AppError(message: "AccountStore deallocated during refresh") }
-                try await accountStore.refreshTokens(userId: accountUserId, login: accountLogin)
+            refreshTokenHandler: {
+                try await refreshTokens(accountUserId, accountLogin)
             }
         )
 
@@ -205,28 +278,75 @@ public final class ChannelSessionRegistry {
         dispatchTargets[key] = session
         ensureEventDispatch(client: client, accountUserId: accountUserId)
 
-        let task = Task<ChannelSession, Error> { [session] in
-            try await session.start()
-            return session
-        }
-        inFlight[key] = task
-        do {
-            let started = try await task.value
-            sessions[key] = started
-            inFlight[key] = nil
+        // A previous session for this key may still be unsubscribing (it was
+        // released and then re-acquired before its stop() finished). Start
+        // only after it's gone — see `stopping`.
+        let priorTeardown = stopping[key]?.task
+        let start = dependencies.startSession
+        let stop = dependencies.stopSession
+        // MainActor-isolated: the commit/abandon bookkeeping below touches the
+        // registry's maps. `start` / `stop` hop off-main to the session actor.
+        let task = Task<ChannelSession, Error> { @MainActor in
+            if let priorTeardown {
+                await priorTeardown.value
+            }
+            do {
+                try Task.checkCancellation()
+                try await start(session)
+                // `start()` deliberately swallows enrichment-subscribe errors
+                // and an empty backfill, so a `release` that cancelled us
+                // mid-start would otherwise go unnoticed and we'd install a
+                // session nobody holds. Re-check before committing.
+                try Task.checkCancellation()
+            } catch {
+                // Our own start failed, or a release cancelled us. Either way
+                // this session is never handed out: detach whatever of it is
+                // still ours, then unsubscribe anything it did manage to
+                // create on Twitch's side.
+                self.abandonStart(key: key, session: session, accountUserId: accountUserId)
+                // Fresh unstructured Task: THIS Task may be cancelled, and a
+                // cancelled context would abort stop()'s Helix unsubscribe
+                // requests — leaving exactly the zombie subscriptions this
+                // path exists to remove.
+                await Task { await stop(session) }.value
+                throw error
+            }
+            // Identity is the source of truth for "still current": release /
+            // releaseAll remove the entry (and cancel) when they end the key's
+            // lifetime. Unreachable without a cancel today, but never commit
+            // a session that isn't the one this key is waiting on.
+            guard self.inFlight[key]?.session === session else {
+                self.abandonStart(key: key, session: session, accountUserId: accountUserId)
+                await Task { await stop(session) }.value
+                throw CancellationError()
+            }
+            self.inFlight[key] = nil
+            self.sessions[key] = session
             // .notice: session creation is a boundary event — when this fires
             // we just opened a new WebSocket subscription to Twitch.
             logger.notice("Created session for @\(accountLogin, privacy: .public)/#\(channelLoginName, privacy: .public)")
-            return started
-        } catch {
-            inFlight[key] = nil
-            // Failed start: stop routing to this session and tear down the
-            // dispatcher if it now has nothing to serve (it may have been
-            // started just above for this very session).
-            dispatchTargets[key] = nil
-            stopDispatcherIfIdle(accountUserId: accountUserId)
-            throw error
+            return session
         }
+        // Set before this function's next suspension point, so the Task (which
+        // is MainActor-isolated and can't run until we suspend) always finds
+        // its own entry.
+        inFlight[key] = PendingStart(session: session, task: task)
+        return try await task.value
+    }
+
+    /// Undo an uncommitted start's registry state — but only the parts that
+    /// still belong to `session`. A `release` + re-acquire during the start
+    /// will have replaced both entries with a newer session's; clearing them
+    /// unconditionally would orphan that newer acquire.
+    private func abandonStart(key: String, session: ChannelSession, accountUserId: String) {
+        if inFlight[key]?.session === session {
+            inFlight[key] = nil
+        }
+        if dispatchTargets[key] === session {
+            dispatchTargets[key] = nil
+        }
+        // The dispatcher may have been started just for this session.
+        stopDispatcherIfIdle(accountUserId: accountUserId)
     }
 
     // MARK: - Reference counting
@@ -244,6 +364,11 @@ public final class ChannelSessionRegistry {
     /// Idempotency: each call adds exactly 1 to the refcount. A tab that
     /// holds the same channel twice (degenerate but legal) increments
     /// twice and must release twice.
+    ///
+    /// Throws `CancellationError` if the key is released (to zero) or
+    /// `releaseAll`ed while the session is still starting. That release
+    /// already balanced this acquire's refcount + activity increment, so the
+    /// caller must NOT release again.
     @discardableResult
     public func acquire(
         accountUserId: String,
@@ -252,11 +377,15 @@ public final class ChannelSessionRegistry {
         channelLoginName: String
     ) async throws -> ChannelSession {
         let key = Self.key(accountUserId: accountUserId, channelId: channelId)
+        if refCounts[key, default: 0] == 0 {
+            lifetimes[key] = nextToken()
+        }
         refCounts[key, default: 0] += 1
+        let lifetime = lifetimes[key]
         // Mark the account "live" so its EventSub client reconnects aggressively
         // while this channel is open. Balanced by the decrement in release()
         // (and the rollback below if construction fails).
-        accountStore.sessionActivity.increment()
+        dependencies.sessionActivity.increment()
         // .debug: refcount churn is per-tab-open/close — visible in DevLogView
         // only when investigating session lifecycle issues, otherwise hidden.
         logger.debug("acquire \(key, privacy: .public) → refcount \(self.refCounts[key] ?? 0)")
@@ -272,11 +401,21 @@ public final class ChannelSessionRegistry {
                 channelLoginName: channelLoginName
             )
         } catch {
-            refCounts[key, default: 1] -= 1
-            if refCounts[key] == 0 { refCounts[key] = nil }
-            // Roll back the activity increment from the top so a failed acquire
-            // doesn't leave the account permanently "live".
-            accountStore.sessionActivity.decrement()
+            // Only roll back if the lifetime we incremented is still live. If
+            // a release / releaseAll ended it while we were suspended, that
+            // release already decremented for us — rolling back again would
+            // eat a NEWER acquire's refcount and activity mark.
+            if let lifetime, lifetimes[key] == lifetime, let count = refCounts[key], count > 0 {
+                if count == 1 {
+                    refCounts[key] = nil
+                    lifetimes[key] = nil
+                } else {
+                    refCounts[key] = count - 1
+                }
+                // Roll back the activity increment from the top so a failed
+                // acquire doesn't leave the account permanently "live".
+                dependencies.sessionActivity.decrement()
+            }
             throw error
         }
     }
@@ -288,6 +427,14 @@ public final class ChannelSessionRegistry {
     ///
     /// Safe to call when no session exists (e.g., release races a failed
     /// acquire) — it just clears any leftover refcount entry.
+    ///
+    /// Teardown order: everything the registry holds for the key (session,
+    /// in-flight start, routing target, per-channel stores) is removed
+    /// SYNCHRONOUSLY, before any suspension. Only then is the detached
+    /// session's `stop()` awaited. A re-acquire during that await therefore
+    /// builds a fresh session (whose start waits for this stop to finish)
+    /// instead of being handed the stopping one, and nothing this release
+    /// does after the await can wipe the new holder's state.
     public func release(accountUserId: String, channelId: String) async {
         let key = Self.key(accountUserId: accountUserId, channelId: channelId)
         guard let count = refCounts[key], count > 0 else {
@@ -296,62 +443,157 @@ public final class ChannelSessionRegistry {
             logger.warning("release \(key, privacy: .public) with no outstanding refcount — likely a double-release; ignoring")
             return
         }
-        refCounts[key] = count - 1
         // Balance the increment from acquire(). The early-return guard above
         // (no outstanding refcount) intentionally does NOT decrement — that
         // release has no matching acquire.
-        accountStore.sessionActivity.decrement()
+        dependencies.sessionActivity.decrement()
 
-        if refCounts[key] == 0 {
-            refCounts[key] = nil
-            // Cancel any in-flight construction — if a peer is still
-            // awaiting acquire's session(...) call, their await throws
-            // CancellationError. ChatScreen already absorbs that
-            // silently.
-            if let task = inFlight[key] {
-                task.cancel()
-                inFlight[key] = nil
-            }
-            // Stop routing events to this session regardless of whether it
-            // finished starting (it may still be in `dispatchTargets` but not
-            // yet in `sessions` if release races a slow start).
-            dispatchTargets[key] = nil
-            if let session = sessions[key] {
-                await session.stop()
-                sessions[key] = nil
-                // .notice: session teardown is a boundary event — counterpart
-                // to the "Created session" notice above.
-                logger.notice("release \(key, privacy: .public) → refcount 0; session stopped")
-            } else {
-                // .debug: rare path (acquire raced release before session()
-                // returned). Useful when investigating race conditions but
-                // not interesting day-to-day.
-                logger.debug("release \(key, privacy: .public) → refcount 0; no session to stop (still constructing or already gone)")
-            }
-            // T11: per-channel view stores share the session's lifetime.
-            // Drop them here so the next acquire for the same channel starts
-            // fresh — emote provider catalogs and channel badges might have
-            // changed between sessions (broadcaster added a new 7TV emote,
-            // promoted a subscriber tier, etc.). Holding stale stores would
-            // also waste memory across closed-then-reopened tabs.
-            emoteIndexes[key] = nil
-            badgeStores[key] = nil
-            normalizedLineCaches[key] = nil
-            // After tearing down the session, check if THIS account has
-            // any remaining sessions. If not, cancel the shared event
-            // dispatcher Task — otherwise the WebSocket stays connected
-            // forever (the Task's `for await event in client.eventSub.events`
-            // keeps the stream alive even after all sessions are gone).
-            //
-            // Without this, closing all chat tabs leaves an idle WebSocket
-            // consuming socket resources + occasional Twitch heartbeat
-            // traffic for the rest of the app's foreground lifetime.
-            stopDispatcherIfIdle(accountUserId: accountUserId)
-        } else {
+        guard count == 1 else {
+            refCounts[key] = count - 1
             // .debug: refcount decrement when not the last reference.
             // Pairs with the .debug "acquire" log on the opposite side.
-            logger.debug("release \(key, privacy: .public) → refcount \(self.refCounts[key] ?? 0)")
+            logger.debug("release \(key, privacy: .public) → refcount \(count - 1)")
+            return
         }
+
+        refCounts[key] = nil
+        lifetimes[key] = nil
+        let wasStarted = sessions[key] != nil
+        let teardown = detach(key: key)
+        if wasStarted, let teardown {
+            await teardown.value
+            // .notice: session teardown is a boundary event — counterpart
+            // to the "Created session" notice above.
+            logger.notice("release \(key, privacy: .public) → refcount 0; session stopped")
+        } else {
+            // .debug: rare path (release raced a still-running start, which
+            // was cancelled and will stop its own session when start()
+            // returns). Not awaited — a slow start must not stall the
+            // caller's teardown loop; a re-acquire waits on it via `stopping`.
+            logger.debug("release \(key, privacy: .public) → refcount 0; no started session (start cancelled or already gone)")
+        }
+        // After tearing down the session, check if THIS account has
+        // any remaining sessions. If not, cancel the shared event
+        // dispatcher Task — otherwise the WebSocket stays connected
+        // forever (the Task's `for await event in client.eventSub.events`
+        // keeps the stream alive even after all sessions are gone).
+        //
+        // Without this, closing all chat tabs leaves an idle WebSocket
+        // consuming socket resources + occasional Twitch heartbeat
+        // traffic for the rest of the app's foreground lifetime.
+        stopDispatcherIfIdle(accountUserId: accountUserId)
+    }
+
+    /// Releases EVERY session for an account at once, regardless of how
+    /// many outstanding acquires each has — e.g. on account switch, where
+    /// the outgoing account's tabs all go away together.
+    ///
+    /// Bookkeeping matches calling `release(...)` once per outstanding
+    /// acquire: each key's refcount is zeroed and `sessionActivity` is
+    /// decremented once per acquire it held. Sessions obtained via
+    /// `session(...)` alone (no refcount) are torn down too. In-flight starts
+    /// are cancelled; their pending `acquire` calls throw `CancellationError`
+    /// and must not release again. Later `release(...)` calls for these keys
+    /// are tolerated no-ops (logged as double-release).
+    public func releaseAll(forAccountUserId accountUserId: String) async {
+        let prefix = "\(accountUserId)/"
+        var keys = Set(refCounts.keys.filter { $0.hasPrefix(prefix) })
+        keys.formUnion(sessions.keys.filter { $0.hasPrefix(prefix) })
+        keys.formUnion(inFlight.keys.filter { $0.hasPrefix(prefix) })
+        keys.formUnion(dispatchTargets.keys.filter { $0.hasPrefix(prefix) })
+        guard !keys.isEmpty else { return }
+
+        // All synchronous detaching happens before the first await — same
+        // ordering guarantee as `release(...)`.
+        var startedTeardowns: [Task<Void, Never>] = []
+        var releasedRefs = 0
+        for key in keys {
+            if let count = refCounts.removeValue(forKey: key), count > 0 {
+                for _ in 0..<count {
+                    dependencies.sessionActivity.decrement()
+                }
+                releasedRefs += count
+            }
+            lifetimes[key] = nil
+            let wasStarted = sessions[key] != nil
+            if let teardown = detach(key: key), wasStarted {
+                startedTeardowns.append(teardown)
+            }
+        }
+        for teardown in startedTeardowns {
+            await teardown.value
+        }
+        logger.notice("releaseAll for account \(accountUserId, privacy: .public): \(keys.count) channel(s), \(releasedRefs) ref(s) released, \(startedTeardowns.count) session(s) stopped")
+        stopDispatcherIfIdle(accountUserId: accountUserId)
+    }
+
+    /// Synchronously removes everything the registry holds for `key` — the
+    /// started session or in-flight start, its routing target, and the
+    /// per-channel view stores — and returns the Task that finishes tearing
+    /// the session down (nil if there was no session at all). The Task is
+    /// also recorded in `stopping` so a re-acquire's start waits for it.
+    ///
+    /// Callers must have already zeroed the key's refcount + lifetime.
+    private func detach(key: String) -> Task<Void, Never>? {
+        // Stop routing events to this session regardless of whether it
+        // finished starting (it may be in `dispatchTargets` but not yet in
+        // `sessions` if the release races a slow start).
+        dispatchTargets[key] = nil
+        // T11: per-channel view stores share the session's lifetime.
+        // Drop them here so the next acquire for the same channel starts
+        // fresh — emote provider catalogs and channel badges might have
+        // changed between sessions (broadcaster added a new 7TV emote,
+        // promoted a subscriber tier, etc.). Holding stale stores would
+        // also waste memory across closed-then-reopened tabs.
+        emoteIndexes[key] = nil
+        badgeStores[key] = nil
+        normalizedLineCaches[key] = nil
+
+        let id = nextToken()
+        let work: Task<Void, Never>
+        if let pending = inFlight.removeValue(forKey: key) {
+            // Cancel the in-flight construction. Its Task sees it is no
+            // longer current once start() returns, stops its own session
+            // and throws CancellationError to every awaiter (ChatScreen
+            // already absorbs that silently). Waiting for the Task to finish
+            // is therefore waiting for that stop.
+            let startTask = pending.task
+            startTask.cancel()
+            work = Task { @MainActor in
+                _ = try? await startTask.value
+                self.finishTeardown(key: key, id: id)
+            }
+        } else if let session = sessions.removeValue(forKey: key) {
+            let stop = dependencies.stopSession
+            work = Task { @MainActor in
+                await stop(session)
+                self.finishTeardown(key: key, id: id)
+            }
+        } else {
+            return nil
+        }
+        // Recorded before our next suspension point, so `work` (MainActor,
+        // can't run until we suspend) always finds its own entry.
+        stopping[key] = PendingStop(id: id, task: work)
+        return work
+    }
+
+    /// Clears `stopping[key]` if it is still the teardown identified by `id`.
+    private func finishTeardown(key: String, id: UInt64) {
+        if stopping[key]?.id == id {
+            stopping[key] = nil
+        }
+    }
+
+    private func nextToken() -> UInt64 {
+        lastToken &+= 1
+        return lastToken
+    }
+
+    /// Test hook: true while a `start()` for this key is in flight (built
+    /// but not yet committed or abandoned).
+    func isStarting(accountUserId: String, channelId: String) -> Bool {
+        inFlight[Self.key(accountUserId: accountUserId, channelId: channelId)] != nil
     }
 
     /// Legacy single-owner teardown. Kept as a thin alias for `release(...)`
@@ -473,7 +715,7 @@ public final class ChannelSessionRegistry {
             return await existing.value ?? []
         }
 
-        let client = accountStore.client(forUserId: accountUserId)
+        let client = dependencies.client(accountUserId)
         let task = Task<Set<String>?, Never> {
             do {
                 var ids: Set<String> = []
@@ -542,7 +784,7 @@ public final class ChannelSessionRegistry {
     /// Best-effort: any error (list or delete) is logged and swallowed. Never
     /// blocks or fails chat startup.
     public func cleanupDisconnectedSubscriptions(forAccountUserId accountUserId: String) async {
-        let client = accountStore.client(forUserId: accountUserId)
+        let client = dependencies.client(accountUserId)
         do {
             var reaped = 0
             for try await record in client.api.eventSubSubscriptions() {
