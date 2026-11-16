@@ -298,11 +298,11 @@ struct ComposeBar: View {
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
                     .focused($focused)
-                    // Forward every text change to the parent so it can
-                    // persist via DraftStorage. UserDefaults batches writes
-                    // so per-keystroke saves don't actually hit disk on
-                    // every call — observed throughput is roughly the same
-                    // as a debounced save without the .task(id:) sleep.
+                    // Forward every text change to the parent, which hands
+                    // it to `DraftStorage.scheduleSave` — debounced (~400ms),
+                    // so a burst of typing costs one UserDefaults write, and
+                    // flushed when the chat goes away or the app leaves the
+                    // foreground.
                     .onChange(of: composeText) { _, newValue in
                         onDraftChange(newValue)
                     }
