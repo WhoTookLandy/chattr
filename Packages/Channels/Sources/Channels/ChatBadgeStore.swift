@@ -73,13 +73,32 @@ public final class ChatBadgeStore {
     /// Distinct badge combinations are naturally bounded (a finite set of badge
     /// types, each user shows a handful), so the cache stays small; it's
     /// cleared whenever `entries` is republished by `load(...)`.
-    @ObservationIgnored private var resolvedCache: [[ChatBadgeKey]: [ChatBadgeEntry]] = [:]
+    ///
+    /// Keyed by a hash of the `(setId, id)` pairs, computed straight off the
+    /// message's `[ChatBadge]`, with the full key kept in the bucket for an
+    /// exact comparison. A hit therefore allocates nothing — the previous
+    /// `[[ChatBadgeKey]: …]` shape had to build the key array (one heap
+    /// allocation per row per pass) just to look itself up.
+    @ObservationIgnored private var resolvedCache: [Int: [ResolvedBadgeSet]] = [:]
+    @ObservationIgnored private var resolvedCount = 0
+
+    private struct ResolvedBadgeSet {
+        let keys: [ChatBadgeKey]
+        let entries: [ChatBadgeEntry]
+    }
 
     /// Idempotency key — the channel id we last successfully loaded for.
     /// Multiple ChatScreen mounts for the same channel each call `load(...)`,
     /// but only the first triggers Helix calls. Public reset via
     /// `forceReload(...)` if a refresh becomes useful (not exposed today).
     private var loadedChannelId: String?
+
+    /// The load currently fetching, if any. Set synchronously — before the
+    /// first `await` — so a second mount's `load(...)` for the same channel
+    /// joins it instead of starting a duplicate pair of Helix fetches (the
+    /// `loadedChannelId` guard alone is only set after those awaits, so two
+    /// overlapping mounts both used to pass it).
+    @ObservationIgnored private var inFlightLoad: (channelId: String, task: Task<Void, Never>)?
 
     public init() {}
 
@@ -105,7 +124,44 @@ public final class ChatBadgeStore {
             // Helix's /chat/badges endpoint.
             return
         }
+        if let inFlight = inFlightLoad, inFlight.channelId == channelId {
+            // A peer mount is already fetching this channel — share it.
+            await inFlight.task.value
+            return
+        }
+
+        // Only Sendable values cross into the load task: the client, the
+        // account's stable userId (not the SwiftData @Model), and the
+        // MainActor-isolated store itself.
         let client = accountStore.client(for: account)
+        let userId = account.userId
+        // Unstructured on purpose: the fetch belongs to this registry-owned
+        // store, not to whichever view's `.task` asked first. A mount torn
+        // down mid-fetch (tab swipe) no longer cancels it, so the next mount
+        // finds the badges loaded instead of starting over.
+        let task = Task { @MainActor in
+            await self.performLoad(
+                client: client,
+                accountStore: accountStore,
+                userId: userId,
+                channelId: channelId,
+                globalBadges: globalBadges
+            )
+        }
+        inFlightLoad = (channelId, task)
+        await task.value
+    }
+
+    private func performLoad(
+        client: TwitchClient,
+        accountStore: AccountStore,
+        userId: String,
+        channelId: String,
+        globalBadges: [ChatBadgeKey: ChatBadgeEntry]
+    ) async {
+        defer {
+            if inFlightLoad?.channelId == channelId { inFlightLoad = nil }
+        }
 
         // Use the catalog's global slice when present; fall back to fetching
         // ourselves so first-channel-open before the catalog finishes still
@@ -114,20 +170,18 @@ public final class ChatBadgeStore {
         if !globalBadges.isEmpty {
             global = globalBadges
         } else {
-            global = await fetchGlobal(client: client, accountStore: accountStore, account: account)
+            global = await fetchGlobal(client: client, accountStore: accountStore, userId: userId)
         }
-        let channel = await fetchChannel(client: client, accountStore: accountStore, account: account, channelId: channelId)
+        let channel = await fetchChannel(client: client, accountStore: accountStore, userId: userId, channelId: channelId)
 
-        // Same cancellation-safety guard as `EmoteIndex.load`: if the parent
-        // task was cancelled mid-flight, both fetch helpers returned `[:]`
-        // (their `catch is CancellationError` swallows the cancel). Publishing
-        // here would set `entries = [:]` (wiping any prior load) and mark
+        // Same cancellation-safety guard as `EmoteIndex.load`: if the load
+        // was cancelled mid-flight, both fetch helpers returned `[:]` (their
+        // `catch is CancellationError` swallows the cancel). Publishing here
+        // would set `entries = [:]` (wiping any prior load) and mark
         // `loadedChannelId = channelId`, causing the next caller to short-
-        // circuit and the channel's badges to stay permanently empty.
-        //
-        // Registry-owned ChatBadgeStore makes this guard essential — under
-        // SwiftUI view churn the `.task` modifier can cancel us mid-flight,
-        // and the next-mount needs to retry from a clean slate.
+        // circuit and the channel's badges to stay permanently empty. The
+        // load no longer runs inside a view's `.task`, so this is now a
+        // belt-and-braces check rather than the common path.
         guard !Task.isCancelled else {
             logger.info("ChatBadgeStore load cancelled for channel \(channelId, privacy: .public); not publishing partial entries")
             return
@@ -140,30 +194,63 @@ public final class ChatBadgeStore {
         for (key, entry) in channel {
             merged[key] = entry
         }
-        entries = merged
-        // Resolution results depend on `entries`; drop them so the next
-        // `entries(for:)` re-resolves against the freshly merged table.
-        resolvedCache.removeAll(keepingCapacity: true)
+        publish(entries: merged)
         loadedChannelId = channelId
         logger.info("Loaded \(merged.count) badge entries for channel \(channelId, privacy: .public) (global=\(global.count), channel=\(channel.count))")
+    }
+
+    /// Replaces the resolved table and drops memoized resolutions, which
+    /// depend on it. Internal so tests can seed a table without Helix.
+    func publish(entries merged: [ChatBadgeKey: ChatBadgeEntry]) {
+        entries = merged
+        resolvedCache.removeAll(keepingCapacity: true)
+        resolvedCount = 0
     }
 
     /// Resolves a per-message badge list to drawable entries, preserving order
     /// and dropping any whose `(setId, id)` aren't in our cached sets (rare —
     /// happens when Twitch ships a new badge type after our last fetch).
     public func entries(for badges: [ChatBadge]) -> [ChatBadgeEntry] {
-        let key = badges.map { ChatBadgeKey(setId: $0.setId, id: $0.id) }
-        if let cached = resolvedCache[key] { return cached }
-        let resolved = key.compactMap { entries[$0] }
+        // Badge-less chatters are common; an empty array literal is a shared
+        // singleton, so this path allocates nothing either.
+        guard !badges.isEmpty else { return [] }
+
+        var hasher = Hasher()
+        hasher.combine(badges.count)
+        for badge in badges {
+            hasher.combine(badge.setId)
+            hasher.combine(badge.id)
+        }
+        let hash = hasher.finalize()
+
+        if let bucket = resolvedCache[hash] {
+            for candidate in bucket where Self.sameKeys(candidate.keys, as: badges) {
+                return candidate.entries
+            }
+        }
+
+        let keys = badges.map { ChatBadgeKey(setId: $0.setId, id: $0.id) }
+        let resolved = keys.compactMap { entries[$0] }
         // Safety valve: distinct badge combinations are normally well under this
         // cap, but a long session on a large channel can keep minting new ones.
-        // Drop an arbitrary entry rather than grow without bound — every entry
+        // Drop an arbitrary bucket rather than grow without bound — every entry
         // is equally cheap to re-resolve (pure dictionary lookups).
-        if resolvedCache.count >= Self.resolvedCacheCapacity, let evict = resolvedCache.keys.first {
-            resolvedCache.removeValue(forKey: evict)
+        if resolvedCount >= Self.resolvedCacheCapacity, let evict = resolvedCache.first {
+            resolvedCache.removeValue(forKey: evict.key)
+            resolvedCount -= evict.value.count
         }
-        resolvedCache[key] = resolved
+        resolvedCache[hash, default: []].append(ResolvedBadgeSet(keys: keys, entries: resolved))
+        resolvedCount += 1
         return resolved
+    }
+
+    /// Exact `(setId, id)`-sequence comparison, without building a key array.
+    private static func sameKeys(_ keys: [ChatBadgeKey], as badges: [ChatBadge]) -> Bool {
+        guard keys.count == badges.count else { return false }
+        for (key, badge) in zip(keys, badges) where key.setId != badge.setId || key.id != badge.id {
+            return false
+        }
+        return true
     }
 
     /// Upper bound on memoized badge-combination resolutions. Generous — a real
@@ -176,10 +263,10 @@ public final class ChatBadgeStore {
     private func fetchGlobal(
         client: TwitchClient,
         accountStore: AccountStore,
-        account: Account
+        userId: String
     ) async -> [ChatBadgeKey: ChatBadgeEntry] {
         do {
-            let sets = try await accountStore.withTokenRefresh(for: account) {
+            let sets = try await accountStore.withTokenRefresh(forUserId: userId) {
                 try await client.api.fetchGlobalBadges()
             }
             return Self.flatten(sets: sets)
@@ -196,11 +283,11 @@ public final class ChatBadgeStore {
     private func fetchChannel(
         client: TwitchClient,
         accountStore: AccountStore,
-        account: Account,
+        userId: String,
         channelId: String
     ) async -> [ChatBadgeKey: ChatBadgeEntry] {
         do {
-            let sets = try await accountStore.withTokenRefresh(for: account) {
+            let sets = try await accountStore.withTokenRefresh(forUserId: userId) {
                 try await client.api.fetchChannelBadges(forBroadcasterID: channelId)
             }
             return Self.flatten(sets: sets)

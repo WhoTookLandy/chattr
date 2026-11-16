@@ -328,6 +328,40 @@ struct ChannelSessionRegistryLifecycleTests {
         #expect(!activity.hasActiveSessions)
     }
 
+    // MARK: - Event routing
+
+    @Test("Routing starts before start() completes and ends with the key's lifetime")
+    func routingFollowsLifetime() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+
+        let pending = acquire(registry)
+        await fake.waitForStarts(1)
+        // Routed while start() is still in flight, so live events arriving
+        // during subscribe + backfill are buffered by the session.
+        #expect(registry.isRouted(accountUserId: "me", channelId: "1"))
+        await fake.resolveStart(0)
+        _ = try await pending.value
+        #expect(registry.isRouted(accountUserId: "me", channelId: "1"))
+
+        await registry.release(accountUserId: "me", channelId: "1")
+        #expect(!registry.isRouted(accountUserId: "me", channelId: "1"))
+    }
+
+    @Test("A failed start stops routing to the abandoned session")
+    func failedStartUnroutes() async {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+
+        let first = acquire(registry)
+        await fake.waitForStarts(1)
+        await fake.resolveStart(0, throwing: StartFailure())
+        _ = await failure(of: first)
+        #expect(!registry.isRouted(accountUserId: "me", channelId: "1"))
+    }
+
     // MARK: - releaseAll
 
     @Test("releaseAll tears down every session for the account and balances activity")

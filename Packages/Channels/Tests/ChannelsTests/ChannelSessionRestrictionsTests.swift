@@ -9,23 +9,18 @@ import TwitchKit
 /// `start()` no longer awaits the Helix `fetchChatSettings` round-trip before
 /// exposing the session; instead it kicks the fetch off in the background and
 /// the result reaches an already-attached tab reactively, as a
-/// `.restrictionsUpdated` fan-out — exactly like a live
-/// `channel.chat_settings.update` event. These tests pin that fan-out, the
+/// `.restrictionsUpdated` delivery — exactly like a live
+/// `channel.chat_settings.update` event. These tests pin that delivery, the
 /// nil/failure no-op, and the race guard that keeps a late-resolving Helix
 /// snapshot from clobbering a fresher live update.
 ///
 /// Same offline strategy as `ChannelSessionResyncTests`: a real but
 /// never-`start()`ed session driven through the internal commit method
-/// directly, so no network is touched.
+/// directly, with delivery read straight off the subscriber's mailbox.
 @Suite("ChannelSession initial restrictions fan-out")
 struct ChannelSessionRestrictionsTests {
 
-    private actor Recorder {
-        var events: [ChannelSession.ChannelEvent] = []
-        func record(_ event: ChannelSession.ChannelEvent) { events.append(event) }
-    }
-
-    private func makeSession(recorder: Recorder) -> ChannelSession {
+    private func makeSession() -> ChannelSession {
         struct NullTokenStore: TwitchTokenStore {
             func loadToken() async throws -> OAuthToken? { nil }
             func saveToken(_ token: OAuthToken) async throws {}
@@ -41,53 +36,48 @@ struct ChannelSessionRestrictionsTests {
         )
     }
 
-    /// Count how many of the recorded events are restrictions updates.
-    private func restrictionEvents(
-        _ events: [ChannelSession.ChannelEvent]
-    ) -> [ChatRestrictions] {
-        events.compactMap {
+    /// The restrictions updates among `updates`, in order.
+    private func restrictionEvents(_ updates: [ChannelUpdate]) -> [ChatRestrictions] {
+        updates.compactMap {
             if case .restrictionsUpdated(let r) = $0 { return r }
             return nil
         }
     }
 
-    @Test("Initial restrictions fan out to an attached subscriber and seed the cache")
+    @Test("Initial restrictions reach an attached subscriber and seed the cache")
     func initialRestrictionsFanOut() async {
-        let recorder = Recorder()
-        let session = makeSession(recorder: recorder)
+        let session = makeSession()
         await session.applyBackfill([])   // end the buffering window
-        _ = await session.subscribe { event in await recorder.record(event) }
+        let (subscription, _) = await session.subscribe()
 
         await session.applyInitialRestrictions(ChatRestrictions(slowModeSeconds: 30))
 
-        let restrictions = restrictionEvents(await recorder.events)
+        let restrictions = restrictionEvents(subscription.takePending())
         #expect(restrictions.count == 1)
         #expect(restrictions.first?.slowModeSeconds == 30)
         #expect(await session.currentChatRestrictions()?.slowModeSeconds == 30)
     }
 
-    @Test("A nil snapshot (fetch failed) fans out nothing and leaves the cache empty")
+    @Test("A nil snapshot (fetch failed) delivers nothing and leaves the cache empty")
     func nilRestrictionsAreNoOp() async {
-        let recorder = Recorder()
-        let session = makeSession(recorder: recorder)
+        let session = makeSession()
         await session.applyBackfill([])
-        _ = await session.subscribe { event in await recorder.record(event) }
+        let (subscription, _) = await session.subscribe()
 
         await session.applyInitialRestrictions(nil)
 
-        #expect(restrictionEvents(await recorder.events).isEmpty)
+        #expect(restrictionEvents(subscription.takePending()).isEmpty)
         #expect(await session.currentChatRestrictions() == nil)
     }
 
     @Test("A late Helix snapshot backs off once a live update already populated the cache")
     func initialRestrictionsBackOffAfterLiveUpdate() async throws {
-        let recorder = Recorder()
-        let session = makeSession(recorder: recorder)
+        let session = makeSession()
         await session.applyBackfill([])
-        _ = await session.subscribe { event in await recorder.record(event) }
+        let (subscription, _) = await session.subscribe()
 
         // A live `channel.chat_settings.update` lands first — followers-only.
-        // handle() sets cachedRestrictionsAreLive = true and fans it out.
+        // handle() sets cachedRestrictionsAreLive = true and delivers it.
         let live = try chatSettingsUpdate(followerMode: true, followerDurationMinutes: 10)
         await session.handle(event: .chatSettingsUpdate(live))
 
@@ -95,8 +85,8 @@ struct ChannelSessionRestrictionsTests {
         // (slow mode, taken before the broadcaster toggled followers-only).
         await session.applyInitialRestrictions(ChatRestrictions(slowModeSeconds: 5))
 
-        // Only the live update fanned out; the stale Helix snapshot backed off.
-        let restrictions = restrictionEvents(await recorder.events)
+        // Only the live update was delivered; the stale Helix snapshot backed off.
+        let restrictions = restrictionEvents(subscription.takePending())
         #expect(restrictions.count == 1)
         #expect(restrictions.first?.followersOnly == true)
         // Cache reflects the live value, not the stale Helix one.

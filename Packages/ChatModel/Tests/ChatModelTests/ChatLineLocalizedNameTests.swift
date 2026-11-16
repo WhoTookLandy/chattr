@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import ChatModel
 
 /// Locks `ChatLine.hasLocalizedDisplayName` — the precomputed flag that lets
@@ -39,5 +40,45 @@ struct ChatLineLocalizedNameTests {
     @Test func preservedAcrossMarkingDeleted() {
         let original = line(display: "デレク", login: "derek")
         #expect(original.markingDeleted().hasLocalizedDisplayName)
+    }
+
+    @Test func asciiFastPathMatchesLowercasedComparison() {
+        // The byte-wise ASCII path must agree with the allocating
+        // `lowercased() != lowercased()` definition it replaces.
+        let pairs: [(String, String)] = [
+            ("DeReK_99", "derek_99"),   // case-only → not localized
+            ("derek1", "derek"),        // longer → localized
+            ("derek", "derek1"),        // shorter → localized
+            ("Derel", "derek"),         // same length, one byte differs
+            ("[]", "{}"),               // punctuation is not case-folded
+            ("Ünal", "unal"),           // non-ASCII → original path
+            ("ÜNAL", "ünal"),           // non-ASCII case-only → not localized
+        ]
+        for (display, login) in pairs {
+            #expect(
+                ChatLine.isLocalized(displayName: display, login: login)
+                    == (display.lowercased() != login.lowercased()),
+                "\(display) / \(login)"
+            )
+        }
+    }
+
+    @Test func markingDeletedFlipsOnlyKindAndHighlight() {
+        var original = ChatLine(
+            id: "1",
+            authorDisplayName: "Derek",
+            authorUserLogin: "derek",
+            runs: [.text("hi")],
+            timestamp: Date(timeIntervalSince1970: 5),
+            isHistorical: true
+        )
+        original.isHighlighted = true
+        let deleted = original.markingDeleted()
+        #expect(deleted.kind == .deletedPlaceholder)
+        #expect(!deleted.isHighlighted)
+        #expect(deleted.runs == original.runs)
+        #expect(deleted.timestamp == original.timestamp)
+        #expect(deleted.isHistorical)
+        #expect(deleted.hasLocalizedDisplayName == original.hasLocalizedDisplayName)
     }
 }

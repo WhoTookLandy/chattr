@@ -6,13 +6,13 @@ import Channels
 @testable import Features
 
 /// Tests for the "New" messages divider as it flows through `ChatTranscriptModel`:
-/// the `.newMessagesDivider` ChannelEvent must become a divider `ChatLine`
-/// with the ring-minted id, survive a chat-clear un-struck, and replay with
-/// stable identity when a tab re-primes.
+/// the session builds the divider row (id + timestamp minted once, stored in
+/// its ring); the model must append it as-is, keep it intact through a
+/// chat-clear, and dedup gap-filled messages around it.
 ///
 /// Sessions here are real but never `start()`ed — same offline pattern as
-/// `ChatTranscriptModelModerationTests`. Events are driven through the internal
-/// `apply(_:)`, the same entry point the live subscriber callback uses.
+/// `ChatTranscriptModelModerationTests`. Updates are driven through the internal
+/// `apply(_:)`, the same entry point the subscription consumer uses.
 @Suite("ChatTranscriptModel new-messages divider")
 @MainActor
 struct ChatTranscriptModelDividerTests {
@@ -44,6 +44,14 @@ struct ChatTranscriptModelDividerTests {
         return try! decoder.decode(ChatMessage.self, from: Data(json.utf8))
     }
 
+    private func message(_ id: String, isHistorical: Bool = false) -> ChannelUpdate {
+        .normalizedMessage(chatMessage(id: id), isHistorical: isHistorical, timestamp: Date(timeIntervalSince1970: 0))
+    }
+
+    private func divider(_ id: String, timestamp: Date = Date(timeIntervalSince1970: 0)) -> ChannelUpdate {
+        .row(ChatLine(id: id, kind: .newMessagesDivider, authorDisplayName: "", runs: [], timestamp: timestamp))
+    }
+
     private func makeAttachedModel() async -> ChatTranscriptModel {
         struct NullTokenStore: TwitchTokenStore {
             func loadToken() async throws -> OAuthToken? { nil }
@@ -62,19 +70,19 @@ struct ChatTranscriptModelDividerTests {
         return model
     }
 
-    @Test("Divider event becomes a divider line with the ring-minted id")
-    func dividerEventBecomesLine() async {
+    @Test("A divider row is appended as-is, keeping its session-minted id and time")
+    func dividerRowAppended() async {
         let model = await makeAttachedModel()
         let stamp = Date(timeIntervalSince1970: 1_700_000_000)
 
-        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
-        model.apply(.newMessagesDivider(id: "div-1", timestamp: stamp))
+        model.apply(message("m1"))
+        model.apply(divider("div-1", timestamp: stamp))
 
         #expect(model.lines.map(\.id) == ["m1", "div-1"])
-        let divider = model.lines.last
-        #expect(divider?.kind == .newMessagesDivider)
-        #expect(divider?.timestamp == stamp)
-        #expect(divider?.runs.isEmpty == true)
+        let line = model.lines.last
+        #expect(line?.kind == .newMessagesDivider)
+        #expect(line?.timestamp == stamp)
+        #expect(line?.runs.isEmpty == true)
         await model.detach()
     }
 
@@ -82,10 +90,7 @@ struct ChatTranscriptModelDividerTests {
     func chatClearPreservesDivider() async {
         let model = await makeAttachedModel()
 
-        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
-        model.apply(.newMessagesDivider(id: "div-1", timestamp: .now))
-        model.apply(.message(chatMessage(id: "m2"), isHistorical: false))
-        model.apply(.chatCleared)
+        model.apply([message("m1"), divider("div-1"), message("m2"), .chatCleared])
 
         let kinds = model.lines.map(\.kind)
         #expect(kinds == [.deletedPlaceholder, .newMessagesDivider, .deletedPlaceholder])
@@ -99,21 +104,19 @@ struct ChatTranscriptModelDividerTests {
         // Path 1 dedup-by-id must drop it rather than duplicate the row.
         let model = await makeAttachedModel()
 
-        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
-        model.apply(.newMessagesDivider(id: "div-1", timestamp: .now))
-        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))   // duplicate — dropped
-        model.apply(.message(chatMessage(id: "gap1"), isHistorical: false)) // genuinely missed
+        model.apply(message("m1"))
+        model.apply([divider("div-1"), message("m1", isHistorical: true), message("gap1", isHistorical: true)])
 
         #expect(model.lines.map(\.id) == ["m1", "div-1", "gap1"])
         await model.detach()
     }
 
-    @Test("Historical provenance stamps the line; live stays undimmed")
+    @Test("Historical provenance stamped by the session reaches the line")
     func historicalFlagStampsLine() async {
         let model = await makeAttachedModel()
 
-        model.apply(.message(chatMessage(id: "h1"), isHistorical: true))
-        model.apply(.message(chatMessage(id: "m1"), isHistorical: false))
+        model.apply(message("h1", isHistorical: true))
+        model.apply(message("m1"))
 
         #expect(model.lines.first?.isHistorical == true)
         #expect(model.lines.last?.isHistorical == false)
