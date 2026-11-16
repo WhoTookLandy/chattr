@@ -390,7 +390,6 @@ struct ChatRow: View, Equatable {
             case .emote(let emote): words.append(emote.name)
             case .twitchEmote(_, let displayName): words.append(displayName)
             case .mention(let login, _): words.append("@\(login)")
-            case .url(let url): words.append(url)
             case .cheermote(let prefix, let bits, _): words.append("\(prefix) \(bits) bits")
             }
         }
@@ -568,13 +567,6 @@ struct ChatRow: View, Equatable {
             // row-level highlight backplate).
             Text("@\(login)")
                 .font(bodyFont.weight(isMe ? .bold : .semibold))
-                .foregroundStyle(Color.accentColor)
-
-        case .url(let urlString):
-            // Slice-2 renders URLs as accent-tinted text. Tappable links
-            // come in a later slice.
-            Text(urlString)
-                .font(bodyFont)
                 .foregroundStyle(Color.accentColor)
 
         case .cheermote(let prefix, let bits, _):

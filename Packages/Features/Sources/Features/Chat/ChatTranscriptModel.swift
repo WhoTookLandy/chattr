@@ -1276,7 +1276,7 @@ public final class ChatTranscriptModel {
     }
 
     /// Build a short, single-line preview of a message's runs for the
-    /// reply chip. Emote and twitchEmote runs become their name, URL and
+    /// reply chip. Emote and twitchEmote runs become their name, mention and
     /// cheermote runs render as their text. Runs are word-level (no
     /// whitespace of their own) so pieces are joined with single spaces.
     /// The total is capped with an ellipsis.
@@ -1296,8 +1296,6 @@ public final class ChatTranscriptModel {
                 piece = display
             case .mention(let login, _):
                 piece = "@\(login)"
-            case .url(let s):
-                piece = s
             case .cheermote(let prefix, let bits, _):
                 piece = "\(prefix)\(bits)"
             }
