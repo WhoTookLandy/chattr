@@ -67,19 +67,27 @@ public enum BackfillProvider {
     /// - Returns: Messages in chronological order, each with its
     ///   `tmi-sent-ts`. Empty array if rustlog returned no data or all lines
     ///   failed to parse (we don't fail loudly — chat still works).
+    ///
+    /// The request carries its own short timeout (`requestTimeout`): history
+    /// is enrichment, and URLSession's 60s default let a hung history host
+    /// keep the fetch (and the session that awaited it) pending for a
+    /// minute. `ChannelSession` separately stops *waiting* after ~3s and
+    /// merges anything later in place.
     public static func fetchRecentMessages(
         channelLogin: String,
         limit: Int = 150,
         urlSession: URLSession = .shared
     ) async -> [BackfillMessage] {
         let url = Endpoints.Rustlog.recentMessages(channelLogin: channelLogin, limit: limit)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = requestTimeout
 
         // Backfill is best-effort. If anything in the fetch + parse
         // pipeline fails, log and return empty rather than throwing —
         // the caller (ChannelSession.start) should NEVER fail because
         // backfill failed. Live chat takes priority.
         do {
-            let (data, response) = try await urlSession.data(from: url)
+            let (data, response) = try await urlSession.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 logger.warning("rustlog returned HTTP \(http.statusCode) for \(channelLogin, privacy: .public); skipping backfill")
                 return []
@@ -107,6 +115,11 @@ public enum BackfillProvider {
             return []
         }
     }
+
+    /// Per-request timeout for the history fetch: generous next to the
+    /// session's ~3s wait (a late answer still merges in), far below
+    /// URLSession's 60s default.
+    static let requestTimeout: TimeInterval = 10
 
     // MARK: - Wrapper response shape
 

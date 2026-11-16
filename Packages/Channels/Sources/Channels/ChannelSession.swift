@@ -199,6 +199,11 @@ public actor ChannelSession {
     /// `refreshTokenHandler`.
     private let fetchBackfill: @Sendable (String, Int) async -> [BackfillMessage]
 
+    /// How long `start()` waits for join history, measured from when the
+    /// fetch began, before exposing the session without it (late history is
+    /// merged in afterwards). Injected so tests can use a short deadline.
+    private let joinBackfillTimeout: Duration
+
     /// True while a `channel.moderate` v2 subscription is live (or being
     /// created) for this session. Makes `enableModerationEvents()`
     /// idempotent — every mod-status path in every attached tab calls it
@@ -220,7 +225,8 @@ public actor ChannelSession {
         },
         fetchBackfill: @escaping @Sendable (String, Int) async -> [BackfillMessage] = { login, limit in
             await BackfillProvider.fetchRecentMessages(channelLogin: login, limit: limit)
-        }
+        },
+        joinBackfillTimeout: Duration = .seconds(3)
     ) {
         self.client = client
         self.channelId = channelId
@@ -231,6 +237,7 @@ public actor ChannelSession {
         self.emoteIndex = emoteIndex
         self.refreshTokenHandler = refreshTokenHandler
         self.fetchBackfill = fetchBackfill
+        self.joinBackfillTimeout = joinBackfillTimeout
     }
 
     // MARK: - Lifecycle
@@ -257,7 +264,13 @@ public actor ChannelSession {
         // by any tab) until `start()` returns. The entire pending window is
         // therefore internal — no subscriber ever observes the empty/partial
         // ring, preserving the atomic prime+subscribe invariant.
-        async let backfillTask = fetchBackfill(channelLoginName, Self.joinBackfillLimit)
+        //
+        // The history wait is BOUNDED (`joinBackfillTimeout`, ~3s from here):
+        // a slow or hung history host no longer holds the channel closed.
+        // Past the deadline the session is exposed with live chat only and
+        // the history merges in above it when (if) it lands — see
+        // `finishJoinBackfill` / `mergeLateBackfill`.
+        beginJoinBackfill()
 
         try await client.eventSub.connect()
 
@@ -287,13 +300,13 @@ public actor ChannelSession {
             group.addTask { await self.subscribeToRaid() }
         }
 
-        // Drain backfill and merge. Failures are absorbed by BackfillProvider —
-        // we never propagate; an empty backfill just flushes whatever buffered
-        // live events accumulated. `applyBackfill` is synchronous (no `await`)
-        // so the read-of-pendingLive → build-ring → clear-buffer → flip-flag
+        // Drain backfill and merge — waiting no later than the deadline.
+        // Failures are absorbed by BackfillProvider — we never propagate; an
+        // empty (or late) backfill just flushes whatever buffered live events
+        // accumulated. `applyBackfill` is synchronous (no `await`) so the
+        // read-of-pendingLive → build-ring → clear-buffer → flip-flag
         // sequence is atomic with respect to `handle(event:)`.
-        let backfill = await backfillTask
-        applyBackfill(backfill)
+        await finishJoinBackfill()
 
         // Fetch chat-settings restrictions WITHOUT blocking session exposure.
         // The restriction strip on the compose bar is enrichment, not part of
@@ -497,6 +510,13 @@ public actor ChannelSession {
         // actor past teardown (and skips its now-pointless subscriber fan-out).
         chatRestrictionsTask?.cancel()
         chatRestrictionsTask = nil
+
+        // Same for the join-history fetch and its deadline timer, and release
+        // a `start()` still parked waiting on them (it then exposes nothing —
+        // the registry discards a session stopped mid-start).
+        joinBackfillFetch?.cancel()
+        joinBackfillFetch = nil
+        wakeJoinBackfillWaiter()
 
         // End every subscriber's stream up front: nothing posted from here on
         // is meant for them, and their consumer loops can wind down while we
@@ -970,6 +990,7 @@ public actor ChannelSession {
     /// same visibility relaxation as `translate(event:...)`. Production's only
     /// caller remains `start()`.
     func applyBackfill(_ backfill: [BackfillMessage]) {
+        joinBackfill = .done
         let history = normalizeHistory(backfill)
         // Join divider: only when there's actually history to separate —
         // an empty backfill (rustlog down, brand-new channel) would put a
@@ -988,6 +1009,135 @@ public actor ChannelSession {
 
         if !ring.isEmpty {
             logger.info("Primed ring with \(self.ring.count) event(s) for #\(self.channelLoginName, privacy: .public) — \(history.count) backfilled, \(bufferedCount) buffered-live")
+        }
+    }
+
+    // MARK: - Join backfill (bounded wait, late merge)
+
+    /// Where the join-time history fetch stands. Every transition happens on
+    /// the actor, so "the deadline passed" and "the history arrived" can't
+    /// both claim the outcome.
+    private enum JoinBackfill {
+        /// No fetch started (tests drive `applyBackfill` directly).
+        case idle
+        /// In flight; `start()` may be waiting on it.
+        case fetching
+        /// Landed before `start()` stopped waiting; not yet applied.
+        case arrived([BackfillMessage])
+        /// `start()` gave up waiting and exposed the session; a late arrival
+        /// is merged in by `mergeLateBackfill`.
+        case abandoned
+        /// Applied (on time, late, or as empty).
+        case done
+    }
+
+    private var joinBackfill: JoinBackfill = .idle
+    private var joinBackfillDeadline: ContinuousClock.Instant?
+    private var joinBackfillFetch: Task<Void, Never>?
+    private var joinBackfillTimer: Task<Void, Never>?
+    /// `start()`, parked in `finishJoinBackfill` until the history lands or
+    /// the deadline passes — whichever wakes it first.
+    private var joinBackfillWaiter: CheckedContinuation<Void, Never>?
+
+    /// Kicks off the join-history fetch and starts its deadline clock.
+    /// Internal (not private) so tests can drive the bounded wait offline.
+    func beginJoinBackfill() {
+        guard case .idle = joinBackfill else { return }
+        joinBackfill = .fetching
+        joinBackfillDeadline = ContinuousClock.now + joinBackfillTimeout
+        let fetch = fetchBackfill
+        let login = channelLoginName
+        let limit = Self.joinBackfillLimit
+        // Unstructured so it can outlive `start()`'s wait: a late answer is
+        // still merged. Weak so it never pins a torn-down session.
+        joinBackfillFetch = Task { [weak self] in
+            let history = await fetch(login, limit)
+            await self?.joinBackfillArrived(history)
+        }
+    }
+
+    /// Waits for the join history — but no later than the deadline — then
+    /// commits whatever we have and ends the buffering window, so the session
+    /// is exposed on time even when the history service is slow or down.
+    /// Internal for the same testing reason as `beginJoinBackfill`.
+    func finishJoinBackfill() async {
+        if case .fetching = joinBackfill, let deadline = joinBackfillDeadline {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                joinBackfillWaiter = continuation
+                joinBackfillTimer = Task { [weak self] in
+                    try? await Task.sleep(until: deadline, clock: .continuous)
+                    await self?.wakeJoinBackfillWaiter()
+                }
+            }
+        }
+        // Decided in one actor turn: whatever state we find is the outcome.
+        switch joinBackfill {
+        case .arrived(let history):
+            applyBackfill(history)
+        case .fetching:
+            logger.notice("Join history for #\(self.channelLoginName, privacy: .public) not back after \(self.joinBackfillTimeout, privacy: .public); opening with live chat, will merge history if it lands")
+            applyBackfill([])
+            joinBackfill = .abandoned
+        case .idle:
+            applyBackfill([])
+        case .abandoned, .done:
+            break
+        }
+    }
+
+    private func joinBackfillArrived(_ history: [BackfillMessage]) {
+        switch joinBackfill {
+        case .fetching:
+            joinBackfill = .arrived(history)
+            wakeJoinBackfillWaiter()
+        case .abandoned:
+            mergeLateBackfill(history)
+        case .idle, .arrived, .done:
+            break
+        }
+    }
+
+    /// Test hook: a `finishJoinBackfill` is currently parked.
+    var isWaitingForJoinBackfill: Bool { joinBackfillWaiter != nil }
+
+    /// Resumes a `start()` parked in `finishJoinBackfill`, at most once.
+    private func wakeJoinBackfillWaiter() {
+        joinBackfillTimer?.cancel()
+        joinBackfillTimer = nil
+        guard let waiter = joinBackfillWaiter else { return }
+        joinBackfillWaiter = nil
+        waiter.resume()
+    }
+
+    /// History that missed the deadline. It's OLDER than every live row the
+    /// session has shown since opening, so it goes ABOVE them — the same
+    /// layout an on-time backfill produces: `[history…, New, live…]`. Reuses
+    /// the reconnect gap-fill's dedup (`missingMessages`) and the join merge
+    /// (`mergeBackfill`); because subscribers already hold the live tail,
+    /// they get the new ring as one `.reprime` rather than an append.
+    private func mergeLateBackfill(_ history: [BackfillMessage]) {
+        joinBackfill = .done
+        let missing = Self.missingMessages(history, notIn: ringSnapshot)
+        guard !missing.isEmpty else { return }
+        ring = Self.mergeBackfill(
+            history: normalizeHistory(missing),
+            pendingLive: ringSnapshot,
+            capacity: ringCapacity,
+            divider: .row(makeDivider())
+        )
+        ringHead = 0
+        logger.info("Merged \(missing.count) late history message(s) above the live rows of #\(self.channelLoginName, privacy: .public)")
+        reprimeSubscribers()
+    }
+
+    /// Re-posts the whole ring to every subscriber as one `.reprime` — for
+    /// changes that aren't a tail append. Replaces each backlog: everything
+    /// in it is already in the ring.
+    private func reprimeSubscribers() {
+        guard !subscribers.isEmpty else { return }
+        let snapshot = ringSnapshot
+        for subscription in subscribers.values {
+            subscription.replacePending(with: [.reprime(snapshot)])
         }
     }
 
