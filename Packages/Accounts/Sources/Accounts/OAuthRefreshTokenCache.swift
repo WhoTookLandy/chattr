@@ -38,11 +38,25 @@ private let logger = AppLogger.make("Accounts.OAuthRefreshTokenCache")
 /// The cache holds *only* the refresh_token, never the access_token (access
 /// tokens are short-lived and cheap to re-acquire; refresh tokens are the
 /// long-lived credential worth protecting).
+///
+/// ## Testability
+///
+/// The Keychain primitives sit behind `RefreshTokenKeychain`, swapped via the
+/// `keychain` seam below. Production uses `SystemRefreshTokenKeychain`; tests
+/// inject an in-memory fake so the namespacing + nil/empty guard logic is
+/// covered without a host-app entitlement (a plain SwiftPM test bundle has no
+/// Keychain access and SecItem returns `errSecMissingEntitlement`).
 enum OAuthRefreshTokenCache {
+
+    /// Backend used for all Keychain reads/writes. Defaults to the real
+    /// system Keychain; tests replace it with an in-memory fake (and restore
+    /// it after). `nonisolated(unsafe)` is the same pragmatic test seam as
+    /// `URLSession.shared` injection — callers that swap it do so serially.
+    nonisolated(unsafe) static var keychain: RefreshTokenKeychain = SystemRefreshTokenKeychain()
 
     /// Keychain key for a userId. Keep this distinct from TwitchKit's
     /// `chattr.account.{userId}` namespace so the two stores never collide.
-    private static func key(for userId: String) -> String {
+    static func key(for userId: String) -> String {
         "chattr.refresh.\(userId)"
     }
 
@@ -57,7 +71,7 @@ enum OAuthRefreshTokenCache {
         }
         guard let data = refreshToken.data(using: .utf8) else { return }
         do {
-            try Self.keychainSave(key: key(for: userId), data: data)
+            try keychain.save(key: key(for: userId), data: data)
             logger.info("Cached refresh_token for \(userId, privacy: .public)")
         } catch {
             logger.error("Failed to cache refresh_token for \(userId, privacy: .public): \(error.localizedDescription)")
@@ -66,25 +80,35 @@ enum OAuthRefreshTokenCache {
 
     /// Read the cached refresh token, or nil if none stored.
     static func load(for userId: String) -> String? {
-        guard let data = Self.keychainLoad(key: key(for: userId)) else { return nil }
+        guard let data = keychain.load(key: key(for: userId)) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
     /// Drop the cached refresh token (used when removing an account).
     static func delete(for userId: String) {
-        Self.keychainDelete(key: key(for: userId))
+        keychain.delete(key: key(for: userId))
         logger.info("Cleared cached refresh_token for \(userId, privacy: .public)")
     }
+}
 
-    // MARK: - Keychain primitives
-    //
-    // Mirror of TwitchKit's internal `KeychainStore` — TwitchKit doesn't
-    // expose its Keychain helpers publicly so we re-implement the same
-    // shape (`kSecClassGenericPassword` + `kSecAttrAccount` keyed) here.
-    // Same accessibility (`AfterFirstUnlockThisDeviceOnly`) so both stores
-    // have identical security semantics.
+/// Minimal key→data Keychain abstraction the cache talks to. Lets tests
+/// substitute an in-memory store for the real `SecItem` primitives.
+protocol RefreshTokenKeychain: Sendable {
+    func save(key: String, data: Data) throws
+    func load(key: String) -> Data?
+    func delete(key: String)
+}
 
-    private static func keychainSave(key: String, data: Data) throws {
+/// Production `RefreshTokenKeychain` backed by the system Keychain.
+///
+/// Mirror of TwitchKit's internal `KeychainStore` — TwitchKit doesn't expose
+/// its Keychain helpers publicly so we re-implement the same shape
+/// (`kSecClassGenericPassword` + `kSecAttrAccount` keyed) here. Same
+/// accessibility (`AfterFirstUnlockThisDeviceOnly`) so both stores have
+/// identical security semantics.
+struct SystemRefreshTokenKeychain: RefreshTokenKeychain {
+
+    func save(key: String, data: Data) throws {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
@@ -118,7 +142,7 @@ enum OAuthRefreshTokenCache {
         }
     }
 
-    private static func keychainLoad(key: String) -> Data? {
+    func load(key: String) -> Data? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
@@ -139,7 +163,7 @@ enum OAuthRefreshTokenCache {
         return result as? Data
     }
 
-    private static func keychainDelete(key: String) {
+    func delete(key: String) {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
