@@ -141,10 +141,15 @@ public actor ChannelSession {
     /// resolves, leaving a zombie session alive across a fast channel switch.
     private var chatRestrictionsTask: Task<Void, Never>?
 
-    /// Called by `start()` when EventSub subscribe returns unauthorized.
-    /// Injected at construction time by `ChannelSessionRegistry` so this actor
-    /// doesn't need to know about `AccountStore` or `Account` directly.
-    private let refreshTokenHandler: @Sendable () async throws -> Void
+    /// Refresh-via-bridge + retry-once wrapper for auth-sensitive calls. Its
+    /// `refreshTokenHandler` is injected at construction time by
+    /// `ChannelSessionRegistry` so this actor doesn't need to know about
+    /// `AccountStore` or `Account` directly.
+    private let authRetry: HelixAuthRetry
+
+    /// Send / delete / chat-settings / chat-colour Helix calls, each behind
+    /// `authRetry` where auth-sensitive. See `HelixChatActions`.
+    private let chatActions: HelixChatActions
 
     /// Fetches recent chat history (channelLogin, limit) → messages with
     /// their send times. Defaults to `BackfillProvider.fetchRecentMessages`;
@@ -188,7 +193,14 @@ public actor ChannelSession {
         self.accountUserId = accountUserId
         self.normalizer = ChannelUpdateNormalizer(accountLogin: accountLogin, emoteIndex: emoteIndex)
         self.hub = ChannelUpdateHub(capacity: max(1, ringCapacity), channelLoginName: channelLoginName)
-        self.refreshTokenHandler = refreshTokenHandler
+        let authRetry = HelixAuthRetry(refreshTokenHandler: refreshTokenHandler)
+        self.authRetry = authRetry
+        self.chatActions = HelixChatActions(
+            client: client,
+            channelId: channelId,
+            accountUserId: accountUserId,
+            authRetry: authRetry
+        )
         self.fetchBackfill = fetchBackfill
         self.joinBackfillTimeout = joinBackfillTimeout
     }
@@ -292,10 +304,10 @@ public actor ChannelSession {
             userID: accountUserId
         )
         do {
-            // Auth-refreshable errors are handled inside `withAuthRetry`
+            // Auth-refreshable errors are handled inside `authRetry`
             // (refresh via the bridge, retry once); see its doc comment for
             // the three shapes a stale token takes.
-            let record = try await withAuthRetry("EventSub chat.message subscribe") {
+            let record = try await authRetry.run("EventSub chat.message subscribe") {
                 try await client.eventSub.subscribe(subscription)
             }
             activeSubscriptionIds.append(record.id)
@@ -305,57 +317,6 @@ public actor ChannelSession {
             logger.info("EventSub already subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public) — reusing existing subscription (no id captured)")
         }
         logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public)")
-    }
-
-    /// Runs a Helix / EventSub operation; if it fails with an auth-refreshable
-    /// error, refreshes tokens via `refreshTokenHandler` and retries ONCE. A
-    /// second failure (or a refresh failure) propagates to the caller.
-    ///
-    /// A stale access token reaches us in one of THREE shapes — not just
-    /// `.unauthorized`. In practice `.oauth` is the common one:
-    ///   - .unauthorized      — the 401 surfaced to us directly.
-    ///   - .oauth(...)        — TwitchKit's HelixClient intercepted the 401,
-    ///                          tried its own `/oauth2/token` refresh, and
-    ///                          Twitch rejected it ("missing client secret" —
-    ///                          we ship no secret; it lives on the Vercel
-    ///                          bridge). TwitchKit then wiped its own token
-    ///                          store as it threw.
-    ///   - .notAuthenticated  — that store-wipe already happened on an earlier
-    ///                          call, so the token is simply gone.
-    /// All three mean "refresh via the bridge and retry once." This mirrors
-    /// `AccountStore.withTokenRefresh`, which nets the same three cases around
-    /// the Helix call sites outside this actor. (Previously only the chat
-    /// subscribe handled all three; send / delete / chat-settings caught only
-    /// `.unauthorized`, so the common `.oauth` shape escaped them.)
-    ///
-    /// The refresh itself is single-flight in `AccountStore`, so concurrent
-    /// retries across sessions share one bridge round-trip.
-    @discardableResult
-    private func withAuthRetry<T>(
-        _ label: String,
-        _ operation: () async throws -> T
-    ) async throws -> T {
-        do {
-            return try await operation()
-        } catch let error where Self.isAuthRefreshable(error) {
-            logger.info("\(label, privacy: .public) needs a token refresh (\(error.localizedDescription, privacy: .public)); refreshing via bridge and retrying once")
-            try await refreshTokenHandler()
-            return try await operation()
-        }
-    }
-
-    /// The three `HelixError` shapes a stale (or already-wiped) access token can
-    /// take, all of which are recoverable by a bridge refresh + one retry.
-    /// Centralizing the predicate keeps `withAuthRetry` in lockstep with
-    /// `AccountStore.withTokenRefresh`, which guards every other Helix call site
-    /// against exactly these cases.
-    private static func isAuthRefreshable(_ error: Error) -> Bool {
-        switch error {
-        case HelixError.unauthorized, HelixError.oauth, HelixError.notAuthenticated:
-            return true
-        default:
-            return false
-        }
     }
 
     /// Subscribes to one of the chat-related notification topics
@@ -522,7 +483,7 @@ public actor ChannelSession {
     /// fan-out — the same path a live `channel.chat_settings.update` takes.
     private func refreshChatRestrictions() async {
         do {
-            let settings = try await accountStoreSafeFetch()
+            let settings = try await chatActions.fetchChatSettings()
             applyInitialRestrictions(ChatRestrictions(from: settings))
             logger.debug("Refreshed chat restrictions for #\(self.channelLoginName, privacy: .public)")
         } catch is CancellationError {
@@ -559,14 +520,6 @@ public actor ChannelSession {
         emit([.restrictionsUpdated(restrictions)])
     }
 
-    /// Wrapper around `fetchChatSettings` with the shared auth-refresh-and-
-    /// retry (`withAuthRetry`), matching `send(...)` and `subscribeToChat()`.
-    private func accountStoreSafeFetch() async throws -> ChatSettings {
-        try await withAuthRetry("fetchChatSettings") {
-            try await client.api.fetchChatSettings(broadcasterID: channelId)
-        }
-    }
-
     /// The signed-in user's chat name color (GET /chat/color), e.g.
     /// "#FF69B4". Used to stamp optimistic send rows with the right
     /// color BEFORE the first echo of the session teaches us — without
@@ -575,14 +528,7 @@ public actor ChannelSession {
     /// a color (Twitch returns "" then) — callers fall back to the
     /// echo-taught value.
     public func fetchOwnChatColor() async -> String? {
-        do {
-            let color = try await client.api.fetchUserChatColors(userIDs: [accountUserId]).first?.color
-            return (color?.isEmpty == false) ? color : nil
-        } catch {
-            // Cosmetic-only data; the echo upgrade corrects the row anyway.
-            logger.debug("Own-chat-color fetch failed: \(error.localizedDescription, privacy: .public)")
-            return nil
-        }
+        await chatActions.fetchOwnChatColor()
     }
 
     /// Update the broadcaster's chat-mode settings (PATCH /chat/settings)
@@ -611,19 +557,14 @@ public actor ChannelSession {
         slowMode: Bool? = nil,
         slowModeSeconds: Int? = nil
     ) async throws -> ChatRestrictions {
-        let update = ChatSettingsUpdate(
-            emoteMode: emoteOnly,
-            followerMode: followersOnly,
-            followerModeDuration: followersDurationMinutes,
+        let settings = try await chatActions.updateChatSettings(
+            emoteOnly: emoteOnly,
+            subscribersOnly: subscribersOnly,
+            followersOnly: followersOnly,
+            followersDurationMinutes: followersDurationMinutes,
             slowMode: slowMode,
-            slowModeWaitTime: slowModeSeconds,
-            subscriberMode: subscribersOnly
+            slowModeSeconds: slowModeSeconds
         )
-        let settings = try await withAuthRetry("updateChatSettings") {
-            try await client.api.updateChatSettings(
-                broadcasterID: channelId, moderatorID: accountUserId, with: update
-            )
-        }
 
         let restrictions = ChatRestrictions(from: settings)
         restrictionsCache.applyLive(restrictions)
@@ -638,7 +579,7 @@ public actor ChannelSession {
 
     /// Sends a chat message through this session's authenticated user. Wraps
     /// `client.api.sendChatMessage(...)` with a one-shot token-refresh-and-retry
-    /// on any auth-refreshable error (`withAuthRetry`), matching
+    /// on any auth-refreshable error (`HelixAuthRetry`), matching
     /// `subscribeToChat()` — sends are short, so we don't go through
     /// `AccountStore.withTokenRefresh` (which is geared at the SwiftData-isolated Account model that doesn't
     /// belong inside this actor).
@@ -660,24 +601,9 @@ public actor ChannelSession {
         _ text: String,
         replyParentMessageId: String? = nil
     ) async throws -> SendChatMessageResponse {
-        // Trim leading/trailing whitespace only — preserve internal whitespace
-        // so users can put their `:` between word and emote in
-        // ":wave: hello :wave:" style messages. Twitch handles the rest.
-        let payload = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !payload.isEmpty else {
-            throw AppError(message: "Can't send an empty message")
-        }
-        // Refresh once, retry once. A second auth failure propagates and lets
-        // the caller (ChatTranscriptModel.send → ChatScreen) surface the
-        // sign-in-expired UX.
-        return try await withAuthRetry("sendChatMessage") {
-            try await client.api.sendChatMessage(
-                broadcasterId: channelId,
-                senderId: accountUserId,
-                message: payload,
-                replyParentMessageId: replyParentMessageId
-            )
-        }
+        // Whitespace trim, empty-message guard and refresh-once/retry-once
+        // live in `HelixChatActions.send`.
+        try await chatActions.send(text, replyParentMessageId: replyParentMessageId)
     }
 
     // MARK: - Moderation
@@ -694,16 +620,10 @@ public actor ChannelSession {
     /// `.deletedPlaceholder` when that arrives, so the visual update
     /// flows through the same path as a moderator's web-UI delete.
     ///
-    /// Refresh-and-retry on auth failure (`withAuthRetry`) matches the other
+    /// Refresh-and-retry on auth failure (`HelixAuthRetry`) matches the other
     /// Helix calls (send, fetchChatSettings).
     public func deleteMessage(messageId: String) async throws {
-        try await withAuthRetry("deleteChatMessages") {
-            try await client.api.deleteChatMessages(
-                broadcasterID: channelId,
-                moderatorID: accountUserId,
-                messageID: messageId
-            )
-        }
+        try await chatActions.deleteMessage(messageId: messageId)
     }
 
     /// Returns true if `accountUserId == channelId` — i.e., the
