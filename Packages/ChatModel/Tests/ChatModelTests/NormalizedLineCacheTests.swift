@@ -51,6 +51,17 @@ struct NormalizedLineCacheTests {
         #expect(cache.line(id: "m1", context: context(emoteVersion: 0)) == nil)
     }
 
+    @Test("A new emote generation invalidates even when the table size is unchanged")
+    func newGenerationSameSizeWipes() {
+        // emoteVersion is EmoteIndex.generation, not the entry count: a
+        // cached restore and the refresh replacing it can hold the same
+        // number of emotes yet resolve names differently.
+        let cache = NormalizedLineCache(capacity: 10)
+        cache.store(line("m1"), context: context(emoteVersion: 7))
+        #expect(cache.line(id: "m1", context: context(emoteVersion: 8)) == nil)
+        #expect(cache.line(id: "m1", context: context(emoteVersion: 7)) == line("m1"))
+    }
+
     @Test("Changed highlight keywords invalidate cached highlighting")
     func keywordChangeWipes() {
         let cache = NormalizedLineCache(capacity: 10)

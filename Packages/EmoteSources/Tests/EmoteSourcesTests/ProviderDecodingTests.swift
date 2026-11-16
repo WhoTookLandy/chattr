@@ -425,3 +425,56 @@ struct FFZDecodingTests {
         #expect(emotes[0].aspectRatio == 2.0)
     }
 }
+
+// MARK: - HTTP status handling
+
+@Suite("Provider HTTP status handling")
+struct ProviderHTTPStatusTests {
+
+    @Test("5xx on a channel endpoint is a provider error, not a decode error")
+    func serverErrorThrowsHTTPStatus() async throws {
+        let provider = BTTVProvider(urlSession: mockedSession(
+            url: "https://api.betterttv.net/3/cached/users/twitch/50300",
+            statusCode: 503,
+            data: Data("<html>Service Unavailable</html>".utf8)
+        ))
+        await #expect(throws: EmoteProviderError.httpStatus(503)) {
+            _ = try await provider.channelEmotes(broadcasterId: "50300", broadcasterLogin: "x")
+        }
+    }
+
+    @Test("429 on a channel endpoint is a provider error")
+    func rateLimitThrowsHTTPStatus() async throws {
+        let provider = FFZProvider(urlSession: mockedSession(
+            url: "https://api.frankerfacez.com/v1/room/ratelimited",
+            statusCode: 429,
+            data: Data()
+        ))
+        await #expect(throws: EmoteProviderError.httpStatus(429)) {
+            _ = try await provider.channelEmotes(broadcasterId: "1", broadcasterLogin: "ratelimited")
+        }
+    }
+
+    @Test("404 on a 7TV channel stays an empty result")
+    func sevenTVNotFoundIsEmpty() async throws {
+        let provider = SevenTVProvider(urlSession: mockedSession(
+            url: "https://7tv.io/v3/users/twitch/40400",
+            statusCode: 404,
+            data: Data()
+        ))
+        let emotes = try await provider.channelEmotes(broadcasterId: "40400", broadcasterLogin: "x")
+        #expect(emotes.isEmpty)
+    }
+
+    @Test("5xx on a 7TV channel throws")
+    func sevenTVServerErrorThrows() async throws {
+        let provider = SevenTVProvider(urlSession: mockedSession(
+            url: "https://7tv.io/v3/users/twitch/50200",
+            statusCode: 502,
+            data: Data()
+        ))
+        await #expect(throws: EmoteProviderError.httpStatus(502)) {
+            _ = try await provider.channelEmotes(broadcasterId: "50200", broadcasterLogin: "x")
+        }
+    }
+}

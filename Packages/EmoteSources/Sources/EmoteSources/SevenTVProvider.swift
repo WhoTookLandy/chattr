@@ -24,7 +24,8 @@ public struct SevenTVProvider: EmoteProvider {
     }
 
     public func globalEmotes() async throws -> [Emote] {
-        let (data, _) = try await urlSession.data(from: Endpoints.SevenTV.globalEmoteSet)
+        let (data, response) = try await urlSession.data(from: Endpoints.SevenTV.globalEmoteSet)
+        try ProviderHTTP.requireSuccess(response)
         let response = try JSONDecoder().decode(EmoteSetResponse.self, from: data)
         return response.emotes.compactMap { Self.map($0, ownerChannelId: nil) }
     }
@@ -34,8 +35,9 @@ public struct SevenTVProvider: EmoteProvider {
         // here (FFZ is the provider that needs login; the unified signature
         // exists so EmoteIndex can call all three providers the same way).
         let (data, response) = try await urlSession.data(from: Endpoints.SevenTV.userByTwitchID(broadcasterId))
-        // 7TV returns 404 if the Twitch user hasn't connected to 7TV. Graceful empty.
-        if (response as? HTTPURLResponse)?.statusCode == 404 { return [] }
+        // 7TV returns 404 if the Twitch user hasn't connected to 7TV. Graceful
+        // empty. Other non-2xx statuses (429, 5xx) throw.
+        if try ProviderHTTP.isNotFound(response) { return [] }
         let user = try JSONDecoder().decode(UserResponse.self, from: data)
         return user.emote_set?.emotes.compactMap { Self.map($0, ownerChannelId: broadcasterId) } ?? []
     }

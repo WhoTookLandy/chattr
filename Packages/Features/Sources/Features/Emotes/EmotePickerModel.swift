@@ -2,6 +2,7 @@ import Foundation
 import EmoteSources
 import TwitchKit
 import Core
+import os
 
 /// A single emote as the picker renders it — unifying Twitch native
 /// emotes (`TwitchEmote`) and third-party emotes (`EmoteSources.Emote`)
@@ -64,34 +65,100 @@ public struct EmoteSection: Identifiable, Hashable, Sendable {
 ///   - `GlobalCatalog.globalEmotes` → Twitch native global emotes
 ///
 /// Section order is relevance-first: this channel's custom emotes at the
-/// top (what people actually want), then third-party globals by provider,
-/// then Twitch global. Each section is name-sorted (case-insensitive) for
-/// predictable browsing.
+/// top (what people actually want), then Twitch global, then third-party
+/// globals by provider. Each section is name-sorted (case-insensitive) for
+/// predictable browsing; the third-party sorts are memoized per emote
+/// table (see `buildSections(emoteIndex:twitchGlobal:)`).
 ///
 /// Future commits add the channel's Twitch subscriber emotes and the
 /// user's subscribed-emote set (both need their own Helix fetches).
 public enum EmoteCatalog {
 
+    /// Preferred entry point. Reads the index's snapshot and publish
+    /// generation atomically and reuses the sorted third-party sections
+    /// while the generation is unchanged — so re-opening the picker on a
+    /// channel with thousands of emotes doesn't re-run thousands of
+    /// `localizedCaseInsensitiveCompare` sorts on the main thread.
+    public static func buildSections(
+        emoteIndex: EmoteIndex?,
+        twitchGlobal: [String: TwitchEmote]
+    ) -> [EmoteSection] {
+        let versioned = emoteIndex?.snapshotWithGeneration()
+        return assemble(
+            thirdPartySections(versioned?.emotes ?? [:], generation: versioned?.generation),
+            twitchGlobal: twitchGlobal)
+    }
+
+    /// Dictionary-based entry point. Also memoized: an unchanged snapshot
+    /// (the same table handed back by `EmoteIndex.snapshot()`) compares
+    /// equal to the cached one, so it skips the sort too.
     public static func buildSections(
         thirdParty: [String: Emote],
         twitchGlobal: [String: TwitchEmote]
     ) -> [EmoteSection] {
-        var sections: [EmoteSection] = []
+        assemble(thirdPartySections(thirdParty, generation: nil), twitchGlobal: twitchGlobal)
+    }
 
-        let allThirdParty = Array(thirdParty.values)
+    // MARK: - Memo
+
+    /// The expensive, third-party half of the picker (channel set + the
+    /// per-provider globals — thousands of emotes on big channels).
+    private struct ThirdPartySections: Sendable {
+        let channel: EmoteSection?
+        let globals: [EmoteSection]
+    }
+
+    private struct Memo: Sendable {
+        /// `EmoteIndex.generation` the sections were built from; `nil` when
+        /// built from a bare dictionary. Generations are process-wide
+        /// unique, so equal generations mean the same table.
+        let generation: Int?
+        let thirdParty: [String: Emote]
+        let sections: ThirdPartySections
+    }
+
+    /// Single-entry memo (one picker is open at a time). Lock-protected so
+    /// `buildSections` stays callable from any isolation.
+    private static let memo = OSAllocatedUnfairLock<Memo?>(initialState: nil)
+
+    private static func thirdPartySections(
+        _ thirdParty: [String: Emote],
+        generation: Int?
+    ) -> ThirdPartySections {
+        if let cached = memo.withLock({ $0 }) {
+            if let generation, cached.generation == generation {
+                return cached.sections
+            }
+            // Different/unknown generation: fall back to content equality
+            // (cheap when it's the same dictionary storage).
+            if cached.thirdParty == thirdParty {
+                return cached.sections
+            }
+        }
+        let built = buildThirdPartySections(thirdParty)
+        let entry = Memo(generation: generation, thirdParty: thirdParty, sections: built)
+        memo.withLock { $0 = entry }
+        return built
+    }
+
+    // MARK: - Building
+
+    /// Section order is: channel emotes, Twitch global, then third-party
+    /// globals by provider.
+    private static func assemble(
+        _ thirdParty: ThirdPartySections,
+        twitchGlobal: [String: TwitchEmote]
+    ) -> [EmoteSection] {
+        var sections: [EmoteSection] = []
 
         // 1. Channel emotes (third-party with an owner). The big draw —
         //    the channel's curated 7TV/BTTV/FFZ set.
-        let channelEmotes = allThirdParty.filter { $0.ownerChannelId != nil }
-        if !channelEmotes.isEmpty {
-            sections.append(EmoteSection(
-                id: "channel",
-                title: "Channel Emotes",
-                emotes: sortedPickerEmotes(channelEmotes)
-            ))
+        if let channel = thirdParty.channel {
+            sections.append(channel)
         }
 
-        // 2. Twitch global (Kappa, LUL, etc.).
+        // 2. Twitch global (Kappa, LUL, etc.). A few hundred entries —
+        //    cheap enough to sort per open.
         if !twitchGlobal.isEmpty {
             sections.append(EmoteSection(
                 id: "twitch-global",
@@ -104,18 +171,34 @@ public enum EmoteCatalog {
 
         // 3. Third-party globals, grouped by provider so the user can
         //    find a known 7TV/BTTV/FFZ emote by where it lives.
+        sections.append(contentsOf: thirdParty.globals)
+
+        return sections
+    }
+
+    private static func buildThirdPartySections(_ thirdParty: [String: Emote]) -> ThirdPartySections {
+        let allThirdParty = Array(thirdParty.values)
+
+        let channelEmotes = allThirdParty.filter { $0.ownerChannelId != nil }
+        let channel: EmoteSection? = channelEmotes.isEmpty ? nil : EmoteSection(
+            id: "channel",
+            title: "Channel Emotes",
+            emotes: sortedPickerEmotes(channelEmotes)
+        )
+
+        var globals: [EmoteSection] = []
         let globalThirdParty = allThirdParty.filter { $0.ownerChannelId == nil }
         for source in Emote.Source.allCases {
             let group = globalThirdParty.filter { $0.source == source }
             guard !group.isEmpty else { continue }
-            sections.append(EmoteSection(
+            globals.append(EmoteSection(
                 id: "global-\(source.rawValue)",
                 title: "\(sourceLabel(source)) Global",
                 emotes: sortedPickerEmotes(group)
             ))
         }
 
-        return sections
+        return ThirdPartySections(channel: channel, globals: globals)
     }
 
     // MARK: - Helpers

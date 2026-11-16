@@ -625,7 +625,9 @@ public final class ChannelSessionRegistry {
         if let existing = emoteIndexes[key] {
             return existing
         }
-        let new = EmoteIndex(providers: Self.enabledEmoteProviders())
+        // Globals come from the process-wide catalog so N channels × M
+        // accounts fetch each provider's global set once, not N×M times.
+        let new = EmoteIndex(providers: Self.enabledEmoteProviders(), globalCatalog: .shared)
         emoteIndexes[key] = new
         return new
     }

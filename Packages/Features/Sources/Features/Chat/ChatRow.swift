@@ -782,7 +782,10 @@ private struct EmoteImage: View {
         // Computed from API metadata (not the loaded image) so the row
         // reserves the right width before the image arrives — no reflow
         // when a wide emote pops in.
-        let emoteHeight = 24 * scale
+        //
+        // Every state — loading, failed, static, animated — renders in the
+        // same fixed box, so the row's layout is final on the first pass.
+        let emoteHeight = EmoteDisplayMetrics.lineHeight * scale
         let emoteWidth = EmoteDisplayMetrics.width(aspectRatio: emote.aspectRatio, height: emoteHeight)
         Group {
             if emote.isAnimated {
@@ -796,8 +799,8 @@ private struct EmoteImage: View {
                 // a first-frame-only decode renders delta-encoded WebPs
                 // (blank opening frame) as empty space, while the decoder
                 // picks the first VISIBLE frame as the static poster.
-                AnimatedImageView(url: imageURL, width: emoteWidth, height: emoteHeight, animate: allowAnimation) {
-                    Text(emote.name).font(.callout)
+                AnimatedImageView(url: imageURL, width: emoteWidth, height: emoteHeight, animate: allowAnimation) { failed in
+                    EmotePlaceholder(name: emote.name, failed: failed)
                 }
             } else {
                 // Static emote. LazyImage: sync memory-cache hit on first
@@ -810,15 +813,15 @@ private struct EmoteImage: View {
                             .interpolation(.high)
                             .scaledToFit()
                     } else {
-                        // While loading or on failure, show the emote name
-                        // as text — the name often hints at the emote.
-                        Text(emote.name)
-                            .font(.callout)
+                        // Box-sized stand-in; on failure it shows the
+                        // name (shrunk to fit) — the name often hints at
+                        // the emote.
+                        EmotePlaceholder(name: emote.name, failed: state.error != nil)
                     }
                 }
-                .frame(maxWidth: emoteWidth, maxHeight: emoteHeight)
             }
         }
+        .frame(width: emoteWidth, height: emoteHeight)
         .accessibilityLabel(emote.name)
     }
 }
