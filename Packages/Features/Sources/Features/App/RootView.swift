@@ -272,8 +272,17 @@ public struct RootView: View {
         // — FollowsStore's staleness throttle skips it after a quick
         // background/foreground hop, and coalesces it with any in-flight
         // refresh (e.g. the launch-time `.task` above).
+        //
+        // Leaving the foreground (inactive on the way to background, or
+        // background directly): write any debounced compose draft now — the
+        // app may be suspended or killed before the ~400ms timer fires, and
+        // the compose bar isn't torn down (so its own flush doesn't run).
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active, let active = activeAccount else { return }
+            guard phase == .active else {
+                DraftStorage.flushPendingSaves()
+                return
+            }
+            guard let active = activeAccount else { return }
             Task { await followsStore.refreshLive(account: active, accountStore: accountStore) }
         }
         // Create the active account's BlockStore (loads its persisted cache in
