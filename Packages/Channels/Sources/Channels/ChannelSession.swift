@@ -492,36 +492,11 @@ public actor ChannelSession {
     // MARK: - Chat restrictions
 
     /// Cached restrictions snapshot from the most recent
-    /// `refreshChatRestrictions()` call OR `channel.chat_settings.update`
-    /// EventSub event. nil before we've seen either.
-    ///
-    /// Storing inside the actor (rather than passing through Helix every
-    /// time the compose bar wants to render) means the compose bar reads
-    /// from a stable snapshot. EventSub updates flow in via `handle()`'s
-    /// `.restrictionsUpdated` side-effect; the start-time Helix fetch
-    /// populates the initial value.
-    private var cachedRestrictions: ChatRestrictions?
-
-    /// True once we've received at least one `chat_settings.update`
-    /// EventSub event. Used by `refreshChatRestrictions()` to AVOID
-    /// overwriting a fresh live update with a late-resolving Helix
-    /// fetch.
-    ///
-    /// The race this prevents (CR MEDIUM 4):
-    ///   1. `start()` kicks `refreshChatRestrictions()` (Helix in flight).
-    ///   2. EventSub subscribe completes, broadcaster toggles slow mode,
-    ///      a `chat_settings.update` event arrives BEFORE the Helix fetch
-    ///      resolves.
-    ///   3. `handle()` sets cachedRestrictions = X (new state).
-    ///   4. Helix fetch completes with OLD state (snapshot taken before
-    ///      the broadcaster's toggle).
-    ///   5. Without the flag, refreshChatRestrictions overwrites
-    ///      cachedRestrictions with stale Helix data → strip shows
-    ///      pre-toggle state until the next event.
-    ///
-    /// With the flag, Helix backs off once an EventSub update has
-    /// arrived. EventSub is the authoritative live source after that.
-    private var cachedRestrictionsAreLive: Bool = false
+    /// `refreshChatRestrictions()` call, `channel.chat_settings.update`
+    /// EventSub event or local settings PATCH — plus the guard that keeps a
+    /// late Helix fetch from clobbering a live update (CR MEDIUM 4). See
+    /// `ChatRestrictionsCache`.
+    private var restrictionsCache = ChatRestrictionsCache()
 
     /// Returns the current chat restrictions for this channel, fetching
     /// from Helix on first access and returning the cached value
@@ -535,7 +510,7 @@ public actor ChannelSession {
     /// still return a `dropReason` on `sendChatMessage` if a hidden
     /// restriction blocks the send.
     public func currentChatRestrictions() -> ChatRestrictions? {
-        cachedRestrictions
+        restrictionsCache.value
     }
 
     /// Refresh the restrictions snapshot from Helix and fan the result out.
@@ -568,7 +543,7 @@ public actor ChannelSession {
     ///
     /// No-ops when:
     ///   - `restrictions` is nil — the Helix fetch failed; leave the cache as is.
-    ///   - `cachedRestrictionsAreLive` — a live `chat_settings.update` already
+    ///   - the cache is already live — a live `chat_settings.update` already
     ///     landed while the fetch was in flight, so the Helix snapshot is older
     ///     than what we hold. Same race guard the awaited refresh used to apply
     ///     inline (CR MEDIUM 4), now that the fetch resolves after exposure.
@@ -577,11 +552,10 @@ public actor ChannelSession {
     /// offline — same visibility relaxation as `applyBackfill`.
     func applyInitialRestrictions(_ restrictions: ChatRestrictions?) {
         guard let restrictions else { return }
-        guard !cachedRestrictionsAreLive else {
+        guard restrictionsCache.applyInitial(restrictions) else {
             logger.debug("Skipping Helix restrictions overwrite — EventSub update already populated cache")
             return
         }
-        cachedRestrictions = restrictions
         emit([.restrictionsUpdated(restrictions)])
     }
 
@@ -652,8 +626,7 @@ public actor ChannelSession {
         }
 
         let restrictions = ChatRestrictions(from: settings)
-        cachedRestrictions = restrictions
-        cachedRestrictionsAreLive = true
+        restrictionsCache.applyLive(restrictions)
 
         // Same `emit` as handle(event:), so a local settings change is
         // indistinguishable from an EventSub-delivered one downstream.
@@ -1133,8 +1106,7 @@ public actor ChannelSession {
         // this to back off if its Helix fetch is still in flight when
         // we arrive (the EventSub state is fresher).
         if case .restrictionsUpdated(let restrictions) = channelEvent {
-            cachedRestrictions = restrictions
-            cachedRestrictionsAreLive = true
+            restrictionsCache.applyLive(restrictions)
         }
 
         guard let update = normalizer.makeUpdate(for: channelEvent, receivedAt: receivedAt) else { return }

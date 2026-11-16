@@ -72,7 +72,8 @@ struct ChannelUpdateRingTests {
         }
         #expect(seen == ["m1"])
         #expect(refreshed == 1)
-        #expect(ring.refreshMessages { _ in nil } == 0)
+        let untouched = ring.refreshMessages { _ in nil }
+        #expect(untouched == 0)
     }
 
     // MARK: - Hub
