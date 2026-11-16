@@ -141,14 +141,17 @@ public actor ChannelSession {
     /// resolves, leaving a zombie session alive across a fast channel switch.
     private var chatRestrictionsTask: Task<Void, Never>?
 
-    /// Refresh-via-bridge + retry-once wrapper for auth-sensitive calls. Its
-    /// `refreshTokenHandler` is injected at construction time by
-    /// `ChannelSessionRegistry` so this actor doesn't need to know about
-    /// `AccountStore` or `Account` directly.
-    private let authRetry: HelixAuthRetry
+    /// The EventSub topics this session subscribes to. Stateless: the ids it
+    /// returns land in `activeSubscriptionIds`. See `EventSubTopics`.
+    private let topics: EventSubTopics
 
-    /// Send / delete / chat-settings / chat-colour Helix calls, each behind
-    /// `authRetry` where auth-sensitive. See `HelixChatActions`.
+    /// Send / delete / chat-settings / chat-colour Helix calls. See
+    /// `HelixChatActions`.
+    ///
+    /// Both this and `topics` share one `HelixAuthRetry` (refresh via the
+    /// bridge, retry once) whose `refreshTokenHandler` is injected at
+    /// construction time by `ChannelSessionRegistry`, so this actor doesn't
+    /// need to know about `AccountStore` or `Account` directly.
     private let chatActions: HelixChatActions
 
     /// Fetches recent chat history (channelLogin, limit) → messages with
@@ -194,7 +197,13 @@ public actor ChannelSession {
         self.normalizer = ChannelUpdateNormalizer(accountLogin: accountLogin, emoteIndex: emoteIndex)
         self.hub = ChannelUpdateHub(capacity: max(1, ringCapacity), channelLoginName: channelLoginName)
         let authRetry = HelixAuthRetry(refreshTokenHandler: refreshTokenHandler)
-        self.authRetry = authRetry
+        self.topics = EventSubTopics(
+            client: client,
+            channelId: channelId,
+            accountUserId: accountUserId,
+            channelLoginName: channelLoginName,
+            authRetry: authRetry
+        )
         self.chatActions = HelixChatActions(
             client: client,
             channelId: channelId,
@@ -293,77 +302,28 @@ public actor ChannelSession {
         // matching session via `handle(event:)`.
     }
 
+    // MARK: - EventSub topics (bookkeeping stays on the actor)
+
     /// The core chat.message subscription — required for the session to be
     /// useful. Throws on failure so the registry doesn't keep a session that
     /// can't deliver chat. The other (notification/raid/delete/clear) topics
     /// use `subscribeToNotificationTopic` / `subscribeToRaid` which swallow
     /// errors — those topics are enrichment, not core function.
     private func subscribeToChat() async throws {
-        let subscription = EventSubSubscription.Chat.message(
-            broadcasterID: channelId,
-            userID: accountUserId
-        )
-        do {
-            // Auth-refreshable errors are handled inside `authRetry`
-            // (refresh via the bridge, retry once); see its doc comment for
-            // the three shapes a stale token takes.
-            let record = try await authRetry.run("EventSub chat.message subscribe") {
-                try await client.eventSub.subscribe(subscription)
-            }
-            activeSubscriptionIds.append(record.id)
-        } catch HelixError.conflict {
-            // 409 "already subscribed" — Twitch keeps the subscription alive
-            // on this WebSocket from a prior session; events still flow.
-            logger.info("EventSub already subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public) — reusing existing subscription (no id captured)")
-        }
-        logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public)")
-    }
-
-    /// Subscribes to one of the chat-related notification topics
-    /// (notification, message_delete, clear, clear_user_messages). All use
-    /// the same `(broadcasterID, userID)` shape. Failure swallowed — the
-    /// session still works without these, just without bubble rendering.
-    private enum NotificationKind {
-        case notification, messageDelete, clear, clearUserMessages, settingsUpdate
-
-        func subscription(broadcasterID: String, userID: String) -> EventSubSubscription {
-            switch self {
-            case .notification:       return .Chat.notification(broadcasterID: broadcasterID, userID: userID)
-            case .messageDelete:      return .Chat.messageDelete(broadcasterID: broadcasterID, userID: userID)
-            case .clear:              return .Chat.clear(broadcasterID: broadcasterID, userID: userID)
-            case .clearUserMessages:  return .Chat.clearUserMessages(broadcasterID: broadcasterID, userID: userID)
-            case .settingsUpdate:     return .Chat.settingsUpdate(broadcasterID: broadcasterID, userID: userID)
-            }
+        if let id = try await topics.subscribeToChat() {
+            activeSubscriptionIds.append(id)
         }
     }
 
-    private func subscribeToNotificationTopic(_ kind: NotificationKind, label: String) async {
-        let subscription = kind.subscription(broadcasterID: channelId, userID: accountUserId)
-        do {
-            let record = try await client.eventSub.subscribe(subscription)
-            activeSubscriptionIds.append(record.id)
-            logger.info("Subscribed to channel.chat.\(label, privacy: .public) for #\(self.channelLoginName, privacy: .public)")
-        } catch HelixError.conflict {
-            logger.info("Already subscribed to channel.chat.\(label, privacy: .public) for #\(self.channelLoginName, privacy: .public)")
-        } catch {
-            // Not fatal — chat still works. Log and move on.
-            logger.warning("Failed to subscribe to channel.chat.\(label, privacy: .public) for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+    private func subscribeToNotificationTopic(_ kind: EventSubTopics.NotificationKind, label: String) async {
+        if let id = await topics.subscribeToNotificationTopic(kind, label: label) {
+            activeSubscriptionIds.append(id)
         }
     }
 
-    /// Subscribes to `channel.raid` keyed by toBroadcasterID — "raids
-    /// arriving at this channel." Failure swallowed for the same reason
-    /// as the other notification topics.
     private func subscribeToRaid() async {
-        let subscription = EventSubSubscription.Channel.raid(toBroadcasterID: channelId)
-        do {
-            let record = try await client.eventSub.subscribe(subscription)
-            activeSubscriptionIds.append(record.id)
-            logger.info("Subscribed to channel.raid for #\(self.channelLoginName, privacy: .public)")
-        } catch HelixError.conflict {
-            logger.info("Already subscribed to channel.raid for #\(self.channelLoginName, privacy: .public)")
-        } catch {
-            logger.warning("Failed to subscribe to channel.raid for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        if let id = await topics.subscribeToRaid() {
+            activeSubscriptionIds.append(id)
         }
     }
 
@@ -389,23 +349,17 @@ public actor ChannelSession {
         guard !moderationEventsEnabled else { return }
         moderationEventsEnabled = true
 
-        let subscription = EventSubSubscription.Moderation.moderate(
-            broadcasterID: channelId,
-            moderatorID: accountUserId
-        )
-        do {
-            let record = try await client.eventSub.subscribe(subscription)
-            activeSubscriptionIds.append(record.id)
-            logger.info("Subscribed to channel.moderate for #\(self.channelLoginName, privacy: .public)")
-        } catch HelixError.conflict {
+        switch await topics.subscribeToModeration() {
+        case .subscribed(let id):
+            activeSubscriptionIds.append(id)
+        case .alreadySubscribed:
             // Already live on this WebSocket from a prior session — keep
             // the flag, events flow.
-            logger.info("Already subscribed to channel.moderate for #\(self.channelLoginName, privacy: .public)")
-        } catch {
+            break
+        case .failed:
             // Roll back so a later promotion (e.g. after the user
             // re-signs-in mid-run and picks up the scopes) can retry.
             moderationEventsEnabled = false
-            logger.info("Failed to subscribe to channel.moderate for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public) — mod status stays attach-time-static")
         }
     }
 
@@ -440,14 +394,7 @@ public actor ChannelSession {
 
         let ids = activeSubscriptionIds
         activeSubscriptionIds = []
-        for id in ids {
-            do {
-                try await client.eventSub.unsubscribe(id: id)
-                logger.info("Deleted EventSub subscription \(id, privacy: .public) for #\(self.channelLoginName, privacy: .public)")
-            } catch {
-                logger.warning("Failed to delete EventSub subscription \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        }
+        await topics.unsubscribe(ids)
     }
 
     // MARK: - Chat restrictions
