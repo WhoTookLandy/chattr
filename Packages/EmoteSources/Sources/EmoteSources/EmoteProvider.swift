@@ -44,11 +44,16 @@ public protocol EmoteProvider: Sendable {
     ///   don't have BTTV or FFZ emotes set up).
     /// - Throws: Network or decoding errors.
     func channelEmotes(broadcasterId: String, broadcasterLogin: String) async throws -> [Emote]
+
+    /// Key under which `GlobalEmoteCatalog` caches and coalesces this
+    /// provider's globals. A requirement (not just an extension member) so
+    /// conformances that override it are honored through `any EmoteProvider`.
+    /// Defaults to the concrete type name — see the extension below.
+    var globalCatalogKey: String { get }
 }
 
 extension EmoteProvider {
-    /// Identity under which `GlobalEmoteCatalog` caches and coalesces this
-    /// provider's `globalEmotes()` result. Global sets are a property of the
+    /// Default `globalCatalogKey`. Global sets are a property of the
     /// provider *kind*, not the instance — every channel's 7TV provider sees
     /// the same global set — so the default keys by concrete type. Test
     /// doubles that stand in for several providers with one type override
