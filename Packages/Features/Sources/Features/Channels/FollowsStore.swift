@@ -248,6 +248,10 @@ public final class FollowsStore {
     /// streams as they arrive. The All view's live-first sort is refreshed
     /// once when the loop exits (on every path), not per page.
     private func performLiveRefresh(account: Account, accountStore: AccountStore) async {
+        // Swapped away before this Task even started: don't touch state (or
+        // the new account's enrichment tasks below).
+        guard !Task.isCancelled else { return }
+
         // Cancel + clear enrichment from a prior *live* load only — the All
         // load's enrichment is independent and keeps running.
         for task in liveEnrichmentTasks { task.cancel() }
@@ -356,11 +360,14 @@ public final class FollowsStore {
         totalFollowed = nil
         allErrorMessage = nil
 
+        let userId = account.userId
+        // Outside the `do` so a mid-pagination failure can still commit the
+        // pages fetched since the last throttled commit.
+        var accumulated: [FollowedChannel] = []
+
         do {
             let client = accountStore.client(for: account)
-            let userId = account.userId
 
-            var accumulated: [FollowedChannel] = []
             var cursor: String? = nil
             let pageCap = 200
             var pagesFetched = 0
@@ -420,6 +427,12 @@ public final class FollowsStore {
         } catch is CancellationError {
             logger.info("All-channels load cancelled — leaving existing data intact")
         } catch {
+            // Keep what we fetched visible (the footer offers Retry for the
+            // rest), matching the pre-throttle per-page-commit behavior.
+            if currentUserId == userId, accumulated.count > channels.count {
+                channels = accumulated
+                recomputeSortedAllChannels()
+            }
             allErrorMessage = "\(error)"
             allLoadState = .failed
             logger.error("Failed to load followed channels: \(error.localizedDescription, privacy: .public)")
