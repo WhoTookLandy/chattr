@@ -22,14 +22,6 @@ struct AccountStoreTests {
         #expect(all.isEmpty)
     }
 
-    @Test("activeAccount returns nil when no active set")
-    func noActiveByDefault() async throws {
-        let container = try Self.makeContainer()
-        let store = AccountStore(modelContainer: container, clientId: "test-client")
-        let active = try await store.activeAccount()
-        #expect(active == nil)
-    }
-
     @Test("namespace produces stable identifier per userId")
     func namespaceStable() {
         #expect(AccountStore.namespace(for: "42") == "chattr.account.42")
@@ -93,25 +85,5 @@ struct AccountStoreTests {
         let twitch = try await store.allAccounts(on: .twitch)
         #expect(twitch.count == 1)
         #expect(twitch.first?.userId == "1")
-    }
-
-    @Test("setActive tracks accounts per platform independently")
-    func setActiveIsPerPlatform() async throws {
-        let container = try Self.makeContainer()
-        let store = AccountStore(modelContainer: container, clientId: "test-client")
-        let context = ModelContext(container)
-        context.insert(Account(
-            userId: "1",
-            platform: .twitch,
-            login: "a",
-            displayName: "A",
-            profileImageURL: "",
-            tokenNamespace: "chattr.account.1"
-        ))
-        try context.save()
-
-        store.setActive(userId: "1", platform: .twitch)
-        let active = try await store.activeAccount(on: .twitch)
-        #expect(active?.userId == "1")
     }
 }

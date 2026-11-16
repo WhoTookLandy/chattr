@@ -6,8 +6,11 @@ import os
 
 private let logger = AppLogger.make("Accounts.AccountStore")
 
-/// Local registry of signed-in Twitch accounts. Single source of truth for "who is signed in"
-/// and which account is currently active.
+/// Local registry of signed-in Twitch accounts. Single source of truth for "who is signed in".
+///
+/// Which account is *active* is NOT tracked here: the per-device selection
+/// lives in UserDefaults (`activeAccountKey(for:)`), observed by RootView's
+/// `@AppStorage`. `selectAccount` writes it; nothing keeps a second copy.
 ///
 /// Persistence: SwiftData (`Account` rows).
 /// Per-account `TwitchClient` instances are constructed lazily and cached in-memory.
@@ -31,11 +34,8 @@ public final class AccountStore {
     /// reconnect stays aggressive while a channel is open. (See SessionActivitySignal.)
     public let sessionActivity = SessionActivitySignal()
 
-    /// Currently active account's userId, per platform. One identity can
-    /// be active on Twitch and another on Kick *simultaneously* — a Kick
-    /// channel always speaks through the Kick identity, so "active" is a
-    /// per-platform slot, not a single global.
-    private var activeUserId: [ChatPlatform: String] = [:]
+    /// Single-flight gate for bridge refreshes — see `TokenRefresher`.
+    let tokenRefresher = TokenRefresher()
 
     public init(modelContainer: ModelContainer, clientId: String) {
         self.modelContainer = modelContainer
@@ -71,21 +71,14 @@ public final class AccountStore {
         return try context.fetch(descriptor)
     }
 
-    /// The currently active account on the given platform, if any.
-    public func activeAccount(on platform: ChatPlatform = .twitch) async throws -> Account? {
-        guard let userId = activeUserId[platform] else { return nil }
-        // mainContext for the same reason as allAccounts() — the returned
-        // Account must outlive its fetching context.
-        let context = modelContainer.mainContext
-        var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == userId })
-        descriptor.fetchLimit = 1
-        return try context.fetch(descriptor).first
-    }
-
-    /// Set which account is active on a platform (in-memory only — see
-    /// `selectAccount` for the persisted variant).
+    /// Records that RootView is now rendering `userId` on `platform`.
+    ///
+    /// Log-only: AccountStore keeps no in-memory "active account" slot —
+    /// the UserDefaults selection (`activeAccountKey(for:)`, written by
+    /// `selectAccount`) is the single source of truth. Retained because
+    /// RootView calls it on every rendered-account change; the log line is
+    /// still a useful boundary marker.
     public func setActive(userId: String, platform: ChatPlatform = .twitch) {
-        activeUserId[platform] = userId
         // .notice: account-switch is a boundary crossing — visible without
         // raising the filter threshold during debugging.
         logger.notice("Active \(platform.rawValue, privacy: .public) account → \(userId, privacy: .public)")
@@ -111,16 +104,14 @@ public final class AccountStore {
     }
 
     /// Make the account with `userId` active on `platform`. Writes the
-    /// userId to UserDefaults (which RootView's `@AppStorage` observes and
-    /// reacts to — re-rendering AppShell with the new account) and updates
-    /// the in-memory `activeUserId` slot for that platform.
+    /// userId to UserDefaults, which RootView's `@AppStorage` observes and
+    /// reacts to — re-rendering AppShell with the new account.
     ///
     /// No SwiftData write, so no migration and no per-device sync. The
     /// `@AppStorage` in RootView picks up the UserDefaults change via KVO
     /// and re-renders.
     public func selectAccount(userId: String, platform: ChatPlatform = .twitch) {
         UserDefaults.standard.set(userId, forKey: Self.activeAccountKey(for: platform))
-        setActive(userId: userId, platform: platform)
         logger.notice("Selected account \(userId, privacy: .public) on \(platform.rawValue, privacy: .public)")
     }
 
@@ -210,7 +201,6 @@ public final class AccountStore {
         let context = modelContainer.mainContext
         context.insert(account)
         try context.save()
-        activeUserId[.twitch] = user.id
         // Make the newly-added account active on this device. RootView's
         // @AppStorage observes this key and re-renders into the new account.
         UserDefaults.standard.set(user.id, forKey: Self.activeAccountKey(for: .twitch))
@@ -294,9 +284,6 @@ public final class AccountStore {
             }
             OAuthRefreshTokenCache.delete(for: userId)
             clients[userId] = nil
-            if activeUserId[account.platform] == userId {
-                activeUserId[account.platform] = nil
-            }
             // Mark, don't delete — see the doc comment. Also clear the
             // stored selection if it pointed here, so RootView's fallback
             // picks a healthy account rather than re-resolving this one.
@@ -312,16 +299,19 @@ public final class AccountStore {
             }
         } else {
             logger.info("forceSignOut: no Account row for userId \(userId) — likely already gone")
-            // Still clear the in-memory client cache and active-account
-            // tracking — they may have outlived the row. Without a row we
-            // don't know the platform, so sweep every slot.
+            // Still clear the in-memory client cache — it may have
+            // outlived the row.
             OAuthRefreshTokenCache.delete(for: userId)
             clients[userId] = nil
-            activeUserId = activeUserId.filter { $0.value != userId }
         }
     }
 
     /// Removes an account: clears its Keychain entries, drops cached client, deletes SwiftData row.
+    ///
+    /// The TwitchKit `logout()` is **best-effort** (same as `forceSignOut`):
+    /// it fails exactly when the user most wants out — token already
+    /// revoked, Keychain entry already wiped — and aborting there would
+    /// leave an account that can't be removed. Only the SwiftData save throws.
     ///
     /// Important: we delete via `modelContainer.mainContext` — the same context RootView's
     /// `@Query` observes. Earlier we created a fresh `ModelContext(modelContainer)` here,
@@ -331,15 +321,19 @@ public final class AccountStore {
     public func remove(account: Account) async throws {
         let client = client(for: account)
         // TwitchAuth.logout() delegates to tokenProvider.logout() internally.
-        try await client.auth.logout()
+        do {
+            try await client.auth.logout()
+        } catch {
+            // .warning, not .error: removal proceeds regardless. A leftover
+            // Keychain entry under this namespace is harmless — re-adding
+            // the account overwrites it via setToken.
+            logger.warning("remove: TwitchKit logout failed for @\(account.login, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
         // Clear our refresh_token cache for this user too — TwitchKit's
         // logout only touches its own store; our fallback cache is separate
         // (intentionally — see OAuthRefreshTokenCache header).
         OAuthRefreshTokenCache.delete(for: account.userId)
         clients[account.userId] = nil
-        if activeUserId[account.platform] == account.userId {
-            activeUserId[account.platform] = nil
-        }
         // If we removed the active account, clear the stored selection so
         // RootView's @AppStorage fallback (accounts.first by addedAt) picks
         // the next account — or SignInView if it was the last one.
@@ -425,18 +419,26 @@ extension AccountStore {
     /// Variant that accepts plain strings so `@Sendable` closures (e.g. in
     /// `ChannelSessionRegistry`) can capture stable IDs instead of the non-Sendable
     /// `Account` model object.
+    ///
+    /// **Single-flight per userId** (via `TokenRefresher`): callers that
+    /// arrive while a refresh for the same account is already running await
+    /// that one and get the same token or error, instead of each POSTing the
+    /// same refresh_token to the bridge (where all but the first could get a
+    /// 4xx and force a sign-out).
     @discardableResult
     public func refreshTokens(userId: String, login: String) async throws -> OAuthToken {
-        // Build a throw-away TwitchClient using the canonical namespace for this userId.
-        // `clients` is keyed by userId so this returns the already-cached client if one exists.
-        let namespace = Self.namespace(for: userId)
-        let twitchClient: TwitchClient
-        if let existing = clients[userId] {
-            twitchClient = existing
-        } else {
-            twitchClient = TwitchClient(clientId: clientId, tokenNamespace: namespace)
-            clients[userId] = twitchClient
+        try await tokenRefresher.refresh(userId: userId) {
+            try await self.performRefresh(userId: userId, login: login)
         }
+    }
+
+    /// The actual bridge refresh. Only ever called through `tokenRefresher`
+    /// so at most one runs per userId at a time.
+    private func performRefresh(userId: String, login: String) async throws -> OAuthToken {
+        // Same cached/constructed client every other path uses — including the
+        // `isLive` closure, so a client first built here still reconnects
+        // EventSub aggressively while a channel is open.
+        let twitchClient = client(forUserId: userId)
 
         // Pull the refresh_token. Two sources, in priority order:
         //   1. TwitchKit's own store via `tokenProvider.token()` — the
@@ -585,26 +587,53 @@ extension AccountStore {
         for account: Account,
         _ operation: @Sendable () async throws -> T
     ) async throws -> T {
+        try await withTokenRefresh(userId: account.userId, login: account.login, operation)
+    }
+
+    /// `withTokenRefresh(for:)` for call sites that hold only a stable userId
+    /// (e.g. `BlockStore`). The login — used for logs and the session-expired
+    /// banner — is looked up from the Account row, falling back to the userId
+    /// if the row is gone.
+    public func withTokenRefresh<T: Sendable>(
+        forUserId userId: String,
+        _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withTokenRefresh(userId: userId, login: login(forUserId: userId) ?? userId, operation)
+    }
+
+    private func withTokenRefresh<T: Sendable>(
+        userId: String,
+        login: String,
+        _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
         do {
             return try await operation()
         } catch HelixError.unauthorized {
-            logger.info("Helix call returned unauthorized for @\(account.login); refreshing via bridge and retrying")
-            try await refreshTokens(for: account)
+            logger.info("Helix call returned unauthorized for @\(login); refreshing via bridge and retrying")
+            try await refreshTokens(userId: userId, login: login)
             return try await operation()
         } catch HelixError.oauth(let oauthError) {
             // TwitchKit's internal auto-refresh fired and failed — likely
             // "missing client secret" because we don't ship one. Bridge it.
-            logger.info("TwitchKit auto-refresh failed for @\(account.login) (\(oauthError.message)); refreshing via bridge and retrying")
-            try await refreshTokens(for: account)
+            logger.info("TwitchKit auto-refresh failed for @\(login) (\(oauthError.message)); refreshing via bridge and retrying")
+            try await refreshTokens(userId: userId, login: login)
             return try await operation()
         } catch HelixError.notAuthenticated {
             // TwitchKit's store is empty — most likely because a prior
             // refresh attempt failed and called logout() on its store.
             // Our chattr-side cache should still hold the refresh_token;
-            // refreshTokens(for:) will read from there.
-            logger.info("TwitchKit store empty for @\(account.login); attempting recovery via chattr-side cache")
-            try await refreshTokens(for: account)
+            // refreshTokens(userId:login:) will read from there.
+            logger.info("TwitchKit store empty for @\(login); attempting recovery via chattr-side cache")
+            try await refreshTokens(userId: userId, login: login)
             return try await operation()
         }
+    }
+
+    /// Login for a stored account, or nil if no row exists for `userId`.
+    private func login(forUserId userId: String) -> String? {
+        let context = modelContainer.mainContext
+        var descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.userId == userId })
+        descriptor.fetchLimit = 1
+        return (try? context.fetch(descriptor))?.first?.login
     }
 }

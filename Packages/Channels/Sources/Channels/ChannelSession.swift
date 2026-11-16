@@ -316,40 +316,61 @@ public actor ChannelSession {
             userID: accountUserId
         )
         do {
-            let record = try await client.eventSub.subscribe(subscription)
+            // Auth-refreshable errors are handled inside `withAuthRetry`
+            // (refresh via the bridge, retry once); see its doc comment for
+            // the three shapes a stale token takes.
+            let record = try await withAuthRetry("EventSub chat.message subscribe") {
+                try await client.eventSub.subscribe(subscription)
+            }
             activeSubscriptionIds.append(record.id)
         } catch HelixError.conflict {
             // 409 "already subscribed" — Twitch keeps the subscription alive
             // on this WebSocket from a prior session; events still flow.
             logger.info("EventSub already subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public) — reusing existing subscription (no id captured)")
-        } catch let error where Self.isAuthRefreshable(error) {
-            // A stale access token reaches us in one of THREE shapes — not just
-            // `.unauthorized`. In practice `.oauth` is the common one:
-            //   - .unauthorized      — the 401 surfaced to us directly.
-            //   - .oauth(...)        — TwitchKit's HelixClient intercepted the
-            //                          401, tried its own `/oauth2/token` refresh,
-            //                          and Twitch rejected it ("missing client
-            //                          secret" — we ship no secret; it lives on
-            //                          the Vercel bridge). TwitchKit then wiped
-            //                          its own token store as it threw.
-            //   - .notAuthenticated  — that store-wipe already happened on an
-            //                          earlier call, so the token is simply gone.
-            // All three mean "refresh via the bridge and retry once." This
-            // mirrors `AccountStore.withTokenRefresh`, which nets the same three
-            // cases around every other Helix call site — chat previously caught
-            // only `.unauthorized`, so the `.oauth` path escaped here and the
-            // user saw "Couldn't open chat: OAuth error: missing client secret".
-            logger.info("EventSub chat.message subscribe needs a token refresh (\(error.localizedDescription, privacy: .public)); refreshing via bridge and retrying")
-            try await refreshTokenHandler()
-            let record = try await client.eventSub.subscribe(subscription)
-            activeSubscriptionIds.append(record.id)
         }
         logger.info("Subscribed to channel.chat.message for #\(self.channelLoginName, privacy: .public)")
     }
 
+    /// Runs a Helix / EventSub operation; if it fails with an auth-refreshable
+    /// error, refreshes tokens via `refreshTokenHandler` and retries ONCE. A
+    /// second failure (or a refresh failure) propagates to the caller.
+    ///
+    /// A stale access token reaches us in one of THREE shapes — not just
+    /// `.unauthorized`. In practice `.oauth` is the common one:
+    ///   - .unauthorized      — the 401 surfaced to us directly.
+    ///   - .oauth(...)        — TwitchKit's HelixClient intercepted the 401,
+    ///                          tried its own `/oauth2/token` refresh, and
+    ///                          Twitch rejected it ("missing client secret" —
+    ///                          we ship no secret; it lives on the Vercel
+    ///                          bridge). TwitchKit then wiped its own token
+    ///                          store as it threw.
+    ///   - .notAuthenticated  — that store-wipe already happened on an earlier
+    ///                          call, so the token is simply gone.
+    /// All three mean "refresh via the bridge and retry once." This mirrors
+    /// `AccountStore.withTokenRefresh`, which nets the same three cases around
+    /// the Helix call sites outside this actor. (Previously only the chat
+    /// subscribe handled all three; send / delete / chat-settings caught only
+    /// `.unauthorized`, so the common `.oauth` shape escaped them.)
+    ///
+    /// The refresh itself is single-flight in `AccountStore`, so concurrent
+    /// retries across sessions share one bridge round-trip.
+    @discardableResult
+    private func withAuthRetry<T>(
+        _ label: String,
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await operation()
+        } catch let error where Self.isAuthRefreshable(error) {
+            logger.info("\(label, privacy: .public) needs a token refresh (\(error.localizedDescription, privacy: .public)); refreshing via bridge and retrying once")
+            try await refreshTokenHandler()
+            return try await operation()
+        }
+    }
+
     /// The three `HelixError` shapes a stale (or already-wiped) access token can
     /// take, all of which are recoverable by a bridge refresh + one retry.
-    /// Centralizing the predicate keeps the chat subscribe path in lockstep with
+    /// Centralizing the predicate keeps `withAuthRetry` in lockstep with
     /// `AccountStore.withTokenRefresh`, which guards every other Helix call site
     /// against exactly these cases.
     private static func isAuthRefreshable(_ error: Error) -> Bool {
@@ -589,15 +610,11 @@ public actor ChannelSession {
         }
     }
 
-    /// Wrapper around `fetchChatSettings` that handles the
-    /// unauthorized → refresh → retry pattern, matching `send(...)` and
-    /// `subscribeToChat()`.
+    /// Wrapper around `fetchChatSettings` with the shared auth-refresh-and-
+    /// retry (`withAuthRetry`), matching `send(...)` and `subscribeToChat()`.
     private func accountStoreSafeFetch() async throws -> ChatSettings {
-        do {
-            return try await client.api.fetchChatSettings(broadcasterID: channelId)
-        } catch HelixError.unauthorized {
-            try await refreshTokenHandler()
-            return try await client.api.fetchChatSettings(broadcasterID: channelId)
+        try await withAuthRetry("fetchChatSettings") {
+            try await client.api.fetchChatSettings(broadcasterID: channelId)
         }
     }
 
@@ -653,14 +670,8 @@ public actor ChannelSession {
             slowModeWaitTime: slowModeSeconds,
             subscriberMode: subscribersOnly
         )
-        let settings: ChatSettings
-        do {
-            settings = try await client.api.updateChatSettings(
-                broadcasterID: channelId, moderatorID: accountUserId, with: update
-            )
-        } catch HelixError.unauthorized {
-            try await refreshTokenHandler()
-            settings = try await client.api.updateChatSettings(
+        let settings = try await withAuthRetry("updateChatSettings") {
+            try await client.api.updateChatSettings(
                 broadcasterID: channelId, moderatorID: accountUserId, with: update
             )
         }
@@ -691,9 +702,9 @@ public actor ChannelSession {
 
     /// Sends a chat message through this session's authenticated user. Wraps
     /// `client.api.sendChatMessage(...)` with a one-shot token-refresh-and-retry
-    /// on `HelixError.unauthorized`, matching the pattern in `subscribeToChat()`
-    /// — sends are short, so we don't go through `AccountStore.withTokenRefresh`
-    /// (which is geared at the SwiftData-isolated Account model that doesn't
+    /// on any auth-refreshable error (`withAuthRetry`), matching
+    /// `subscribeToChat()` — sends are short, so we don't go through
+    /// `AccountStore.withTokenRefresh` (which is geared at the SwiftData-isolated Account model that doesn't
     /// belong inside this actor).
     ///
     /// Returns the Helix response so the caller can:
@@ -720,21 +731,11 @@ public actor ChannelSession {
         guard !payload.isEmpty else {
             throw AppError(message: "Can't send an empty message")
         }
-        do {
-            return try await client.api.sendChatMessage(
-                broadcasterId: channelId,
-                senderId: accountUserId,
-                message: payload,
-                replyParentMessageId: replyParentMessageId
-            )
-        } catch HelixError.unauthorized {
-            // Same shape as subscribeToChat's recovery: refresh tokens once,
-            // retry once. A second unauthorized error propagates and lets
-            // the caller (ChatTranscriptModel.send → ChatScreen) surface the
-            // sign-in-expired UX.
-            logger.info("sendChatMessage unauthorized; refreshing tokens and retrying once")
-            try await refreshTokenHandler()
-            return try await client.api.sendChatMessage(
+        // Refresh once, retry once. A second auth failure propagates and lets
+        // the caller (ChatTranscriptModel.send → ChatScreen) surface the
+        // sign-in-expired UX.
+        return try await withAuthRetry("sendChatMessage") {
+            try await client.api.sendChatMessage(
                 broadcasterId: channelId,
                 senderId: accountUserId,
                 message: payload,
@@ -757,18 +758,10 @@ public actor ChannelSession {
     /// `.deletedPlaceholder` when that arrives, so the visual update
     /// flows through the same path as a moderator's web-UI delete.
     ///
-    /// Refresh-and-retry on unauthorized matches the other Helix calls
-    /// (send, fetchChatSettings).
+    /// Refresh-and-retry on auth failure (`withAuthRetry`) matches the other
+    /// Helix calls (send, fetchChatSettings).
     public func deleteMessage(messageId: String) async throws {
-        do {
-            try await client.api.deleteChatMessages(
-                broadcasterID: channelId,
-                moderatorID: accountUserId,
-                messageID: messageId
-            )
-        } catch HelixError.unauthorized {
-            logger.info("deleteChatMessages unauthorized; refreshing tokens and retrying once")
-            try await refreshTokenHandler()
+        try await withAuthRetry("deleteChatMessages") {
             try await client.api.deleteChatMessages(
                 broadcasterID: channelId,
                 moderatorID: accountUserId,
