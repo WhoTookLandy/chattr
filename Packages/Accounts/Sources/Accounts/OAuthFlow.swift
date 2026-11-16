@@ -67,49 +67,11 @@ public enum OAuthFlow {
                     return
                 }
 
-                // Parse the chattr://oauth-complete?... URL. Either:
-                //   - Success: access_token + refresh_token + expires_in + scope + token_type
-                //   - Error:   error + error_description (bridged from Twitch)
-                guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
-                    continuation.resume(throwing: AppError(message: "Callback URL could not be parsed"))
-                    return
+                do {
+                    continuation.resume(returning: try parseCallbackURL(callbackURL))
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-                let items = components.queryItems ?? []
-
-                // Error-path: bridge propagated Twitch's error (user cancel, invalid scope, etc).
-                if let err = items.first(where: { $0.name == "error" })?.value {
-                    let desc = items.first(where: { $0.name == "error_description" })?.value
-                    let decoded = desc?.removingPercentEncoding ?? desc ?? err
-                    continuation.resume(throwing: AppError(message: decoded))
-                    return
-                }
-
-                // Success-path: tokens in URL query.
-                guard let accessToken = items.first(where: { $0.name == "access_token" })?.value,
-                      !accessToken.isEmpty
-                else {
-                    continuation.resume(
-                        throwing: AppError(message: "Callback URL missing access_token")
-                    )
-                    return
-                }
-                let refreshToken = items.first(where: { $0.name == "refresh_token" })?.value
-                let expiresIn = items.first(where: { $0.name == "expires_in" })?.value.flatMap(Int.init)
-                let tokenType = items.first(where: { $0.name == "token_type" })?.value
-                let scopeString = items.first(where: { $0.name == "scope" })?.value
-                let scope: [String]? = scopeString?
-                    .split(separator: " ")
-                    .map(String.init)
-                    .nilIfEmpty
-
-                let token = OAuthToken(
-                    accessToken: accessToken,
-                    refreshToken: refreshToken?.nilIfEmpty,
-                    expiresIn: expiresIn,
-                    scope: scope,
-                    tokenType: tokenType?.nilIfEmpty
-                )
-                continuation.resume(returning: token)
             }
             session.presentationContextProvider = contextProvider
             session.prefersEphemeralWebBrowserSession = false
@@ -117,6 +79,55 @@ public enum OAuthFlow {
                 continuation.resume(throwing: AppError(message: "Failed to start ASWebAuthenticationSession"))
             }
         }
+    }
+
+    /// Parses the bridge's `chattr://oauth-complete?...` callback URL into an
+    /// `OAuthToken`, or throws an `AppError` describing why it couldn't.
+    ///
+    /// Extracted from `run(...)`'s session handler so the branch tree —
+    /// unparseable URL, bridged error, missing/empty access token, success
+    /// with and without the optional fields — is unit-testable without
+    /// standing up an `ASWebAuthenticationSession`.
+    ///
+    /// Either shape arrives:
+    ///   - Success: `access_token` (+ optional `refresh_token`, `expires_in`,
+    ///     `scope`, `token_type`)
+    ///   - Error:   `error` (+ optional `error_description`, bridged from Twitch)
+    static func parseCallbackURL(_ callbackURL: URL) throws -> OAuthToken {
+        guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
+            throw AppError(message: "Callback URL could not be parsed")
+        }
+        let items = components.queryItems ?? []
+
+        // Error-path: bridge propagated Twitch's error (user cancel, invalid scope, etc).
+        if let err = items.first(where: { $0.name == "error" })?.value {
+            let desc = items.first(where: { $0.name == "error_description" })?.value
+            let decoded = desc?.removingPercentEncoding ?? desc ?? err
+            throw AppError(message: decoded)
+        }
+
+        // Success-path: tokens in URL query.
+        guard let accessToken = items.first(where: { $0.name == "access_token" })?.value,
+              !accessToken.isEmpty
+        else {
+            throw AppError(message: "Callback URL missing access_token")
+        }
+        let refreshToken = items.first(where: { $0.name == "refresh_token" })?.value
+        let expiresIn = items.first(where: { $0.name == "expires_in" })?.value.flatMap(Int.init)
+        let tokenType = items.first(where: { $0.name == "token_type" })?.value
+        let scopeString = items.first(where: { $0.name == "scope" })?.value
+        let scope: [String]? = scopeString?
+            .split(separator: " ")
+            .map(String.init)
+            .nilIfEmpty
+
+        return OAuthToken(
+            accessToken: accessToken,
+            refreshToken: refreshToken?.nilIfEmpty,
+            expiresIn: expiresIn,
+            scope: scope,
+            tokenType: tokenType?.nilIfEmpty
+        )
     }
 
     /// Bridges `ASPresentationAnchor` into the
