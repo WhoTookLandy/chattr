@@ -82,6 +82,12 @@ final class ChatListViewController: UIViewController {
     /// value to request a re-pin; we act only when it changes.
     private var lastScrollToBottomToken = 0
 
+    /// A re-pin requested while the user's finger was dragging the list
+    /// (e.g. a hardware-keyboard send mid-scroll). Applied when the drag
+    /// ends: pinning now would make every layout pass yank the offset out
+    /// from under the finger.
+    private var repinAfterDrag = false
+
     /// Consumer of the model's change log: what the data source shows (and
     /// the cell provider's `linesByID` lookup), plus the changes held back
     /// while the user reads scrollback. See `ChatListFeed`.
@@ -261,15 +267,23 @@ final class ChatListViewController: UIViewController {
         let inputsChanged = self.rowInputs != nil && self.rowInputs != rowInputs
         self.rowInputs = rowInputs
 
-        let jumpRequested = scrollToBottomToken != lastScrollToBottomToken
+        var jumpRequested = scrollToBottomToken != lastScrollToBottomToken
         if jumpRequested {
             lastScrollToBottomToken = scrollToBottomToken
-            // Re-pin request (jump pill, own send): re-enter tailing BEFORE
-            // pulling, so the backlog held back while reading flushes in this
-            // same apply. The per-pass pinToBottomIfNeeded (and the explicit
-            // pin in `apply`) glue the offset to the live edge from here —
-            // same mechanism as resumeTailingIfNearBottom.
-            isPinnedToBottom = true
+            if collectionView?.isDragging == true {
+                // A finger is on the list: honour the request when it lifts
+                // (see `repinAfterDrag`).
+                repinAfterDrag = true
+                jumpRequested = false
+            } else {
+                // Re-pin request (jump pill, own send): re-enter tailing
+                // BEFORE pulling, so the backlog held back while reading
+                // flushes in this same apply. The per-pass
+                // pinToBottomIfNeeded (and the explicit pin in `apply`) glue
+                // the offset to the live edge from here — same mechanism as
+                // resumeTailing.
+                isPinnedToBottom = true
+            }
         }
         refresh(reconfigureAll: inputsChanged)
         if jumpRequested { pinToBottomIfNeeded() }
@@ -404,10 +418,17 @@ extension ChatListViewController: UICollectionViewDelegate {
         isPinnedToBottom = false
     }
 
-    /// Drag released without momentum — resume tailing if it ended near
-    /// the bottom (within the same 44pt the pill logic uses).
+    /// Drag released. A re-pin requested mid-drag (see `repinAfterDrag`)
+    /// applies now, momentum or not; otherwise resume tailing if the drag
+    /// ended near the bottom without momentum (within the same 44pt the pill
+    /// logic uses).
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if !decelerate { resumeTailingIfNearBottom(scrollView) }
+        if repinAfterDrag {
+            repinAfterDrag = false
+            resumeTailing()
+        } else if !decelerate {
+            resumeTailingIfNearBottom(scrollView)
+        }
     }
 
     /// Momentum settled — same near-bottom check as the direct release.
@@ -433,10 +454,15 @@ extension ChatListViewController: UICollectionViewDelegate {
             containerHeight: scrollView.bounds.height,
             bottomInset: scrollView.adjustedContentInset.bottom
         ) else { return }
+        resumeTailing()
+    }
+
+    /// Back to the live edge: flush everything held back while reading right
+    /// now — the next model publish may be a while away on a quiet channel —
+    /// then glue the offset to the (new) bottom. `setContentOffset` also
+    /// stops any remaining momentum.
+    private func resumeTailing() {
         isPinnedToBottom = true
-        // Back at the live edge: flush everything held back while reading
-        // right now — the next model publish may be a while away on a quiet
-        // channel — then glue the offset to the (new) bottom.
         refresh()
         pinToBottomIfNeeded()
     }

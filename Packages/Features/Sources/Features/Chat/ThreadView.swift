@@ -141,9 +141,12 @@ struct ThreadView: View {
                     channelDisplayName: channelDisplayName,
                     replyTarget: threadReplyTarget,
                     onSend: { draft in
+                        // The sheet shows the new reply itself; leave the
+                        // main transcript behind it where the user was.
                         await chatModel.send(
                             text: draft,
-                            replyOverride: threadReplyTarget
+                            replyOverride: threadReplyTarget,
+                            repinsTranscript: false
                         )
                     }
                 )

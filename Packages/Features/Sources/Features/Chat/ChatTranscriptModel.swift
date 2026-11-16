@@ -143,10 +143,11 @@ public final class ChatTranscriptModel {
     /// cleared by `cancelReply()` or by the send that uses it.
     public var replyContext: ReplyContext?
 
-    /// Bumped each time a send puts the user's optimistic row in the
-    /// transcript. `ChatTranscript` re-pins to the live edge on every change,
-    /// so a message sent while reading scrollback shows at once instead of
-    /// being held back with the rest of the unread backlog.
+    /// Bumped each time a main-transcript send (compose bar, retry) puts the
+    /// user's optimistic row in the transcript. `ChatTranscript` re-pins to
+    /// the live edge on every change, so a message sent while reading
+    /// scrollback shows at once instead of being held back with the rest of
+    /// the unread backlog.
     private(set) var outgoingSendCount = 0
 
     // MARK: - Change channel (see `TranscriptStore`)
@@ -285,7 +286,16 @@ public final class ChatTranscriptModel {
     /// Three paths share it: a plain send, a reply (the main bar's chip, then
     /// cleared), and a thread send (`replyOverride`, from the thread sheet —
     /// which leaves the main bar's chip alone; the user may be mid-reply).
-    public func send(text: String, replyOverride: ReplyContext? = nil) async {
+    ///
+    /// - Parameter repinsTranscript: whether the main transcript should jump
+    ///   to the live edge to show the new row (see `outgoingSendCount`). The
+    ///   thread sheet passes false: it shows the row itself, and yanking the
+    ///   list behind it would lose the reader's place in scrollback.
+    public func send(
+        text: String,
+        replyOverride: ReplyContext? = nil,
+        repinsTranscript: Bool = true
+    ) async {
         // Trim exactly as `ChannelSession.send` does, or the echo's text
         // match would miss.
         let canonical = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -313,7 +323,9 @@ public final class ChatTranscriptModel {
         let pendingId = outgoing.begin(text: canonical) { id in
             selfChatter.optimisticLine(id: id, text: canonical, replyingTo: reply)
         }
-        outgoingSendCount &+= 1
+        if repinsTranscript {
+            outgoingSendCount &+= 1
+        }
 
         do {
             let response = try await session.send(canonical, replyParentMessageId: reply?.parentMessageId)
@@ -344,6 +356,12 @@ public final class ChatTranscriptModel {
     public func retry(failedLineId: String) async {
         guard let failedRow = store.line(id: failedLineId),
               case .failed(_, let retryText) = failedRow.deliveryState else {
+            return
+        }
+        // Check before removing the row: with no session the send below would
+        // bail, and the message the user wanted to retry would be gone.
+        guard attachment.primarySession != nil else {
+            sendError = "Not connected to chat."
             return
         }
         let preservedReply = failedRow.replyParent.map { ReplyContext($0) }

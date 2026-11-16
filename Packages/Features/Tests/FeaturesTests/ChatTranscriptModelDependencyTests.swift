@@ -212,6 +212,37 @@ struct ChatTranscriptModelDependencyTests {
         await model.detach()
     }
 
+    @Test("Thread-sheet sends leave the main transcript alone; retries re-pin it")
+    func repinOnlyForMainTranscriptSends() async throws {
+        let model = makeModel(Recorder())
+        await model.attach(sessions: [makeSession()], currentUserId: "me-1")
+
+        // Offline, so every send fails at once and leaves a retryable row.
+        await model.send(text: "in thread", repinsTranscript: false)
+        #expect(model.outgoingSendCount == 0)
+        #expect(model.lines.count == 1)
+
+        let failed = try #require(model.lines.last)
+        await model.retry(failedLineId: failed.id)
+        #expect(model.outgoingSendCount == 1)
+        #expect(model.lines.count == 1, "the retry replaces the failed row")
+        await model.detach()
+    }
+
+    @Test("Retry with no session keeps the failed row instead of losing the message")
+    func retryWhileDetachedKeepsRow() async throws {
+        let model = makeModel(Recorder())
+        await model.attach(sessions: [makeSession()], currentUserId: "me-1")
+        await model.send(text: "hi")
+        let failed = try #require(model.lines.last)
+        await model.detach()
+
+        await model.retry(failedLineId: failed.id)
+
+        #expect(model.lines.map(\.id) == [failed.id])
+        #expect(model.sendError == "Not connected to chat.")
+    }
+
     // MARK: - Badge observation
 
     @Test("A moderator badge on our own echo grants mod status; someone else's doesn't")
