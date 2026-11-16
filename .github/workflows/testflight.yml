@@ -33,7 +33,7 @@ jobs:
     env:
       BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # `runner.temp` is only available inside steps, not job-level env.
       - name: Set paths
@@ -100,7 +100,7 @@ jobs:
           echo "Uploaded build $BUILD_NUMBER — it appears in TestFlight once App Store Connect finishes processing." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep dSYMs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: dSYMs-${{ env.BUILD_NUMBER }}
           path: ${{ env.ARCHIVE_PATH }}/dSYMs
