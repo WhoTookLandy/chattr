@@ -931,54 +931,6 @@ public actor ChannelSession {
 
     // MARK: - Backfill merge
 
-    /// Merges rustlog `history` with `pendingLive` (events buffered while the
-    /// backfill fetch was in flight), deduplicating by `messageId` and capping
-    /// to `capacity`. When `divider` is non-nil it's inserted between the two
-    /// blocks — after every history event, before the first buffered-live one —
-    /// marking "everything above happened before you joined."
-    ///
-    /// `static` + pure so it's unit-testable without a `TwitchClient`. The
-    /// instance wrapper `applyBackfill(_:)` calls this and commits the result
-    /// to `ring`.
-    static func mergeBackfill(
-        history: [ChannelUpdate],
-        pendingLive: [ChannelUpdate],
-        capacity: Int,
-        divider: ChannelUpdate? = nil
-    ) -> [ChannelUpdate] {
-        var seenMessageIds = Set<String>()
-        var merged: [ChannelUpdate] = []
-        merged.reserveCapacity(history.count + pendingLive.count + 1)
-
-        // History first (oldest scrollback), then buffered-live in arrival
-        // order. Chat messages dedup by canonical `messageId` — the same
-        // message can land in BOTH rustlog history and the live buffer during
-        // the fetch-overlap window. First occurrence wins, so a duplicate keeps
-        // its chronological history position rather than jumping to the live tail.
-        // Non-message events (notifications/raids/clears) never appear in
-        // backfill and carry no shared id, so they pass through untouched.
-        //
-        // The divider goes between the blocks (not appended after dedup) so a
-        // live duplicate that kept its history position still lands above it.
-        for event in history {
-            if case .message(let normalized) = event {
-                guard seenMessageIds.insert(normalized.message.messageId).inserted else { continue }
-            }
-            merged.append(event)
-        }
-        if let divider {
-            merged.append(divider)
-        }
-        for event in pendingLive {
-            if case .message(let normalized) = event {
-                guard seenMessageIds.insert(normalized.message.messageId).inserted else { continue }
-            }
-            merged.append(event)
-        }
-
-        return merged.count > capacity ? Array(merged.suffix(capacity)) : merged
-    }
-
     /// Commits the backfill merge to the ring and ends the buffering window.
     ///
     /// MUST stay synchronous (no `await`): the actor holds its isolation for
@@ -999,7 +951,7 @@ public actor ChannelSession {
         // an empty backfill (rustlog down, brand-new channel) would put a
         // meaningless rule at the very top of an all-live transcript.
         let divider: ChannelUpdate? = history.isEmpty ? nil : .row(makeDivider())
-        ring = Self.mergeBackfill(
+        ring = ChannelHistoryMerge.mergeBackfill(
             history: history,
             pendingLive: pendingLive,
             capacity: ringCapacity,
@@ -1145,9 +1097,9 @@ public actor ChannelSession {
     /// they get the new ring as one `.reprime` rather than an append.
     private func mergeLateBackfill(_ history: [BackfillMessage]) {
         joinBackfill = .done
-        let missing = Self.missingMessages(history, notIn: ringSnapshot)
+        let missing = ChannelHistoryMerge.missingMessages(history, notIn: ringSnapshot)
         guard !missing.isEmpty else { return }
-        let merged = Self.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: normalizeHistory(missing),
             pendingLive: ringSnapshot,
             capacity: ringCapacity,
@@ -1241,7 +1193,7 @@ public actor ChannelSession {
         let fetched = await fetchBackfill(channelLoginName, Self.reconnectBackfillLimit)
         guard !fetched.isEmpty else { return }
 
-        let missing = Self.missingMessages(fetched, notIn: ringSnapshot)
+        let missing = ChannelHistoryMerge.missingMessages(fetched, notIn: ringSnapshot)
         guard !missing.isEmpty else {
             logger.info("Reconnect resync for #\(self.channelLoginName, privacy: .public): no missed messages")
             return
@@ -1249,24 +1201,6 @@ public actor ChannelSession {
         logger.notice("Reconnect resync for #\(self.channelLoginName, privacy: .public): filling \(missing.count) missed message(s)")
 
         emit(normalizeHistory(missing) + [.row(makeDivider())])
-    }
-
-    /// Pure dedup: the fetched history messages the ring does NOT already
-    /// hold, in fetched order. Empty when nothing was missed — callers then
-    /// add nothing (no divider for a clean reconnect).
-    ///
-    /// `static` + pure for the same testability reason as `mergeBackfill`.
-    static func missingMessages(
-        _ fetched: [BackfillMessage],
-        notIn ring: [ChannelUpdate]
-    ) -> [BackfillMessage] {
-        var knownMessageIds = Set<String>()
-        for update in ring {
-            if case .message(let normalized) = update {
-                knownMessageIds.insert(normalized.message.messageId)
-            }
-        }
-        return fetched.filter { !knownMessageIds.contains($0.message.messageId) }
     }
 
     // MARK: - Normalization
