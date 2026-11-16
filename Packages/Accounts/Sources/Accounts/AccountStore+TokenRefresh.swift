@@ -9,7 +9,7 @@ private let logger = AppLogger.make("Accounts.AccountStore")
 
 extension AccountStore {
 
-    /// Refreshes the OAuth tokens for the given account via the Vercel bridge.
+    /// Refreshes the OAuth tokens for an account via the Vercel bridge.
     ///
     /// Reads the current refresh_token from this account's TwitchAuth (which reads
     /// from Keychain via TokenStore), POSTs it to the bridge, parses the new tokens,
@@ -18,14 +18,10 @@ extension AccountStore {
     ///
     /// Side effects: persists the new OAuthToken via `TwitchAuth.setToken(_:)`, which
     /// also updates the in-memory cachedAccessToken / cachedRefreshToken.
-    @discardableResult
-    public func refreshTokens(for account: Account) async throws -> OAuthToken {
-        try await refreshTokens(userId: account.userId, login: account.login)
-    }
-
-    /// Variant that accepts plain strings so `@Sendable` closures (e.g. in
-    /// `ChannelSessionRegistry`) can capture stable IDs instead of the non-Sendable
-    /// `Account` model object.
+    ///
+    /// Takes plain strings so `@Sendable` closures (e.g. in
+    /// `ChannelSessionRegistry`) can capture stable IDs instead of the
+    /// non-Sendable `Account` model object.
     ///
     /// **Single-flight per userId** (via `TokenRefresher`): callers that
     /// arrive while a refresh for the same account is already running await
@@ -140,10 +136,10 @@ extension AccountStore {
     ///     failure, because `TwitchTokenProvider.refreshIfNeeded()` calls
     ///     `logout()` in its catch (wiping its own Keychain entry). The
     ///     access token IS gone, but our chattr-side `OAuthRefreshTokenCache`
-    ///     still holds the refresh_token — `refreshTokens(for:)` will read
+    ///     still holds the refresh_token — `refreshTokens(userId:login:)` will read
     ///     it from there and recover transparently.
     ///
-    /// In all three cases, `refreshTokens(for:)` POSTs to the bridge with the
+    /// In all three cases, `refreshTokens(userId:login:)` POSTs to the bridge with the
     /// refresh_token and persists the new OAuthToken. Subsequent operation()
     /// retry uses the fresh access token.
     ///

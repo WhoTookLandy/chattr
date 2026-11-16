@@ -4,9 +4,6 @@ import Accounts
 import Channels
 import TwitchKit
 import Core
-import os
-
-private let logger = AppLogger.make("Features.Root")
 
 /// The app's root view. Decides between sign-in flow and the main app shell.
 ///
