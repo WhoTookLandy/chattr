@@ -6,32 +6,37 @@ import Core
 @Suite("ActiveAccountSelection (UserDefaults)")
 struct ActiveAccountSelectionTests {
 
-    /// A throwaway defaults suite so tests never touch `.standard`.
-    private static func makeSelection() -> ActiveAccountSelection {
-        let defaults = UserDefaults(suiteName: "chattr.tests.selection.\(UUID().uuidString)")!
-        return ActiveAccountSelection(defaults: defaults)
+    /// Runs `body` against a throwaway defaults suite (so tests never touch
+    /// `.standard`), removing the suite afterwards.
+    private static func withSelection(_ body: (ActiveAccountSelection) -> Void) {
+        let suite = "chattr.tests.selection.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        body(ActiveAccountSelection(defaults: defaults))
     }
 
     @Test("select writes the platform's key")
     func selectWrites() {
-        let selection = Self.makeSelection()
-        #expect(selection.selectedUserId(on: .twitch) == nil)
+        Self.withSelection { selection in
+            #expect(selection.selectedUserId(on: .twitch) == nil)
 
-        selection.select(userId: "42", on: .twitch)
+            selection.select(userId: "42", on: .twitch)
 
-        #expect(selection.selectedUserId(on: .twitch) == "42")
-        #expect(selection.defaults.string(forKey: "chattr.activeAccountUserId") == "42")
+            #expect(selection.selectedUserId(on: .twitch) == "42")
+            #expect(selection.defaults.string(forKey: "chattr.activeAccountUserId") == "42")
+        }
     }
 
     @Test("clear(ifSelected:) only clears a matching selection")
     func clearOnlyMatching() {
-        let selection = Self.makeSelection()
-        selection.select(userId: "42", on: .twitch)
+        Self.withSelection { selection in
+            selection.select(userId: "42", on: .twitch)
 
-        selection.clear(ifSelected: "7", on: .twitch)
-        #expect(selection.selectedUserId(on: .twitch) == "42")
+            selection.clear(ifSelected: "7", on: .twitch)
+            #expect(selection.selectedUserId(on: .twitch) == "42")
 
-        selection.clear(ifSelected: "42", on: .twitch)
-        #expect(selection.selectedUserId(on: .twitch) == nil)
+            selection.clear(ifSelected: "42", on: .twitch)
+            #expect(selection.selectedUserId(on: .twitch) == nil)
+        }
     }
 }

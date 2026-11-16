@@ -93,17 +93,19 @@ struct AccountStoreTests {
     // refresh-token cache delete) against ids no real account uses; any
     // Keychain failure is logged and ignored by design.
 
-    /// A store over an in-memory container and a throwaway defaults suite.
-    private static func makeIsolatedStore() throws -> (AccountStore, ModelContainer, UserDefaults) {
+    /// A store over an in-memory container and a throwaway defaults suite
+    /// (callers remove the suite with `removePersistentDomain(forName:)`).
+    private static func makeIsolatedStore() throws -> (AccountStore, ModelContainer, UserDefaults, String) {
         let container = try Self.makeContainer()
-        let defaults = UserDefaults(suiteName: "chattr.tests.accountstore.\(UUID().uuidString)")!
+        let suite = "chattr.tests.accountstore.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
         let store = AccountStore(
             modelContainer: container,
             clientId: "test-client",
             defaults: defaults,
             bridgeRefresh: BridgeTokenRefresh()
         )
-        return (store, container, defaults)
+        return (store, container, defaults, suite)
     }
 
     private static func insertAccount(_ userId: String, into container: ModelContainer) throws -> Account {
@@ -121,7 +123,8 @@ struct AccountStoreTests {
 
     @Test("remove deletes the row, clears a matching selection, and notifies onAccountRemoved")
     func removeNotifies() async throws {
-        let (store, container, defaults) = try Self.makeIsolatedStore()
+        let (store, container, defaults, suite) = try Self.makeIsolatedStore()
+        defer { defaults.removePersistentDomain(forName: suite) }
         let userId = "test-remove-\(UUID().uuidString)"
         let account = try Self.insertAccount(userId, into: container)
         store.selectAccount(account)
@@ -137,7 +140,8 @@ struct AccountStoreTests {
 
     @Test("forceSignOut marks needsReauth, keeps the row, and stashes the banner when no healthy account remains")
     func forceSignOutMarks() async throws {
-        let (store, container, defaults) = try Self.makeIsolatedStore()
+        let (store, container, defaults, suite) = try Self.makeIsolatedStore()
+        defer { defaults.removePersistentDomain(forName: suite) }
         let userId = "test-expire-\(UUID().uuidString)"
         let account = try Self.insertAccount(userId, into: container)
         store.selectAccount(account)
