@@ -347,6 +347,18 @@ final class ChatListViewController: UIViewController {
             case .reconfigured(let line):
                 linesByID[line.id] = line
                 toReconfigure.append(line.id)
+            case .rekeyed(let from, let line):
+                // Optimistic row upgraded to its server id: swap the
+                // identifier in place so the delivered row replaces the
+                // dimmed one at the same position.
+                linesByID[from] = nil
+                linesByID[line.id] = line
+                if liveIds.contains(from), !liveIds.contains(line.id) {
+                    snapshot.insertItems([line.id], beforeItem: from)
+                    snapshot.deleteItems([from])
+                    liveIds.remove(from)
+                    liveIds.insert(line.id)
+                }
             case .reset(let lines):
                 linesByID = lines.reduce(into: [:]) { $0[$1.id] = $1 }
                 snapshot = NSDiffableDataSourceSnapshot<Section, String>()

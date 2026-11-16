@@ -237,7 +237,9 @@ struct ChatBuffer {
             if let vi = visibleIndex(of: id) {
                 _lines[vi] = new
             }
-            pendingChanges.append(.reconfigured(new))
+            // A pending-send row re-keyed to its server id keeps its slot but
+            // changes identity — only `.rekeyed` lets the view find the row.
+            pendingChanges.append(new.id == id ? .reconfigured(new) : .rekeyed(from: id, to: new))
         case (true, false):
             if let vi = visibleIndex(of: id) { _lines.remove(at: vi) }
             pendingChanges.append(.removed(id: id))

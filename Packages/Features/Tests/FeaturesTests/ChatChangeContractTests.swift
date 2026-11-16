@@ -51,6 +51,9 @@ struct ChatChangeContractTests {
 
         // reset replaces wholesale regardless of prior state.
         #expect(ChatChange.apply([.reset([line("z")])], to: base).map(\.id) == ["z"])
+
+        // rekeyed swaps identity in place.
+        #expect(ChatChange.apply([.rekeyed(from: "a", to: line("a2"))], to: base).map(\.id) == ["a2", "b"])
     }
 
     // MARK: - Append
@@ -98,6 +101,43 @@ struct ChatChangeContractTests {
         buf.append(line("a", "old")); _ = buf.takeChanges()
         assertContract(&buf) { _ = $0.replace(id: "a", with: line("a", "new")) }
         #expect(buf.lines.first?.runs == [.text("new")])
+    }
+
+    @Test("replace that changes the id emits .rekeyed (pending → server id)")
+    func replaceRekeys() {
+        var buf = ChatBuffer(cap: 100)
+        buf.append(line("a")); buf.append(line("pending-1", "mine")); buf.append(line("b"))
+        _ = buf.takeChanges()
+        assertContract(&buf) { _ = $0.replace(id: "pending-1", with: line("msg-1", "mine")) }
+        #expect(buf.lines.map(\.id) == ["a", "msg-1", "b"])
+    }
+
+    @Test("re-key emits .rekeyed, never a .reconfigured the view can't place")
+    func rekeyEmission() {
+        var buf = ChatBuffer(cap: 100)
+        buf.append(line("pending-1")); _ = buf.takeChanges()
+        _ = buf.replace(id: "pending-1", with: line("msg-1"))
+        #expect(buf.takeChanges() == [.rekeyed(from: "pending-1", to: line("msg-1"))])
+        // The side table follows the new id.
+        #expect(buf.contains(id: "msg-1"))
+        #expect(!buf.contains(id: "pending-1"))
+    }
+
+    @Test("mutate(id:) that changes the id emits .rekeyed")
+    func mutateRekeys() {
+        var buf = ChatBuffer(cap: 100)
+        buf.append(line("pending-1")); buf.append(line("b")); _ = buf.takeChanges()
+        assertContract(&buf) { $0.mutate(id: "pending-1") { _ in self.line("msg-1") } }
+        #expect(buf.lines.map(\.id) == ["msg-1", "b"])
+    }
+
+    @Test("re-key of a blocked author's line emits nothing visible")
+    func rekeyBlockedNoChange() {
+        var buf = ChatBuffer(cap: 100)
+        buf.blockedIds = ["villain"]
+        buf.append(line("pending-1", author: "villain")); _ = buf.takeChanges()
+        assertContract(&buf) { _ = $0.replace(id: "pending-1", with: line("msg-1", author: "villain")) }
+        #expect(buf.lines.isEmpty)
     }
 
     @Test("replace of an absent id emits nothing")
@@ -178,11 +218,15 @@ struct ChatChangeContractTests {
         }
 
         for i in 0..<40 {
-            switch i % 4 {
+            switch i % 5 {
             case 0: step { $0.append(line("m\(i)")) }
             case 1: step { $0.append(line("s\(i)", author: "spammer")) }   // blocked
             case 2: step { _ = $0.replace(id: "m\(i - 2)", with: line("m\(i - 2)", "edit")) }
-            default: step { $0.mutate(id: "m\(i - 3)") { $0.markingDeleted() } }
+            case 3: step { $0.mutate(id: "m\(i - 3)") { $0.markingDeleted() } }
+            default:
+                // Optimistic send + its server-id upgrade.
+                step { $0.append(line("pending-\(i)")) }
+                step { _ = $0.replace(id: "pending-\(i)", with: line("msg-\(i)")) }
             }
         }
         #expect(mirror == buf.lines)

@@ -18,9 +18,16 @@ enum ChatChange: Equatable {
     /// The line with this id left the visible list (trimmed, removed, or
     /// newly block-filtered).
     case removed(id: String)
-    /// The line with this id changed value but kept its position
-    /// (optimistic→delivered, markFailed, delete-flip).
+    /// The line with this id changed value but kept its position AND its id
+    /// (markFailed, delete-flip, chat-clear).
     case reconfigured(ChatLine)
+    /// The line with id `from` was replaced in place by `to`, which carries a
+    /// different id — an optimistic `pending-…` send row upgraded to its
+    /// server-issued message id (echo reconciliation or the stuck-send
+    /// fallback). Position unchanged. A distinct case because the view keys
+    /// rows by id: emitted as `.reconfigured(to)` it would look up `to.id`,
+    /// find nothing, and leave the dimmed `.sending` row on screen forever.
+    case rekeyed(from: String, to: ChatLine)
     /// The visible list was replaced wholesale with this exact array.
     case reset([ChatLine])
 
@@ -39,6 +46,10 @@ enum ChatChange: Equatable {
                 }
             case .reconfigured(let line):
                 if let idx = result.firstIndex(where: { $0.id == line.id }) {
+                    result[idx] = line
+                }
+            case .rekeyed(let from, let line):
+                if let idx = result.firstIndex(where: { $0.id == from }) {
                     result[idx] = line
                 }
             case .reset(let lines):
