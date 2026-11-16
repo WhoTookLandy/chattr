@@ -30,8 +30,9 @@ private let logger = AppLogger.make("Features.ChatImagePrefetcher")
 /// disk, no decode). We use both:
 ///
 ///   - **`.memoryCache`** for assets that appear in nearly every
-///     chat message: global emotes (~50 unique) and global badges
-///     (~30 unique). Worth keeping decoded in RAM.
+///     chat message: static global emotes and global badges
+///     (~30 unique). Worth keeping decoded in RAM. (Animated globals
+///     go to disk — their renderer reads raw bytes, not decoded images.)
 ///   - **`.diskCache`** for assets the user might or might not see
 ///     in this session: subscribed-channel emotes (potentially
 ///     hundreds), per-channel badges. Disk-only saves RAM; decode
@@ -76,17 +77,38 @@ public final class ChatImagePrefetcher {
 
     // MARK: - Global emotes (launch-time)
 
-    /// Warm the memory cache with every URL behind Twitch's global
-    /// emote set. Called by `RootView` after `GlobalCatalog.load`
-    /// completes — by then we have the emote IDs to build URLs from.
+    /// Warm the caches for every URL behind Twitch's global emote set.
+    /// Called by `RootView` after `GlobalCatalog.load` completes — by then
+    /// we have the emote IDs to build URLs from.
+    ///
+    /// Split by how each emote is rendered:
+    ///   - **static** → memory cache (decoded `UIImage`), which is exactly
+    ///     what `LazyImage` reads.
+    ///   - **animated** → disk (data) cache only. `AnimatedImageView` never
+    ///     reads Nuke's decoded-image memory cache — it pulls raw bytes via
+    ///     `ImagePipeline.data(for:)` and runs its own ImageIO frame decode —
+    ///     so a memory prefetch decoded a first-frame image nobody used and
+    ///     spent RAM on it.
     public func prefetchGlobalEmotes(_ emotes: [TwitchEmote]) {
-        let requests = emotes.compactMap { emote -> ImageRequest? in
-            guard let url = Self.emoteCDNURL(for: emote) else { return nil }
-            return ImageRequest(url: url, priority: .veryLow)
+        var staticRequests: [ImageRequest] = []
+        var animatedRequests: [ImageRequest] = []
+        for emote in emotes {
+            guard let url = Self.emoteCDNURL(for: emote) else { continue }
+            let request = ImageRequest(url: url, priority: .veryLow)
+            if Self.isAnimated(emote) {
+                animatedRequests.append(request)
+            } else {
+                staticRequests.append(request)
+            }
         }
-        guard !requests.isEmpty else { return }
-        memoryPrefetcher.startPrefetching(with: requests)
-        logger.info("Prefetching \(requests.count) global emote images (memory)")
+        if !staticRequests.isEmpty {
+            memoryPrefetcher.startPrefetching(with: staticRequests)
+        }
+        if !animatedRequests.isEmpty {
+            diskPrefetcher.startPrefetching(with: animatedRequests)
+        }
+        guard !staticRequests.isEmpty || !animatedRequests.isEmpty else { return }
+        logger.info("Prefetching \(staticRequests.count) static (memory) + \(animatedRequests.count) animated (disk) global emote images")
     }
 
     // MARK: - Global badges (launch-time)
@@ -214,8 +236,13 @@ public final class ChatImagePrefetcher {
     /// prefetch results land in the cache under the same key the
     /// runtime `LazyImage` will look them up by.
     private static func emoteCDNURL(for emote: TwitchEmote) -> URL? {
-        let format = emote.format.contains("animated") ? "animated" : "static"
+        let format = isAnimated(emote) ? "animated" : "static"
         return Endpoints.TwitchCDN.emote(id: emote.id, format: format)
+    }
+
+    /// Same test `TwitchEmoteImage` uses to pick the animated renderer.
+    private static func isAnimated(_ emote: TwitchEmote) -> Bool {
+        emote.format.contains("animated")
     }
 }
 
