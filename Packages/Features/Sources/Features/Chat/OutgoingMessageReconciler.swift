@@ -162,7 +162,7 @@ struct OutgoingMessageReconciler {
         isOwn: Bool,
         rowState: RowState
     ) -> EchoMatch {
-        if let pendingId = pendingId(forHelixMessageId: messageId) {
+        if let pendingId = sendAcceptedAs(helixMessageId: messageId) {
             settle(pendingId)
             if rowState(pendingId) != nil { return .upgrade(pendingId: pendingId) }
         }
@@ -181,7 +181,7 @@ struct OutgoingMessageReconciler {
     /// Path 2) and returns its id, so the caller drops that optimistic row
     /// instead of re-appending it as a duplicate. Doesn't consult rows.
     mutating func settlePending(answeredBy messageId: String, text: String, isOwn: Bool) -> String? {
-        let pendingId = pendingId(forHelixMessageId: messageId)
+        let pendingId = sendAcceptedAs(helixMessageId: messageId)
             ?? (isOwn ? oldestPendingId(forText: text) : nil)
         if let pendingId { settle(pendingId) }
         return pendingId
@@ -249,7 +249,7 @@ struct OutgoingMessageReconciler {
 
     // MARK: - Internals
 
-    private func pendingId(forHelixMessageId messageId: String) -> String? {
+    private func sendAcceptedAs(helixMessageId messageId: String) -> String? {
         guard !helixMessageIdByPendingId.isEmpty else { return nil }
         return helixMessageIdByPendingId.first { $0.value == messageId }?.key
     }
