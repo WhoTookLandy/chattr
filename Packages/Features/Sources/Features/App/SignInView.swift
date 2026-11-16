@@ -20,7 +20,8 @@ private let logger = AppLogger.make("Features.SignInView")
 /// Lives in `Features` (all SwiftUI does); the UI-free flow it drives is
 /// `Accounts.TwitchSignIn`.
 struct SignInView: View {
-    @Environment(\.accountStore) private var accountStore
+    private let accountStore: AccountStore
+    private let clientId: String
 
     @State private var isSigningIn = false
     @State private var errorMessage: String?
@@ -39,6 +40,11 @@ struct SignInView: View {
     // `TwitchSignIn` flow — used by both this view and the in-app account
     // switcher's "Add Account" — so there's one source of truth for what
     // "sign in to chattr" means.
+
+    init(accountStore: AccountStore, clientId: String) {
+        self.accountStore = accountStore
+        self.clientId = clientId
+    }
 
     var body: some View {
         VStack(spacing: 24) {
@@ -163,7 +169,7 @@ struct SignInView: View {
             // the client_secret stays off-device), and hands the token
             // to AccountStore.add. RootView's @Query observes the new
             // row and transitions away from this view automatically.
-            _ = try await TwitchSignIn.run(accountStore: accountStore)
+            _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
         } catch {
             logger.error("Sign-in failed: \(error.localizedDescription, privacy: .public)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription

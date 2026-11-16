@@ -30,8 +30,9 @@ private let logger = AppLogger.make("Features.Profile")
 ///   6. Developer (conditional) + destructive sign-out at the bottom.
 public struct ProfileScreen: View {
     private let account: Account
-
-    @Environment(\.accountStore) private var accountStore
+    private let accountStore: AccountStore
+    /// Twitch client id, used by the account switcher's "Add Account".
+    private let clientId: String
 
     /// Stored as the enum directly — `AppearanceMode` is `RawRepresentable`
     /// over `String`, which `@AppStorage` supports natively (same pattern as
@@ -82,8 +83,10 @@ public struct ProfileScreen: View {
         return "\(version) (\(build))"
     }
 
-    public init(account: Account) {
+    public init(account: Account, accountStore: AccountStore, clientId: String) {
         self.account = account
+        self.accountStore = accountStore
+        self.clientId = clientId
     }
 
     public var body: some View {
@@ -295,7 +298,7 @@ public struct ProfileScreen: View {
         // ~60pt of vertical space vs the default large-title mode.
         .toolbarTitleDisplayMode(.inlineLarge)
         .sheet(isPresented: $showingAccountSwitcher) {
-            AccountSwitcherView()
+            AccountSwitcherView(accountStore: accountStore, clientId: clientId)
         }
         .confirmationDialog(
             "Sign out of @\(account.login)?",
@@ -320,7 +323,7 @@ public struct ProfileScreen: View {
         isSigningOut = true
         defer { isSigningOut = false }
         // Read before removal: the row is deleted once `remove` returns, and
-        // touching a deleted @Model's properties traps.
+        // touching a deleted SwiftData model's properties traps.
         let login = account.login
         do {
             try await accountStore.remove(account: account)

@@ -472,3 +472,9 @@ public final class FollowsStore {
         }
     }
 }
+
+// MARK: - Environment plumbing
+
+public extension EnvironmentValues {
+    @Entry var followsStore: FollowsStore? = nil
+}
