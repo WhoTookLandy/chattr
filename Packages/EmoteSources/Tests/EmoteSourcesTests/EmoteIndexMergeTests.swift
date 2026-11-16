@@ -8,7 +8,7 @@ import Core
 /// merge-precedence tests. With the single 6-task fetch group, results merge
 /// in completion order — these tests pin down that precedence is data-driven
 /// (channel > global; 7TV > BTTV > FFZ) regardless of which fetch lands first.
-final class ScriptedProvider: EmoteProvider, @unchecked Sendable {
+final class ScriptedProvider: EmoteProvider {
     private let global: [Emote]
     private let channel: [Emote]
     private let globalDelay: Duration?

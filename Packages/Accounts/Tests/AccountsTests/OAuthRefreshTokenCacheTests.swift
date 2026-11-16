@@ -1,21 +1,21 @@
 import Testing
 import Foundation
+import os
 @testable import Accounts
 
 /// In-memory `RefreshTokenKeychain` so the cache's namespacing + guard logic
 /// is testable without the system Keychain. A plain SwiftPM test bundle has no
 /// Keychain entitlement on the simulator (`SecItem` → `errSecMissingEntitlement`,
 /// OSStatus -34018), so the real backend can't be exercised here — the seam is.
-final class InMemoryRefreshTokenKeychain: RefreshTokenKeychain, @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: [String: Data] = [:]
+final class InMemoryRefreshTokenKeychain: RefreshTokenKeychain {
+    private let storage = OSAllocatedUnfairLock<[String: Data]>(initialState: [:])
 
-    func save(key: String, data: Data) throws { lock.withLock { storage[key] = data } }
-    func load(key: String) -> Data? { lock.withLock { storage[key] } }
-    func delete(key: String) { lock.withLock { _ = storage.removeValue(forKey: key) } }
+    func save(key: String, data: Data) throws { storage.withLock { $0[key] = data } }
+    func load(key: String) -> Data? { storage.withLock { $0[key] } }
+    func delete(key: String) { storage.withLock { _ = $0.removeValue(forKey: key) } }
 
     /// Test-only: did anything get written under this exact key?
-    func contains(key: String) -> Bool { lock.withLock { storage[key] != nil } }
+    func contains(key: String) -> Bool { storage.withLock { $0[key] != nil } }
 }
 
 /// Coverage for the chattr-side refresh-token cache — the recovery store that

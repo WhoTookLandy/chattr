@@ -376,3 +376,13 @@ public final class ChatTabsModel {
         releaseAfterOpen(releases)
     }
 }
+
+// MARK: - Environment plumbing
+
+public extension EnvironmentValues {
+    /// UI state for the Chat tab's open channels. Injected by `AppShell`.
+    /// nil default for the same MainActor-isolation reason as other Features
+    /// environment values — `@MainActor` instances can't be constructed in
+    /// a nonisolated static context. AppShell provides the real value.
+    @Entry var chatTabs: ChatTabsModel? = nil
+}

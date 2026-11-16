@@ -12,9 +12,8 @@ import TwitchKit
 /// say `.twitch`; when a second platform arrives it adds its own overload
 /// and the core path is already correct.
 ///
-/// `Sendable` so the environment-key static default (the no-op action)
-/// doesn't trip Swift 6's mutable-global-variable check. The no-op default
-/// is what previews and detached views get — call sites never unwrap.
+/// `Sendable` so the environment-key static default (`nil`) doesn't trip
+/// Swift 6's mutable-global-variable check.
 ///
 /// ## Why a stable reference, not a stored closure
 ///
@@ -31,32 +30,23 @@ import TwitchKit
 /// "closures in the environment" guidance — custom env actions don't get the
 /// framework's special-cased comparison that `OpenURLAction` etc. enjoy.)
 public struct OpenChannelAction: Sendable {
-    /// `nil` only for the environment default (no AppShell ancestor), which
-    /// makes every call a no-op.
-    private let navigation: AppNavigation?
+    private let navigation: AppNavigation
 
     init(_ navigation: AppNavigation) {
         self.navigation = navigation
     }
 
-    /// The do-nothing action — the environment default.
-    private init() {
-        self.navigation = nil
-    }
-
-    public static let noop = OpenChannelAction()
-
     /// Primary entry point — `callAsFunction` lets call sites read as
     /// `openChannel(descriptor)`.
     @MainActor
     public func callAsFunction(_ channel: ChannelDescriptor) {
-        navigation?.openChannel(channel)
+        navigation.openChannel(channel)
     }
 
     /// Convenience for FollowedChannel call sites (the All view).
     @MainActor
     public func callAsFunction(channel: FollowedChannel, profileImageURL: URL?) {
-        callAsFunction(ChannelDescriptor(
+        navigation.openChannel(ChannelDescriptor(
             platform: .twitch,
             channelId: channel.broadcasterId,
             channelLoginName: channel.broadcasterLogin,
@@ -68,7 +58,7 @@ public struct OpenChannelAction: Sendable {
     /// Convenience for TwitchStream call sites (the Live view, Home).
     @MainActor
     public func callAsFunction(stream: TwitchStream, profileImageURL: URL?) {
-        callAsFunction(ChannelDescriptor(
+        navigation.openChannel(ChannelDescriptor(
             platform: .twitch,
             channelId: stream.userId,
             channelLoginName: stream.userLogin,
@@ -79,7 +69,7 @@ public struct OpenChannelAction: Sendable {
 }
 
 public extension EnvironmentValues {
-    /// Open the given channel in the Chat tab. Injected by `AppShell`; the
-    /// default (previews, detached views) is a no-op.
-    @Entry var openChannel: OpenChannelAction = .noop
+    /// Open the given channel in the Chat tab. `nil` when the action hasn't
+    /// been injected (e.g. in previews); call sites should fall back gracefully.
+    @Entry var openChannel: OpenChannelAction? = nil
 }

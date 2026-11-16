@@ -9,15 +9,14 @@ import UIKit
 /// `Accounts` domain package stays free of UIKit.
 extension TwitchSignIn {
 
-    /// Runs the shared sign-in flow with the store's Twitch client id,
-    /// presenting from the app's foreground window. Used by `SignInView`
-    /// and the account switcher.
+    /// Runs the shared sign-in flow, presenting from the app's foreground
+    /// window. Used by `SignInView` and the account switcher.
     @MainActor
     @discardableResult
-    static func run(accountStore: AccountStore) async throws -> Account {
+    static func run(accountStore: AccountStore, clientId: String) async throws -> Account {
         try await run(
             accountStore: accountStore,
-            clientId: accountStore.clientId,
+            clientId: clientId,
             presentationAnchor: foregroundWindow
         )
     }

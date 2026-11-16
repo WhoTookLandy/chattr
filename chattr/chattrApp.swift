@@ -139,6 +139,7 @@ struct chattrApp: App {
     private var rootView: some View {
         RootView(
             accountStore: accountStore,
+            clientId: Self.clientId,
             channelSessionRegistry: channelSessionRegistry
         )
         .modelContainer(modelContainer)

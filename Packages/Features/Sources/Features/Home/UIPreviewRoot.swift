@@ -60,9 +60,6 @@ public struct UIPreviewRoot: View {
         accountStore = AccountStore(modelContainer: container, clientId: "preview")
     }
 
-    /// Empty follow cache — the Chats tab's "Browse Follows" sheet reads it.
-    @State private var followsStore = FollowsStore()
-
     /// Open chats for the Chats tab's list. `-uiPreviewChatOpen` leaves
     /// the first tab active so the transcript arrives pushed (for
     /// screenshotting the full-screen chat layout); otherwise the list
@@ -107,14 +104,14 @@ public struct UIPreviewRoot: View {
             }
             .accessibilityLabel("Home")
             Tab(value: PreviewTab.chats) {
-                ChatTabsScreen(account: account)
+                ChatTabsScreen(account: account, accountStore: accountStore)
             } label: {
                 Image(systemName: "bubble.left.and.bubble.right")
             }
             .accessibilityLabel("Chats")
             Tab(value: PreviewTab.you) {
                 NavigationStack {
-                    ProfileScreen(account: account)
+                    ProfileScreen(account: account, accountStore: accountStore, clientId: "preview")
                 }
             } label: {
                 Image(systemName: "person.crop.circle")
@@ -123,6 +120,7 @@ public struct UIPreviewRoot: View {
             Tab(value: PreviewTab.search, role: .search) {
                 AddChannelView(
                     account: account,
+                    accountStore: accountStore,
                     showsCancelButton: false
                 )
             } label: {
@@ -131,11 +129,6 @@ public struct UIPreviewRoot: View {
             .accessibilityLabel("Search")
         }
         .modelContainer(container)
-        // Same non-optional dependencies RootView / AppShell inject — the
-        // screens above read them unconditionally. (`\.openChannel` keeps
-        // its no-op default: there's no AppShell navigation to drive here.)
-        .environment(\.accountStore, accountStore)
-        .environment(\.followsStore, followsStore)
         .environment(\.chatTabs, chatTabsModel)
     }
 }

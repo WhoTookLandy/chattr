@@ -7,7 +7,7 @@ import Core
 /// Fake provider that counts how many times each fetch ran, so tests can
 /// assert whether the network path was taken. `globalCatalogKey` is
 /// per-instance so a shared `GlobalEmoteCatalog` never confuses two fakes.
-final class CountingProvider: EmoteProvider, @unchecked Sendable {
+final class CountingProvider: EmoteProvider {
     let globalCalls = OSAllocatedUnfairLock(initialState: 0)
     let channelCalls = OSAllocatedUnfairLock(initialState: 0)
     private let globals: [Emote]
@@ -33,7 +33,7 @@ final class CountingProvider: EmoteProvider, @unchecked Sendable {
 
 /// Provider whose fetches throw for the first `failures` calls of each kind,
 /// then succeed — models a transient 5xx / 429.
-final class FlakyProvider: EmoteProvider, @unchecked Sendable {
+final class FlakyProvider: EmoteProvider {
     private let globalFailuresLeft: OSAllocatedUnfairLock<Int>
     private let channelFailuresLeft: OSAllocatedUnfairLock<Int>
     let globalCalls = OSAllocatedUnfairLock(initialState: 0)
