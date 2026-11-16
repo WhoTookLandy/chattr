@@ -18,6 +18,9 @@ import ChatModel
 ///     them. The contract (`ChatChangeContractTests`) guarantees applying a
 ///     batch to the previous visible state reproduces the new one exactly, so
 ///     the view never has to re-diff.
+///   - **Late moderation:** visible lines that age out are remembered (up to
+///     `cap`) so a delete / timeout / clear that arrives afterwards still
+///     reaches a view holding them on screen (see `trimmed`).
 ///
 /// Pure value type, no SwiftUI/UIKit surface.
 struct ChatBuffer {
@@ -69,6 +72,21 @@ struct ChatBuffer {
     /// Entries are removed as lines drop off the ring, and values are shifted
     /// on the (rare) mid-array remove and the amortized compaction.
     private var indexByID: [String: Int] = [:]
+
+    /// Visible lines that recently aged out of the window, by id (FIFO,
+    /// bounded at `cap`). `ChatListFeed` holds trims back while the reader is
+    /// in scrollback, so during a firehose most of what's on screen has
+    /// already left the buffer — and moderation arriving after that (a mass
+    /// ban in a hate raid) used to find nothing to edit, leaving those rows
+    /// un-struck until the reader returned to the live edge. The `mutate…`
+    /// methods also apply to these lines and emit `.reconfigured` for them:
+    /// a view applies that only if it still shows the row, and against
+    /// `lines` it's a no-op, so the change contract is unaffected. Never
+    /// consulted by `contains` / `line(id:)` — dedup semantics are unchanged.
+    private var trimmed: [String: ChatLine] = [:]
+    /// Eviction order for `trimmed`; live entries are `trimmedOrder[trimmedHead...]`.
+    private var trimmedOrder: [String] = []
+    private var trimmedHead = 0
 
     init(cap: Int) {
         self.cap = cap
@@ -172,9 +190,13 @@ struct ChatBuffer {
         return true
     }
 
-    /// Transforms one line by id, if present.
+    /// Transforms one line by id, if present — or, if it recently aged out,
+    /// its retained copy (see `trimmed`).
     mutating func mutate(id: String, _ transform: (ChatLine) -> ChatLine) {
-        guard let idx = index(of: id) else { return }
+        guard let idx = index(of: id) else {
+            mutateTrimmed(id: id, transform)
+            return
+        }
         let old = storage[idx]
         let new = transform(old)
         storage[idx] = new
@@ -188,8 +210,9 @@ struct ChatBuffer {
     /// Transforms every line in the window (chat-clear shape). `transform` must
     /// preserve `authorUserId` (so visibility is unchanged) and `id` (so the
     /// id→index side table stays valid) — true for the only caller,
-    /// `markingDeleted()`.
+    /// `markingDeleted()`. Recently trimmed lines are transformed too.
     mutating func mutateAll(_ transform: (ChatLine) -> ChatLine) {
+        mutateTrimmed { transform($0) }
         guard head < storage.count else { return }
         for i in head..<storage.count {
             storage[i] = transform(storage[i])
@@ -201,8 +224,10 @@ struct ChatBuffer {
         }
     }
 
-    /// Transforms every line authored by `authorUserId` (user-timeout shape).
+    /// Transforms every line authored by `authorUserId` (user-timeout shape),
+    /// recently trimmed ones included.
     mutating func mutateMatching(authorUserId: String, _ transform: (ChatLine) -> ChatLine) {
+        mutateTrimmed { $0.authorUserId == authorUserId ? transform($0) : nil }
         guard head < storage.count else { return }
         for i in head..<storage.count where storage[i].authorUserId == authorUserId {
             storage[i] = transform(storage[i])
@@ -221,10 +246,55 @@ struct ChatBuffer {
         _lines.removeAll(keepingCapacity: true)
         linesHead = 0
         indexByID.removeAll(keepingCapacity: true)
+        trimmed.removeAll()
+        trimmedOrder.removeAll()
+        trimmedHead = 0
         pendingChanges.append(.reset([]))
     }
 
     // MARK: - Internals
+
+    /// Remembers a visible line the window just dropped (see `trimmed`),
+    /// evicting the oldest past `cap`. O(1) amortized — same head-index ring
+    /// trick as `storage`.
+    private mutating func retainTrimmed(_ line: ChatLine) {
+        trimmed[line.id] = line
+        trimmedOrder.append(line.id)
+        if trimmedOrder.count - trimmedHead > cap {
+            trimmed[trimmedOrder[trimmedHead]] = nil
+            trimmedHead += 1
+        }
+        if trimmedHead >= cap {
+            trimmedOrder.removeFirst(trimmedHead)
+            trimmedHead = 0
+        }
+    }
+
+    /// Single-line edit of a recently trimmed line. Emits `.reconfigured` only
+    /// when the value actually changed (moderation edits are idempotent) and
+    /// the id is kept — re-keys only ever target pending sends still in the
+    /// window.
+    private mutating func mutateTrimmed(id: String, _ transform: (ChatLine) -> ChatLine) {
+        guard let old = trimmed[id] else { return }
+        let new = transform(old)
+        guard new.id == id, new != old else { return }
+        trimmed[id] = new
+        pendingChanges.append(.reconfigured(new))
+    }
+
+    /// Bulk edit of recently trimmed lines; `edit` returns nil to skip one.
+    /// O(retained) — only the rare chat-clear / user-timeout paths use it.
+    private mutating func mutateTrimmed(_ edit: (ChatLine) -> ChatLine?) {
+        guard !trimmed.isEmpty else { return }
+        var changed: [ChatLine] = []
+        for (id, old) in trimmed {
+            if let new = edit(old), new.id == id, new != old { changed.append(new) }
+        }
+        for line in changed {
+            trimmed[line.id] = line
+            pendingChanges.append(.reconfigured(line))
+        }
+    }
 
     private func index(of id: String) -> Int? {
         // O(1) via the maintained side table. Dropped lines are pruned from
@@ -299,6 +369,7 @@ struct ChatBuffer {
             if !blocked.contains(dropped.authorUserId), linesHead < _lines.count {
                 linesHead += 1
                 pendingChanges.append(.removed(id: dropped.id))
+                retainTrimmed(dropped)
             }
         }
         if head >= cap {

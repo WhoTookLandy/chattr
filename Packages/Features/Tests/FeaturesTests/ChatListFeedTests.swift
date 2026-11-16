@@ -329,6 +329,42 @@ struct ChatListFeedTests {
         rig.expectInSync()
     }
 
+    @Test("unpinned: moderation still strikes rows held on screen after the model trimmed them")
+    func unpinnedModerationReachesTrimmedRows() {
+        var rig = Rig(cap: 3)
+        for id in ["a", "b", "c"] { rig.transcript.buffer.append(line(id)) }
+        rig.update()
+        rig.pinned = false
+        for i in 0..<3 { rig.transcript.buffer.append(line("x\(i)")) }   // trims a, b, c — still on screen
+        rig.transcript.buffer.mutate(id: "a") { $0.markingDeleted() }      // a mod deletes one of them
+        let edit = rig.update()
+        #expect(edit.steps.isEmpty)
+        #expect(edit.reconfigure == ["a"])
+        #expect(rig.mirror.ids == ["a", "b", "c"])
+        #expect(rig.mirror.shown["a"]?.kind == .deletedPlaceholder)
+        rig.pinned = true
+        rig.update()
+        rig.expectInSync()
+    }
+
+    @Test("unpinned: the user's own on-screen send is swapped to its delivered row immediately")
+    func unpinnedRekeyAppliesNow() {
+        var rig = Rig()
+        rig.transcript.buffer.append(line("a"))
+        rig.transcript.buffer.append(line("pending-1", "sending"))
+        rig.update()
+        rig.pinned = false
+        rig.transcript.buffer.append(line("b"))   // held
+        _ = rig.transcript.buffer.replace(id: "pending-1", with: line("msg-1", "delivered"))
+        let edit = rig.update()
+        #expect(edit.steps == [.replace(from: "pending-1", with: "msg-1")])
+        #expect(rig.mirror.ids == ["a", "msg-1"])
+        #expect(rig.feed.unreadCount == 1)
+        rig.pinned = true
+        rig.update()
+        rig.expectInSync()
+    }
+
     @Test("unpinned: an edit of a row with a held-back change queues behind it")
     func unpinnedEditQueuesBehindDeferred() {
         var rig = Rig()

@@ -25,7 +25,10 @@ enum ChatChange: Equatable {
     /// newly block-filtered).
     case removed(id: String)
     /// The line with this id changed value but kept its position AND its id
-    /// (markFailed, delete-flip, chat-clear).
+    /// (markFailed, delete-flip, chat-clear). May name a line that already
+    /// left the visible list: `ChatBuffer` also reports moderation of
+    /// recently trimmed lines, for views still holding them on screen.
+    /// Appliers ignore ids they don't hold.
     case reconfigured(ChatLine)
     /// The line with id `from` was replaced in place by `to`, which carries a
     /// different id — an optimistic `pending-…` send row upgraded to its
@@ -117,10 +120,12 @@ struct ChatChangeLog {
         case overrun(head: Int)
     }
 
-    /// Batches retained for readers that fall behind. A transcript flush
-    /// publishes at most one batch per coalescing window (~one frame), so the
-    /// default covers ~2s at the ceiling rate — far longer than any gap
-    /// between SwiftUI updates of an on-screen view.
+    /// Batches retained for readers that fall behind. The transcript appends
+    /// one batch per flush (~one frame at most) plus one per reader pull that
+    /// found unflushed changes, so under a firehose this spans roughly
+    /// 0.5–2s — still far longer than any gap between SwiftUI updates of an
+    /// on-screen view, which pulls every update. A reader that does fall off
+    /// the end just resets (correctly, with changed rows reconfigured).
     static let defaultCapacity = 120
 
     let capacity: Int

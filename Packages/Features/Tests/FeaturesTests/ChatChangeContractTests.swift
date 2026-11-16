@@ -172,6 +172,16 @@ struct ChatChangeContractTests {
         #expect(buf.lines.allSatisfy { $0.kind == .deletedPlaceholder })
     }
 
+    @Test("moderating a trimmed line keeps the contract (its reconfigure is a no-op against lines)")
+    func mutateTrimmedKeepsContract() {
+        var buf = ChatBuffer(cap: 2)
+        buf.append(line("a")); buf.append(line("b")); buf.append(line("c"))   // trims a
+        _ = buf.takeChanges()
+        assertContract(&buf) { $0.mutate(id: "a") { $0.markingDeleted() } }
+        assertContract(&buf) { $0.mutateAll { $0.markingDeleted() } }
+        #expect(buf.lines.map(\.id) == ["b", "c"])
+    }
+
     @Test("mutateMatching emits reconfigures only for the matched visible lines")
     func mutateMatching() {
         var buf = ChatBuffer(cap: 100)

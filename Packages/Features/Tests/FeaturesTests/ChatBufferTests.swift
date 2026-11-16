@@ -159,6 +159,60 @@ struct ChatBufferTests {
         #expect(buf.lines.first?.runs == [.text("edited")])
     }
 
+    // MARK: - Moderation of recently trimmed lines
+
+    private func reconfiguredIds(_ changes: [ChatChange]) -> Set<String> {
+        Set(changes.compactMap { change -> String? in
+            if case .reconfigured(let line) = change { return line.id } else { return nil }
+        })
+    }
+
+    @Test("moderating a line that just aged out is still reported, once")
+    func moderationReachesTrimmedLine() {
+        var buf = ChatBuffer(cap: 2)
+        buf.append(line("a")); buf.append(line("b")); buf.append(line("c"))   // trims a
+        _ = buf.takeChanges()
+        buf.mutate(id: "a") { $0.markingDeleted() }
+        let changes = buf.takeChanges()
+        #expect(changes.count == 1)
+        if case .reconfigured(let struck)? = changes.first {
+            #expect(struck.id == "a")
+            #expect(struck.kind == .deletedPlaceholder)
+        } else {
+            Issue.record("expected .reconfigured for the trimmed line")
+        }
+        #expect(!buf.contains(id: "a"))            // dedup still treats it as gone
+        #expect(buf.lines.map(\.id) == ["b", "c"])
+        buf.mutate(id: "a") { $0.markingDeleted() }  // idempotent: nothing new to show
+        #expect(buf.takeChanges().isEmpty)
+    }
+
+    @Test("user-timeout and chat-clear also reach recently trimmed lines")
+    func bulkModerationReachesTrimmedLines() {
+        var buf = ChatBuffer(cap: 2)
+        buf.append(line("a", author: "villain")); buf.append(line("b", author: "alice"))
+        buf.append(line("c")); buf.append(line("d"))   // trims a, b
+        _ = buf.takeChanges()
+        buf.mutateMatching(authorUserId: "villain") { $0.markingDeleted() }
+        #expect(reconfiguredIds(buf.takeChanges()) == ["a"])
+        buf.mutateAll { $0.markingDeleted() }
+        #expect(reconfiguredIds(buf.takeChanges()) == ["b", "c", "d"])   // a already struck
+    }
+
+    @Test("trimmed-line memory is bounded at cap and cleared by reset")
+    func trimmedMemoryIsBounded() {
+        var buf = ChatBuffer(cap: 2)
+        for i in 0..<6 { buf.append(line("m\(i)")) }   // trims m0…m3; remembers m2, m3
+        _ = buf.takeChanges()
+        buf.mutate(id: "m0") { $0.markingDeleted() }
+        #expect(buf.takeChanges().isEmpty)
+        buf.mutate(id: "m3") { $0.markingDeleted() }
+        #expect(buf.takeChanges().count == 1)
+        buf.reset(); _ = buf.takeChanges()
+        buf.mutate(id: "m2") { $0.markingDeleted() }
+        #expect(buf.takeChanges().isEmpty)
+    }
+
     @Test("takeChanges drains once, then returns empty")
     func takeChangesDrains() {
         var buf = ChatBuffer(cap: 100)

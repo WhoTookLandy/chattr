@@ -48,17 +48,20 @@ struct ChatListEdit: Equatable {
 ///
 /// ## Reading scrollback (unpinned)
 ///
-/// While the list is not pinned to the live edge, appends / removals /
-/// re-keys are deferred instead of applied: at 100+ msg/s the buffer's
-/// front-trim would otherwise delete the very rows being read (and force an
-/// anchor-restoring layout pass per flush). In-place `.reconfigured` edits of
-/// rows on screen still apply immediately — a moderation delete or a send
-/// failure must show where the user is looking — unless an earlier deferred
-/// change touches the same id (order must hold). A `.reset` applies
-/// immediately too: it is wholesale (a block-list change) and supersedes the
-/// backlog. The backlog is bounded by `maxDeferredChanges`; past it the feed
-/// drops it and resets from a snapshot on resume, since a full buffer's worth
-/// of churn has replaced every row anyway.
+/// While the list is not pinned to the live edge, appends and removals are
+/// deferred instead of applied: at 100+ msg/s the buffer's front-trim would
+/// otherwise delete the very rows being read (and force an anchor-restoring
+/// layout pass per flush). Edits to rows on screen still apply immediately —
+/// a moderation strike, a send failure, or the user's own send being
+/// delivered (`.rekeyed`, swapped in place) must show where the user is
+/// looking — unless an earlier deferred append / re-key / edit touches the
+/// same id (order must hold). A row's own deferred trim doesn't block an
+/// in-place edit: the buffer keeps reporting moderation of recently trimmed
+/// lines precisely so held rows get struck. A `.reset` applies immediately
+/// too: it is wholesale (a block-list change) and supersedes the backlog.
+/// The backlog is bounded by `maxDeferredChanges`; past it the feed drops it
+/// and resets from a snapshot on resume, since a full buffer's worth of churn
+/// has replaced every row anyway.
 struct ChatListFeed {
 
     /// Deferred-change bound. Two changes per message at cap (append + trim),
@@ -85,9 +88,16 @@ struct ChatListFeed {
 
     /// Structural changes held back while unpinned, in publish order.
     private var deferred: [ChatChange] = []
-    /// Every id a deferred change mentions — a later in-place edit of one of
-    /// these must queue behind it rather than jump ahead.
+    /// Ids a deferred append / re-key / in-place edit mentions — a later
+    /// in-place edit of one of these must queue behind it rather than jump
+    /// ahead.
     private var deferredIds: Set<String> = []
+    /// Ids with a deferred removal (mostly front-trims). Deliberately NOT in
+    /// `deferredIds`: an in-place edit that arrives after a row's trim (the
+    /// buffer still reports moderation of recently trimmed lines) can show
+    /// immediately — the row is on screen, and the removal still applies on
+    /// resume. Re-keys, which swap identity, do wait behind a removal.
+    private var deferredRemovals: Set<String> = []
     /// The backlog was abandoned (overflow, or a log overrun while unpinned);
     /// the next pinned update resets from a snapshot instead of replaying.
     private var resetOnResume = false
@@ -193,12 +203,22 @@ struct ChatListFeed {
             switch change {
             case .reset:
                 // Wholesale (block-list change): show it now; it supersedes
-                // whatever was held back.
+                // whatever was held back. `unreadCount` is kept on purpose:
+                // the held appends land below the viewport, still unseen.
                 clearDeferred()
                 process(change)
             case .reconfigured(let line) where liveIds.contains(line.id) && !deferredIds.contains(line.id):
-                // A row on screen changed value in place, with nothing
-                // deferred ahead of it — safe (and wanted) to show now.
+                // A row on screen changed value in place (moderation strike,
+                // send failure), with nothing but possibly its own trim
+                // deferred ahead of it — safe, and wanted, to show now.
+                process(change)
+            case .rekeyed(let from, let line)
+                where liveIds.contains(from) && !liveIds.contains(line.id)
+                    && !deferredIds.contains(from) && !deferredRemovals.contains(from)
+                    && !deferredIds.contains(line.id):
+                // The user's own on-screen send was delivered: swap it in
+                // place now (same position) instead of leaving it dimmed as
+                // "sending" — with stale-id context actions — until re-pin.
                 process(change)
             default:
                 if case .appended = change { unreadCount += 1 }
@@ -215,7 +235,7 @@ struct ChatListFeed {
         case .appended(let line), .reconfigured(let line):
             deferredIds.insert(line.id)
         case .removed(let id):
-            deferredIds.insert(id)
+            deferredRemovals.insert(id)
         case .rekeyed(let from, let line):
             deferredIds.insert(from)
             deferredIds.insert(line.id)
@@ -231,6 +251,7 @@ struct ChatListFeed {
     private mutating func clearDeferred() {
         if !deferred.isEmpty { deferred = [] }
         if !deferredIds.isEmpty { deferredIds = [] }
+        if !deferredRemovals.isEmpty { deferredRemovals = [] }
         resetOnResume = false
     }
 

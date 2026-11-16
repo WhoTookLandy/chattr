@@ -285,6 +285,11 @@ final class ChatListViewController: UIViewController {
               let attrs = collectionView.layoutAttributesForItem(at: indexPath) else { return }
         var offset = collectionView.contentOffset
         offset.y = attrs.frame.minY - anchor.distanceFromTop
+        // Most unpinned edits land below the viewport (recent rows) and don't
+        // move the anchor. Skip the write then: `setContentOffset` kills any
+        // in-flight deceleration, so an unconditional restore would stop a
+        // fling through scrollback whenever a row got struck or delivered.
+        guard abs(offset.y - collectionView.contentOffset.y) > 0.5 else { return }
         collectionView.setContentOffset(offset, animated: false)
     }
 
