@@ -40,7 +40,16 @@ struct ChatBufferBenchmark {
     private func newApproach(messageCount: Int, cap: Int, blocked: Set<String>) -> Int {
         var buffer = ChatBuffer(cap: cap)
         buffer.blockedIds = blocked
-        for i in 0..<messageCount { buffer.append(line(i)) }
+        _ = buffer.takeChanges()
+        for i in 0..<messageCount {
+            buffer.append(line(i))
+            // Production drains the change log on every coalesced flush
+            // (~15 ms ≈ a handful of messages at raid rates). Without this the
+            // benchmark would measure an unbounded `[ChatChange]` (~2 entries
+            // per message) that the app never accumulates.
+            if i % 8 == 7 { _ = buffer.takeChanges() }
+        }
+        _ = buffer.takeChanges()
         return buffer.lines.count
     }
 
