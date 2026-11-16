@@ -193,6 +193,25 @@ struct ChatTranscriptModelDependencyTests {
         await model.detach()
     }
 
+    // MARK: - Re-pin on send
+
+    @Test("Each send that shows a row bumps outgoingSendCount; one that can't start doesn't")
+    func sendBumpsOutgoingCount() async {
+        let detached = makeModel(Recorder())
+        await detached.send(text: "hi")             // no session → error, no row
+        #expect(detached.outgoingSendCount == 0)
+        #expect(detached.sendError != nil)
+
+        let model = makeModel(Recorder())
+        await model.attach(sessions: [makeSession()], currentUserId: "me-1")
+        await model.send(text: "   ")               // blank → nothing to send
+        #expect(model.outgoingSendCount == 0)
+        await model.send(text: "hi")
+        await model.send(text: "again")
+        #expect(model.outgoingSendCount == 2)
+        await model.detach()
+    }
+
     // MARK: - Badge observation
 
     @Test("A moderator badge on our own echo grants mod status; someone else's doesn't")

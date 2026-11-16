@@ -64,8 +64,9 @@ struct ChatTranscript: View {
     /// exactly how many); the legacy path tallies `lines.count` deltas.
     @State private var unreadWhileScrolledUp = 0
 
-    /// Incremented to ask the UIKit chat list to scroll to the newest message
-    /// (jump-to-bottom pill). The collection view acts on each change.
+    /// Incremented to ask the UIKit chat list to re-pin to the newest message
+    /// — by the jump-to-bottom pill, and by each of the user's own sends.
+    /// The collection view acts on each change.
     @State private var scrollToBottomToken = 0
 
     /// Current connection pill, derived from connection-state transitions via
@@ -136,6 +137,14 @@ struct ChatTranscript: View {
             // every block/unblock and restarted the task — redundant.)
             .task {
                 chatModel.blockedIds = blockStore?.blockedIds ?? []
+            }
+            // Sending re-pins to the live edge so the user sees their own
+            // message, like any chat app — while scrolled up it would
+            // otherwise sit in the held-back backlog until they scrolled down.
+            // Same path as the jump pill: on UIKit the token re-pins and
+            // flushes the backlog (the new row included) in one apply.
+            .onChange(of: chatModel.outgoingSendCount) { _, _ in
+                jumpToLatest()
             }
     }
 

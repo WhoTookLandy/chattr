@@ -143,6 +143,12 @@ public final class ChatTranscriptModel {
     /// cleared by `cancelReply()` or by the send that uses it.
     public var replyContext: ReplyContext?
 
+    /// Bumped each time a send puts the user's optimistic row in the
+    /// transcript. `ChatTranscript` re-pins to the live edge on every change,
+    /// so a message sent while reading scrollback shows at once instead of
+    /// being held back with the rest of the unread backlog.
+    private(set) var outgoingSendCount = 0
+
     // MARK: - Change channel (see `TranscriptStore`)
 
     /// Publishes pending changes now. Internal so tests can flush
@@ -307,6 +313,7 @@ public final class ChatTranscriptModel {
         let pendingId = outgoing.begin(text: canonical) { id in
             selfChatter.optimisticLine(id: id, text: canonical, replyingTo: reply)
         }
+        outgoingSendCount &+= 1
 
         do {
             let response = try await session.send(canonical, replyParentMessageId: reply?.parentMessageId)

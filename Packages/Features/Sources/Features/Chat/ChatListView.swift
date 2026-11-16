@@ -41,8 +41,8 @@ struct ChatListView: UIViewControllerRepresentable {
     /// UIKit → SwiftUI: messages that arrived while the list was unpinned and
     /// are held back off screen. Drives the pill's "N new".
     @Binding var unreadCount: Int
-    /// SwiftUI → UIKit: incremented by the jump-to-bottom pill to request a
-    /// scroll to the newest message.
+    /// SwiftUI → UIKit: incremented (by the jump-to-bottom pill, and on each
+    /// of the user's own sends) to request a re-pin to the newest message.
     let scrollToBottomToken: Int
     /// True when the user's Edge-to-Edge Chat setting extends the
     /// transcript under the toolbar pills. Switches the top scroll-edge
@@ -149,16 +149,16 @@ final class ChatListViewController: UIViewController {
     /// landing short of the bottom).
     ///
     /// Cleared the moment the user starts dragging; restored when a drag or
-    /// deceleration ends near the bottom, or when the jump-to-bottom pill
-    /// fires. Starts true — chat opens tailing.
+    /// deceleration ends near the bottom, or when a re-pin is requested (the
+    /// jump-to-bottom pill, or an own send). Starts true — chat opens tailing.
     ///
     /// Also gates data flow: while unpinned, appends / trims / re-keys are
     /// held back by `feed` so the rows being read can't be trimmed out from
     /// under the reader; re-pinning flushes them in one apply.
     private var isPinnedToBottom = true
 
-    /// Last-seen scroll-to-bottom token — the jump-to-bottom pill increments the
-    /// value to request a scroll; we act only when it changes.
+    /// Last-seen scroll-to-bottom token — the jump pill and own sends increment the
+    /// value to request a re-pin; we act only when it changes.
     private var lastScrollToBottomToken = 0
 
     /// Consumer of the model's change log: what the data source shows (and
@@ -316,7 +316,7 @@ final class ChatListViewController: UIViewController {
     }
 
     /// SwiftUI update (a model flush, or anything else that re-ran the parent
-    /// body): remember the model accessors, honor the jump-to-bottom pill,
+    /// body): remember the model accessors, honor a re-pin request,
     /// then pull and apply everything new.
     ///
     /// There is no version arithmetic here. SwiftUI may fold several model
@@ -343,11 +343,11 @@ final class ChatListViewController: UIViewController {
         let jumpRequested = scrollToBottomToken != lastScrollToBottomToken
         if jumpRequested {
             lastScrollToBottomToken = scrollToBottomToken
-            // Jump-to-bottom pill: re-enter tailing BEFORE pulling, so the
-            // backlog held back while reading flushes in this same apply. The
-            // per-pass pinToBottomIfNeeded (and the explicit pin in `apply`)
-            // glue the offset to the live edge from here — same mechanism as
-            // resumeTailingIfNearBottom.
+            // Re-pin request (jump pill, own send): re-enter tailing BEFORE
+            // pulling, so the backlog held back while reading flushes in this
+            // same apply. The per-pass pinToBottomIfNeeded (and the explicit
+            // pin in `apply`) glue the offset to the live edge from here —
+            // same mechanism as resumeTailingIfNearBottom.
             isPinnedToBottom = true
         }
         refresh(reconfigureAll: inputsChanged)
