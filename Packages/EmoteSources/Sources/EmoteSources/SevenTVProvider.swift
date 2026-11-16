@@ -26,8 +26,8 @@ public struct SevenTVProvider: EmoteProvider {
     public func globalEmotes() async throws -> [Emote] {
         let (data, response) = try await urlSession.data(from: Endpoints.SevenTV.globalEmoteSet)
         try ProviderHTTP.requireSuccess(response)
-        let response = try JSONDecoder().decode(EmoteSetResponse.self, from: data)
-        return response.emotes.compactMap { Self.map($0, ownerChannelId: nil) }
+        let body = try JSONDecoder().decode(EmoteSetResponse.self, from: data)
+        return body.emotes.compactMap { Self.map($0, ownerChannelId: nil) }
     }
 
     public func channelEmotes(broadcasterId: String, broadcasterLogin: String) async throws -> [Emote] {

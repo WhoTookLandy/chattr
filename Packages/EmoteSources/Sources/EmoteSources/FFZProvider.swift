@@ -28,11 +28,11 @@ public struct FFZProvider: EmoteProvider {
     public func globalEmotes() async throws -> [Emote] {
         let (data, response) = try await urlSession.data(from: Endpoints.FFZ.globalSet)
         try ProviderHTTP.requireSuccess(response)
-        let response = try JSONDecoder().decode(GlobalResponse.self, from: data)
+        let body = try JSONDecoder().decode(GlobalResponse.self, from: data)
         // `sets` is a dict keyed by set ID — flatten emoticons across all sets.
         // FFZ may use multiple global sets for organization, but for chat
         // resolution they all behave the same.
-        return response.sets.values.flatMap {
+        return body.sets.values.flatMap {
             $0.emoticons.compactMap { Self.map($0, ownerChannelId: nil) }
         }
     }
