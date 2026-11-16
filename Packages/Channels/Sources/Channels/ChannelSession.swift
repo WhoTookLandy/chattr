@@ -8,10 +8,12 @@ import os
 private let logger = AppLogger.make("Channels.ChannelSession")
 
 /// Instruments intervals for the session half of the message pipeline:
-/// `normalize` (per live message / per history batch), `renormalize` (stale
-/// ring rows refreshed on subscribe) and `deliver` (one post to every
-/// subscriber's mailbox). Pair with `Features.ChatTranscriptModel`'s
-/// `apply-batch` interval for the main-actor half.
+/// `renormalize` (stale ring rows refreshed on subscribe) here, plus
+/// `normalize` (per live message / per history batch, in
+/// `ChannelUpdateNormalizer`) and `deliver` (one post to every subscriber's
+/// mailbox, in `ChannelUpdateHub`) under the same category. Pair with
+/// `Features.ChatTranscriptModel`'s `apply-batch` interval for the
+/// main-actor half.
 private let signposter = AppLogger.signposter("Channels.Pipeline")
 
 /// Owns one chat session for a (account × channel) pair.
@@ -111,17 +113,10 @@ public actor ChannelSession {
     private let channelLoginName: String
     private let accountUserId: String
 
-    /// The session account's login. The only viewer-specific input the
-    /// session's normalization uses: it marks `@login` mentions as `isMe`
-    /// (and the line highlighted). A session is per account, so this is the
-    /// same for every tab that shows it; keyword highlighting — a per-attach
-    /// viewer preference — stays with each subscriber.
-    private let accountLogin: String
-
-    /// The channel's third-party emote table. Read through its nonisolated,
-    /// lock-protected snapshot — no actor hop on the per-message path. nil
-    /// (tests) normalizes with no third-party emotes.
-    private let emoteIndex: EmoteIndex?
+    /// Builds display-ready rows from translated events and history, against
+    /// the session account's login and the channel's emote index. See
+    /// `ChannelUpdateNormalizer`.
+    private let normalizer: ChannelUpdateNormalizer
 
     /// The ring of display-ready updates (capped at the Chat History
     /// setting), the join-backfill buffering window in front of it, and the
@@ -191,9 +186,8 @@ public actor ChannelSession {
         self.channelId = channelId
         self.channelLoginName = channelLoginName
         self.accountUserId = accountUserId
-        self.accountLogin = accountLogin
+        self.normalizer = ChannelUpdateNormalizer(accountLogin: accountLogin, emoteIndex: emoteIndex)
         self.hub = ChannelUpdateHub(capacity: max(1, ringCapacity), channelLoginName: channelLoginName)
-        self.emoteIndex = emoteIndex
         self.refreshTokenHandler = refreshTokenHandler
         self.fetchBackfill = fetchBackfill
         self.joinBackfillTimeout = joinBackfillTimeout
@@ -842,11 +836,11 @@ public actor ChannelSession {
     /// caller remains `start()`.
     func applyBackfill(_ backfill: [BackfillMessage]) {
         joinBackfill = .done
-        let history = normalizeHistory(backfill)
+        let history = normalizer.normalizeHistory(backfill)
         // Join divider: only when there's actually history to separate —
         // an empty backfill (rustlog down, brand-new channel) would put a
         // meaningless rule at the very top of an all-live transcript.
-        let divider: ChannelUpdate? = history.isEmpty ? nil : .row(makeDivider())
+        let divider: ChannelUpdate? = history.isEmpty ? nil : .row(normalizer.makeDivider())
         let bufferedCount = hub.commitBackfill(history: history, divider: divider)
 
         let primedCount = hub.ring.count
@@ -988,10 +982,10 @@ public actor ChannelSession {
         let missing = ChannelHistoryMerge.missingMessages(history, notIn: hub.snapshot)
         guard !missing.isEmpty else { return }
         let merged = ChannelHistoryMerge.mergeBackfill(
-            history: normalizeHistory(missing),
+            history: normalizer.normalizeHistory(missing),
             pendingLive: hub.snapshot,
             capacity: hub.capacity,
-            divider: .row(makeDivider())
+            divider: .row(normalizer.makeDivider())
         )
         // The cap trims from the head, i.e. history first. If live rows
         // already fill the ring, nothing late survives — leave the ring (and
@@ -1075,73 +1069,10 @@ public actor ChannelSession {
         }
         logger.notice("Reconnect resync for #\(self.channelLoginName, privacy: .public): filling \(missing.count) missed message(s)")
 
-        emit(normalizeHistory(missing) + [.row(makeDivider())])
+        emit(normalizer.normalizeHistory(missing) + [.row(normalizer.makeDivider())])
     }
 
     // MARK: - Normalization
-
-    /// The emote table normalization reads, plus the generation stamping it.
-    private typealias EmoteTable = (emotes: [String: Emote], generation: Int)
-
-    private func currentEmoteTable() -> EmoteTable {
-        emoteIndex?.snapshotWithGeneration() ?? (emotes: [:], generation: 0)
-    }
-
-    /// Normalizes one message — the one place the session runs the
-    /// `Normalizer` for chat. `timestamp` is decided by the caller from the
-    /// message's metadata and stored with the line, so every later replay is
-    /// the identical value.
-    private func normalize(
-        _ message: ChatMessage,
-        isHistorical: Bool,
-        timestamp: Date,
-        table: EmoteTable
-    ) -> NormalizedMessage {
-        var line = Normalizer.normalize(
-            message: message,
-            emoteSnapshot: table.emotes,
-            currentUserLogin: accountLogin,
-            timestamp: timestamp
-        )
-        line.isHistorical = isHistorical
-        return NormalizedMessage(message: message, line: line, emoteGeneration: table.generation)
-    }
-
-    /// Normalizes a history batch (join backfill, gap-fill) as historical
-    /// rows, timestamped by `tmi-sent-ts` — or, for a line without one, by
-    /// the batch's arrival time, captured once.
-    private func normalizeHistory(_ messages: [BackfillMessage]) -> [ChannelUpdate] {
-        guard !messages.isEmpty else { return [] }
-        let interval = signposter.beginInterval(
-            "normalize",
-            id: signposter.makeSignpostID(),
-            "history=\(messages.count)"
-        )
-        defer { signposter.endInterval("normalize", interval) }
-
-        let table = currentEmoteTable()
-        let fetchedAt = Date()
-        return messages.map { record in
-            ChannelUpdate.message(normalize(
-                record.message,
-                isHistorical: true,
-                timestamp: record.sentAt ?? fetchedAt,
-                table: table
-            ))
-        }
-    }
-
-    /// A fresh "New" divider row. Its id and timestamp are minted here, once,
-    /// and the row is stored in the ring — every replay is the same row.
-    private func makeDivider() -> ChatLine {
-        ChatLine(
-            id: "divider-\(UUID().uuidString)",
-            kind: .newMessagesDivider,
-            authorDisplayName: "",
-            runs: [],
-            timestamp: Date()
-        )
-    }
 
     /// Re-normalizes ring messages built against an older emote table —
     /// typically history and early live rows normalized before the channel's
@@ -1150,19 +1081,14 @@ public actor ChannelSession {
     /// every later subscriber primes from. (Rows already delivered to a live
     /// subscriber aren't re-sent — same as before: a re-attach picks them up.)
     private func refreshStaleNormalization() {
-        guard emoteIndex != nil, !hub.ring.isEmpty else { return }
-        let table = currentEmoteTable()
+        guard normalizer.hasEmoteIndex, !hub.ring.isEmpty else { return }
+        let table = normalizer.currentEmoteTable()
         guard table.generation != 0 else { return }
 
+        let normalizer = self.normalizer
         let interval = signposter.beginInterval("renormalize", id: signposter.makeSignpostID())
         let refreshed = hub.refreshMessages { stale in
-            guard stale.emoteGeneration != table.generation else { return nil }
-            return normalize(
-                stale.message,
-                isHistorical: stale.line.isHistorical,
-                timestamp: stale.line.timestamp,
-                table: table
-            )
+            normalizer.renormalized(stale, table: table)
         }
         signposter.endInterval("renormalize", interval, "refreshed=\(refreshed)")
     }
@@ -1211,50 +1137,12 @@ public actor ChannelSession {
             cachedRestrictionsAreLive = true
         }
 
-        guard let update = makeUpdate(for: channelEvent, receivedAt: receivedAt) else { return }
+        guard let update = normalizer.makeUpdate(for: channelEvent, receivedAt: receivedAt) else { return }
         // Under raid storms (50-200 events/sec) this is the hottest path in
         // the app. It used to await a TaskGroup child per subscriber per
         // event, so the slowest main-actor subscriber set the pace for the
         // whole channel; posting to mailboxes is a lock + append each.
         emit([update])
-    }
-
-    /// Normalizes one translated event into its ring/delivery form. Message
-    /// text is tokenized and emote-resolved here — once per channel, not once
-    /// per tab — and bubble ids/timestamps are minted here, once, so replays
-    /// are identical. Returns nil for notice types the Normalizer doesn't
-    /// render (dropped here rather than stored and dropped by every tab).
-    private func makeUpdate(for event: ChannelEvent, receivedAt: Date) -> ChannelUpdate? {
-        switch event {
-        case .message(let message):
-            let interval = signposter.beginInterval("normalize", id: signposter.makeSignpostID())
-            let normalized = normalize(
-                message,
-                isHistorical: false,
-                timestamp: receivedAt,
-                table: currentEmoteTable()
-            )
-            signposter.endInterval("normalize", interval)
-            return .message(normalized)
-        case .notification(let notification):
-            return Normalizer.line(from: notification, timestamp: receivedAt).map { ChannelUpdate.row($0) }
-        case .raid(let raid):
-            let id = Normalizer.raidLineID(
-                fromBroadcasterUserId: raid.fromBroadcasterUserId,
-                receivedAt: receivedAt
-            )
-            return .row(Normalizer.line(from: raid, id: id, timestamp: receivedAt))
-        case .messageDeleted(let targetMessageId):
-            return .messageDeleted(targetMessageId: targetMessageId)
-        case .chatCleared:
-            return .chatCleared
-        case .messagesClearedFromUser(let targetUserId):
-            return .messagesClearedFromUser(targetUserId: targetUserId)
-        case .restrictionsUpdated(let restrictions):
-            return .restrictionsUpdated(restrictions)
-        case .moderationStatusChanged(let canModerate):
-            return .moderationStatusChanged(canModerate: canModerate)
-        }
     }
 
     /// Translate one TwitchKit EventSub event to a chattr ChannelEvent.
