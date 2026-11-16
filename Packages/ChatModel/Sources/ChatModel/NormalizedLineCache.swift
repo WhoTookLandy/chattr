@@ -37,9 +37,13 @@ public final class NormalizedLineCache {
     /// with. Reads under a different context miss; writes under a
     /// different context reset the cache to it.
     public struct Context: Equatable, Sendable {
-        /// `EmoteIndex.snapshot().count` — 0 before the provider fetches
-        /// land, the table size after. Loads are idempotent-once per
-        /// channel, so the count only moves on a real table change.
+        /// `EmoteIndex.generation` of the emote table the line was
+        /// normalized against — 0 before anything is published, bumped
+        /// (process-wide unique) on every publish. A generation, not the
+        /// table's entry count: two different tables can have the same
+        /// size (e.g. a cached restore and the network refresh that
+        /// replaces it), and a count fingerprint would serve lines built
+        /// from the old one.
         public let emoteVersion: Int
         public let currentUserLogin: String
         public let highlightKeywords: [String]

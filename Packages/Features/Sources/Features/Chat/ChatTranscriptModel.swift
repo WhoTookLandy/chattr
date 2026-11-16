@@ -206,8 +206,8 @@ public final class ChatTranscriptModel {
     private var lineCache: NormalizedLineCache?
 
     /// Fingerprint of the inputs normalization depends on, for cache
-    /// stamping. `emoteVersion` is the snapshot's entry count — see
-    /// `NormalizedLineCache.Context` for why that's sufficient.
+    /// stamping. `emoteVersion` is the emote index's publish generation —
+    /// see `NormalizedLineCache.Context`.
     private func cacheContext(emoteVersion: Int) -> NormalizedLineCache.Context {
         NormalizedLineCache.Context(
             emoteVersion: emoteVersion,
@@ -1431,7 +1431,8 @@ public final class ChatTranscriptModel {
     /// — without it the same six-line block would appear twice with the
     /// same content but different match-key sources, inviting drift.
     private func upgradeOptimistic(at pendingId: String, with chatMessage: ChatMessage) -> Bool {
-        let snapshot = emoteIndex?.snapshot() ?? [:]
+        let versioned = emoteIndex?.snapshotWithGeneration()
+        let snapshot = versioned?.emotes ?? [:]
         let normalizedLine = Normalizer.normalize(
             message: chatMessage,
             emoteSnapshot: snapshot,
@@ -1443,7 +1444,7 @@ public final class ChatTranscriptModel {
         // remount replays it through `ingest` — which should hit, not
         // re-normalize. (The optimistic `pending-…` row itself is never
         // cached; it isn't a ring event.)
-        lineCache?.store(normalizedLine, context: cacheContext(emoteVersion: snapshot.count))
+        lineCache?.store(normalizedLine, context: cacheContext(emoteVersion: versioned?.generation ?? 0))
         // `replace` returns false (a no-op) when the optimistic row was already
         // removed under us — the caller then falls through to a normal append.
         let didReplace = buffer.replace(id: pendingId, with: normalizedLine)
@@ -1496,8 +1497,12 @@ public final class ChatTranscriptModel {
             if isFiltered(chatMessage) { return }
             // EmoteIndex.snapshot() is nonisolated + lock-protected, so
             // it's safe to call from @MainActor without an await.
-            let snapshot = emoteIndex?.snapshot() ?? [:]
-            let context = cacheContext(emoteVersion: snapshot.count)
+            // Snapshot + generation read atomically: the generation stamps
+            // the cache entry, so it must belong to the table we normalize
+            // against.
+            let versioned = emoteIndex?.snapshotWithGeneration()
+            let snapshot = versioned?.emotes ?? [:]
+            let context = cacheContext(emoteVersion: versioned?.generation ?? 0)
             // Memo hit: this exact message was normalized before (live
             // arrival, or a prior tab mount) under the same inputs. The
             // re-prime path on tab swipes is ~all hits, which is what
