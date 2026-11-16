@@ -118,6 +118,7 @@ public struct AppShell: View {
         .environment(\.openChannel, OpenChannelAction(navigation))
         // Single appearance task that does, in this exact order:
         //
+        //   0. Point `DraftStorage` at this account's drafts.
         //   1. Wire `onOpen` / `onClose` on the ChatTabsModel — these
         //      bridge to the registry's `acquire` / `release` so refcounts
         //      track tab lifetime.
@@ -162,6 +163,12 @@ public struct AppShell: View {
             // so the wiring below reads the same way it did when ChatTabsModel
             // was a direct `@State`.
             let chatTabs = navigation.chatTabs
+
+            // 0. Scope compose drafts to this account. Before hydration, so
+            //    every ChatScreen the restored tabs mount reads this
+            //    account's drafts (first run after upgrade also adopts the
+            //    pre-scoping drafts — see `DraftStorage.activate`).
+            DraftStorage.activate(accountUserId: account.userId)
 
             // 1. Wire callbacks.
             //
