@@ -1512,6 +1512,7 @@ public final class ChatTranscriptModel {
             message: chatMessage,
             emoteSnapshot: snapshot,
             currentUserLogin: currentUserLogin,
+            timestamp: .now,
             highlightKeywords: highlightKeywords
         )
         // Memo the echo's normalized form: the echo event sits in the
@@ -1593,6 +1594,7 @@ public final class ChatTranscriptModel {
                 message: chatMessage,
                 emoteSnapshot: snapshot,
                 currentUserLogin: currentUserLogin,
+                timestamp: .now,
                 highlightKeywords: highlightKeywords
             )
             line.isHistorical = isHistorical
@@ -1603,12 +1605,17 @@ public final class ChatTranscriptModel {
             // The Normalizer skips notice types we don't render (returns
             // nil) — those are dropped here. Logging the skip is the
             // caller's job; the Normalizer stays sync-and-pure.
-            if let line = Normalizer.line(from: n) {
+            if let line = Normalizer.line(from: n, timestamp: .now) {
                 buffer.append(line)
             }
 
         case .raid(let r):
-            buffer.append(Normalizer.line(from: r))
+            let receivedAt = Date.now
+            buffer.append(Normalizer.line(
+                from: r,
+                id: Normalizer.raidLineID(fromBroadcasterUserId: r.fromBroadcasterUserId, receivedAt: receivedAt),
+                timestamp: receivedAt
+            ))
 
         case .messageDeleted(let targetMessageId):
             // Mutation in place: find the row by id, replace with a

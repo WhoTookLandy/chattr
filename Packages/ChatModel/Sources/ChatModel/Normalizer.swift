@@ -47,8 +47,13 @@ public enum Normalizer {
     ///     gracefully — all tokens stay as plain text runs.
     ///   - currentUserLogin: The signed-in user's lowercase login.
     ///     Used to flag `.mention(isMe: true)` on self-mentions.
+    ///   - timestamp: When the message was sent — `tmi-sent-ts` for IRC
+    ///     history, the receipt time captured once for live events. Required
+    ///     (no `.now` default): normalizing the same message twice must yield
+    ///     equal lines, so the caller owns the clock.
     ///   - highlightKeywords: Case-insensitive substrings that highlight
-    ///     a message. Empty array disables keyword highlighting.
+    ///     a message. Empty array disables keyword highlighting. Hot paths
+    ///     that apply keywords separately use a prebuilt `HighlightMatcher`.
     ///   - badges: Pre-resolved `AuthorBadge`s — caller does the lookup
     ///     via `ChatBadgeStore.entries(for:)` and hands them in.
     /// - Returns: A fully tokenized, display-ready `ChatLine`.
@@ -56,6 +61,7 @@ public enum Normalizer {
         message: ChatMessage,
         emoteSnapshot: [String: Emote],
         currentUserLogin: String,
+        timestamp: Date,
         highlightKeywords: [String] = [],
         badges: [ChatLine.AuthorBadge] = []
     ) -> ChatLine {
@@ -145,10 +151,8 @@ public enum Normalizer {
         // keyword (case-insensitive substring match; phrases match across
         // word runs). The keyword check is bypassed when the keyword
         // list is empty, which is the common case.
-        let isHighlighted = sawSelfMention || Self.containsHighlight(
-            runs: runs,
-            keywords: highlightKeywords
-        )
+        let isHighlighted = sawSelfMention
+            || (!highlightKeywords.isEmpty && HighlightMatcher(keywords: highlightKeywords).matches(runs))
 
         // Extract reply metadata if Twitch tagged this message as a reply.
         // Stored on the ChatLine so the renderer can show a quoted-preview
@@ -174,6 +178,7 @@ public enum Normalizer {
             authorColor: message.color,
             runs: runs,
             isHighlighted: isHighlighted,
+            timestamp: timestamp,
             replyParent: replyParent
         )
     }
@@ -192,8 +197,12 @@ public enum Normalizer {
     /// "resub", "sub_gift", "raid", "announcement", "charity_donation",
     /// etc. Different optional fields are populated depending on the
     /// type — we read whichever is present.
+    ///
+    /// `timestamp` is the receipt time the caller captured for the event
+    /// (the payload carries no send time).
     public static func line(
-        from notification: EventSubChatNotification
+        from notification: EventSubChatNotification,
+        timestamp: Date
     ) -> ChatLine? {
         // Dispatch on noticeType to find the right payload and build the
         // matching bubble kind.
@@ -289,7 +298,8 @@ public enum Normalizer {
             authorUserId: notification.chatterUserId,
             authorDisplayName: notification.chatterUserName,
             authorColor: notification.color ?? "",
-            runs: []   // bubbles render from `kind`, not `runs`
+            runs: [],   // bubbles render from `kind`, not `runs`
+            timestamp: timestamp
         )
     }
 
@@ -297,17 +307,29 @@ public enum Normalizer {
     /// channel we're watching) into a raidBubble `ChatLine`. Distinct
     /// from the `raid` notice inside `EventSubChatNotification` —
     /// channel.raid is the dedicated topic with simpler payload.
-    public static func line(from raid: EventSubRaid) -> ChatLine {
+    ///
+    /// The payload has no message id, so the caller mints one — once, when
+    /// the event arrives (see `raidLineID`) — and stores the resulting line.
+    /// Minting it here from the clock gave the same raid a new row identity
+    /// every time it was re-normalized (each tab re-prime).
+    public static func line(from raid: EventSubRaid, id: String, timestamp: Date) -> ChatLine {
         ChatLine(
-            id: "raid-\(raid.fromBroadcasterUserId)-\(Int(Date().timeIntervalSince1970 * 1000))",
+            id: id,
             kind: .raidBubble(.init(
                 fromBroadcasterDisplayName: raid.fromBroadcasterUserName,
                 viewers: raid.viewers
             )),
             authorUserId: raid.fromBroadcasterUserId,
             authorDisplayName: raid.fromBroadcasterUserName,
-            runs: []
+            runs: [],
+            timestamp: timestamp
         )
+    }
+
+    /// Row id for a `channel.raid` event received at `receivedAt`: the
+    /// raider plus the arrival millisecond. Call once per event.
+    public static func raidLineID(fromBroadcasterUserId: String, receivedAt: Date) -> String {
+        "raid-\(fromBroadcasterUserId)-\(Int(receivedAt.timeIntervalSince1970 * 1000))"
     }
 
     /// Map TwitchKit's `SubscriptionTier` enum + `isPrime` flag → our
@@ -352,31 +374,70 @@ public enum Normalizer {
     /// inter-word gap is reconstructed by the layout's `spacing`, which
     /// means consecutive whitespace collapses — same tradeoff Twitch's
     /// own renderer makes.
+    ///
+    /// Two paths with identical output:
+    ///   - **ASCII** (nearly all chat): one pass over UTF-8 bytes, slicing
+    ///     each word out of the original string. Every ASCII byte is its own
+    ///     grapheme (CR LF is the one multi-scalar ASCII cluster, and both
+    ///     halves are whitespace), so byte boundaries ARE Character
+    ///     boundaries and the split matches the Character walk exactly.
+    ///   - **Anything else**: the Character walk, which is what decides how
+    ///     whitespace combines with neighbouring scalars (a space followed by
+    ///     a combining mark is one non-splittable grapheme, etc.).
     private static func tokenizeWords(
         text: String,
         emoteSnapshot: [String: Emote],
         into runs: inout [LineRun]
     ) {
-        var currentWord = ""
-
-        func flushWord() {
-            guard !currentWord.isEmpty else { return }
-            if let emote = emoteSnapshot[currentWord] {
+        func emit(_ word: String) {
+            if let emote = emoteSnapshot[word] {
                 runs.append(.emote(emote))
             } else {
-                runs.append(.text(currentWord))
+                runs.append(.text(word))
             }
-            currentWord = ""
         }
 
+        let utf8 = text.utf8
+        if !utf8.contains(where: { $0 >= 0x80 }) {
+            var wordStart: String.Index?
+            var index = utf8.startIndex
+            while index != utf8.endIndex {
+                if isASCIIWhitespace(utf8[index]) {
+                    if let start = wordStart {
+                        emit(String(text[start..<index]))
+                        wordStart = nil
+                    }
+                } else if wordStart == nil {
+                    wordStart = index
+                }
+                index = utf8.index(after: index)
+            }
+            if let start = wordStart {
+                emit(String(text[start..<utf8.endIndex]))
+            }
+            return
+        }
+
+        var currentWord = ""
         for ch in text {
             if ch.isWhitespace {
-                flushWord()
+                if !currentWord.isEmpty {
+                    emit(currentWord)
+                    currentWord = ""
+                }
             } else {
                 currentWord.append(ch)
             }
         }
-        flushWord()
+        if !currentWord.isEmpty { emit(currentWord) }
+    }
+
+    /// The ASCII members of Unicode's White_Space property — exactly the
+    /// ASCII scalars `Character.isWhitespace` accepts: TAB, LF, VT, FF, CR,
+    /// and SPACE.
+    @inline(__always)
+    private static func isASCIIWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x20 || (byte >= 0x09 && byte <= 0x0D)
     }
 
     // MARK: - Post-processing
@@ -403,44 +464,5 @@ public enum Normalizer {
             return runs
         }
         return Array(runs.dropFirst())
-    }
-
-    /// Returns true when any contiguous span of text words contains any
-    /// of the (non-empty) keywords as a case-insensitive substring.
-    /// Empty keyword list short-circuits — no allocation, immediate false.
-    ///
-    /// Words within one span are joined with a single space before
-    /// matching, so multi-word phrases ("free crypto") match. Non-text
-    /// runs (emotes, mentions, …) end the span — words that were never
-    /// textually adjacent in the message can't fake a phrase match, and
-    /// emote NAMES stay invisible to keywords (an emote run carries no
-    /// text words).
-    private static func containsHighlight(
-        runs: [LineRun],
-        keywords: [String]
-    ) -> Bool {
-        guard !keywords.isEmpty else { return false }
-
-        func spanMatches(_ span: [String]) -> Bool {
-            guard !span.isEmpty else { return false }
-            let haystack = span.joined(separator: " ")
-            for keyword in keywords where !keyword.isEmpty {
-                if haystack.range(of: keyword, options: .caseInsensitive) != nil {
-                    return true
-                }
-            }
-            return false
-        }
-
-        var span: [String] = []
-        for run in runs {
-            if case .text(let word) = run {
-                span.append(word)
-            } else {
-                if spanMatches(span) { return true }
-                span.removeAll(keepingCapacity: true)
-            }
-        }
-        return spanMatches(span)
     }
 }
