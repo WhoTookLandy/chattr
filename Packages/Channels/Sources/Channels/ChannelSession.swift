@@ -123,52 +123,11 @@ public actor ChannelSession {
     /// (tests) normalizes with no third-party emotes.
     private let emoteIndex: EmoteIndex?
 
-    /// Ring buffer of display-ready updates, capped at `ringCapacity`.
-    /// Head-index ring: the live window is `ring[ringHead...]`; everything
-    /// before `ringHead` is dead and reclaimed at the next batch compaction
-    /// (see `appendToRing`). Same technique as `ChatBuffer` — a front trim is
-    /// an O(1) pointer bump, not an O(count) `removeFirst` memmove per event.
-    /// Readers go through `ringSnapshot`, never `ring` directly.
-    ///
-    /// Holding normalized rows (not raw events) is what makes the ring the
-    /// normalize memo: a tab that re-attaches primes from finished lines.
-    private var ring: [ChannelUpdate] = []
-    private var ringHead: Int = 0
-
-    /// The live window, materialized. O(count) copy — acceptable on the cold
-    /// paths that read it (subscribe prime, one-shot snapshot, resync dedup),
-    /// never touched on the per-event hot path.
-    private var ringSnapshot: [ChannelUpdate] {
-        ringHead == 0 ? ring : Array(ring[ringHead...])
-    }
-    /// Set at construction from the user's Chat History setting (default
-    /// 500). Fixed for the session's lifetime — a changed setting applies
-    /// to sessions created after it (i.e. newly opened channel tabs).
-    private let ringCapacity: Int
-
-    /// Live events that arrived via `handle(event:)` while `backfillPending`
-    /// is true — i.e. after we subscribed to EventSub but before the rustlog
-    /// backfill resolved. `applyBackfill` drains this into the ring (merged +
-    /// deduped against history) and clears it. Empty for the rest of the
-    /// session's life once backfill has been applied.
-    private var pendingLive: [ChannelUpdate] = []
-
-    /// True from construction until `applyBackfill` runs. While true,
-    /// `handle(event:)` parks events in `pendingLive` instead of appending to
-    /// the ring, so backfill history can still be inserted ahead of them
-    /// without clobbering live events. Flipped to false exactly once.
-    private var backfillPending = true
-
-    /// Active subscribers' mailboxes, keyed by their token. Multi-consumer by
-    /// design — the same channel in multiple tabs (plus each tab strip's
-    /// mention watcher) registers one mailbox each; every mailbox gets every
-    /// update, in order. Posting never waits on the consumer.
-    private var subscribers: [UUID: ChannelSubscription] = [:]
-
-    /// Backlog cap per subscriber mailbox: twice the ring, and never tiny.
-    /// Past it, a lagging subscriber is re-primed instead (see
-    /// `ChannelSubscription`).
-    private var subscriberBacklogLimit: Int { max(ringCapacity * 2, 1_000) }
+    /// The ring of display-ready updates (capped at the Chat History
+    /// setting), the join-backfill buffering window in front of it, and the
+    /// subscriber mailboxes it fans out to. Every update reaches it through
+    /// `emit`. See `ChannelUpdateHub`.
+    private var hub: ChannelUpdateHub
 
     /// IDs of active EventSub subscriptions, captured from the records that
     /// `subscribe(...)` returns. We track all of them (chat.message + chat
@@ -233,7 +192,7 @@ public actor ChannelSession {
         self.channelLoginName = channelLoginName
         self.accountUserId = accountUserId
         self.accountLogin = accountLogin
-        self.ringCapacity = max(1, ringCapacity)
+        self.hub = ChannelUpdateHub(capacity: max(1, ringCapacity), channelLoginName: channelLoginName)
         self.emoteIndex = emoteIndex
         self.refreshTokenHandler = refreshTokenHandler
         self.fetchBackfill = fetchBackfill
@@ -522,10 +481,7 @@ public actor ChannelSession {
         // End every subscriber's stream up front: nothing posted from here on
         // is meant for them, and their consumer loops can wind down while we
         // wait on Twitch below.
-        for subscription in subscribers.values {
-            subscription.finish()
-        }
-        subscribers.removeAll()
+        hub.finishAllSubscribers()
 
         let ids = activeSubscriptionIds
         activeSubscriptionIds = []
@@ -810,9 +766,8 @@ public actor ChannelSession {
     /// `subscription.token` to `unsubscribe(_:)` when done.
     public func subscribe() -> (subscription: ChannelSubscription, snapshot: [ChannelUpdate]) {
         refreshStaleNormalization()
-        let subscription = ChannelSubscription(capacity: subscriberBacklogLimit)
-        subscribers[subscription.token] = subscription
-        return (subscription, ringSnapshot)
+        let subscription = hub.addSubscriber()
+        return (subscription, hub.snapshot)
     }
 
     /// Watcher convenience: runs `handler` once per drained batch on a task
@@ -821,8 +776,7 @@ public actor ChannelSession {
     /// handler only delays its own batches.
     @discardableResult
     public func subscribe(onBatch handler: @escaping @Sendable ([ChannelUpdate]) async -> Void) -> UUID {
-        let subscription = ChannelSubscription(capacity: subscriberBacklogLimit)
-        subscribers[subscription.token] = subscription
+        let subscription = hub.addSubscriber()
         Task {
             await Self.drain(subscription, into: handler)
         }
@@ -846,7 +800,7 @@ public actor ChannelSession {
     /// en masse by `stop()`, so callers don't strictly need to unsubscribe on
     /// session teardown, but doing so is good hygiene for partial detach.
     public func unsubscribe(_ token: UUID) {
-        subscribers.removeValue(forKey: token)?.finish()
+        hub.removeSubscriber(token)
     }
 
     /// Returns the current ring snapshot without subscribing. Useful for one-
@@ -854,7 +808,7 @@ public actor ChannelSession {
     /// ongoing updates, use `subscribe()` — it primes AND subscribes in one
     /// atomic step.
     public func currentSnapshot() -> [ChannelUpdate] {
-        ringSnapshot
+        hub.snapshot
     }
 
     /// The single path every update takes into the session's state and out
@@ -864,69 +818,11 @@ public actor ChannelSession {
     ///
     /// Synchronous: the whole batch is committed to the ring and posted to
     /// every mailbox in one actor turn, so it lands contiguously — nothing
-    /// can interleave inside it. Posting never waits on a subscriber.
+    /// can interleave inside it. Posting never waits on a subscriber. While
+    /// the join backfill is pending the batch is parked instead of appended
+    /// (see `ChannelUpdateHub.emit`).
     private func emit(_ updates: [ChannelUpdate]) {
-        guard !updates.isEmpty else { return }
-        if backfillPending {
-            // Backfill hasn't landed yet — park the updates so history can
-            // still be merged ahead of them; `applyBackfill` drains this into
-            // the ring. The registry exposes the session only once `start()`
-            // returns, so no subscriber normally exists in this window and
-            // the delivery below is a no-op.
-            pendingLive.append(contentsOf: updates)
-        } else {
-            for update in updates {
-                appendToRing(update)
-            }
-        }
-        deliver(updates)
-    }
-
-    /// Posts one batch to every mailbox. A mailbox that is too far behind to
-    /// take it gets the ring snapshot as a `.reprime` instead — it converges
-    /// on the same state without its backlog growing unbounded.
-    private func deliver(_ updates: [ChannelUpdate]) {
-        guard !subscribers.isEmpty else { return }
-        let interval = signposter.beginInterval(
-            "deliver",
-            id: signposter.makeSignpostID(),
-            "updates=\(updates.count) subscribers=\(self.subscribers.count)"
-        )
-        defer { signposter.endInterval("deliver", interval) }
-
-        var overflowed: [ChannelSubscription] = []
-        for subscription in subscribers.values where !subscription.post(updates) {
-            overflowed.append(subscription)
-        }
-        guard !overflowed.isEmpty else { return }
-        let snapshot = ringSnapshot
-        for subscription in overflowed {
-            // The refused batch is in the ring already (emit appends first);
-            // only its state-only updates need carrying.
-            subscription.reprime(snapshot: snapshot, alsoCarrying: updates)
-        }
-        logger.warning("\(overflowed.count) subscriber(s) of #\(self.channelLoginName, privacy: .public) fell more than \(self.subscriberBacklogLimit) updates behind; re-priming them")
-    }
-
-    /// Appends one update to the ring, dropping the oldest past `ringCapacity`.
-    /// The single owner of the cap invariant — every post-backfill ring write
-    /// goes through here (via `emit`) so the trim logic can't drift between
-    /// call sites.
-    ///
-    /// O(1) amortized: at capacity (the steady state for any long-open
-    /// channel) each append bumps `ringHead` instead of paying an O(count)
-    /// `removeFirst` memmove — under raid bursts (50-200 events/sec) that
-    /// memmove compounded on every single event. The dead prefix is reclaimed
-    /// in one batch once per `ringCapacity` appends.
-    private func appendToRing(_ event: ChannelUpdate) {
-        ring.append(event)
-        if ring.count - ringHead > ringCapacity {
-            ringHead += 1
-        }
-        if ringHead >= ringCapacity {
-            ring.removeFirst(ringHead)
-            ringHead = 0
-        }
+        hub.emit(updates)
     }
 
     // MARK: - Backfill merge
@@ -934,11 +830,11 @@ public actor ChannelSession {
     /// Commits the backfill merge to the ring and ends the buffering window.
     ///
     /// MUST stay synchronous (no `await`): the actor holds its isolation for
-    /// the whole call, so reading `pendingLive`, building `ring`, clearing the
-    /// buffer, and flipping `backfillPending` happen as one atomic step with
-    /// respect to `handle(event:)`. An `await` here would reopen the actor and
-    /// let a live event slip in between "merge" and "clear" — it would be lost
-    /// or double-counted.
+    /// the whole call, so reading the hub's buffered live updates, building
+    /// the ring, clearing the buffer, and flipping `backfillPending` happen as
+    /// one atomic step with respect to `handle(event:)`. An `await` here would
+    /// reopen the actor and let a live event slip in between "merge" and
+    /// "clear" — it would be lost or double-counted.
     ///
     /// Internal (not private) so ChannelsTests can end the buffering window on
     /// a never-`start()`ed session and drive `resyncAfterReconnect` offline —
@@ -951,19 +847,11 @@ public actor ChannelSession {
         // an empty backfill (rustlog down, brand-new channel) would put a
         // meaningless rule at the very top of an all-live transcript.
         let divider: ChannelUpdate? = history.isEmpty ? nil : .row(makeDivider())
-        ring = ChannelHistoryMerge.mergeBackfill(
-            history: history,
-            pendingLive: pendingLive,
-            capacity: ringCapacity,
-            divider: divider
-        )
-        ringHead = 0
-        let bufferedCount = pendingLive.count
-        pendingLive = []
-        backfillPending = false
+        let bufferedCount = hub.commitBackfill(history: history, divider: divider)
 
-        if !ring.isEmpty {
-            logger.info("Primed ring with \(self.ring.count) event(s) for #\(self.channelLoginName, privacy: .public) — \(history.count) backfilled, \(bufferedCount) buffered-live")
+        let primedCount = hub.ring.count
+        if primedCount > 0 {
+            logger.info("Primed ring with \(primedCount) event(s) for #\(self.channelLoginName, privacy: .public) — \(history.count) backfilled, \(bufferedCount) buffered-live")
         }
     }
 
@@ -1097,12 +985,12 @@ public actor ChannelSession {
     /// they get the new ring as one `.reprime` rather than an append.
     private func mergeLateBackfill(_ history: [BackfillMessage]) {
         joinBackfill = .done
-        let missing = ChannelHistoryMerge.missingMessages(history, notIn: ringSnapshot)
+        let missing = ChannelHistoryMerge.missingMessages(history, notIn: hub.snapshot)
         guard !missing.isEmpty else { return }
         let merged = ChannelHistoryMerge.mergeBackfill(
             history: normalizeHistory(missing),
-            pendingLive: ringSnapshot,
-            capacity: ringCapacity,
+            pendingLive: hub.snapshot,
+            capacity: hub.capacity,
             divider: .row(makeDivider())
         )
         // The cap trims from the head, i.e. history first. If live rows
@@ -1117,22 +1005,9 @@ public actor ChannelSession {
             return false
         }
         guard anyHistorySurvives else { return }
-        ring = merged
-        ringHead = 0
+        hub.replaceRing(with: merged)
         logger.info("Merged \(missing.count) late history message(s) above the live rows of #\(self.channelLoginName, privacy: .public)")
-        reprimeSubscribers()
-    }
-
-    /// Re-posts the whole ring to every subscriber as one `.reprime` — for
-    /// changes that aren't a tail append. Replaces each backlog: its rows are
-    /// already in the ring, and its latest state-only updates are carried
-    /// (see `ChannelSubscription.reprime`).
-    private func reprimeSubscribers() {
-        guard !subscribers.isEmpty else { return }
-        let snapshot = ringSnapshot
-        for subscription in subscribers.values {
-            subscription.reprime(snapshot: snapshot)
-        }
+        hub.reprimeSubscribers()
     }
 
     // MARK: - Reconnect resync
@@ -1186,14 +1061,14 @@ public actor ChannelSession {
     public func resyncAfterReconnect() async {
         // The initial-backfill window has its own divider + merge path; a
         // resync during it would race `applyBackfill`'s atomic commit.
-        guard !backfillPending, !resyncInFlight else { return }
+        guard !hub.backfillPending, !resyncInFlight else { return }
         resyncInFlight = true
         defer { resyncInFlight = false }
 
         let fetched = await fetchBackfill(channelLoginName, Self.reconnectBackfillLimit)
         guard !fetched.isEmpty else { return }
 
-        let missing = ChannelHistoryMerge.missingMessages(fetched, notIn: ringSnapshot)
+        let missing = ChannelHistoryMerge.missingMessages(fetched, notIn: hub.snapshot)
         guard !missing.isEmpty else {
             logger.info("Reconnect resync for #\(self.channelLoginName, privacy: .public): no missed messages")
             return
@@ -1275,22 +1150,19 @@ public actor ChannelSession {
     /// every later subscriber primes from. (Rows already delivered to a live
     /// subscriber aren't re-sent — same as before: a re-attach picks them up.)
     private func refreshStaleNormalization() {
-        guard emoteIndex != nil, ringHead < ring.count else { return }
+        guard emoteIndex != nil, !hub.ring.isEmpty else { return }
         let table = currentEmoteTable()
         guard table.generation != 0 else { return }
 
-        var refreshed = 0
         let interval = signposter.beginInterval("renormalize", id: signposter.makeSignpostID())
-        for index in ringHead..<ring.count {
-            guard case .message(let stale) = ring[index],
-                  stale.emoteGeneration != table.generation else { continue }
-            ring[index] = .message(normalize(
+        let refreshed = hub.refreshMessages { stale in
+            guard stale.emoteGeneration != table.generation else { return nil }
+            return normalize(
                 stale.message,
                 isHistorical: stale.line.isHistorical,
                 timestamp: stale.line.timestamp,
                 table: table
-            ))
-            refreshed += 1
+            )
         }
         signposter.endInterval("renormalize", interval, "refreshed=\(refreshed)")
     }
