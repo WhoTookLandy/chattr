@@ -180,7 +180,7 @@ public final class ChatTabsModel {
     ///
     /// Active tab restoration is *not* handled here — that lives in
     /// `@SceneStorage` because it's window-state, not account-data. See
-    /// `ChatTabsScreen` for the `@SceneStorage` binding.
+    /// `HomeScreen` for the `@SceneStorage` binding.
     public func hydrateFromPersistence() {
         guard let persistence else { return }
         // Idempotent: only hydrate once per model. A re-run would reset `tabs`

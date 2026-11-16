@@ -185,7 +185,7 @@ public struct ChatScreen: View {
         @Bindable var bindableChatModel = chatModel
         // `.safeAreaBar(edge: .bottom)` pins the compose bar below the
         // scrolling content with integrated glass blur (iOS 26). The bar
-        // lives INSIDE ChatScreen (not in ChatTabsScreen) because each
+        // lives INSIDE ChatScreen (not in ChatPagerScreen) because each
         // tab has its own draft — sharing one bar across tabs would lose
         // drafts on swipe.
         Group {
@@ -307,13 +307,13 @@ public struct ChatScreen: View {
         // Chat settings entry point: the compose bar's ⋯ menu (see
         // `ComposeBar.moreMenu`). The top-bar gear it replaced competed
         // with the channel pill for the same glance.
-        // No `.navigationTitle` here — the parent ChatTabsScreen sets it to
+        // No `.navigationTitle` here — the parent ChatPagerScreen sets it to
         // "Chat" and the active tab pill in the strip already identifies the
         // channel. Having ChatScreen also override the title to "#login"
         // would just duplicate the information already shown one row below.
         //
         // Three structured tasks, all bound to view lifetime. SwiftUI cancels
-        // them on tear-down (incl. when ChatTabsScreen swaps the active
+        // them on tear-down (incl. when ChatPagerScreen swaps the active
         // channel via `.id(...)`). T11 made this safe — see notes above the
         // `badgeStore` / `emoteIndex` computed properties.
         //

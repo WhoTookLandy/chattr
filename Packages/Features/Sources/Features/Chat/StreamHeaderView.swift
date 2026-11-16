@@ -19,7 +19,7 @@ import Nuke
 ///
 /// Reads `FollowsStore` + `ChannelStatusStore` itself (not via ChatScreen)
 /// so status refreshes re-render only this header, never the chat screen.
-/// Refresh polling lives in `ChatTabsScreen`, batched across open tabs.
+/// Refresh polling lives in `HomeScreen`, batched across open tabs.
 struct StreamHeaderView: View {
     let channel: ChannelDescriptor
 

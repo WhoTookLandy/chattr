@@ -206,7 +206,7 @@ struct ChatTranscript: View {
     /// until rows arrive but log-spams about a missing target).
     ///
     /// **Scroll edge effect**: `.hard` style is the right pick here because
-    /// our parent (`ChatTabsScreen`) renders a pinned glass tab strip
+    /// our parent (`ChatPagerScreen`) renders a pinned glass tab strip
     /// directly above this scroll. Per the Liquid Glass guidance, "use
     /// `.hard` style for pinned accessory views" — that's exactly what the
     /// tab strip is. The hard variant dissolves scrolling content into the

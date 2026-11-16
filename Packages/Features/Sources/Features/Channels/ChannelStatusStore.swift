@@ -137,6 +137,20 @@ public final class ChannelStatusStore {
         }
     }
 
+    /// Last-live for one channel on demand — the Following list calls this
+    /// as offline rows scroll into view, so a 500-follow account costs one
+    /// `/videos` call per row actually looked at (and none for 30 minutes
+    /// after). No-op while the channel is known to be live.
+    public func ensureLastLive(channelId: String, account: Account, accountStore: AccountStore) async {
+        guard statuses[channelId]?.isLive != true else { return }
+        await refreshLastLive(
+            channelId: channelId,
+            client: accountStore.client(for: account),
+            account: account,
+            accountStore: accountStore
+        )
+    }
+
     private func refreshLastLive(
         channelId: String,
         client: TwitchClient,
@@ -152,7 +166,15 @@ public final class ChannelStatusStore {
             }
             guard let video = page.data.first else { return }
             let end = video.createdAt.addingTimeInterval(Self.seconds(inTwitchDuration: video.duration))
-            statuses[channelId]?.lastLiveAt = end
+            if statuses[channelId] != nil {
+                statuses[channelId]?.lastLiveAt = end
+            } else {
+                // First thing we've learned about this channel. `distantPast`
+                // fetchedAt keeps the (unknown) stream state stale, so
+                // `liveStream(for:)` still defers to FollowsStore and the
+                // next `refresh` still fetches it.
+                statuses[channelId] = Status(stream: nil, channelInfo: nil, lastLiveAt: end, fetchedAt: .distantPast)
+            }
         } catch {
             // Non-fatal: the header just says "Offline" without a time.
             logger.info("Last-live lookup failed for \(channelId, privacy: .public): \(error.localizedDescription, privacy: .public)")

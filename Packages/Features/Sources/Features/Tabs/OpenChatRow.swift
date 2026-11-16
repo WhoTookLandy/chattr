@@ -13,11 +13,11 @@ import Nuke
 ///
 /// Offline: "Offline · 2d ago" (or "#login" while status is unknown).
 /// Reads the status stores itself so a status refresh redraws rows, not the
-/// whole `ChatTabsScreen` (which also owns the pager).
+/// whole list.
 struct OpenChatRow: View {
     let tab: ChatTab
     /// Read for `mentionedTabIds` HERE (not by the list's owner) so a
-    /// background ping redraws one row, not `ChatTabsScreen`'s body.
+    /// background ping redraws one row, not `OpenChatsList`'s body.
     let chatTabs: ChatTabsModel
 
     private var hasMention: Bool { chatTabs.mentionedTabIds.contains(tab.id) }

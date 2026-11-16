@@ -41,7 +41,7 @@ public struct ProfileScreen: View {
     /// `?? .system` guard the old `String`-backed mirror needed is gone.
     @AppStorage(AppearanceMode.storageKey) private var appearanceMode: AppearanceMode = .system
     /// Whether visiting the Chats tab re-pushes the chat that was open
-    /// when the scene was torn down. Read by ChatTabsScreen's scene
+    /// when the scene was torn down. Read by HomeScreen's scene
     /// restoration; default on (resume) matches pre-toggle behavior.
     @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
     @State private var isSigningOut = false
