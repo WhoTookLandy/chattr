@@ -150,6 +150,29 @@ swift test --package-path Packages/ChatModel
 # …etc.
 ```
 
+## CI and TestFlight
+
+GitHub Actions (`.github/workflows/`):
+
+- **CI** (`ci.yml`) — on every push to `main` and every PR: `swift test` for
+  each package, plus an iOS Simulator `build-for-testing` of the app.
+- **TestFlight** (`testflight.yml`) — on a `v*` tag (or manually from the
+  Actions tab): archives a Release build and uploads it to App Store Connect.
+  The build number is the workflow run number unless overridden.
+
+TestFlight signing is cloud-managed through an App Store Connect API key, so
+no certificates or profiles live in the repo. One-time setup:
+
+1. App Store Connect → Users and Access → Integrations → App Store Connect API
+   → generate a key with the **Admin** role; note the Key ID and Issuer ID and
+   download `AuthKey_XXXX.p8` (downloadable once).
+2. Make sure the app record for `com.landy.chattr` exists in App Store Connect.
+3. Add repository secrets: `ASC_KEY_ID`, `ASC_ISSUER_ID`, and
+   `ASC_KEY_P8_BASE64` (`base64 -i AuthKey_XXXX.p8 | pbcopy` on macOS, or
+   `[Convert]::ToBase64String([IO.File]::ReadAllBytes("AuthKey_XXXX.p8"))` in
+   PowerShell).
+4. Push a tag: `git tag v1.0.0 && git push origin v1.0.0`.
+
 ## Roadmap
 
 Agreed-on but not-yet-scheduled work (with the blocker noted for each) lives in
