@@ -91,7 +91,7 @@ public struct ChannelListScreen: View {
     private var channels: [FollowedChannel] { followsStore?.channels ?? [] }
     private var liveStreamsDict: [String: TwitchStream] { followsStore?.liveStreams ?? [:] }
     private var liveStreamsOrdered: [TwitchStream] { followsStore?.liveStreamsOrdered ?? [] }
-    private var userProfiles: [String: TwitchUser] { followsStore?.userProfiles ?? [:] }
+    private var profileImageURLs: [String: URL] { followsStore?.profileImageURLs ?? [:] }
     private var allLoadState: FollowsStore.LoadState { followsStore?.allLoadState ?? .idle }
     private var liveLoadState: FollowsStore.LoadState { followsStore?.liveLoadState ?? .idle }
     private var allLoadProgress: Int { followsStore?.allLoadProgress ?? 0 }
@@ -115,27 +115,30 @@ public struct ChannelListScreen: View {
         followsStore?.sortedAllChannels ?? []
     }
 
+    /// Filters against `FollowsStore.sortedAllChannelSearchKeys` — lowercased
+    /// `"name\nlogin"` keys precomputed with the sort — so a keystroke costs
+    /// one `contains` per channel instead of two `lowercased()` allocations.
     private var filteredAllChannels: [FollowedChannel] {
         let sorted = sortedAllChannels
         guard !searchText.isEmpty else { return sorted }
         let query = searchText.lowercased()
-        return sorted.filter { channel in
-            channel.broadcasterName.lowercased().contains(query)
-                || channel.broadcasterLogin.lowercased().contains(query)
+        let keys = followsStore?.sortedAllChannelSearchKeys ?? []
+        return zip(sorted, keys).compactMap { channel, key in
+            key.contains(query) ? channel : nil
         }
     }
 
     /// Live channels filtered by search, then ordered by the selected sort.
     /// `/streams/followed` already returns descending viewer count, so the
-    /// default `.viewers` sort is a no-op passthrough.
+    /// default `.viewers` sort is a no-op passthrough. Search matches the
+    /// store's precomputed lowercased name/login/game keys.
     private var filteredLiveStreams: [TwitchStream] {
         var streams = liveStreamsOrdered
         if !searchText.isEmpty {
             let query = searchText.lowercased()
+            let keys = followsStore?.liveStreamSearchKeys ?? [:]
             streams = streams.filter { stream in
-                stream.userName.lowercased().contains(query)
-                    || stream.userLogin.lowercased().contains(query)
-                    || stream.gameName.lowercased().contains(query)
+                keys[stream.userId]?.contains(query) ?? false
             }
         }
         switch liveSort {
@@ -284,15 +287,17 @@ public struct ChannelListScreen: View {
             guard let store = followsStore else { return }
             switch selectedMode {
             case .live:
-                await store.refreshLive(account: account, accountStore: accountStore)
+                // Explicit user intent — bypass the staleness throttle.
+                await store.refreshLive(account: account, accountStore: accountStore, force: true)
             case .all:
                 await store.refreshAll(account: account, accountStore: accountStore)
             }
         }
         // Refresh live data whenever the user visits the Follows tab. The
         // initial load is triggered by RootView's .task on sign-in; this
-        // .task fires on every appear (including tab switches), giving us
-        // fresh live data without manual pull-to-refresh.
+        // .task fires on every appear (including tab switches). FollowsStore
+        // coalesces it with any in-flight refresh and skips it when the
+        // live list is younger than `liveStalenessInterval`.
         .task {
             guard let store = followsStore else { return }
             await store.refreshLive(account: account, accountStore: accountStore)
@@ -329,18 +334,16 @@ public struct ChannelListScreen: View {
         } else if filtered.isEmpty && !searchText.isEmpty {
             ContentUnavailableView.search(text: searchText)
         } else {
+            // One store read per body; each row gets its resolved URL.
+            let avatarURLs = profileImageURLs
             List {
                 ForEach(filtered, id: \.userId) { stream in
+                    let profileURL = avatarURLs[stream.userId]
                     Button {
-                        let profileURL = userProfiles[stream.userId]
-                            .flatMap { URL(string: $0.profileImageUrl) }
                         openChannel?(stream: stream, profileImageURL: profileURL)
                         dismiss()
                     } label: {
-                        LiveStreamRow(
-                            stream: stream,
-                            profile: userProfiles[stream.userId]
-                        )
+                        LiveStreamRow(stream: stream, profileImageURL: profileURL)
                     }
                     .buttonStyle(.plain)
                     .listRowBackground(Color.clear)
@@ -360,7 +363,7 @@ public struct ChannelListScreen: View {
             )
             Button("Retry") {
                 guard let store = followsStore else { return }
-                Task { await store.refreshLive(account: account, accountStore: accountStore) }
+                Task { await store.refreshLive(account: account, accountStore: accountStore, force: true) }
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)
@@ -441,19 +444,20 @@ public struct ChannelListScreen: View {
         if filtered.isEmpty && !searchText.isEmpty {
             ContentUnavailableView.search(text: searchText)
         } else {
+            // One store read each per body; each row gets resolved values.
+            let avatarURLs = profileImageURLs
+            let live = liveStreamsDict
             List {
                 ForEach(filtered) { channel in
+                    let profileURL = avatarURLs[channel.broadcasterId]
                     Button {
-                        let profileURL = userProfiles[channel.broadcasterId]
-                            .flatMap { URL(string: $0.profileImageUrl) }
                         openChannel?(channel: channel, profileImageURL: profileURL)
                         dismiss()
                     } label: {
                         ChannelRow(
                             channel: channel,
-                            stream: liveStreamsDict[channel.broadcasterId],
-                            profileImageURL: userProfiles[channel.broadcasterId]
-                                .flatMap { URL(string: $0.profileImageUrl) }
+                            stream: live[channel.broadcasterId],
+                            profileImageURL: profileURL
                         )
                     }
                     .buttonStyle(.plain)
