@@ -20,7 +20,7 @@ private let logger = AppLogger.make("Accounts.TwitchSignIn")
 /// UI-free by design: the window the auth sheet presents from is supplied
 /// by the caller through the `presentationAnchor` provider. The UIKit
 /// window lookup lives in `Features` (`TwitchSignIn+Presentation.swift`),
-/// which also offers the anchor-less `run(accountStore:clientId:)`
+/// which also offers the anchor-less `run(accountStore:)`
 /// convenience the views call.
 @MainActor
 public enum TwitchSignIn {

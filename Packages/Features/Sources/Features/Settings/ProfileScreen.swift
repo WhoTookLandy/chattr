@@ -30,9 +30,8 @@ private let logger = AppLogger.make("Features.Profile")
 ///   6. Developer (conditional) + destructive sign-out at the bottom.
 public struct ProfileScreen: View {
     private let account: Account
-    private let accountStore: AccountStore
-    /// Twitch client id, used by the account switcher's "Add Account".
-    private let clientId: String
+
+    @Environment(\.accountStore) private var accountStore
 
     /// Stored as the enum directly — `AppearanceMode` is `RawRepresentable`
     /// over `String`, which `@AppStorage` supports natively (same pattern as
@@ -83,10 +82,8 @@ public struct ProfileScreen: View {
         return "\(version) (\(build))"
     }
 
-    public init(account: Account, accountStore: AccountStore, clientId: String) {
+    public init(account: Account) {
         self.account = account
-        self.accountStore = accountStore
-        self.clientId = clientId
     }
 
     public var body: some View {
@@ -298,7 +295,7 @@ public struct ProfileScreen: View {
         // ~60pt of vertical space vs the default large-title mode.
         .toolbarTitleDisplayMode(.inlineLarge)
         .sheet(isPresented: $showingAccountSwitcher) {
-            AccountSwitcherView(accountStore: accountStore, clientId: clientId)
+            AccountSwitcherView()
         }
         .confirmationDialog(
             "Sign out of @\(account.login)?",
@@ -322,9 +319,12 @@ public struct ProfileScreen: View {
     private func signOut() async {
         isSigningOut = true
         defer { isSigningOut = false }
+        // Read before removal: the row is deleted once `remove` returns, and
+        // touching a deleted @Model's properties traps.
+        let login = account.login
         do {
             try await accountStore.remove(account: account)
-            logger.notice("Signed out @\(account.login, privacy: .public) from Profile")
+            logger.notice("Signed out @\(login, privacy: .public) from Profile")
         } catch {
             logger.error("Sign out had an error: \(error.localizedDescription, privacy: .public)")
             errorMessage = "Sign out: \(error.localizedDescription)"

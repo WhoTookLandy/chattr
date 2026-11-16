@@ -83,4 +83,100 @@ struct DraftStorageTests {
         #expect(DraftStorage.load(forChannel: stored) == "")
         #expect(DraftStorage.load(forChannel: pending) == "")
     }
+
+    // MARK: - Account scoping
+    //
+    // These switch the process-wide active account, so each one is fully
+    // synchronous (no suspension point for another @MainActor test to run
+    // in) and resets the scope to nil before returning. They use
+    // `setActiveAccount`, never `activate`, so they don't migrate the
+    // legacy dictionary other tests are writing to.
+
+    private func account() -> String {
+        "drafttest-account-\(UUID().uuidString)"
+    }
+
+    @Test("Drafts are scoped to the active account")
+    func scopedByAccount() {
+        let id = channel().id
+        let a = account()
+        let b = account()
+        defer {
+            DraftStorage.setActiveAccount(nil)
+            DraftStorage.removeAll(forAccount: a)
+            DraftStorage.removeAll(forAccount: b)
+        }
+
+        DraftStorage.setActiveAccount(a)
+        DraftStorage.save(forChannel: id, text: "from A")
+
+        DraftStorage.setActiveAccount(b)
+        #expect(DraftStorage.load(forChannel: id) == "")
+        DraftStorage.save(forChannel: id, text: "from B")
+
+        DraftStorage.setActiveAccount(a)
+        #expect(DraftStorage.load(forChannel: id) == "from A")
+
+        DraftStorage.setActiveAccount(nil)
+        #expect(DraftStorage.load(forChannel: id) == "")
+    }
+
+    @Test("A pending save lands in the account it was typed under")
+    func pendingKeepsItsAccount() {
+        let id = channel().id
+        let a = account()
+        let b = account()
+        defer {
+            DraftStorage.setActiveAccount(nil)
+            DraftStorage.removeAll(forAccount: a)
+            DraftStorage.removeAll(forAccount: b)
+        }
+
+        DraftStorage.setActiveAccount(a)
+        DraftStorage.scheduleSave(forChannel: id, text: "typed under A")
+        DraftStorage.setActiveAccount(b)
+        DraftStorage.flushPendingSaves()
+
+        #expect(DraftStorage.load(forChannel: id) == "")
+        DraftStorage.setActiveAccount(a)
+        #expect(DraftStorage.load(forChannel: id) == "typed under A")
+    }
+
+    @Test("removeAll(forAccount:) drops stored and pending drafts")
+    func removeAllForAccount() {
+        let stored = channel().id
+        let pending = channel().id
+        let a = account()
+        defer { DraftStorage.setActiveAccount(nil) }
+
+        DraftStorage.setActiveAccount(a)
+        DraftStorage.save(forChannel: stored, text: "a")
+        DraftStorage.scheduleSave(forChannel: pending, text: "b")
+
+        DraftStorage.removeAll(forAccount: a)
+        DraftStorage.flushPendingSaves()
+
+        #expect(DraftStorage.load(forChannel: stored) == "")
+        #expect(DraftStorage.load(forChannel: pending) == "")
+        #expect(UserDefaults.standard.object(forKey: DraftStorage.storageKey(forAccount: a)) == nil)
+    }
+
+    @Test("Legacy drafts migrate into the first account, keeping its own on conflict")
+    func legacyMigration() throws {
+        let suite = "chattr.tests.drafts.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = DraftStorage.storageKey(forAccount: "first")
+        defaults.set(["twitch/1": "legacy", "twitch/2": "old"], forKey: DraftStorage.legacyStorageKey)
+        defaults.set(["twitch/2": "newer"], forKey: first)
+
+        DraftStorage.migrateLegacyDrafts(toAccount: "first", defaults: defaults)
+
+        #expect(defaults.dictionary(forKey: first) as? [String: String] == ["twitch/1": "legacy", "twitch/2": "newer"])
+        #expect(defaults.object(forKey: DraftStorage.legacyStorageKey) == nil)
+
+        // Nothing left for a later account to adopt.
+        DraftStorage.migrateLegacyDrafts(toAccount: "second", defaults: defaults)
+        #expect(defaults.object(forKey: DraftStorage.storageKey(forAccount: "second")) == nil)
+    }
 }

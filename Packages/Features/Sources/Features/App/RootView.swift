@@ -4,17 +4,18 @@ import Accounts
 import Channels
 import TwitchKit
 import Core
-import os
-
-private let logger = AppLogger.make("Features.Root")
 
 /// The app's root view. Decides between sign-in flow and the main app shell.
 ///
 /// `accounts` is driven by SwiftData's `@Query` so it auto-refreshes when
 /// `AccountStore.add(...)` inserts a new row.
+///
+/// RootView is the single injection point for app-wide dependencies: every
+/// store a screen needs (`\.accountStore`, `\.followsStore`,
+/// `\.channelSessionRegistry`, …) is set in the environment here, once, so
+/// screens read them instead of threading them through their inits.
 public struct RootView: View {
     private let accountStore: AccountStore
-    private let clientId: String
     /// Owned by chattrApp, not by RootView — re-instantiating RootView (e.g.
     /// on a future hot reload or scene rebuild) shouldn't blow away in-flight
     /// chat sessions.
@@ -93,11 +94,9 @@ public struct RootView: View {
 
     public init(
         accountStore: AccountStore,
-        clientId: String,
         channelSessionRegistry: ChannelSessionRegistry
     ) {
         self.accountStore = accountStore
-        self.clientId = clientId
         self.channelSessionRegistry = channelSessionRegistry
         // Carry the pre-slider discrete text-size choice into the points
         // key (no-op once migrated or when the user has set the slider).
@@ -139,7 +138,7 @@ public struct RootView: View {
         // of `body` avoids re-running it on every re-evaluation.
         Group {
             if let active = activeAccount {
-                AppShell(account: active, accountStore: accountStore, clientId: clientId)
+                AppShell(account: active)
                     // `.id(userId)` forces a fresh AppShell when the active
                     // account changes (switch / add / remove). A new account
                     // means new chat sessions, a new follow list, new
@@ -154,9 +153,10 @@ public struct RootView: View {
                     // only AppShell holds that account's tab model.
                     .id(active.userId)
             } else {
-                SignInView(accountStore: accountStore, clientId: clientId)
+                SignInView()
             }
         }
+        .environment(\.accountStore, accountStore)
         .environment(\.globalCatalog, globalCatalog)
         .environment(\.blockStore, blockStore)
         .environment(\.followsStore, followsStore)
@@ -269,8 +269,17 @@ public struct RootView: View {
         // — FollowsStore's staleness throttle skips it after a quick
         // background/foreground hop, and coalesces it with any in-flight
         // refresh (e.g. the launch-time `.task` above).
+        //
+        // Leaving the foreground (inactive on the way to background, or
+        // background directly): write any debounced compose draft now — the
+        // app may be suspended or killed before the ~400ms timer fires, and
+        // the compose bar isn't torn down (so its own flush doesn't run).
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active, let active = activeAccount else { return }
+            guard phase == .active else {
+                DraftStorage.flushPendingSaves()
+                return
+            }
+            guard let active = activeAccount else { return }
             Task { await followsStore.refreshLive(account: active, accountStore: accountStore) }
         }
         // Create the active account's BlockStore (loads its persisted cache in
