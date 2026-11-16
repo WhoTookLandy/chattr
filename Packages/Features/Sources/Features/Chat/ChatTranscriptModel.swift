@@ -29,11 +29,13 @@ private let logger = AppLogger.make("Features.ChatTranscriptModel")
 ///   - `deinit`: nothing to clean up — `detach()` is the explicit teardown,
 ///     called by `ChatScreen.onDisappear`.
 ///
-/// Why `@MainActor`: the @Observable `lines` property drives SwiftUI body
-/// recomputes. Mutating from any other actor would either need explicit
-/// MainActor hops everywhere or trip Swift 6's data-race checks. @MainActor
-/// keeps everything simple at the cost of one actor hop per inbound message
-/// (cheap in practice — chat throughput is ~tens of messages/sec at peak).
+/// Why `@MainActor`: the observed publish surface (`changeVersion`, `isEmpty`,
+/// …) drives SwiftUI body recomputes. Mutating from any other actor would
+/// either need explicit MainActor hops everywhere or trip Swift 6's data-race
+/// checks. @MainActor keeps everything simple at the cost of one actor hop per
+/// inbound message. A raid pushes 100+ messages/sec, so that hop does only
+/// the O(1) buffer mutation; publishing is coalesced to at most one flush per
+/// `coalescingWindow` (~one frame) — see "Coalesced change channel" below.
 @MainActor
 @Observable
 public final class ChatTranscriptModel {
@@ -48,66 +50,130 @@ public final class ChatTranscriptModel {
         case attached    // all subscriptions live
     }
 
-    /// Display-ready lines rendered by `ChatRow`. Capped at `lineCap` via
-    /// a sliding window — when full, appending drops the oldest line.
-    ///
-    /// Type changed from `[ChatMessage]` to `[ChatLine]` in Phase 2.2 — we
-    /// now normalize each incoming message through `Normalizer.normalize`
-    /// before storing, so views consume the already-tokenized form
-    /// (emote runs, mention runs, etc.) without re-tokenizing on every
-    /// body recomputation.
-
     /// Sliding-window store of every received line (the dedup/echo source of
     /// truth) plus the incrementally-maintained, block-filtered projection the
     /// view renders. Replaces the old `allLines` array + per-message
     /// `BlockFilter.apply` full rescan + `Array.removeFirst` trim — see
-    /// `ChatBuffer` for the cost rationale. Cap = 500 retained lines per tab.
-    private var buffer = ChatBuffer(cap: 500)
+    /// `ChatBuffer` for the cost rationale. Cap = 500 retained lines per tab
+    /// by default (the Chat History setting overrides it at attach).
+    ///
+    /// `@ObservationIgnored`: it's a value type mutated on EVERY inbound
+    /// message (and by every drain, even an empty one), so leaving it observed
+    /// invalidated any body that had ever read through it at message rate.
+    /// Views observe the explicit, coalesced surface instead — `changeVersion`
+    /// (one bump per flush) and `isEmpty` (flips only).
+    @ObservationIgnored private var buffer = ChatBuffer(cap: 500)
 
-    /// Block-filtered, display-ready lines. Used as the **fallback snapshot**
-    /// for the incremental-change channel — `ChatListView` reads this only on
-    /// first mount or after a coalesced burst (see `changeVersion`), not per
-    /// message. Computed off the stored `buffer` so @Observable still notifies
-    /// the view, without a second stored copy to keep in sync.
-    public var lines: [ChatLine] { buffer.lines }
+    /// Block-filtered, display-ready lines — the live buffer state, which can
+    /// run up to one coalescing window ahead of the last flush. Reading it
+    /// registers a dependency on `changeVersion`, so a body that renders
+    /// `lines` directly (the non-UIKit fallback list) re-evaluates once per
+    /// flush. The UIKit list never reads this: it pulls `changes(since:)` and
+    /// resets from `transcriptSnapshot()` only when it must.
+    public var lines: [ChatLine] {
+        _ = changeVersion
+        return buffer.lines
+    }
 
-    /// True when there are no visible lines — drives `ChatScreen`'s empty
-    /// state. Reading this (instead of `lines.isEmpty`) keeps `ChatScreen.body`
-    /// off the full-array dependency on the hot path. Counts the *visible*
-    /// (block-filtered) projection, matching what the transcript renders —
-    /// `buffer.isEmpty` would count blocked-but-retained lines too. Internal:
-    /// only consumed inside the Features module.
-    var isEmpty: Bool { buffer.visibleCount == 0 }
+    /// True when there are no visible lines — drives `ChatTranscript`'s empty
+    /// state. Stored rather than derived from the (observation-ignored)
+    /// buffer, so observers are invalidated only when it actually flips; kept
+    /// current synchronously by `publishPending()`, so the list mounts the
+    /// moment the first line lands rather than a flush later. Counts the
+    /// *visible* (block-filtered) projection, matching what the transcript
+    /// renders. Internal: only consumed inside the Features module.
+    private(set) var isEmpty = true
 
-    // MARK: - Incremental change channel
+    // MARK: - Coalesced change channel
     //
     // Instead of re-publishing the whole `lines` array every message and making
-    // the view re-diff it, the model pushes a typed `[ChatChange]` batch the
-    // view applies directly. `changeVersion` is the only @Observable trigger;
-    // the batch itself is @ObservationIgnored so reading it never churns
-    // observation. The view applies `latestChangeBatch` when `changeVersion`
-    // advanced by exactly one, and falls back to a wholesale snapshot of
-    // `lines` on first mount or a coalesced multi-step jump.
+    // the view re-diff it, the model publishes typed `[ChatChange]` batches the
+    // view applies directly:
+    //
+    //   1. Every buffer mutation calls `publishPending()`. The first one after a
+    //      flush schedules a single main-actor flush `coalescingWindow` later;
+    //      the rest inside the window just accumulate in the buffer.
+    //   2. The flush seals everything pending into `changeLog` as ONE versioned
+    //      batch and sets `changeVersion` (the only observed trigger) to the
+    //      log head. A 100 msg/s firehose costs ~one publish per frame, not
+    //      one per message.
+    //   3. Readers never assume they saw every publish (SwiftUI coalesces
+    //      invalidations). Each keeps the last version it consumed and pulls
+    //      `changes(since:)`, which replays EVERY batch after it; only a reader
+    //      whose next batch was evicted from the bounded log resets from
+    //      `transcriptSnapshot()`.
+    //
+    // Reader pulls seal pending changes too (touching only ignored state), so
+    // a snapshot's lines always correspond exactly to its version.
 
-    /// Drained-but-undelivered changes from the most recent publish. Read by
-    /// `ChatListView` during its update. Observation-ignored: pulling it must
-    /// not invalidate any view.
-    @ObservationIgnored private var _latestChangeBatch: [ChatChange] = []
-    var latestChangeBatch: [ChatChange] { _latestChangeBatch }
+    /// How long the first mutation after a flush waits before publishing —
+    /// about one 60 Hz frame. Mutations inside the window ride along.
+    static let coalescingWindow: Duration = .milliseconds(15)
 
-    /// Monotonic publish counter. Bumps once per non-empty change batch; the
-    /// view compares it against the version it last applied.
+    /// Published batches by version. Observation-ignored: readers pull from it
+    /// inside their own update, which must not invalidate anything.
+    @ObservationIgnored private var changeLog = ChatChangeLog()
+
+    /// True while a flush is scheduled — collapses every mutation inside the
+    /// coalescing window onto that one flush.
+    @ObservationIgnored private var flushScheduled = false
+
+    /// Log head as of the last flush — the only observed trigger for the
+    /// change channel. Moves at most once per flush; readers treat a move as
+    /// "pull `changes(since:)`", never as "exactly one batch happened".
     private(set) var changeVersion: Int = 0
 
-    /// Drains the buffer's accumulated changes and publishes them. Safe to call
-    /// after any buffer mutation; a no-op when nothing changed. Because the
-    /// buffer *accumulates* between calls, a missed call only delays delivery
-    /// (the next call drains everything) — it can never lose or corrupt a row.
+    /// Call after any buffer mutation: refreshes `isEmpty` and schedules the
+    /// coalesced flush. Cheap — beyond the O(1) empty check it does nothing
+    /// while a flush is already pending. Because the buffer *accumulates*
+    /// until a flush or a reader pull seals it, nothing is lost between calls.
     private func publishPending() {
+        let empty = buffer.visibleCount == 0
+        if empty != isEmpty { isEmpty = empty }
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.coalescingWindow)
+            self?.flushPendingChanges()
+        }
+    }
+
+    /// Seals pending buffer changes into the log and publishes the new head.
+    /// Normally run by the task `publishPending()` schedules; internal so
+    /// tests can flush deterministically instead of sleeping.
+    func flushPendingChanges() {
+        flushScheduled = false
+        let head = sealPendingChanges()
+        if changeVersion != head { changeVersion = head }
+    }
+
+    /// Moves the buffer's undrained changes into the log as one batch and
+    /// returns the log head; afterwards `buffer.lines` is exactly the state at
+    /// that version. Touches only observation-ignored state, so readers may
+    /// call it from inside a view update.
+    @discardableResult
+    private func sealPendingChanges() -> Int {
         let changes = buffer.takeChanges()
-        guard !changes.isEmpty else { return }
-        _latestChangeBatch = changes
-        changeVersion &+= 1
+        if !changes.isEmpty { changeLog.append(changes) }
+        return changeLog.headVersion
+    }
+
+    /// Every change published after `version`, flattened in order, or
+    /// `.overrun` when `version` predates the retained log (the reader must
+    /// reset from `transcriptSnapshot()`). Seals pending changes first, so the
+    /// reader is never behind the buffer. Observation-free: safe to call from
+    /// `updateUIViewController`, `onChange`, or a scroll callback.
+    func changes(since version: Int) -> ChatChangeLog.Delta {
+        sealPendingChanges()
+        return changeLog.changes(since: version)
+    }
+
+    /// The visible lines plus the exact log version they reflect. A reader
+    /// that resets from this and then pulls `changes(since: version)` sees
+    /// every later change exactly once. O(visible) — reset path only.
+    func transcriptSnapshot() -> (version: Int, lines: [ChatLine]) {
+        let version = sealPendingChanges()
+        return (version, buffer.lines)
     }
 
     /// Blocked user ids, pushed in by the view (which observes BlockStore).

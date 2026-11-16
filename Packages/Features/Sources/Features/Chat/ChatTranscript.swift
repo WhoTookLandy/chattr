@@ -10,13 +10,13 @@ import Channels
 /// ## Why this is a separate view (observation scoping)
 ///
 /// `@Observable` registers dependencies per view BODY that reads a
-/// property. `ChatTranscriptModel.lines` is derived from the stored `buffer`,
-/// which mutates on EVERY inbound message — so whichever body reads
-/// `lines` re-evaluates at chat-message rate (50-200x/sec during raids).
-/// When that body was `ChatScreen.body`, each message re-ran the whole
-/// screen: compose-bar closure construction, sheet/alert wiring, registry
-/// lookups. Isolating every `lines` read (and the scroll-rate @State)
-/// here confines per-message invalidation to this subtree.
+/// property. This body reads `chatModel.changeVersion`, which moves on every
+/// coalesced model flush (up to ~once per frame during raids) — so whichever
+/// body reads it re-evaluates at flush rate. When that body was
+/// `ChatScreen.body`, each update re-ran the whole screen: compose-bar
+/// closure construction, sheet/alert wiring, registry lookups. Isolating
+/// every per-flush read (and the scroll-rate @State) here confines that
+/// invalidation to this subtree.
 ///
 /// To verify after touching this boundary: add `let _ = Self._printChanges()`
 /// to ChatScreen.body in a debug build and open a busy channel — ChatScreen
@@ -57,8 +57,9 @@ struct ChatTranscript: View {
 
     /// Count of messages that arrived while the user was scrolled up
     /// (not tailing). Shown in the jump-to-bottom pill ("3 new
-    /// messages") so the user knows how much they're missing. Reset to
-    /// 0 whenever they return to the bottom.
+    /// messages") so the user knows how much they're missing. On UIKit the
+    /// list controller writes it (it holds those messages back and knows
+    /// exactly how many); the legacy path tallies `lines.count` deltas.
     @State private var unreadWhileScrolledUp = 0
 
     /// Incremented to ask the UIKit chat list to scroll to the newest message
@@ -75,7 +76,8 @@ struct ChatTranscript: View {
     var body: some View {
         // `isEmpty` (not `lines.isEmpty`): the `lines` getter materializes the
         // full visible window once the ring wraps, and this body re-runs per
-        // message — see ChatTranscriptModel.isEmpty's doc comment.
+        // flush — while `isEmpty` is a stored flag that only invalidates when
+        // it flips. See ChatTranscriptModel.isEmpty's doc comment.
         if chatModel.isEmpty {
             // Distinguish "attaching" (sessions not yet subscribed) from
             // "attached but quiet" (subscriptions live, but no messages
@@ -105,35 +107,25 @@ struct ChatTranscript: View {
         ZStack {
             ChatListView(
                 // Pass the publish VERSION (an Int), not the lines array — that's
-                // what keeps this body off the full-array dependency. The view
-                // pulls the change batch / snapshot via the closures only when it
-                // actually needs them, inside its own update pass.
+                // what keeps this body off the full-array dependency. It only
+                // triggers the update; the controller pulls every change since
+                // its own last version (or, rarely, a snapshot) via the
+                // closures, inside its own update pass.
                 changeVersion: chatModel.changeVersion,
-                latestChanges: { chatModel.latestChangeBatch },
-                snapshot: { chatModel.lines },
+                changes: { chatModel.changes(since: $0) },
+                snapshot: { chatModel.transcriptSnapshot() },
                 rowContent: { line in rowContent(line) },
                 isAtBottom: $isAtBottom,
+                // The controller owns the unread tally: it is the one holding
+                // messages back while the user reads scrollback, so it counts
+                // exactly the appends it hasn't shown — across every replayed
+                // batch, not just the latest publish — and zeroes the count
+                // when it flushes them (re-pin or pill tap).
+                unreadCount: $unreadWhileScrolledUp,
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge
             )
             .ignoresSafeArea(edges: appearance.edgeToEdge ? .top : [])
-        }
-        // New messages while scrolled up tally into the unread pill; while
-        // tailing, the collection view auto-scrolls and we reset the count.
-        // Counting `.appended` changes in the just-published batch replaces the
-        // old `lines.count` delta (which we no longer observe per message).
-        .onChange(of: chatModel.changeVersion) { _, _ in
-            if isAtBottom {
-                unreadWhileScrolledUp = 0
-            } else {
-                let appended = chatModel.latestChangeBatch.reduce(into: 0) { count, change in
-                    if case .appended = change { count += 1 }
-                }
-                if appended > 0 { unreadWhileScrolledUp += appended }
-            }
-        }
-        .onChange(of: isAtBottom) { _, atBottom in
-            if atBottom { unreadWhileScrolledUp = 0 }
         }
         // Jump-to-bottom pill (bottom edge).
         .overlay(alignment: .bottom) {
