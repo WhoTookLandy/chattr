@@ -136,6 +136,12 @@ public struct RootView: View {
                     // emote+badge prefetch — a clean slate is correct, and
                     // far simpler than threading account-change invalidation
                     // through every child store.
+                    //
+                    // The outgoing account's chat sessions are released by
+                    // the OLD AppShell's `onDisappear` (→ `ChatTabsModel
+                    // .tearDown()`), which this identity change triggers.
+                    // Hooked there rather than in an `onChange` here because
+                    // only AppShell holds that account's tab model.
                     .id(active.userId)
             } else {
                 SignInView(accountStore: accountStore, clientId: clientId)

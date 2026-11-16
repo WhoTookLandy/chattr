@@ -99,9 +99,12 @@ public struct ChatTabsScreen: View {
     ///     mirror the new value back to `@SceneStorage`. The latest selection
     ///     is always durable.
     ///
-    /// Tab list itself lives in SwiftData (account-scoped, see
-    /// `PersistedChatTab`) — this storage is purely "which one was active
-    /// in this scene."
+    /// Tab list itself lives in SwiftData, scoped per account (rows carry
+    /// `PersistedChatTab.accountUserId`; `TabPersistence` only reads/writes
+    /// the signed-in account's rows) — this storage is purely "which one was
+    /// active in this scene." It is NOT account-scoped: after an account
+    /// switch the saved id simply won't match any of the new account's tabs,
+    /// and the restore below skips it.
     @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
 
     /// You → App → Resume Last Chat. When off, the Chats tab always
@@ -258,10 +261,9 @@ public struct ChatTabsScreen: View {
                 chatTabs.move(fromOffsets: source, toOffset: destination)
             }
             .onDelete { offsets in
-                let ids = offsets.map { chatTabs.tabs[$0].id }
-                for id in ids {
-                    chatTabs.close(tabId: id)
-                }
+                // One batched close: a single persistence save and one
+                // release pass, instead of a save per row.
+                chatTabs.close(tabIds: offsets.map { chatTabs.tabs[$0].id })
             }
         }
         .listStyle(.plain)

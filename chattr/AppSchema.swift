@@ -5,7 +5,9 @@
 
 import Accounts
 import Channels
+import Core
 import Features
+import Foundation
 import SwiftData
 
 /// Baseline versioned schema for chattr's SwiftData store.
@@ -37,22 +39,79 @@ import SwiftData
 ///
 /// Test the upgrade path on a *real device* with pre-existing data — the
 /// simulator deletes the store on rebuild and never exercises migration.
+///
+/// ## Frozen snapshots
+///
+/// An older schema must describe the models *as they were*, so when a model
+/// changes, its previous shape is copied into the old schema as a nested
+/// `@Model` with the same class name (SwiftData keys entities by the
+/// unqualified name). Pointing two versions at the same live class gives
+/// them identical checksums, and SwiftData rejects the plan at launch.
+/// `Account` and `JoinedChannel` haven't changed since V1, so every version
+/// still references the live types; freeze them here the first time they
+/// change.
 enum AppSchemaV1: VersionedSchema {
     static let versionIdentifier = Schema.Version(1, 0, 0)
 
     static var models: [any PersistentModel.Type] {
+        // `PersistedChatTab` resolves to the frozen nested copy below.
+        [Account.self, JoinedChannel.self, PersistedChatTab.self]
+    }
+
+    /// `Features.PersistedChatTab` as shipped in V1 (before tabs were
+    /// account-scoped). Must stay byte-for-byte equivalent in stored
+    /// properties and attributes to what V1 stores were created with, or
+    /// SwiftData won't recognise existing stores as V1. Never edit it.
+    @Model
+    final class PersistedChatTab {
+        @Attribute(.unique) var id: UUID
+        var order: Int
+        var channels: [ChannelDescriptor]
+        var addedAt: Date
+
+        init(id: UUID, order: Int, channels: [ChannelDescriptor], addedAt: Date) {
+            self.id = id
+            self.order = order
+            self.channels = channels
+            self.addedAt = addedAt
+        }
+    }
+}
+
+/// V2: chat tabs are per-account. Adds `PersistedChatTab.accountUserId`
+/// (`String`, default `""`).
+enum AppSchemaV2: VersionedSchema {
+    static let versionIdentifier = Schema.Version(2, 0, 0)
+
+    static var models: [any PersistentModel.Type] {
+        // The live `Features.PersistedChatTab`.
         [Account.self, JoinedChannel.self, PersistedChatTab.self]
     }
 }
 
-/// Migration plan for the SwiftData store. V1 is the baseline, so there are no
-/// stages yet — the first schema change adds the first stage.
+/// The schema the app's container is built with. Bump when adding a version.
+typealias AppSchemaLatest = AppSchemaV2
+
+/// Migration plan for the SwiftData store.
 enum AppMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [AppSchemaV1.self]
+        [AppSchemaV1.self, AppSchemaV2.self]
     }
 
     static var stages: [MigrationStage] {
-        []
+        [migrateV1toV2]
+    }
+
+    /// V1 → V2 adds `PersistedChatTab.accountUserId`. Lightweight is enough:
+    /// it's a new attribute with a declared default, so existing rows get
+    /// `""` ("legacy, not yet owned"). `TabPersistence.fetchAll()` then hands
+    /// those rows to the first account that hydrates after the upgrade — the
+    /// pre-upgrade strip belonged to whoever was signed in, which is almost
+    /// always the account that launches first. Rows aren't stamped here
+    /// because the store doesn't know which account is active.
+    ///
+    /// Computed, not a stored `static let`: `MigrationStage` isn't `Sendable`.
+    static var migrateV1toV2: MigrationStage {
+        .lightweight(fromVersion: AppSchemaV1.self, toVersion: AppSchemaV2.self)
     }
 }
