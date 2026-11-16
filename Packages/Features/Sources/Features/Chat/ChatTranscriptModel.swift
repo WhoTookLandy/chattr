@@ -1192,15 +1192,24 @@ public final class ChatTranscriptModel {
     /// Computed on demand rather than maintained as an index because:
     ///   - Threads are rare (one in N messages); maintaining a full
     ///     thread-index for every message would waste memory.
-    ///   - The filter is O(lines.count) which at our cap (~500 lines)
-    ///     is well below the noticeable-cost threshold; SwiftUI calls
-    ///     this once per sheet open + once per chat update while the
-    ///     sheet is open, which is fine.
+    ///   - The filter is O(lines.count) — fine per call at our cap (~500
+    ///     lines), but not per publish during a raid. `ThreadView` therefore
+    ///     calls it (via `threadSnapshot`) once per sheet open and then only
+    ///     when a published batch actually touches the thread (see
+    ///     `ChatChange.touchesThread`).
     public func lines(inThreadRootedAt rootMessageId: String) -> [ChatLine] {
         lines.filter { line in
             line.id == rootMessageId
                 || line.replyParent?.threadRootMessageId == rootMessageId
         }
+    }
+
+    /// The thread's lines plus the change-log version they reflect — the
+    /// thread-sheet counterpart of `transcriptSnapshot()`. A reader that seeds
+    /// from this and then pulls `changes(since: version)` misses nothing.
+    func threadSnapshot(rootedAt rootMessageId: String) -> (version: Int, lines: [ChatLine]) {
+        let version = sealPendingChanges()
+        return (version, lines(inThreadRootedAt: rootMessageId))
     }
 
     /// Returns the thread root id for a given line. If the line is

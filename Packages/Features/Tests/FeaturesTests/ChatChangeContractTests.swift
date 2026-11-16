@@ -203,6 +203,38 @@ struct ChatChangeContractTests {
         #expect(buf.lines.isEmpty)
     }
 
+    // MARK: - Thread relevance (ThreadView's refresh gate)
+
+    private func reply(_ id: String, root: String) -> ChatLine {
+        ChatLine(
+            id: id, kind: .message, authorUserId: "u", authorDisplayName: "u", runs: [.text("re")],
+            replyParent: ChatLine.ReplyParent(
+                parentMessageId: root, parentAuthorDisplayName: "u",
+                parentBody: "root", threadRootMessageId: root
+            )
+        )
+    }
+
+    @Test("touchesThread: unrelated chatter is ignored, root/replies/members are not")
+    func touchesThread() {
+        let members: Set<String> = ["root", "r1"]
+        func touches(_ change: ChatChange) -> Bool {
+            change.touchesThread(rootedAt: "root", memberIds: members)
+        }
+        #expect(!touches(.appended(line("noise"))))
+        #expect(!touches(.removed(id: "noise")))
+        #expect(!touches(.reconfigured(line("noise"))))
+        #expect(!touches(.rekeyed(from: "pending-9", to: line("msg-9"))))
+
+        #expect(touches(.appended(reply("r2", root: "root"))))        // new reply
+        #expect(touches(.appended(line("root"))))                     // root itself
+        #expect(touches(.reconfigured(line("r1"))))                   // member edited (deleted)
+        #expect(touches(.removed(id: "r1")))                          // member trimmed
+        #expect(touches(.rekeyed(from: "pending-1", to: reply("msg-1", root: "root"))))  // my reply delivered
+        #expect(touches(.rekeyed(from: "r1", to: line("r1b"))))       // member re-keyed
+        #expect(touches(.reset([])))
+    }
+
     // MARK: - Composed stream
 
     @Test("a long mixed stream stays consistent change-by-change")

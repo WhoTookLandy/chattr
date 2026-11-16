@@ -64,6 +64,28 @@ enum ChatChange: Equatable {
         }
         return result
     }
+
+    /// Whether this change can alter the thread rooted at `rootMessageId`,
+    /// given the ids the thread currently shows (`memberIds`). Lets a thread
+    /// sheet skip its O(buffer) re-filter for the overwhelming majority of
+    /// batches, which are unrelated chatter.
+    func touchesThread(rootedAt rootMessageId: String, memberIds: Set<String>) -> Bool {
+        func belongs(_ line: ChatLine) -> Bool {
+            line.id == rootMessageId
+                || line.replyParent?.threadRootMessageId == rootMessageId
+                || memberIds.contains(line.id)
+        }
+        switch self {
+        case .appended(let line), .reconfigured(let line):
+            return belongs(line)
+        case .rekeyed(let from, let line):
+            return memberIds.contains(from) || belongs(line)
+        case .removed(let id):
+            return memberIds.contains(id)
+        case .reset:
+            return true
+        }
+    }
 }
 
 /// Bounded, versioned log of published `ChatChange` batches — the delivery
