@@ -56,6 +56,12 @@ struct chattrApp: App {
         let container = Self.makeModelContainer(schema: schema)
         self.modelContainer = container
         let store = AccountStore(modelContainer: container, clientId: Self.clientId)
+        // Removing an account also drops what Features persists for it
+        // (tabs, drafts, block cache). Wired here because Accounts can't
+        // import Features.
+        store.onAccountRemoved = { userId in
+            AccountLocalData.remove(forAccountUserId: userId, modelContainer: container)
+        }
         self.accountStore = store
         self.channelSessionRegistry = ChannelSessionRegistry(accountStore: store)
     }

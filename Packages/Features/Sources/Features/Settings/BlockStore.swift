@@ -35,7 +35,17 @@ public final class BlockStore {
     private let accountUserId: String
     private let accountStore: AccountStore
     private let defaults: UserDefaults
-    private var storageKey: String { "blockedUsers.\(accountUserId)" }
+    private var storageKey: String { Self.persistenceKey(forAccountUserId: accountUserId) }
+
+    private static func persistenceKey(forAccountUserId accountUserId: String) -> String {
+        "blockedUsers.\(accountUserId)"
+    }
+
+    /// Drop an account's persisted block-list cache. Called when the account
+    /// is removed (see `AccountLocalData.remove`).
+    public static func removePersisted(forAccountUserId accountUserId: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: persistenceKey(forAccountUserId: accountUserId))
+    }
 
     public init(accountUserId: String, accountStore: AccountStore, defaults: UserDefaults = .standard) {
         self.accountUserId = accountUserId

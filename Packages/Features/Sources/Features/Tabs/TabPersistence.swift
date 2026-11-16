@@ -146,4 +146,24 @@ public final class TabPersistence {
         try context.save()
         logger.info("Saved \(tabs.count) tab(s) to SwiftData")
     }
+
+    /// Delete every row this account owns. Called when the account itself
+    /// is removed (see `AccountLocalData.remove`) so its strip doesn't
+    /// linger on disk. Legacy unowned rows (`accountUserId == ""`) are left
+    /// for the next account to adopt. No save when there's nothing to delete.
+    public func deleteAll() throws {
+        let context = modelContainer.mainContext
+        let owner = accountUserId
+        let rows = try context.fetch(FetchDescriptor<PersistedChatTab>(
+            predicate: #Predicate<PersistedChatTab> { row in
+                row.accountUserId == owner
+            }
+        ))
+        guard !rows.isEmpty else { return }
+        for row in rows {
+            context.delete(row)
+        }
+        try context.save()
+        logger.notice("Deleted \(rows.count) tab row(s) for removed account \(owner, privacy: .public)")
+    }
 }
