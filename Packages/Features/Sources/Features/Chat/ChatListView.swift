@@ -31,6 +31,11 @@ struct ChatListView: UIViewControllerRepresentable {
     /// callbacks are assembled by `ChatScreen`, keeping this component
     /// ignorant of the model layer.
     let rowContent: (ChatLine) -> ChatRow
+    /// Inputs `rowContent` reads besides the line (badges loaded, can
+    /// moderate). When it changes, every row already in the list is
+    /// reconfigured — otherwise rows built before badges loaded or mod
+    /// status arrived stay stale until recycled.
+    let rowInputs: ChatRowInputs
     /// UIKit → SwiftUI: true when tailing the live edge. Drives the pill.
     @Binding var isAtBottom: Bool
     /// UIKit → SwiftUI: messages that arrived while the list was unpinned and
@@ -72,6 +77,7 @@ struct ChatListView: UIViewControllerRepresentable {
         vc.update(
             changes: changes,
             snapshot: snapshot,
+            rowInputs: rowInputs,
             scrollToBottomToken: scrollToBottomToken
         )
     }
@@ -169,6 +175,10 @@ final class ChatListViewController: UIViewController {
     /// Last unread count pushed to SwiftUI — report on change only.
     private var lastReportedUnread = 0
 
+    /// Current row inputs (badges loaded, can moderate). Nil before the first
+    /// update. Read by the cell registration as the hosted row's identity.
+    private var rowInputs: ChatRowInputs?
+
     override func viewDidLoad() {
         super.viewDidLoad()
         configureCollectionView()
@@ -236,7 +246,14 @@ final class ChatListViewController: UIViewController {
     private func configureDataSource() {
         let registration = UICollectionView.CellRegistration<UICollectionViewCell, String> { [weak self] cell, _, id in
             guard let self, let line = self.feed.linesByID[id], let rowContent = self.rowContent else { return }
-            cell.contentConfiguration = UIHostingConfiguration { rowContent(line) }
+            // `.id(rowInputs)`: ChatRow's hand-written `==` compares only the
+            // line and badge entries — it deliberately ignores closures, so a
+            // reconfigure that merely adds `onDelete` (mod status learned)
+            // would be short-circuited as "unchanged". Keying the hosted
+            // row's identity on the inputs token forces a fresh row exactly
+            // when those inputs change (rare), and is a no-op otherwise.
+            let inputs = self.rowInputs
+            cell.contentConfiguration = UIHostingConfiguration { rowContent(line).id(inputs) }
                 .margins(.all, 0)   // ChatRow + section insets own the spacing
             cell.backgroundConfiguration = .clear()
         }
@@ -308,10 +325,18 @@ final class ChatListViewController: UIViewController {
     func update(
         changes: @escaping (Int) -> ChatChangeLog.Delta,
         snapshot: @escaping () -> (version: Int, lines: [ChatLine]),
+        rowInputs: ChatRowInputs,
         scrollToBottomToken: Int
     ) {
         pullChanges = changes
         pullSnapshot = snapshot
+
+        // Row inputs changed (badges finished loading, mod status flipped):
+        // reconfigure every row already in the list, in the same apply as
+        // whatever data arrived. Not on the first update — every row is
+        // fresh then.
+        let inputsChanged = self.rowInputs != nil && self.rowInputs != rowInputs
+        self.rowInputs = rowInputs
 
         let jumpRequested = scrollToBottomToken != lastScrollToBottomToken
         if jumpRequested {
@@ -323,7 +348,7 @@ final class ChatListViewController: UIViewController {
             // resumeTailingIfNearBottom.
             isPinnedToBottom = true
         }
-        refresh()
+        refresh(reconfigureAll: inputsChanged)
         if jumpRequested { pinToBottomIfNeeded() }
     }
 

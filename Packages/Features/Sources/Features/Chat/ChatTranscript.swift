@@ -31,6 +31,10 @@ struct ChatTranscript: View {
     /// Row factory — closes over ChatScreen's callbacks (retry, reply,
     /// block, report). Runs from the cell provider, outside any body.
     let rowContent: (ChatLine) -> ChatRow
+    /// What `rowContent` reads besides the line (badges, mod status). A
+    /// change makes the list reconfigure rows already on screen — see
+    /// `ChatRowInputs`.
+    let rowInputs: ChatRowInputs
     /// Parent-owned: written by the report flow's row callbacks (built in
     /// ChatScreen), read by the confirmation pill overlay here.
     @Binding var showReportConfirmation: Bool
@@ -115,6 +119,7 @@ struct ChatTranscript: View {
                 changes: { chatModel.changes(since: $0) },
                 snapshot: { chatModel.transcriptSnapshot() },
                 rowContent: { line in rowContent(line) },
+                rowInputs: rowInputs,
                 isAtBottom: $isAtBottom,
                 // The controller owns the unread tally: it is the one holding
                 // messages back while the user reads scrollback, so it counts
@@ -344,4 +349,22 @@ struct ChatTranscript: View {
         }
     }
 
+}
+
+/// Row-construction inputs that live OUTSIDE `ChatLine` — what
+/// `ChatScreen.chatRow(for:)` reads besides the line itself when a cell is
+/// configured: the channel's badge table (`ChatBadgeStore.entries`, loaded
+/// once, asynchronously) and whether the account can moderate here (drives
+/// the row's Delete Message affordance).
+///
+/// The list configures a cell once and keeps it until the line changes, so a
+/// row built before badges loaded — or before mod status was learned — stayed
+/// badge-less / Delete-less until it happened to be recycled. `ChatScreen`
+/// computes this token in its body (so it's observed); when it changes,
+/// `ChatListView` reconfigures every row it holds.
+struct ChatRowInputs: Hashable {
+    /// Size of the badge table — 0 until `ChatBadgeStore.load` lands.
+    var badgeEntryCount: Int
+    /// `ChatTranscriptModel.currentUserCanModerate`.
+    var canModerate: Bool
 }
