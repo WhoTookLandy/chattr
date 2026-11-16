@@ -516,6 +516,7 @@ public actor ChannelSession {
         // the registry discards a session stopped mid-start).
         joinBackfillFetch?.cancel()
         joinBackfillFetch = nil
+        joinBackfill = .done   // a fetch that completes anyway is not merged
         wakeJoinBackfillWaiter()
 
         // End every subscriber's stream up front: nothing posted from here on
@@ -900,7 +901,9 @@ public actor ChannelSession {
         guard !overflowed.isEmpty else { return }
         let snapshot = ringSnapshot
         for subscription in overflowed {
-            subscription.replacePending(with: [.reprime(snapshot)])
+            // The refused batch is in the ring already (emit appends first);
+            // only its state-only updates need carrying.
+            subscription.reprime(snapshot: snapshot, alsoCarrying: updates)
         }
         logger.warning("\(overflowed.count) subscriber(s) of #\(self.channelLoginName, privacy: .public) fell more than \(self.subscriberBacklogLimit) updates behind; re-priming them")
     }
@@ -1061,14 +1064,32 @@ public actor ChannelSession {
     /// is exposed on time even when the history service is slow or down.
     /// Internal for the same testing reason as `beginJoinBackfill`.
     func finishJoinBackfill() async {
-        if case .fetching = joinBackfill, let deadline = joinBackfillDeadline {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                joinBackfillWaiter = continuation
-                joinBackfillTimer = Task { [weak self] in
-                    try? await Task.sleep(until: deadline, clock: .continuous)
-                    await self?.wakeJoinBackfillWaiter()
+        if case .fetching = joinBackfill,
+           let deadline = joinBackfillDeadline,
+           joinBackfillWaiter == nil,       // one waiter (start) — never overwrite one
+           !Task.isCancelled {
+            // A cancelled start (the registry released the key mid-start)
+            // must not sit out the deadline: a re-acquire is queued behind
+            // this session's teardown.
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    joinBackfillWaiter = continuation
+                    joinBackfillTimer = Task { [weak self] in
+                        do {
+                            try await Task.sleep(until: deadline, clock: .continuous)
+                        } catch {
+                            return   // cancelled: whoever cancelled us did the waking
+                        }
+                        await self?.wakeJoinBackfillWaiter()
+                    }
                 }
+            } onCancel: {
+                Task { await self.wakeJoinBackfillWaiter() }
             }
+        }
+        if Task.isCancelled {
+            // This session is about to be discarded; don't keep fetching.
+            joinBackfillFetch?.cancel()
         }
         // Decided in one actor turn: whatever state we find is the outcome.
         switch joinBackfill {
@@ -1100,6 +1121,13 @@ public actor ChannelSession {
     /// Test hook: a `finishJoinBackfill` is currently parked.
     var isWaitingForJoinBackfill: Bool { joinBackfillWaiter != nil }
 
+    /// Test hook: the join history has been applied or merged (or given up
+    /// on by `stop()`) — nothing more will come of it.
+    var isJoinBackfillSettled: Bool {
+        if case .done = joinBackfill { return true }
+        return false
+    }
+
     /// Resumes a `start()` parked in `finishJoinBackfill`, at most once.
     private func wakeJoinBackfillWaiter() {
         joinBackfillTimer?.cancel()
@@ -1119,25 +1147,39 @@ public actor ChannelSession {
         joinBackfill = .done
         let missing = Self.missingMessages(history, notIn: ringSnapshot)
         guard !missing.isEmpty else { return }
-        ring = Self.mergeBackfill(
+        let merged = Self.mergeBackfill(
             history: normalizeHistory(missing),
             pendingLive: ringSnapshot,
             capacity: ringCapacity,
             divider: .row(makeDivider())
         )
+        // The cap trims from the head, i.e. history first. If live rows
+        // already fill the ring, nothing late survives — leave the ring (and
+        // every subscriber's transcript) alone rather than reset them for an
+        // orphaned divider.
+        let historyIds = Set(missing.map(\.message.messageId))
+        let anyHistorySurvives = merged.contains { update in
+            if case .message(let normalized) = update {
+                return historyIds.contains(normalized.message.messageId)
+            }
+            return false
+        }
+        guard anyHistorySurvives else { return }
+        ring = merged
         ringHead = 0
         logger.info("Merged \(missing.count) late history message(s) above the live rows of #\(self.channelLoginName, privacy: .public)")
         reprimeSubscribers()
     }
 
     /// Re-posts the whole ring to every subscriber as one `.reprime` — for
-    /// changes that aren't a tail append. Replaces each backlog: everything
-    /// in it is already in the ring.
+    /// changes that aren't a tail append. Replaces each backlog: its rows are
+    /// already in the ring, and its latest state-only updates are carried
+    /// (see `ChannelSubscription.reprime`).
     private func reprimeSubscribers() {
         guard !subscribers.isEmpty else { return }
         let snapshot = ringSnapshot
         for subscription in subscribers.values {
-            subscription.replacePending(with: [.reprime(snapshot)])
+            subscription.reprime(snapshot: snapshot)
         }
     }
 

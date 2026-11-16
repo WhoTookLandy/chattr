@@ -100,21 +100,26 @@ struct ChannelSessionJoinBackfillTests {
 
         let (subscription, snapshot) = await session.subscribe()
         #expect(shape(snapshot) == ["live1"])
+        // The start-time restrictions fetch resolves while the subscriber
+        // hasn't drained yet — it must survive the reprime below.
+        await session.applyInitialRestrictions(ChatRestrictions(slowModeSeconds: 7))
 
         // History lands late: deduped against the ring (live1 is already
         // there), placed ABOVE the live rows with the join divider between,
         // and handed to the subscriber as one reprime of the new ring.
         await gate.open()
-        for _ in 0..<500 {
-            if await session.currentSnapshot().count == 4 { break }
-            try await Task.sleep(for: .milliseconds(2))
-        }
+        try await waitUntilSettled(session)
         #expect(shape(await session.currentSnapshot()) == ["h1", "h2", "|", "live1"])
 
         let pending = subscription.takePending()
-        try #require(pending.count == 1)
-        guard case .reprime(let reprimed) = pending[0] else {
-            Issue.record("Expected a reprime, got \(pending[0])")
+        try #require(pending.count == 2)
+        guard case .restrictionsUpdated(let restrictions) = pending[0] else {
+            Issue.record("Expected the pending restrictions to be carried, got \(pending[0])")
+            return
+        }
+        #expect(restrictions.slowModeSeconds == 7)
+        guard case .reprime(let reprimed) = pending[1] else {
+            Issue.record("Expected a reprime, got \(pending[1])")
             return
         }
         #expect(shape(reprimed) == ["h1", "h2", "|", "live1"])
@@ -131,10 +136,70 @@ struct ChannelSessionJoinBackfillTests {
         let (subscription, _) = await session.subscribe()
 
         await gate.open()
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntilSettled(session)
 
         #expect(shape(await session.currentSnapshot()) == ["live1"])
         #expect(subscription.takePending().isEmpty)
+    }
+
+    @Test("Late history the ring has no room for is dropped without resetting subscribers")
+    func lateHistoryWithoutRoomIsDropped() async throws {
+        let gate = Gate()
+        let session = ChannelSession(
+            client: TwitchClient(clientId: "test-client", tokenStore: NullTokenStore()),
+            channelId: "1",
+            channelLoginName: "ch",
+            accountUserId: "me",
+            ringCapacity: 2,
+            fetchBackfill: { _, _ in
+                await gate.wait()
+                return [BackfillMessage(message: IRCMessageParser.parse(
+                    "@id=h1;room-id=1;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :hi",
+                    channelLogin: "ch"
+                )!, sentAt: nil)]
+            },
+            joinBackfillTimeout: .milliseconds(20)
+        )
+
+        await session.beginJoinBackfill()
+        await session.handle(event: .chatMessage(chatMessage(id: "live1")))
+        await session.handle(event: .chatMessage(chatMessage(id: "live2")))
+        await session.finishJoinBackfill()
+        let (subscription, _) = await session.subscribe()
+
+        await gate.open()
+        try await waitUntilSettled(session)
+
+        // The ring is full of live rows; history (oldest) would be trimmed
+        // straight back out, so nothing changes — no orphan divider either.
+        #expect(shape(await session.currentSnapshot()) == ["live1", "live2"])
+        #expect(subscription.takePending().isEmpty)
+    }
+
+    @Test("A cancelled start stops waiting for history immediately")
+    func cancellationEndsTheWait() async {
+        let gate = Gate()
+        let session = makeSession(gate: gate, history: [record("h1")], timeout: .seconds(60))
+
+        await session.beginJoinBackfill()
+        let finishing = Task { await session.finishJoinBackfill() }
+        while !(await session.isWaitingForJoinBackfill) {
+            await Task.yield()
+        }
+
+        finishing.cancel()
+        await finishing.value   // returns promptly, not after 60s
+
+        await gate.open()       // let the parked fetch closure finish
+    }
+
+    /// Spin until the join history has been applied or merged.
+    private func waitUntilSettled(_ session: ChannelSession) async throws {
+        for _ in 0..<1_000 {
+            if await session.isJoinBackfillSettled { return }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        Issue.record("join history never settled")
     }
 
     @Test("stop() releases a start() still waiting on history")

@@ -356,6 +356,12 @@ public final class ChatTranscriptModel {
     /// and by `detach` when the model goes away.
     private var sendFallbackTimers: [String: Task<Void, Never>] = [:]
 
+    /// Rows the stuck-send fallback settled locally (`synthesizeStuckUpgrade`):
+    /// `.delivered` under their canonical id, yet absent from the session's
+    /// ring because the echo never came. `reprime` must carry them across a
+    /// rebuild like any other local row. Pruned to ids still in the buffer.
+    @ObservationIgnored private var locallySettledIds: Set<String> = []
+
     /// How long to wait for the EventSub echo after Helix accepts a
     /// send. 5 seconds is a tradeoff: long enough to cover normal
     /// echo latency (median ~150ms, p99 ~1s on busy channels) plus a
@@ -702,6 +708,7 @@ public final class ChatTranscriptModel {
         // drift. The buffer's own cap handles the multi-session overflow the
         // old `Self.cap(primed)` did.
         buffer.reset()
+        locallySettledIds.removeAll()
         for update in combined {
             ingest(update)
         }
@@ -1123,6 +1130,7 @@ public final class ChatTranscriptModel {
             replyParent: row.replyParent
         ))
         publishPending()
+        locallySettledIds.insert(canonicalMessageId)
 
         // Clean up correlation maps — we won't be reconciling this id
         // from an echo anymore (the synthesized id is what a future
@@ -1415,33 +1423,7 @@ public final class ChatTranscriptModel {
         // exist) has.
         if case .message(let normalized) = event {
             let chatMessage = normalized.message
-            // Mod-status side-observation. We look at the badges
-            // attached to OUR own echoed messages. If we see a
-            // "moderator" or "broadcaster" set_id, we're a mod here.
-            // Cheap (badge array is usually <5 entries), runs only on
-            // our own messages, and once `currentUserCanModerate` is
-            // true we don't re-check.
-            //
-            // This is a free upgrade — runs alongside the existing echo
-            // reconciliation paths below.
-            if !currentUserCanModerate && chatMessage.chatterUserId == currentUserId {
-                let hasModBadge = chatMessage.badges.contains { badge in
-                    badge.setId == "moderator" || badge.setId == "broadcaster"
-                }
-                if hasModBadge {
-                    promoteToModerator(session: subscriptions.first?.session)
-                    logger.info("Detected mod status from echoed badges for #\(self.draftKey, privacy: .public)")
-                }
-            }
-
-            // Self-style side-observation: each echoed own-message carries
-            // the authoritative color + badge set for this channel. Cache
-            // them so the NEXT optimistic send row renders fully styled
-            // instead of flashing plain until its own echo lands.
-            if chatMessage.chatterUserId == currentUserId {
-                if !chatMessage.color.isEmpty { selfColor = chatMessage.color }
-                if !chatMessage.badges.isEmpty { selfBadges = chatMessage.badges }
-            }
+            observeOwnEcho(chatMessage)
 
             // ─── Path 0 (primary): Helix-id match ────────────────────
             //
@@ -1541,6 +1523,48 @@ public final class ChatTranscriptModel {
            HighlightSettings.soundEnabled() {
             HighlightSoundPlayer.shared.play()
         }
+    }
+
+    /// Side-observations on OUR OWN echoed messages (no-op for anyone else's):
+    ///
+    ///   - **Mod status**: a "moderator" / "broadcaster" badge on our echo
+    ///     means we're a mod here. Cheap (badge array is usually <5
+    ///     entries), and once `currentUserCanModerate` is true we don't
+    ///     re-check. A free upgrade alongside echo reconciliation.
+    ///   - **Self style**: each echo carries the authoritative color + badge
+    ///     set for this channel. Cache them so the NEXT optimistic send row
+    ///     renders fully styled instead of flashing plain until its own echo
+    ///     lands.
+    ///
+    /// Shared by the live path (`applyOne`) and `reprime`, so an echo that
+    /// arrives inside a reprime snapshot still teaches us both.
+    private func observeOwnEcho(_ chatMessage: ChatMessage) {
+        guard chatMessage.chatterUserId == currentUserId else { return }
+        if !currentUserCanModerate {
+            let hasModBadge = chatMessage.badges.contains { badge in
+                badge.setId == "moderator" || badge.setId == "broadcaster"
+            }
+            if hasModBadge {
+                promoteToModerator(session: subscriptions.first?.session)
+                logger.info("Detected mod status from echoed badges for #\(self.draftKey, privacy: .public)")
+            }
+        }
+        if !chatMessage.color.isEmpty { selfColor = chatMessage.color }
+        if !chatMessage.badges.isEmpty { selfBadges = chatMessage.badges }
+    }
+
+    /// The pending send an own echo answers, by the same keys the live path
+    /// uses: the Helix-returned id (Path 0), else the canonical text, FIFO
+    /// (Path 2). Doesn't consume anything — callers `cleanupPending`.
+    private func pendingSend(answeredBy echo: ChatMessage) -> String? {
+        if !helixMessageIdByPendingId.isEmpty,
+           let pendingId = helixMessageIdByPendingId.first(where: { $0.value == echo.messageId })?.key {
+            return pendingId
+        }
+        guard echo.chatterUserId == currentUserId else { return nil }
+        return pendingSendIDByText[
+            echo.message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        ]?.first
     }
 
     /// Replaces the optimistic row at `pendingId` with the echo's line, as
@@ -1648,27 +1672,51 @@ public final class ChatTranscriptModel {
     }
 
     /// Rebuilds the buffer from a session snapshot — the same replay attach
-    /// primes with — while keeping this transcript's local-only rows: sends
-    /// still in flight or marked failed exist nowhere in the session's ring.
+    /// primes with — while keeping this transcript's local-only rows, which
+    /// exist nowhere in the session's ring: sends still in flight or marked
+    /// failed, and stuck sends the fallback settled locally.
     ///
-    /// A local row whose echo is already in the snapshot (Helix told us its
-    /// canonical id) is settled instead of re-appended. A `.sending` row whose
-    /// echo arrived before Helix answered is kept; when Helix does answer, the
-    /// stuck-send fallback sees the canonical id already present and drops
-    /// the optimistic row (see `synthesizeStuckUpgrade`).
+    /// The snapshot may carry own echoes this transcript never saw live (they
+    /// sat in the backlog the reprime replaced). Those get the live path's
+    /// treatment minus the in-place swap — their row is already in the
+    /// snapshot: the own-echo observations run, and the pending send each
+    /// one answers (Path 0 id, else Path 2 text) is settled instead of its
+    /// optimistic row being re-appended as a duplicate. Only echoes NEW to
+    /// this transcript are considered, so an old identical message in late
+    /// history can't settle a fresh send.
+    ///
+    /// Kept rows are re-appended at the tail — where recent sends nearly
+    /// always are anyway.
     private func reprime(with snapshot: [ChannelUpdate]) {
-        let localRows = buffer.lines.filter { $0.deliveryState != .delivered }
+        let previousLines = buffer.lines
+        let previousIds = Set(previousLines.map(\.id))
+        let localRows = previousLines.filter {
+            $0.deliveryState != .delivered || locallySettledIds.contains($0.id)
+        }
+
         buffer.reset()
         for update in snapshot {
             ingest(update)
         }
-        for row in localRows where !buffer.contains(id: row.id) {
-            if let canonicalId = helixMessageIdByPendingId[row.id], buffer.contains(id: canonicalId) {
-                cleanupPending(pendingId: row.id)
-                continue
+
+        var settledPendingIds = Set<String>()
+        for update in snapshot {
+            guard case .message(let normalized) = update,
+                  normalized.message.chatterUserId == currentUserId,
+                  !previousIds.contains(normalized.message.messageId) else { continue }
+            observeOwnEcho(normalized.message)
+            if let pendingId = pendingSend(answeredBy: normalized.message) {
+                cleanupPending(pendingId: pendingId)
+                settledPendingIds.insert(pendingId)
             }
-            buffer.append(row)
         }
-        logger.info("ChatTranscriptModel re-primed from \(snapshot.count) session update(s), kept \(localRows.count) local row(s)")
+
+        var kept = 0
+        for row in localRows where !settledPendingIds.contains(row.id) && !buffer.contains(id: row.id) {
+            buffer.append(row)
+            kept += 1
+        }
+        locallySettledIds = locallySettledIds.filter { buffer.contains(id: $0) }
+        logger.info("ChatTranscriptModel re-primed from \(snapshot.count) session update(s); kept \(kept) local row(s), settled \(settledPendingIds.count) send(s) by echo")
     }
 }

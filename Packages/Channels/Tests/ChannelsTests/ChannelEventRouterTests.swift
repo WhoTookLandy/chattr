@@ -75,14 +75,21 @@ struct ChannelEventRouterTests {
     func accountIsPartOfTheKey() async throws {
         let router = ChannelEventRouter()
         let mine = makeSession(channelId: "1")
+        let (subscription, _) = await mine.subscribe()
         router.register(mine, for: .init(accountUserId: "me", channelId: "1"))
 
-        router.route(try settingsUpdate(channelId: "1", slowSeconds: 10), accountUserId: "someone-else")
-        router.route(try settingsUpdate(channelId: "1", slowSeconds: 20), accountUserId: "me")
+        router.route(try settingsUpdate(channelId: "1", slowSeconds: 10), accountUserId: "me")
+        router.route(try settingsUpdate(channelId: "1", slowSeconds: 20), accountUserId: "someone-else")
+        router.route(try settingsUpdate(channelId: "1", slowSeconds: 30), accountUserId: "me")
+        #expect(await waitForSlowMode(mine, seconds: 30))
 
-        // Only the second event belongs to this account's route; the first
-        // matched no route and was dropped.
-        #expect(await waitForSlowMode(mine, seconds: 20))
+        // Per-route order: by the time 30 landed, anything routed here
+        // before it has too — and the other account's 20 is not among them.
+        let delivered = subscription.takePending().compactMap { update -> Int? in
+            if case .restrictionsUpdated(let r) = update { return r.slowModeSeconds }
+            return nil
+        }
+        #expect(delivered == [10, 30])
     }
 
     @Test("Unregister is identity-based: a stale session can't unroute its replacement")

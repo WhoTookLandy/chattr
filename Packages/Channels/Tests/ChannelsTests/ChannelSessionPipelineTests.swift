@@ -218,22 +218,49 @@ struct ChannelSessionPipelineTests {
         #expect(subscription.takePending().isEmpty)
     }
 
-    @Test("A subscriber past its backlog cap is handed one reprime of the ring instead")
+    @Test("A subscriber past its backlog cap gets one reprime of the ring, keeping the latest state update")
     func overflowingSubscriberIsReprimed() async throws {
         let session = await makeSession(ringCapacity: 5)
         let (subscription, _) = await session.subscribe()
-        // Backlog cap is max(2 × ring, 1_000) = 1_000; one past it overflows.
-        for i in 0...1_000 {
-            try await session.handle(event: settingsEvent(slowSeconds: i))
+        // Backlog cap is max(2 × ring, 1_000) = 1_000: the settings update
+        // plus 999 messages fill it; the 1_000th message overflows.
+        try await session.handle(event: settingsEvent(slowSeconds: 5))
+        for i in 0..<1_000 {
+            try await session.handle(event: chatEvent(id: "m\(i)"))
         }
 
         let pending = subscription.takePending()
-        try #require(pending.count == 1)
-        guard case .reprime(let snapshot) = pending[0] else {
-            Issue.record("Expected a reprime, got \(pending[0])")
+        try #require(pending.count == 2)
+        // Rows come back via the snapshot; the restrictions change can't, so
+        // it rides along ahead of the reprime.
+        guard case .restrictionsUpdated(let kept) = pending[0] else {
+            Issue.record("Expected the carried restrictions first, got \(pending[0])")
             return
         }
-        #expect(snapshot.count == 5)   // exactly the ring
+        #expect(kept.slowModeSeconds == 5)
+        guard case .reprime(let snapshot) = pending[1] else {
+            Issue.record("Expected a reprime, got \(pending[1])")
+            return
+        }
+        #expect(lines(snapshot).map(\.id) == ["m995", "m996", "m997", "m998", "m999"])   // exactly the ring
+    }
+
+    @Test("A state update that is itself refused for overflow still reaches the subscriber")
+    func refusedStateUpdateIsCarried() async throws {
+        let session = await makeSession(ringCapacity: 5)
+        let (subscription, _) = await session.subscribe()
+        for i in 0..<1_000 {
+            try await session.handle(event: chatEvent(id: "m\(i)"))
+        }
+        try await session.handle(event: settingsEvent(slowSeconds: 9))   // the overflowing post
+
+        let pending = subscription.takePending()
+        try #require(pending.count == 2)
+        guard case .restrictionsUpdated(let kept) = pending[0], case .reprime = pending[1] else {
+            Issue.record("Expected [restrictions, reprime], got \(pending)")
+            return
+        }
+        #expect(kept.slowModeSeconds == 9)
     }
 
     @Test("Unsubscribe ends the subscriber's wakeups")

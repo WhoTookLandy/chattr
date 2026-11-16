@@ -107,9 +107,10 @@ public struct NormalizedMessage: Sendable {
 ///
 /// The mailbox holds at most `capacity` updates. A post that would exceed it
 /// is refused; the session then replaces the whole backlog with a single
-/// `.reprime(snapshot)` — so a consumer stalled for a long time costs one
-/// ring-sized snapshot, not an ever-growing queue, and still converges on
-/// exactly the ring's state.
+/// `.reprime(snapshot)` (preceded by the latest restrictions / mod-status
+/// change, which a snapshot can't restore) — so a consumer stalled for a long
+/// time costs one ring-sized snapshot, not an ever-growing queue, and still
+/// converges on exactly the session's state.
 ///
 /// Typical consumer:
 /// ```swift
@@ -163,9 +164,27 @@ public final class ChannelSubscription: Sendable {
         return accepted
     }
 
-    /// Session side: discard the backlog in favour of `updates` (a reprime).
-    func replacePending(with updates: [ChannelUpdate]) {
-        mailbox.withLock { $0 = updates }
+    /// Session side: replace the backlog with one `.reprime(snapshot)`.
+    ///
+    /// Rows in the backlog (and in `unposted`, a batch that was refused for
+    /// being over the cap) are all recoverable from the snapshot, but the
+    /// state-only updates are not — a reprime rebuilds rows and nothing else
+    /// (a transcript reads restrictions / mod status from their own sources
+    /// at attach, not from the ring). So the latest restrictions change and
+    /// the latest mod-status change among them survive, ahead of the reprime.
+    func reprime(snapshot: [ChannelUpdate], alsoCarrying unposted: [ChannelUpdate] = []) {
+        mailbox.withLock { pending in
+            var latestRestrictions: ChannelUpdate?
+            var latestModeration: ChannelUpdate?
+            for update in pending + unposted {
+                switch update {
+                case .restrictionsUpdated: latestRestrictions = update
+                case .moderationStatusChanged: latestModeration = update
+                default: break
+                }
+            }
+            pending = [latestRestrictions, latestModeration].compactMap { $0 } + [.reprime(snapshot)]
+        }
         doorbell.yield(())
     }
 

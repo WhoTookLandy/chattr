@@ -95,7 +95,7 @@ struct ChatTranscriptModelPipelineTests {
 
     // MARK: - Highlighting
 
-    @Test("This attach's keywords are layered onto session rows; bubbles and other tabs are untouched")
+    @Test("This attach's keywords are layered onto session rows; another attach of the same session is unaffected")
     func keywordHighlightIsPerAttach() async {
         let session = makeSession()
         let withKeywords = ChatTranscriptModel()
@@ -147,6 +147,41 @@ struct ChatTranscriptModelPipelineTests {
         model.apply(.reprime([message("h1"), message("h2")]))
 
         #expect(model.lines.map(\.id) == ["h1", "h2", local.id])
+        await model.detach()
+    }
+
+    @Test("An own echo arriving inside a reprime settles its in-flight send instead of duplicating it")
+    func reprimeSettlesInFlightSendByEcho() async throws {
+        let session = ChannelSession(
+            client: TwitchClient(clientId: "test-client", tokenStore: NullTokenStore()),
+            channelId: "chan-1",
+            channelLoginName: "somechannel",
+            accountUserId: "me-1",
+            accountLogin: "me",
+            // Offline send → notAuthenticated → token refresh. Parking the
+            // refresh holds the optimistic row in `.sending`.
+            refreshTokenHandler: { try await Task.sleep(for: .seconds(30)) },
+            fetchBackfill: { _, _ in [] }
+        )
+        let model = ChatTranscriptModel()
+        await model.attach(sessions: [session], currentUserId: "me-1", currentUserLogin: "me")
+        let sending = Task { await model.send(text: "hi there") }
+        try await waitUntil { model.lines.last?.deliveryState == .sending }
+        try #require(model.lines.last?.deliveryState == .sending)
+
+        // The echo was in the backlog the reprime replaced; it reaches the
+        // transcript only inside the snapshot.
+        let echo = ChannelUpdate.normalizedMessage(
+            chatMessage(id: "echo-1", userId: "me-1", text: "hi there"),
+            timestamp: Date(timeIntervalSince1970: 0)
+        )
+        model.apply(.reprime([message("h1"), echo]))
+        #expect(model.lines.map(\.id) == ["h1", "echo-1"])
+
+        // The settled send's failure path finds no row to resurrect.
+        sending.cancel()
+        await sending.value
+        #expect(model.lines.map(\.id) == ["h1", "echo-1"])
         await model.detach()
     }
 
