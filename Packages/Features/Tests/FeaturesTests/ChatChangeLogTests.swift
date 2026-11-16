@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import ChatModel
 @testable import Features
 
@@ -9,8 +10,11 @@ import ChatModel
 @Suite("ChatChangeLog")
 struct ChatChangeLogTests {
 
+    /// Fixed timestamp: `ChatLine ==` compares it, and these tests rebuild
+    /// expected lines rather than reusing the logged instances.
     private func line(_ id: String) -> ChatLine {
-        ChatLine(id: id, kind: .message, authorUserId: "u", authorDisplayName: "u", runs: [.text(id)])
+        ChatLine(id: id, kind: .message, authorUserId: "u", authorDisplayName: "u",
+                 runs: [.text(id)], timestamp: Date(timeIntervalSince1970: 0))
     }
 
     private func batch(_ id: String) -> [ChatChange] { [.appended(line(id))] }

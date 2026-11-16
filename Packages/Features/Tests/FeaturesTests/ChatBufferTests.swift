@@ -163,8 +163,9 @@ struct ChatBufferTests {
     func takeChangesDrains() {
         var buf = ChatBuffer(cap: 100)
         #expect(buf.takeChanges().isEmpty)
-        buf.append(line("a"))
-        #expect(buf.takeChanges() == [.appended(line("a"))])
+        let a = line("a")   // built once: ChatLine == includes its timestamp
+        buf.append(a)
+        #expect(buf.takeChanges() == [.appended(a)])
         #expect(buf.takeChanges().isEmpty)
     }
 

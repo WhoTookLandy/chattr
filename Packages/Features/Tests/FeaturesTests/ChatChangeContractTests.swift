@@ -116,8 +116,9 @@ struct ChatChangeContractTests {
     func rekeyEmission() {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("pending-1")); _ = buf.takeChanges()
-        _ = buf.replace(id: "pending-1", with: line("msg-1"))
-        #expect(buf.takeChanges() == [.rekeyed(from: "pending-1", to: line("msg-1"))])
+        let delivered = line("msg-1")   // built once: ChatLine == includes its timestamp
+        _ = buf.replace(id: "pending-1", with: delivered)
+        #expect(buf.takeChanges() == [.rekeyed(from: "pending-1", to: delivered)])
         // The side table follows the new id.
         #expect(buf.contains(id: "msg-1"))
         #expect(!buf.contains(id: "pending-1"))
