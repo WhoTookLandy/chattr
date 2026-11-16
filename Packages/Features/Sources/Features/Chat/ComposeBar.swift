@@ -1,6 +1,9 @@
 import Channels
 import DesignSystem
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - ComposeBar
 
@@ -48,6 +51,10 @@ struct ComposeBar: View {
     /// is tapped) so we don't recompute them on every body eval.
     let emoteSectionsProvider: () -> [EmoteSection]
     let onSend: @MainActor (String) async -> Void
+    /// Opens the chat settings sheet from the ⋯ menu. nil hides the item.
+    let onOpenSettings: (() -> Void)?
+
+    @Environment(\.openURL) private var openURL
 
     @State private var composeText: String
     @State private var isSending: Bool = false
@@ -73,8 +80,10 @@ struct ComposeBar: View {
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
         emoteSectionsProvider: @escaping () -> [EmoteSection],
-        onSend: @escaping @MainActor (String) async -> Void
+        onSend: @escaping @MainActor (String) async -> Void,
+        onOpenSettings: (() -> Void)? = nil
     ) {
+        self.onOpenSettings = onOpenSettings
         self.channelLoginName = channelLoginName
         self.channelDisplayName = channelDisplayName
         self.replyContext = replyContext
@@ -290,6 +299,9 @@ struct ComposeBar: View {
     @ViewBuilder
     private var inputRow: some View {
         GlassEffectContainer(spacing: 6) {
+          // Pill + the ⋯ actions circle beside it (same container, so the
+          // two glass shapes blend as one surface family).
+          HStack(alignment: .bottom, spacing: 8) {
             // `.bottom` alignment so the trailing buttons stay pinned to
             // the bottom of the pill as the field grows multi-line, rather
             // than floating to the vertical center of a tall field.
@@ -385,7 +397,62 @@ struct ComposeBar: View {
             // change it causes). Value-scoped so unrelated re-renders don't
             // animate.
             .animation(.snappy(duration: 0.2), value: hasDraft)
+
+            moreMenu
+          }
         }
+    }
+
+    /// ⋯ — chat actions that don't earn a permanent button: chat settings
+    /// (moved here from the top bar, where it competed with the channel
+    /// pill), clearing the draft, and channel link hand-offs.
+    private var moreMenu: some View {
+        Menu {
+            if let onOpenSettings {
+                Button {
+                    onOpenSettings()
+                } label: {
+                    Label("Chat Settings", systemImage: "gearshape")
+                }
+            }
+            if hasDraft {
+                Button(role: .destructive) {
+                    composeText = ""
+                } label: {
+                    Label("Clear Draft", systemImage: "xmark.circle")
+                }
+            }
+            Divider()
+            if let channelURL {
+                Button {
+                    openURL(channelURL)
+                } label: {
+                    Label("Watch on Twitch", systemImage: "play.tv")
+                }
+                ShareLink(item: channelURL) {
+                    Label("Share Channel", systemImage: "square.and.arrow.up")
+                }
+                Button {
+                    #if os(iOS)
+                    UIPasteboard.general.url = channelURL
+                    #endif
+                } label: {
+                    Label("Copy Channel Link", systemImage: "link")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .glassEffect(.regular.interactive(), in: Circle())
+        .accessibilityLabel("More chat actions")
+    }
+
+    private var channelURL: URL? {
+        URL(string: "https://www.twitch.tv/\(channelLoginName)")
     }
 
     private func sendDraft() async {

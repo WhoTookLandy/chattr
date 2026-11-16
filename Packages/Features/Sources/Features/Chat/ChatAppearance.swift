@@ -75,13 +75,20 @@ public struct ChatAppearance: Equatable, Sendable {
     /// Annotate localized usernames with the login (see `loginAnnotation`).
     public var loginNameDisplay: LoginNameDisplay = .displayFirst
 
+    /// Render messages from well-known bots (`ChatFilterSettings.knownBotLogins`)
+    /// small, dimmed and line-capped, with box-drawing decoration stripped —
+    /// so a StreamElements shoutout banner takes a few quiet lines instead of
+    /// six loud ones. Distinct from Hide Known Bots, which drops them.
+    public var compactBots: Bool = true
+
     public init(
         textSizePoints: Double = ChatAppearance.defaultTextSizePoints,
         showTimestamps: Bool = false,
         showBadges: Bool = true,
         animatedEmotes: Bool = true,
         edgeToEdge: Bool = false,
-        loginNameDisplay: LoginNameDisplay = .displayFirst
+        loginNameDisplay: LoginNameDisplay = .displayFirst,
+        compactBots: Bool = true
     ) {
         self.textSizePoints = textSizePoints
         // Derive the hot-path values once — see `font` / `imageScale`.
@@ -92,6 +99,7 @@ public struct ChatAppearance: Equatable, Sendable {
         self.animatedEmotes = animatedEmotes
         self.edgeToEdge = edgeToEdge
         self.loginNameDisplay = loginNameDisplay
+        self.compactBots = compactBots
     }
 
     // MARK: - Storage keys
@@ -110,6 +118,7 @@ public struct ChatAppearance: Equatable, Sendable {
     public static let animatedEmotesKey = "chattr.chatAppearance.animatedEmotes"
     public static let edgeToEdgeKey = "chattr.chatAppearance.edgeToEdge"
     public static let loginNameDisplayKey = "chattr.chatAppearance.loginNameDisplay"
+    public static let compactBotsKey = "chattr.chatAppearance.compactBots"
 
     // MARK: - Chat history
 

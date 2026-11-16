@@ -11,21 +11,23 @@ import NukeUI
 ///
 /// Sections, top to bottom:
 ///   1. **Open chats** — one avatar circle per open chat tab (story-rail
-///      style), with a red dot when that channel is live. Tapping resumes
-///      that tab (switches to the Chats tab with it active). First because
-///      "get back to my chat" is the highest-intent action and must cost
-///      zero scrolling.
-///   2. **Live now** — a PREVIEW of followed channels currently streaming,
-///      capped at `liveDisplayCap` rows in Twitch's descending-viewer-count
-///      order, followed by a "Show all" row that pushes the full
-///      `ChannelListScreen` (Live segment preselected; its title menu
-///      switches to All, and it carries search + sorting). Home stays a
-///      glanceable landing page; the browse-everything job lives on one
-///      dedicated screen instead of being duplicated here.
+///      style): a red ring + LIVE caption when that channel is live, a
+///      "2d ago" last-live caption when it isn't. Tapping resumes that tab
+///      (switches to the Chats tab with it active). First because "get back
+///      to my chat" is the highest-intent action and must cost zero
+///      scrolling.
+///   2. **Live now** — category chips (All + each category with someone
+///      live, busiest first), then a PREVIEW of followed channels currently
+///      streaming: the top `featuredCount` as full-width `LiveStreamCard`s,
+///      the rest as compact `LiveStreamRow`s, capped at `liveDisplayCap`.
+///      The section header's "See all" pushes the full `ChannelListScreen`
+///      (Live segment preselected; its title menu switches to All, and it
+///      carries search + sorting).
 ///
 /// Data comes from the environment stores RootView already owns
-/// (`FollowsStore`, `ChatTabsModel`) — Home adds no new fetching, it's a
-/// new window onto data the app already has.
+/// (`FollowsStore`, `ChannelStatusStore`, `ChatTabsModel`). Home's only
+/// extra fetch is the open tabs' status (for last-live captions), batched
+/// and throttled in `ChannelStatusStore`.
 ///
 /// Split into a thin store-backed wrapper (this type) and the
 /// presentational `HomeContent` so previews and future tests can render
@@ -39,6 +41,7 @@ public struct HomeScreen: View {
     private let onResumeChat: (ChatTab) -> Void
 
     @Environment(\.followsStore) private var followsStore
+    @Environment(\.channelStatus) private var channelStatus
     @Environment(\.chatTabs) private var chatTabs
     @Environment(\.openChannel) private var openChannel
 
@@ -52,6 +55,10 @@ public struct HomeScreen: View {
         self.onResumeChat = onResumeChat
     }
 
+    private var openChannelIds: [String] {
+        (chatTabs?.tabs ?? []).compactMap { $0.channels.first?.channelId }
+    }
+
     public var body: some View {
         NavigationStack {
             HomeContent(
@@ -59,6 +66,7 @@ public struct HomeScreen: View {
                 profileImageURLs: followsStore?.profileImageURLs ?? [:],
                 liveLoadState: followsStore?.liveLoadState ?? .idle,
                 openTabs: chatTabs?.tabs ?? [],
+                openTabStatuses: channelStatus?.statuses ?? [:],
                 onStreamTap: { stream in
                     let profileURL = followsStore?.profileImageURLs[stream.userId]
                     openChannel?(stream: stream, profileImageURL: profileURL)
@@ -70,8 +78,8 @@ public struct HomeScreen: View {
             .navigationDestination(for: HomeRoute.self) { route in
                 switch route {
                 case .allFollows:
-                    // Live preselected: the push comes from the live
-                    // preview's "Show all" row, so landing on Live is the
+                    // Live preselected: the push comes from the Live now
+                    // header's "See all", so landing on Live is the
                     // continuation the tap promised. The title menu
                     // switches to All from there.
                     ChannelListScreen(
@@ -82,16 +90,25 @@ public struct HomeScreen: View {
                 }
             }
             .refreshable {
-                guard let store = followsStore else { return }
-                // Explicit user intent — bypass the staleness throttle.
-                await store.refreshLive(account: account, accountStore: accountStore, force: true)
+                // Explicit user intent — bypass the staleness throttles.
+                // Sequential, not `async let`: `Account` is a non-Sendable
+                // SwiftData model and can't cross into child tasks.
+                await followsStore?.refreshLive(account: account, accountStore: accountStore, force: true)
+                await channelStatus?.refresh(
+                    channelIds: openChannelIds, account: account, accountStore: accountStore, force: true
+                )
             }
             // Live data whenever Home appears (tab switches included) —
             // same policy as the Following list. Throttled + coalesced in
-            // FollowsStore, so a recent refresh makes this a no-op.
+            // the stores, so a recent refresh makes this a no-op.
             .task {
                 guard let store = followsStore else { return }
                 await store.refreshLive(account: account, accountStore: accountStore)
+            }
+            .task(id: openChannelIds) {
+                await channelStatus?.refresh(
+                    channelIds: openChannelIds, account: account, accountStore: accountStore
+                )
             }
         }
     }
@@ -111,8 +128,14 @@ struct HomeContent: View {
     let profileImageURLs: [String: URL]
     let liveLoadState: FollowsStore.LoadState
     let openTabs: [ChatTab]
+    /// Status for open tabs' channels (live for unfollowed channels,
+    /// last-live for offline ones). Empty in previews.
+    var openTabStatuses: [String: ChannelStatusStore.Status] = [:]
     let onStreamTap: (TwitchStream) -> Void
     let onResumeChat: (ChatTab) -> Void
+
+    /// Category chip selection; nil = All.
+    @State private var selectedCategory: String?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -142,7 +165,7 @@ struct HomeContent: View {
             // `-uiPreviewChatOpen` in UIPreviewRoot.
             .task {
                 guard ProcessInfo.processInfo.arguments.contains("-uiPreviewScrolled"),
-                      let last = liveStreams.prefix(Self.liveDisplayCap).last else { return }
+                      let last = displayedStreams.last else { return }
                 try? await Task.sleep(for: .milliseconds(500))
                 proxy.scrollTo(last.userId, anchor: .bottom)
             }
@@ -150,16 +173,49 @@ struct HomeContent: View {
         }
     }
 
-    /// Rows shown in the Live now preview before the "Show all" row takes
-    /// over. Five ≈ one screenful under the chats rail — enough to answer
-    /// "anything good on?" without burying the rest of the app.
-    private static let liveDisplayCap = 5
+    /// Streams shown in the Live now preview, after the featured cards.
+    /// Six ≈ two cards + four rows — enough to answer "anything good on?"
+    /// without burying the rest of the app.
+    private static let liveDisplayCap = 6
 
-    /// Channel ids currently live — drives the red dot on open-chat
-    /// avatars. Derived, not stored: `liveStreams` is already the source
-    /// of truth.
+    /// Leading streams that get the full-width card treatment.
+    private static let featuredCount = 2
+
+    /// Channel ids currently live — followed streams plus any open tab the
+    /// status store has seen live (e.g. opened from search, not followed).
     private var liveChannelIds: Set<String> {
-        Set(liveStreams.map(\.userId))
+        var ids = Set(liveStreams.map(\.userId))
+        for (id, status) in openTabStatuses where status.isLive { ids.insert(id) }
+        return ids
+    }
+
+    // MARK: - Categories
+
+    /// Categories with at least one live followed channel, busiest (total
+    /// viewers) first. Chips only appear when there are two or more —
+    /// one chip would filter nothing.
+    private var categories: [String] {
+        var totals: [String: Int] = [:]
+        for stream in liveStreams where !stream.gameName.isEmpty {
+            totals[stream.gameName, default: 0] += stream.viewerCount
+        }
+        guard totals.count >= 2 else { return [] }
+        return totals.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+    }
+
+    /// The selection, ignored once its category has nobody live.
+    private var activeCategory: String? {
+        guard let selectedCategory, categories.contains(selectedCategory) else { return nil }
+        return selectedCategory
+    }
+
+    private var filteredStreams: [TwitchStream] {
+        guard let activeCategory else { return liveStreams }
+        return liveStreams.filter { $0.gameName == activeCategory }
+    }
+
+    private var displayedStreams: ArraySlice<TwitchStream> {
+        filteredStreams.prefix(Self.liveDisplayCap)
     }
 
     // MARK: - Live now
@@ -170,41 +226,93 @@ struct HomeContent: View {
             if liveStreams.isEmpty {
                 liveEmptyContent
             } else {
-                ForEach(liveStreams.prefix(Self.liveDisplayCap), id: \.userId) { stream in
+                if !categories.isEmpty {
+                    categoryChips
+                }
+                let shown = Array(displayedStreams)
+                ForEach(Array(shown.enumerated()), id: \.element.userId) { index, stream in
                     Button {
                         onStreamTap(stream)
                     } label: {
-                        LiveStreamRow(
-                            stream: stream,
-                            profileImageURL: profileImageURLs[stream.userId]
-                        )
+                        if index < Self.featuredCount {
+                            LiveStreamCard(
+                                stream: stream,
+                                profileImageURL: profileImageURLs[stream.userId]
+                            )
+                        } else {
+                            LiveStreamRow(
+                                stream: stream,
+                                profileImageURL: profileImageURLs[stream.userId]
+                            )
+                        }
                     }
                     .buttonStyle(.plain)
                     .listRowBackground(Color.clear)
+                    .listRowSeparator(index < Self.featuredCount ? .hidden : .automatic)
                 }
-                showAllRow
             }
         } header: {
-            sectionHeader("Live now")
+            HStack(alignment: .firstTextBaseline) {
+                sectionHeader("Live now")
+                Spacer()
+                // The single gateway to the full browse screen (Following —
+                // Live/All segments, search, sorting). A header link, the
+                // standard iOS "See all" placement, instead of a trailing
+                // list row that read as just another stream.
+                NavigationLink(value: HomeRoute.allFollows) {
+                    HStack(spacing: 2) {
+                        Text(liveStreams.count > Self.liveDisplayCap
+                             ? "See all \(liveStreams.count)"
+                             : "See all")
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .textCase(nil)
+            }
         }
     }
 
-    /// Footer of the live preview: the single gateway to the full browse
-    /// screen (Following — Live/All segments, search, sorting). One entry
-    /// point instead of the previous heart-toolbar-button + list-row pair.
-    private var showAllRow: some View {
-        NavigationLink(value: HomeRoute.allFollows) {
-            HStack {
-                Text(liveStreams.count > Self.liveDisplayCap
-                    ? "Show all \(liveStreams.count) live"
-                    : "All follows")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.accentColor)
-                Spacer()
+    /// All / per-category filter chips (Twitch Home's "All · Just Chatting
+    /// · IRL" row), scoped to the Live now preview.
+    private var categoryChips: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                chip("All", isSelected: activeCategory == nil) {
+                    selectedCategory = nil
+                }
+                ForEach(categories, id: \.self) { category in
+                    chip(category, isSelected: activeCategory == category) {
+                        selectedCategory = category
+                    }
+                }
             }
+            .padding(.vertical, 2)
         }
-        .listRowBackground(Color.clear)
+        .scrollIndicators(.hidden)
         .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+    }
+
+    private func chip(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .foregroundStyle(isSelected ? AnyShapeStyle(.background) : AnyShapeStyle(.primary))
+                .background(
+                    isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(Color.secondary.opacity(0.15)),
+                    in: Capsule()
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     /// Inline placeholder for the Live section's loading / quiet / failed
@@ -272,13 +380,14 @@ struct HomeContent: View {
     }
 
     /// Story-rail entry for one open chat tab: a large avatar with the
-    /// name underneath, plus a red dot when the channel is live. The
-    /// avatar carries the recognition load — same visual grammar as the
-    /// thumbnails below, unlike the gray text capsules this replaced
-    /// (which read as filter chips, not destinations).
+    /// name underneath, a red ring + "LIVE" caption when the channel is
+    /// live, and a "2d ago" last-live caption when it isn't (Twitch's
+    /// "Streamed 2 days ago").
     private func openChatCircle(for tab: ChatTab) -> some View {
+        let channelId = tab.channels.first?.channelId
         let isLive = tab.channels.contains { liveChannelIds.contains($0.channelId) }
-        return VStack(spacing: 6) {
+        let lastLive = channelId.flatMap { openTabStatuses[$0]?.lastLiveAt }
+        return VStack(spacing: 4) {
             LazyImage(request: ImageRequest.avatar(url: tab.profileImageURL, side: 56)) { state in
                 if let image = state.image {
                     image.resizable().scaledToFill()
@@ -291,24 +400,41 @@ struct HomeContent: View {
             }
             .frame(width: 56, height: 56)
             .clipShape(Circle())
-            .overlay(alignment: .bottomTrailing) {
+            .padding(3)
+            .overlay {
                 if isLive {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 12, height: 12)
-                        // Background-colored ring separates the dot from
-                        // the avatar regardless of its edge colors.
-                        .overlay(Circle().strokeBorder(.background, lineWidth: 2))
+                    Circle().strokeBorder(.red, lineWidth: 2.5)
                 }
             }
             Text(tab.displayName)
                 .font(.caption)
                 .lineLimit(1)
                 .foregroundStyle(.primary)
+            Group {
+                if isLive {
+                    Text("LIVE")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.red)
+                } else if let lastLive {
+                    Text(StreamFormatting.lastLiveShort(lastLive))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    // Reserve the caption line so names stay aligned.
+                    Text(" ").font(.caption2)
+                }
+            }
+            .lineLimit(1)
         }
-        .frame(width: 64)
+        .frame(width: 68)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(isLive ? "\(tab.displayName), live" : tab.displayName)
+        .accessibilityLabel(accessibilityLabel(for: tab, isLive: isLive, lastLive: lastLive))
+    }
+
+    private func accessibilityLabel(for tab: ChatTab, isLive: Bool, lastLive: Date?) -> String {
+        if isLive { return "\(tab.displayName), live" }
+        if let lastLive { return "\(tab.displayName), offline, \(StreamFormatting.lastLive(lastLive))" }
+        return tab.displayName
     }
 
     // MARK: - Shared

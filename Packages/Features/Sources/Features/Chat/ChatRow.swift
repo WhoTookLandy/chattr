@@ -232,6 +232,8 @@ struct ChatRow: View, Equatable {
             // `.failed` since we don't send those (they always arrive
             // via EventSub already-delivered).
             switch line.deliveryState {
+            case .delivered where isCompactBot:
+                compactBotBody
             case .delivered:
                 messageWithOptionalQuote
             case .sending:
@@ -402,10 +404,12 @@ struct ChatRow: View, Equatable {
             // `.dateTime.hour().minute()`, which appends an am/pm marker in
             // 12-hour locales and makes the column wide and ragged. Body-size
             // + secondary grey so rows read uniformly, not metadata-tiny.
+            //
+            // One step smaller than the body (0.8×): at full body size the
+            // timestamp column competed with usernames for attention. It still
+            // shares the first text baseline, so it lines up with the name.
             if appearance.showTimestamps {
-                Text(line.timestamp, format: Self.timestampFormat)
-                    .font(bodyFont.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                timestampText
             }
             // Badges keyed by `url` — a stable per-badge identity across row
             // re-renders, so SwiftUI keeps each badge's `LazyImage` (and its
@@ -464,8 +468,17 @@ struct ChatRow: View, Equatable {
         // passed in by `messageBody`, which computes it once per row.
         switch run {
         case .text(let body):
-            Text(body)
-                .font(bodyFont)
+            // Link-looking words become tappable (an AttributedString link
+            // keeps this a plain `Text`, so baseline alignment in the flow
+            // layout is unchanged). The detector's fast path rejects any word
+            // without a dot, so ordinary words cost one byte scan.
+            if let url = ChatLinkDetector.url(in: body) {
+                Text(Self.linkText(body, url: url))
+                    .font(bodyFont)
+            } else {
+                Text(body)
+                    .font(bodyFont)
+            }
 
         case .emote(let emote):
             // 7TV / BTTV / FFZ inline, through the shared `EmoteImageView`.
@@ -493,6 +506,85 @@ struct ChatRow: View, Equatable {
                 .font(bodyFont.weight(.semibold))
                 .foregroundStyle(.orange)
         }
+    }
+
+    // MARK: - Timestamps, links, compact bots
+
+    /// Leading `HH:mm`, one step smaller than the body text.
+    private var timestampText: some View {
+        Text(line.timestamp, format: Self.timestampFormat)
+            .font(.system(size: appearance.textSizePoints * 0.8).monospacedDigit())
+            .foregroundStyle(.secondary)
+    }
+
+    /// A word rendered as an underlined link in the tint color.
+    private static func linkText(_ word: String, url: URL) -> AttributedString {
+        var text = AttributedString(word)
+        text.link = url
+        text.underlineStyle = .single
+        return text
+    }
+
+    /// True when this row should take the compact bot treatment. Twitch
+    /// logins are already lowercase, so no per-render `lowercased()`.
+    private var isCompactBot: Bool {
+        appearance.compactBots
+            && !line.isHighlighted
+            && ChatFilterSettings.knownBotLogins.contains(line.authorUserLogin)
+    }
+
+    /// Bot message, compact: smaller, dimmed, at most three lines, with
+    /// box-drawing / dingbat banner decoration stripped. Rendered as ONE
+    /// `Text` (emotes fall back to their names — bots rarely use them) so
+    /// `lineLimit` can cap it; the flow layout can't truncate.
+    private var compactBotBody: some View {
+        let font = Font.system(size: appearance.textSizePoints * 0.85)
+        let name = Text(line.authorDisplayName)
+            .font(font.weight(.semibold))
+            .foregroundStyle(usernameColor)
+        let message = Text(Self.compactBotAttributedBody(line.runs)).font(font)
+        return HStack(alignment: .firstTextBaseline, spacing: 4) {
+            if appearance.showTimestamps {
+                timestampText
+            }
+            Text("\(name)\(Text(":").foregroundStyle(.secondary)) \(message)")
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+        }
+        .opacity(0.85)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityMessageLabel)
+    }
+
+    /// Words joined back into one string, decoration stripped, links kept.
+    static func compactBotAttributedBody(_ runs: [LineRun]) -> AttributedString {
+        var result = AttributedString()
+        for run in runs {
+            let word = stripDecoration(run.plainText(.visual))
+            guard !word.isEmpty else { continue }
+            if !result.characters.isEmpty { result.append(AttributedString(" ")) }
+            if case .text = run, let url = ChatLinkDetector.url(in: word) {
+                result.append(linkText(word, url: url))
+            } else {
+                result.append(AttributedString(word))
+            }
+        }
+        return result
+    }
+
+    /// Removes box-drawing, block-element and dingbat scalars — the
+    /// "❀────SHOUTOUT────❀" banner furniture bots wrap messages in.
+    static func stripDecoration(_ word: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in word.unicodeScalars {
+            switch scalar.value {
+            case 0x2500...0x259F, 0x2700...0x27BF, 0x2E3A...0x2E3B, 0x2014, 0x2015:
+                continue
+            default:
+                scalars.append(scalar)
+            }
+        }
+        return String(scalars)
     }
 
     /// Per-row username color. Empty `line.authorColor` (user hasn't picked one)
