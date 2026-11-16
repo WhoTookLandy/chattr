@@ -182,7 +182,7 @@ struct ChannelSessionPipelineTests {
         try #require(history.count == 3)
         #expect(history[0].timestamp == sent)
         #expect(history[1].timestamp == history[2].timestamp)
-        #expect(history.allSatisfy(\.isHistorical))
+        #expect(history.allSatisfy { $0.isHistorical })
     }
 
     // MARK: - Delivery never waits on a subscriber
