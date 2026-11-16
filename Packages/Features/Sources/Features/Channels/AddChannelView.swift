@@ -2,6 +2,7 @@ import SwiftUI
 import Accounts
 import TwitchKit
 import Core
+import Nuke
 import NukeUI
 import os
 
@@ -242,7 +243,7 @@ private struct SearchResultRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            LazyImage(url: URL(string: channel.thumbnailUrl)) { state in
+            LazyImage(request: ImageRequest.avatar(url: URL(string: channel.thumbnailUrl), side: 40)) { state in
                 if let image = state.image {
                     image.resizable().scaledToFill()
                 } else {

@@ -1,5 +1,6 @@
 import SwiftUI
 import Accounts
+import Nuke
 import NukeUI
 
 /// A signed-in account presented as avatar + display name + @login.
@@ -57,7 +58,7 @@ struct AccountRow: View {
     }
 
     private var avatar: some View {
-        LazyImage(url: URL(string: account.profileImageURL)) { state in
+        LazyImage(request: ImageRequest.avatar(url: URL(string: account.profileImageURL), side: avatarSize)) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else {
