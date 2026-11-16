@@ -48,8 +48,9 @@ struct chattrApp: App {
             // (see AppSchema.swift) rather than the bare model list, so future
             // schema changes can ship as MigrationStages instead of crashing
             // existing users at launch. V1 is structurally identical to the
-            // old bare schema, so current installs open without migrating.
-            let schema = Schema(versionedSchema: AppSchemaV1.self)
+            // old bare schema; V1 stores migrate to the latest version via
+            // `AppMigrationPlan`'s stages.
+            let schema = Schema(versionedSchema: AppSchemaLatest.self)
             let container = try ModelContainer(
                 for: schema,
                 migrationPlan: AppMigrationPlan.self

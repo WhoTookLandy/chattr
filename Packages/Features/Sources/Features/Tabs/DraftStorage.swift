@@ -19,9 +19,14 @@ import Core
 ///   - **Schema cost**: SwiftData would need either a new @Model or a
 ///     migration to add a field to `PersistedChatTab`. UserDefaults
 ///     needs neither.
-///   - **Access pattern**: load once on mount, save on each keystroke
-///     (UserDefaults batches writes via its internal disk cache, so
-///     this is fast in practice).
+///   - **Access pattern**: load once on mount; keystrokes go through
+///     `scheduleSave`, which debounces (~400ms) so a burst of typing costs
+///     one dictionary read-modify-write instead of one per keystroke.
+///     `flushPendingSaves()` (compose bar disappearing) writes anything
+///     still pending immediately.
+///   - **Lifetime**: a channel's draft is pruned when its last tab closes
+///     (`remove(forChannels:)`, called by `ChatTabsModel.close`), so the
+///     dictionary doesn't accumulate drafts for channels the user left.
 ///
 /// ## Storage shape
 ///
@@ -61,35 +66,116 @@ public enum DraftStorage {
         return ""
     }
 
-    /// Saves a draft for a channel. Empty / whitespace-only texts are
-    /// REMOVED from storage rather than persisted as empty strings —
-    /// the dictionary stays tight and reload-after-empty correctly
-    /// reads as "no draft" instead of "empty draft."
+    /// Saves a draft for a channel immediately. Empty / whitespace-only
+    /// texts are REMOVED from storage rather than persisted as empty
+    /// strings — the dictionary stays tight and reload-after-empty
+    /// correctly reads as "no draft" instead of "empty draft."
     ///
-    /// Performance: UserDefaults writes are batched to disk by iOS;
-    /// per-keystroke saves don't actually hit storage on every call.
+    /// Per-keystroke callers should use `scheduleSave` instead: every call
+    /// here re-reads and rewrites the whole drafts dictionary.
     public static func save(forChannel id: ChannelDescriptor.ID, text: String) {
-        var dict = UserDefaults.standard.dictionary(forKey: storageKey) as? [String: String] ?? [:]
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            dict.removeValue(forKey: id)
-        } else {
-            // Persist the UNTRIMMED text so the user's leading/trailing
-            // whitespace (rare but possible — copy-paste from another
-            // app might include it) survives. Only the emptiness check
-            // uses the trim.
-            dict[id] = text
-        }
+        var dict = storedDrafts()
+        apply(text, forChannel: id, to: &dict)
         UserDefaults.standard.set(dict, forKey: storageKey)
     }
 
-    /// Clear a specific channel's draft. Equivalent to `save(..., text: "")`
-    /// but reads more clearly at call sites that intend to delete.
-    /// Used by `ChatTranscriptModel.send` after a successful send, so the next
+    /// Clear a specific channel's draft, including any debounced save still
+    /// pending for it (which would otherwise resurrect the draft when it
+    /// fires). Used by `ChatTranscriptModel.send` after a send, so the next
     /// channel-mount doesn't restore a draft the user just sent.
+    @MainActor
     public static func clear(forChannel id: ChannelDescriptor.ID) {
-        var dict = UserDefaults.standard.dictionary(forKey: storageKey) as? [String: String] ?? [:]
+        pendingDrafts.removeValue(forKey: id)
+        var dict = storedDrafts()
         guard dict.removeValue(forKey: id) != nil else { return }
         UserDefaults.standard.set(dict, forKey: storageKey)
+    }
+
+    // MARK: - Debounced saves
+
+    /// How long typing must pause before pending drafts are written.
+    static let saveDebounce: Duration = .milliseconds(400)
+
+    /// Latest unsaved text per channel, written by the next flush.
+    @MainActor private static var pendingDrafts: [ChannelDescriptor.ID: String] = [:]
+
+    /// The debounce timer. One timer for all channels: a flush writes every
+    /// pending channel in a single read-modify-write.
+    @MainActor private static var pendingFlush: Task<Void, Never>?
+
+    /// Records `text` as the channel's draft and (re)starts the debounce
+    /// timer. The compose bar calls this on every keystroke; storage is
+    /// touched once typing pauses for `saveDebounce`, or on
+    /// `flushPendingSaves()`.
+    @MainActor
+    public static func scheduleSave(forChannel id: ChannelDescriptor.ID, text: String) {
+        pendingDrafts[id] = text
+        pendingFlush?.cancel()
+        pendingFlush = Task { @MainActor in
+            try? await Task.sleep(for: saveDebounce)
+            // A newer keystroke (or an explicit flush) cancelled this timer
+            // and owns the write now.
+            guard !Task.isCancelled else { return }
+            flushPendingSaves()
+        }
+    }
+
+    /// Writes every pending draft now and stops the debounce timer. Call when
+    /// the compose bar goes away so the last keystrokes aren't lost to the
+    /// debounce window. No-op (and no UserDefaults write) when nothing is
+    /// pending.
+    @MainActor
+    public static func flushPendingSaves() {
+        pendingFlush?.cancel()
+        pendingFlush = nil
+        guard !pendingDrafts.isEmpty else { return }
+        let batch = pendingDrafts
+        pendingDrafts.removeAll()
+        let original = storedDrafts()
+        var dict = original
+        for (id, text) in batch {
+            apply(text, forChannel: id, to: &dict)
+        }
+        guard dict != original else { return }
+        UserDefaults.standard.set(dict, forKey: storageKey)
+    }
+
+    /// Drops the drafts (stored and pending) for channels the user no longer
+    /// has open — called by `ChatTabsModel.close` for channels whose last tab
+    /// just closed. Also drops each channel's pre-composite legacy key. One
+    /// UserDefaults write at most, none if nothing was stored.
+    @MainActor
+    public static func remove(forChannels ids: [ChannelDescriptor.ID]) {
+        guard !ids.isEmpty else { return }
+        let original = storedDrafts()
+        var dict = original
+        for id in ids {
+            pendingDrafts.removeValue(forKey: id)
+            dict.removeValue(forKey: id)
+            if let slash = id.firstIndex(of: "/") {
+                dict.removeValue(forKey: String(id[id.index(after: slash)...]))
+            }
+        }
+        guard dict != original else { return }
+        UserDefaults.standard.set(dict, forKey: storageKey)
+    }
+
+    // MARK: - Helpers
+
+    private static func storedDrafts() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: storageKey) as? [String: String] ?? [:]
+    }
+
+    /// Applies one draft to `dict`: whitespace-only removes the entry,
+    /// anything else stores the UNTRIMMED text so the user's
+    /// leading/trailing whitespace (rare but possible — copy-paste from
+    /// another app might include it) survives. Only the emptiness check
+    /// uses the trim.
+    private static func apply(_ text: String, forChannel id: ChannelDescriptor.ID, to dict: inout [String: String]) {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            dict.removeValue(forKey: id)
+        } else {
+            dict[id] = text
+        }
     }
 }

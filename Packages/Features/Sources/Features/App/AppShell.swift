@@ -32,8 +32,10 @@ private let logger = AppLogger.make("Features.AppShell")
 /// It also injects the `\.openChannel` action (open a channel as a new chat
 /// tab — used by Home, Following, and Search row taps) and, in a single
 /// appearance `.task`, wires `ChatTabsModel`'s `onOpen`/`onClose` to the
-/// session registry's acquire/release refcounting, installs
-/// `TabPersistence`, and hydrates persisted tabs on cold start.
+/// session registry's acquire/release refcounting, installs the
+/// account-scoped `TabPersistence`, and hydrates persisted tabs on cold
+/// start. On disappear (account switch / sign-out) it tears the tab model
+/// down, releasing every session it acquired.
 public struct AppShell: View {
     private let account: Account
     private let accountStore: AccountStore
@@ -253,7 +255,12 @@ public struct AppShell: View {
             //    here so AppShell doesn't have to take the container as
             //    an init parameter — `@Environment(\.modelContext)` is
             //    the canonical SwiftUI accessor.
-            let persistence = TabPersistence(modelContainer: modelContext.container)
+            //    Scoped to this account: it only reads and writes this
+            //    account's rows, so each account keeps its own strip.
+            let persistence = TabPersistence(
+                modelContainer: modelContext.container,
+                accountUserId: account.userId
+            )
             chatTabs.persistence = persistence
 
             // 3. Hydrate. This fires `onOpen` for each restored tab in
@@ -264,6 +271,25 @@ public struct AppShell: View {
             //    chat panel as soon as each subscription confirms.
             chatTabs.hydrateFromPersistence()
             logger.info("AppShell wired tab callbacks + persistence; hydration kicked off")
+        }
+        // Teardown: release every session this account's tabs acquired.
+        // RootView's `.id(userId)` replaces this AppShell on account switch
+        // (and removes it on sign-out), which fires `onDisappear` on the old
+        // instance — its `navigation.chatTabs` is still the old account's
+        // model here. Without this, nothing balanced the `onOpen` acquires
+        // and every switch leaked the previous account's chat sessions and
+        // EventSub subscriptions. `tearDown()` releases each acquired tab
+        // exactly once, skips opens that hadn't started, and doesn't touch
+        // the account's saved tabs; it is reversible (if this same AppShell
+        // re-appeared, the `.task` above would re-wire and re-hydrate).
+        //
+        // Deliberately doesn't read `account` here: on account removal the
+        // SwiftData `@Model` may already be deleted when this fires, and
+        // touching a deleted model's properties traps. The release closures
+        // captured `userId` as a String back when they were wired.
+        .onDisappear {
+            logger.notice("AppShell disappearing; tearing down chat tabs")
+            navigation.chatTabs.tearDown()
         }
     }
 }

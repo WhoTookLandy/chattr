@@ -14,7 +14,8 @@ import Core
 /// break the struct's value semantics.
 ///
 /// Instead `PersistedChatTab` is the *storage* model. The two convert via
-/// `init(from:order:)` and `toChatTab()` — a 1:1 mapping that costs nothing.
+/// `init(from:order:accountUserId:)` and `toChatTab()` — a 1:1 mapping that
+/// costs nothing.
 ///
 /// ## Why `channels` is a Codable array, not a relationship
 ///
@@ -53,27 +54,48 @@ public final class PersistedChatTab {
     /// active tab is gone" UX, and for future debug/analytics.
     public var addedAt: Date
 
-    public init(id: UUID, order: Int, channels: [ChannelDescriptor], addedAt: Date = .now) {
+    /// `Account.userId` of the account that owns this tab. Tabs are
+    /// per-account: `TabPersistence` reads and writes only the rows of the
+    /// account it was constructed for, so switching accounts restores that
+    /// account's own strip.
+    ///
+    /// Added in `AppSchemaV2`. The `""` default is what lets the V1 → V2
+    /// lightweight migration fill the new column on existing rows, so an
+    /// empty value means "legacy row from before tabs were account-scoped".
+    /// The first account to hydrate after the upgrade adopts those rows (see
+    /// `TabPersistence.fetchAll()`).
+    public var accountUserId: String = ""
+
+    public init(
+        id: UUID,
+        order: Int,
+        channels: [ChannelDescriptor],
+        accountUserId: String,
+        addedAt: Date = .now
+    ) {
         self.id = id
         self.order = order
         self.channels = channels
+        self.accountUserId = accountUserId
         self.addedAt = addedAt
     }
 
     /// Construct a persistence row from a runtime `ChatTab`.
-    public convenience init(from tab: ChatTab, order: Int) {
-        self.init(id: tab.id, order: order, channels: tab.channels)
+    public convenience init(from tab: ChatTab, order: Int, accountUserId: String) {
+        self.init(id: tab.id, order: order, channels: tab.channels, accountUserId: accountUserId)
     }
 
     /// Project back to the runtime `ChatTab` representation. SwiftUI views
     /// always see `ChatTab`, never `PersistedChatTab` — this conversion
     /// happens at the persistence boundary in `TabPersistence`.
-    public func toChatTab() -> ChatTab {
-        // ChatTab's init has a precondition that channels is non-empty.
-        // If persistence somehow ended up with an empty channels array
-        // (shouldn't happen — we never write that), the precondition will
-        // crash, which is correct: it surfaces the data-integrity bug
-        // immediately rather than silently rendering a broken tab.
-        ChatTab(id: id, channels: channels)
+    ///
+    /// Returns `nil` for a corrupt row with no channels. We never write one,
+    /// but `ChatTab.init` preconditions non-empty, and a crash on every
+    /// launch is the worst way to surface bad data. Callers drop the `nil`s;
+    /// the row itself is deleted by the next `TabPersistence.save(tabs:)`,
+    /// which removes every row of the account that isn't in the strip.
+    public func toChatTab() -> ChatTab? {
+        guard !channels.isEmpty else { return nil }
+        return ChatTab(id: id, channels: channels)
     }
 }

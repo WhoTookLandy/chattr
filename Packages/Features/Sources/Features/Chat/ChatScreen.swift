@@ -458,8 +458,10 @@ public struct ChatScreen: View {
             // pass was wasted UserDefaults work on the per-message hot path.
             seedDraft: draftSeed,
             onCancelReply: { chatModel.cancelReply() },
+            // Debounced: storage is written once typing pauses (~400ms),
+            // not per keystroke. Flushed in `.onDisappear` below.
             onDraftChange: { [channelKey = channel.id] newDraft in
-                DraftStorage.save(forChannel: channelKey, text: newDraft)
+                DraftStorage.scheduleSave(forChannel: channelKey, text: newDraft)
             },
             // Captures the concrete EmoteIndex instance + globals dict
             // (resolved above), NOT @Environment — so it returns real
@@ -485,6 +487,9 @@ public struct ChatScreen: View {
                 await chatModel.send(text: draft)
             }
         )
+        // Write any draft still inside the debounce window when the compose
+        // bar leaves (page swiped off, tab closed, account switched).
+        .onDisappear { DraftStorage.flushPendingSaves() }
     }
 
     // MARK: - Subviews
