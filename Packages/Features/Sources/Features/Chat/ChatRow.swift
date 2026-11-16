@@ -29,31 +29,78 @@ struct ChatRow: View, Equatable {
     /// Called when the user taps the retry control on a `.failed` row.
     /// Optional so call sites without a retry path (priming, previews,
     /// future read-only chat) don't have to manufacture a callback.
-    var onRetry: (() -> Void)? = nil
+    private let onRetry: (() -> Void)?
     /// Called when the user picks "Reply" from the long-press menu on
     /// a `.message` row. Optional for the same reason as `onRetry`.
-    var onReply: (() -> Void)? = nil
+    private let onReply: (() -> Void)?
     /// Called when the user picks "View Thread" from the long-press
     /// menu OR taps the quoted-reply preview line. Optional — when nil,
     /// the menu item is hidden and the quote tap is disabled (so the
     /// thread-sheet view itself, which doesn't recurse, sets it nil
     /// to suppress both).
-    var onViewThread: (() -> Void)? = nil
+    private let onViewThread: (() -> Void)?
     /// Called when a moderator picks "Delete Message" from the
     /// long-press menu. Optional — when nil, the menu item is hidden.
     /// `ChatScreen` only passes a non-nil closure when
     /// `chatModel.currentUserCanModerate` is true, so non-mods never
     /// see the affordance.
-    var onDelete: (() -> Void)? = nil
+    private let onDelete: (() -> Void)?
     /// Called when the user picks "Block" from the long-press menu. nil hides the
     /// item (ChatScreen passes nil for the current user's own messages).
-    var onBlock: (() -> Void)? = nil
+    private let onBlock: (() -> Void)?
     /// Called when the user picks a reason from "Report…". Same nil-hides rule.
-    var onReport: ((UserBlockReason) -> Void)? = nil
+    private let onReport: ((UserBlockReason) -> Void)?
     /// Whether a reply line renders its quoted-parent block. The thread
     /// sheet sets this false — inside a thread every message's parent is
     /// already visible right above it, so per-row quotes are pure noise.
-    var showsQuotedReply: Bool = true
+    let showsQuotedReply: Bool
+
+    /// Which of the callbacks above are present — the comparable shadow `==`
+    /// uses instead of the (incomparable) closures themselves. Derived in
+    /// `init`, so it can't drift from them.
+    private let affordances: Affordances
+
+    /// One bit per optional callback.
+    struct Affordances: OptionSet, Hashable, Sendable {
+        let rawValue: UInt8
+        static let retry      = Affordances(rawValue: 1 << 0)
+        static let reply      = Affordances(rawValue: 1 << 1)
+        static let viewThread = Affordances(rawValue: 1 << 2)
+        static let delete     = Affordances(rawValue: 1 << 3)
+        static let block      = Affordances(rawValue: 1 << 4)
+        static let report     = Affordances(rawValue: 1 << 5)
+    }
+
+    init(
+        line: ChatLine,
+        badgeEntries: [ChatBadgeEntry],
+        onRetry: (() -> Void)? = nil,
+        onReply: (() -> Void)? = nil,
+        onViewThread: (() -> Void)? = nil,
+        onDelete: (() -> Void)? = nil,
+        onBlock: (() -> Void)? = nil,
+        onReport: ((UserBlockReason) -> Void)? = nil,
+        showsQuotedReply: Bool = true
+    ) {
+        self.line = line
+        self.badgeEntries = badgeEntries
+        self.onRetry = onRetry
+        self.onReply = onReply
+        self.onViewThread = onViewThread
+        self.onDelete = onDelete
+        self.onBlock = onBlock
+        self.onReport = onReport
+        self.showsQuotedReply = showsQuotedReply
+
+        var affordances: Affordances = []
+        if onRetry != nil { affordances.insert(.retry) }
+        if onReply != nil { affordances.insert(.reply) }
+        if onViewThread != nil { affordances.insert(.viewThread) }
+        if onDelete != nil { affordances.insert(.delete) }
+        if onBlock != nil { affordances.insert(.block) }
+        if onReport != nil { affordances.insert(.report) }
+        self.affordances = affordances
+    }
 
     /// Fixed-width `HH:mm` (24-hour, zero-padded) — the Twitch-native chat
     /// timestamp shape. Verbatim because every locale-aware hour style adds
@@ -94,27 +141,32 @@ struct ChatRow: View, Equatable {
     // justify. Each individual eval was fast (~15µs), but the volume
     // accumulated to 1.48s of CPU on the main thread.
     //
-    // With explicit Equatable comparing the semantically-significant
-    // fields (line + badgeEntries), SwiftUI's diff short-circuits when
-    // the underlying data is unchanged:
+    // With explicit Equatable comparing what the row actually renders from,
+    // SwiftUI's diff short-circuits when nothing visible changed:
     //   - `line`: ChatLine is itself Equatable; identical line → equal
-    //   - `badgeEntries`: array element-wise compare; identical
-    //     ChatBadgeEntry sequence → equal (typically stable per line)
-    //   - Closures: deliberately IGNORED. They're functionally identical
-    //     across body re-evals (capture the same `line.id`, `chatModel`,
-    //     etc.), and treating them as equal lets the short-circuit fire.
+    //   - `badgeEntries`: element-wise; typically stable per line
+    //   - `showsQuotedReply`: a plain flag
+    //   - Callbacks: compared by PRESENCE (`affordances`), never by
+    //     identity. A fresh closure per body re-eval does the same thing as
+    //     the last one (same `line.id`, same model), so it must not defeat
+    //     the short-circuit — but gaining or losing one changes the row
+    //     (a menu item, the retry strip, the quote's tap), so it must. That
+    //     last part used to be missing: with closures ignored outright, a
+    //     reconfigure that only added `onDelete` (mod status learned) was
+    //     swallowed as "unchanged" and the list had to force fresh row
+    //     identity to show it.
     //
     // SwiftUI applies this comparison automatically when a View conforms
     // to Equatable — no need to wrap in `EquatableView()` at call sites.
     //
     // `nonisolated` because Equatable conformance from a @MainActor View
-    // requires `==` to be callable from any actor. The args are Sendable
-    // (ChatLine + [ChatBadgeEntry]) so this is safe — no instance state
-    // is accessed.
+    // requires `==` to be callable from any actor. Every compared field is
+    // a Sendable `let`, so no actor-isolated state is touched.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.line == rhs.line
             && lhs.badgeEntries == rhs.badgeEntries
             && lhs.showsQuotedReply == rhs.showsQuotedReply
+            && lhs.affordances == rhs.affordances
     }
 
     var body: some View {

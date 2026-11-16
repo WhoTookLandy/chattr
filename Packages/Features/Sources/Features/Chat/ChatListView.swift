@@ -175,8 +175,8 @@ final class ChatListViewController: UIViewController {
     /// Last unread count pushed to SwiftUI — report on change only.
     private var lastReportedUnread = 0
 
-    /// Current row inputs (badges loaded, can moderate). Nil before the first
-    /// update. Read by the cell registration as the hosted row's identity.
+    /// Last row inputs (badges loaded, can moderate) — `update` reconfigures
+    /// every row when they change. Nil before the first update.
     private var rowInputs: ChatRowInputs?
 
     override func viewDidLoad() {
@@ -246,14 +246,11 @@ final class ChatListViewController: UIViewController {
     private func configureDataSource() {
         let registration = UICollectionView.CellRegistration<UICollectionViewCell, String> { [weak self] cell, _, id in
             guard let self, let line = self.feed.linesByID[id], let rowContent = self.rowContent else { return }
-            // `.id(rowInputs)`: ChatRow's hand-written `==` compares only the
-            // line and badge entries — it deliberately ignores closures, so a
-            // reconfigure that merely adds `onDelete` (mod status learned)
-            // would be short-circuited as "unchanged". Keying the hosted
-            // row's identity on the inputs token forces a fresh row exactly
-            // when those inputs change (rare), and is a no-op otherwise.
-            let inputs = self.rowInputs
-            cell.contentConfiguration = UIHostingConfiguration { rowContent(line).id(inputs) }
+            // No forced identity needed when row inputs change: ChatRow's
+            // `==` compares its badges and which callbacks are present
+            // (`ChatRow.Affordances`), so a reconfigure that only adds
+            // `onDelete` (mod status learned) re-renders like any other.
+            cell.contentConfiguration = UIHostingConfiguration { rowContent(line) }
                 .margins(.all, 0)   // ChatRow + section insets own the spacing
             cell.backgroundConfiguration = .clear()
         }
