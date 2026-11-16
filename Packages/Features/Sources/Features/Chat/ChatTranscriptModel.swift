@@ -495,40 +495,6 @@ public final class ChatTranscriptModel {
         )
     }
 
-    /// Payload for an in-flight reply intent. Held by `replyContext`;
-    /// passed to `ChannelSession.send` as `replyParentMessageId` when
-    /// the user finally taps Send.
-    public struct ReplyContext: Sendable, Equatable {
-        public let parentMessageId: String
-        public let parentAuthorDisplayName: String
-        public let parentSnippet: String      // already-truncated so the view doesn't need to
-        /// The root of the thread this reply belongs to. For replies
-        /// to a top-level message, this equals `parentMessageId`. For
-        /// replies-to-replies mid-thread, this equals the original
-        /// thread root (walked from the parent's own `replyParent`).
-        ///
-        /// Used to stamp the optimistic `ChatLine.ReplyParent` so the
-        /// thread sheet can group the optimistic row correctly
-        /// BEFORE the echo arrives and replaces it with Twitch's
-        /// authoritative `threadMessageId`. Without this, an
-        /// optimistic mid-thread reply would render as a singleton
-        /// (its own "thread") in the View Thread sheet until the
-        /// echo lands.
-        public let threadRootMessageId: String
-
-        public init(
-            parentMessageId: String,
-            parentAuthorDisplayName: String,
-            parentSnippet: String,
-            threadRootMessageId: String
-        ) {
-            self.parentMessageId = parentMessageId
-            self.parentAuthorDisplayName = parentAuthorDisplayName
-            self.parentSnippet = parentSnippet
-            self.threadRootMessageId = threadRootMessageId
-        }
-    }
-
     /// Monotonic attach epoch. Bumped synchronously at the start of every
     /// `attach(...)`; the value that call establishes is `myEpoch`. Two things
     /// hang off it:
@@ -1238,79 +1204,6 @@ public final class ChatTranscriptModel {
     func threadSnapshot(rootedAt rootMessageId: String) -> (version: Int, lines: [ChatLine]) {
         let version = sealPendingChanges()
         return (version, lines(inThreadRootedAt: rootMessageId))
-    }
-
-    /// Returns the thread root id for a given line. If the line is
-    /// itself a reply, the thread root is `replyParent.threadRootMessageId`.
-    /// If not, the line itself is the candidate root.
-    ///
-    /// "Candidate" because we have no way to tell from a single line
-    /// whether it's actually been replied to — would require scanning
-    /// other lines. The caller (the View Thread menu item) doesn't
-    /// need this distinction because the sheet handles a "singleton
-    /// thread" (just this one message) the same way it handles a
-    /// 50-message thread.
-    public static func threadRoot(of line: ChatLine) -> String {
-        line.replyParent?.threadRootMessageId ?? line.id
-    }
-
-    /// Factory: build a `ReplyContext` from any line. Used by
-    /// `beginReply` (main compose bar) AND by `ThreadView` (thread
-    /// sheet's compose bar — replies to the latest thread message).
-    /// Centralizing the construction here means callers don't have to
-    /// know how to build the snippet, and the snippet logic only
-    /// exists in one place.
-    public static func replyContext(for line: ChatLine) -> ReplyContext {
-        // Resolve the thread root: if the line we're replying to is
-        // itself a reply, the thread root is the SAME root the line
-        // already points to (mid-thread continuation). Otherwise the
-        // line itself is the root candidate (first reply, or a
-        // singleton thread).
-        let threadRoot = line.replyParent?.threadRootMessageId ?? line.id
-        return ReplyContext(
-            parentMessageId: line.id,
-            parentAuthorDisplayName: line.authorDisplayName,
-            parentSnippet: snippet(from: line.runs, cap: 80),
-            threadRootMessageId: threadRoot
-        )
-    }
-
-    /// Build a short, single-line preview of a message's runs for the
-    /// reply chip. Emote and twitchEmote runs become their name, mention and
-    /// cheermote runs render as their text. Runs are word-level (no
-    /// whitespace of their own) so pieces are joined with single spaces.
-    /// The total is capped with an ellipsis.
-    ///
-    /// Internal (not private) so `ThreadView` can reuse it via
-    /// `replyContext(for:)` without duplicating the dispatch logic.
-    static func snippet(from runs: [LineRun], cap: Int) -> String {
-        var out = ""
-        for run in runs {
-            let piece: String
-            switch run {
-            case .text(let s):
-                piece = s
-            case .emote(let e):
-                piece = e.name
-            case .twitchEmote(_, let display):
-                piece = display
-            case .mention(let login, _):
-                piece = "@\(login)"
-            case .cheermote(let prefix, let bits, _):
-                piece = "\(prefix)\(bits)"
-            }
-            if piece.isEmpty { continue }
-            if !out.isEmpty { out += " " }
-            out += piece
-            if out.count >= cap { break }
-        }
-        if out.count > cap {
-            // Cut at character boundary — using `prefix(cap)` returns a
-            // Substring of Characters, safe for Grapheme clusters
-            // (emoji, combined marks). String(...) re-bridges.
-            return String(out.prefix(cap)) + "…"
-        }
-        return out
     }
 
     // MARK: - Internals
