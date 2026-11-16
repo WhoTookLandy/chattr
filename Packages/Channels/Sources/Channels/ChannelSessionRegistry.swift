@@ -22,6 +22,12 @@ private let logger = AppLogger.make("Channels.Registry")
 /// iterator per client and routes each event to the session whose channel ID
 /// matches the event's broadcaster.
 ///
+/// That iterator runs in a detached task — never on the main actor — and
+/// only hands each event to `ChannelEventRouter`, which drops it into the
+/// owning session's own inbox without waiting. A slow channel (or a slow
+/// subscriber of one) therefore can't hold up the socket's other channels,
+/// and a busy main thread can't hold up the socket at all.
+///
 /// ## Why coalesce concurrent calls
 ///
 /// `session(...)` is `@MainActor`-isolated but contains a suspension point at
@@ -37,7 +43,8 @@ private let logger = AppLogger.make("Channels.Registry")
 /// be `Sendable`, which they aren't. `@MainActor` keeps them inside their
 /// native isolation domain. The contained `ChannelSession` instances are
 /// themselves `actor`s; their internal work happens off-main and the registry
-/// only stores/dispenses them and hops to call `handle(event:)`.
+/// only stores/dispenses them and keeps the router's table in step with
+/// their lifecycle. No event passes through the main actor on its way in.
 @MainActor
 public final class ChannelSessionRegistry {
 
@@ -91,14 +98,21 @@ public final class ChannelSessionRegistry {
     /// Event-routing targets, keyed the same way as `sessions`. A session is
     /// registered here BEFORE `start()` runs, so the shared dispatcher can
     /// deliver live events to `handle(event:)` (which buffers them) during the
-    /// subscribe + backfill window. Without this, `dispatch(event:)` would drop
-    /// those events because the session isn't in `sessions` yet.
+    /// subscribe + backfill window. Without this, the router would drop those
+    /// events because the session isn't in `sessions` yet.
     ///
     /// Distinct from `sessions` on purpose: routing must begin early, but
     /// exposure (fast-path + coalescing result) must stay late. Conflating them
     /// would let a concurrent caller grab a not-yet-started session. Cleared on
     /// teardown and on failed start.
+    ///
+    /// Mirrored into `router` (which the off-main dispatcher reads): every
+    /// write here is paired with a `router.register` / `router.unregister`.
     private var dispatchTargets: [String: ChannelSession] = [:]
+
+    /// The off-main routing table the per-account dispatchers deliver
+    /// through. See `ChannelEventRouter`.
+    private let router = ChannelEventRouter()
 
     /// In-flight session-construction Tasks, keyed the same way as `sessions`.
     /// Two views opening the same channel concurrently each see no entry in
@@ -131,8 +145,9 @@ public final class ChannelSessionRegistry {
 
     /// Shared event-dispatcher Tasks, one per accountUserId. Each owns the
     /// single iterator on its account's `client.eventSub.events` stream and
-    /// routes each event to the matching session via `handle(event:)`.
-    /// Started lazily on first session creation for an account.
+    /// routes each event to the matching session's inbox via `router`.
+    /// Detached (never main-actor). Started lazily on first session creation
+    /// for an account.
     private var eventDispatchTasks: [String: Task<Void, Never>] = [:]
 
     /// Per-account connection-state mirrors, keyed by `accountUserId`. One per
@@ -276,6 +291,7 @@ public final class ChannelSessionRegistry {
         // expose the session to the fast path or to subscribers yet.
         // Idempotent: ensureEventDispatch spins up at most one Task per account.
         dispatchTargets[key] = session
+        router.register(session, for: .init(accountUserId: accountUserId, channelId: channelId))
         ensureEventDispatch(client: client, accountUserId: accountUserId)
 
         // A previous session for this key may still be unsubscribing (it was
@@ -345,6 +361,8 @@ public final class ChannelSessionRegistry {
         if dispatchTargets[key] === session {
             dispatchTargets[key] = nil
         }
+        // Identity-based: a no-op if a newer session already took the route.
+        router.unregister(session)
         // The dispatcher may have been started just for this session.
         stopDispatcherIfIdle(accountUserId: accountUserId)
     }
@@ -538,7 +556,9 @@ public final class ChannelSessionRegistry {
         // Stop routing events to this session regardless of whether it
         // finished starting (it may be in `dispatchTargets` but not yet in
         // `sessions` if the release races a slow start).
-        dispatchTargets[key] = nil
+        if let target = dispatchTargets.removeValue(forKey: key) {
+            router.unregister(target)
+        }
         // T11: per-channel view stores share the session's lifetime.
         // Drop them here so the next acquire for the same channel starts
         // fresh — emote provider catalogs and channel badges might have
@@ -842,13 +862,16 @@ public final class ChannelSessionRegistry {
     private func ensureEventDispatch(client: TwitchClient, accountUserId: String) {
         guard eventDispatchTasks[accountUserId] == nil else { return }
 
-        eventDispatchTasks[accountUserId] = Task { [weak self] in
-            // ONE iterator on the client's event stream — that's the whole
-            // point of this Task. All routing happens via `dispatch(event:)`.
+        // ONE iterator on the client's event stream — that's the whole point
+        // of this Task. Detached so the loop never runs on (or waits for) the
+        // main actor; it touches only the Sendable router, whose `route` is a
+        // lock-protected lookup + non-blocking inbox yield. Nothing here
+        // awaits a session or a subscriber.
+        let router = self.router
+        eventDispatchTasks[accountUserId] = Task.detached(priority: .userInitiated) {
             for await event in client.eventSub.events {
-                guard let self else { return }
                 guard !Task.isCancelled else { return }
-                await self.dispatch(event: event, accountUserId: accountUserId)
+                router.route(event, accountUserId: accountUserId)
             }
         }
         logger.info("Started event dispatcher for account \(accountUserId, privacy: .public)")
@@ -911,22 +934,12 @@ public final class ChannelSessionRegistry {
         }
     }
 
-    /// Routes a single event to the session whose `channelId` matches the
-    /// event's broadcaster. Drops events for channels with no active session
-    /// (briefly possible during close-X — event in flight while we tear down).
-    private func dispatch(event: EventSubEvent, accountUserId: String) async {
-        guard let broadcasterId = ChannelSession.broadcasterUserId(from: event) else {
-            return
-        }
-        let key = Self.key(accountUserId: accountUserId, channelId: broadcasterId)
-        // Route via `dispatchTargets`, not `sessions`: a session is routable
-        // (registered here) from before `start()` runs, so events arriving
-        // during the subscribe + backfill window reach `handle(event:)` and get
-        // buffered rather than dropped.
-        guard let session = dispatchTargets[key] else {
-            return
-        }
-        await session.handle(event: event)
+    /// Test hook: whether the off-main router currently delivers this
+    /// account × channel's events anywhere. Routing starts BEFORE `start()`
+    /// (so events during subscribe + backfill are buffered, not dropped) and
+    /// ends synchronously when the key's lifetime does.
+    func isRouted(accountUserId: String, channelId: String) -> Bool {
+        router.isRouted(.init(accountUserId: accountUserId, channelId: channelId))
     }
 
     // MARK: - Helpers
