@@ -216,6 +216,7 @@ public struct ChatScreen: View {
                     channelLoginName: channelLoginName,
                     connectionStatus: connectionStatus,
                     rowContent: { line in chatRow(for: line) },
+                    rowInputs: rowInputs,
                     showReportConfirmation: $showReportConfirmation
                 )
             }
@@ -517,6 +518,20 @@ public struct ChatScreen: View {
             .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The non-line inputs `chatRow(for:)` reads (see `ChatRowInputs`).
+    /// `chatRow` itself runs from the cell provider, OUTSIDE any body, so
+    /// those reads were never observed and configured rows went stale; this
+    /// is read in `body` instead, so a badge-table load or a mod-status flip
+    /// re-renders the transcript and the list reconfigures its rows. Both
+    /// change rarely (badges load once per channel; mod status flips at most
+    /// a few times), so the extra dependencies cost nothing at message rate.
+    private var rowInputs: ChatRowInputs {
+        ChatRowInputs(
+            badgeEntryCount: badgeStore?.entries.count ?? 0,
+            canModerate: chatModel.currentUserCanModerate
+        )
     }
 
     /// Builds the row for one line — same badge lookup + callbacks the

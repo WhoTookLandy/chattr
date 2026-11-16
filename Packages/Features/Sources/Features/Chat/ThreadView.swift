@@ -54,10 +54,16 @@ struct ThreadView: View {
     /// to call `lines(inThreadRootedAt:)` — an O(buffer) filter — on every body
     /// evaluation, and because it read `chatModel.lines` that meant a full
     /// re-filter on every incoming message (devastating during a raid with the
-    /// sheet open). Snapshotting into @State and refreshing only on a
-    /// `changeVersion` bump runs the filter at most once per publish, and keeps
-    /// renders driven by compose/focus/scroll off the filter entirely.
+    /// sheet open). Snapshotting into @State keeps renders driven by
+    /// compose/focus/scroll off the filter entirely; on each publish the sheet
+    /// pulls the changes since `threadVersion` and re-filters only when one of
+    /// them touches this thread (`ChatChange.touchesThread`) — in a raid,
+    /// nearly every batch is unrelated chatter and costs a scan of the batch,
+    /// not of the buffer.
     @State private var threadLines: [ChatLine] = []
+
+    /// Change-log version `threadLines` reflects. `-1` until seeded on appear.
+    @State private var threadVersion = -1
 
     /// Reply target for the thread compose bar — latest message in the thread,
     /// built via the centralized factory so it matches the main compose bar's
@@ -157,12 +163,35 @@ struct ThreadView: View {
                 }
             }
         }
-        // Seed on open, then refresh only when the transcript actually changes
-        // (one Int comparison), instead of re-filtering the whole buffer on
-        // every render pass.
-        .onAppear { threadLines = chatModel.lines(inThreadRootedAt: rootMessageId) }
-        .onChange(of: chatModel.changeVersion) { _, _ in
-            threadLines = chatModel.lines(inThreadRootedAt: rootMessageId)
+        // Seed on open, then on each publish re-filter only if the published
+        // changes touch this thread — never on plain render passes.
+        .onAppear { reloadThread() }
+        .onChange(of: chatModel.changeVersion) { _, _ in refreshThreadIfTouched() }
+    }
+
+    /// Re-filters the buffer for this thread and records the version it
+    /// reflects.
+    private func reloadThread() {
+        let snapshot = chatModel.threadSnapshot(rootedAt: rootMessageId)
+        threadLines = snapshot.lines
+        threadVersion = snapshot.version
+    }
+
+    /// Pulls everything published since `threadVersion` (every batch, even if
+    /// SwiftUI coalesced several publishes into this one onChange) and
+    /// re-filters only when something touched the thread.
+    private func refreshThreadIfTouched() {
+        switch chatModel.changes(since: threadVersion) {
+        case .overrun:
+            reloadThread()
+        case .changes(let changes, let through):
+            guard !changes.isEmpty else { return }
+            let memberIds = Set(threadLines.map(\.id))
+            if changes.contains(where: { $0.touchesThread(rootedAt: rootMessageId, memberIds: memberIds) }) {
+                reloadThread()
+            } else {
+                threadVersion = through
+            }
         }
     }
 }

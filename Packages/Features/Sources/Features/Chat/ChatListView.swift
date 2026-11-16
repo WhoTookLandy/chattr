@@ -13,25 +13,34 @@ import ChatModel
 /// inverted-transform approach was rejected (it degrades the per-row context
 /// menu previews).
 struct ChatListView: UIViewControllerRepresentable {
-    /// Monotonic publish version from `ChatTranscriptModel`. The ONLY value that drives
-    /// a data update — passing the `Int` (not the `[ChatLine]`) is what keeps
-    /// `ChatScreen.body` off the full-array dependency on the per-message hot
-    /// path. When it advances by exactly one, the controller applies the
-    /// incremental batch; any other jump falls back to a full snapshot.
+    /// `ChatTranscriptModel.changeVersion` — a TRIGGER only. Passing the `Int`
+    /// (not the `[ChatLine]`) keeps the parent body off the full-array
+    /// dependency while still making SwiftUI call `updateUIViewController`
+    /// once per model flush. The controller never trusts the value's
+    /// arithmetic (SwiftUI may coalesce several flushes into one update); it
+    /// pulls everything since its own last version via `changes`.
     let changeVersion: Int
-    /// Pulls the change batch that produced the current `changeVersion`
-    /// (incremental fast path). A closure, not a stored array, so reading it
+    /// The model's `changes(since:)` — every published change after a
+    /// version, or `.overrun`. A closure, not a stored array, so reading it
     /// doesn't register a body dependency.
-    let latestChanges: () -> [ChatChange]
-    /// Pulls the full visible snapshot — the first-mount / coalesced-jump
-    /// fallback. Only invoked when the incremental path can't be trusted.
-    let snapshot: () -> [ChatLine]
+    let changes: (Int) -> ChatChangeLog.Delta
+    /// The model's `transcriptSnapshot()` — the first-mount / log-overrun /
+    /// abandoned-backlog fallback. Only invoked when replay can't be used.
+    let snapshot: () -> (version: Int, lines: [ChatLine])
     /// Builds a row for one line — the badge lookup and the four per-line
     /// callbacks are assembled by `ChatScreen`, keeping this component
     /// ignorant of the model layer.
     let rowContent: (ChatLine) -> ChatRow
+    /// Inputs `rowContent` reads besides the line (badges loaded, can
+    /// moderate). When it changes, every row already in the list is
+    /// reconfigured — otherwise rows built before badges loaded or mod
+    /// status arrived stay stale until recycled.
+    let rowInputs: ChatRowInputs
     /// UIKit → SwiftUI: true when tailing the live edge. Drives the pill.
     @Binding var isAtBottom: Bool
+    /// UIKit → SwiftUI: messages that arrived while the list was unpinned and
+    /// are held back off screen. Drives the pill's "N new".
+    @Binding var unreadCount: Int
     /// SwiftUI → UIKit: incremented by the jump-to-bottom pill to request a
     /// scroll to the newest message.
     let scrollToBottomToken: Int
@@ -52,6 +61,11 @@ struct ChatListView: UIViewControllerRepresentable {
             // enqueue) — one scheduling world instead of two.
             Task { @MainActor in isAtBottom = atBottom }
         }
+        vc.onUnreadCountChanged = { count in
+            // Same deferral as above — this can fire from inside a SwiftUI
+            // update pass or a scroll callback.
+            Task { @MainActor in unreadCount = count }
+        }
         return vc
     }
 
@@ -61,9 +75,9 @@ struct ChatListView: UIViewControllerRepresentable {
         vc.rowContent = rowContent
         vc.extendsToTop = extendsToTop
         vc.update(
-            version: changeVersion,
-            latestChanges: latestChanges,
+            changes: changes,
             snapshot: snapshot,
+            rowInputs: rowInputs,
             scrollToBottomToken: scrollToBottomToken
         )
     }
@@ -94,6 +108,10 @@ final class ChatListViewController: UIViewController {
 
     /// UIKit → SwiftUI callback for tailing state (set by the representable).
     var onAtBottomChanged: ((Bool) -> Void)?
+
+    /// UIKit → SwiftUI callback for the held-back message count (set by the
+    /// representable). Fired only when the count changes.
+    var onUnreadCountChanged: ((Int) -> Void)?
 
     /// Mirrors `ChatListView.extendsToTop` — applied on change (and once
     /// at viewDidLoad, since the representable sets it before the view
@@ -133,17 +151,33 @@ final class ChatListViewController: UIViewController {
     /// Cleared the moment the user starts dragging; restored when a drag or
     /// deceleration ends near the bottom, or when the jump-to-bottom pill
     /// fires. Starts true — chat opens tailing.
+    ///
+    /// Also gates data flow: while unpinned, appends / trims / re-keys are
+    /// held back by `feed` so the rows being read can't be trimmed out from
+    /// under the reader; re-pinning flushes them in one apply.
     private var isPinnedToBottom = true
 
     /// Last-seen scroll-to-bottom token — the jump-to-bottom pill increments the
     /// value to request a scroll; we act only when it changes.
     private var lastScrollToBottomToken = 0
 
-    /// Last-applied lines, keyed by id for the cell provider's O(1) lookup.
-    private var linesByID: [String: ChatLine] = [:]
-    /// Last model publish version applied to the data source. `-1` = nothing
-    /// applied yet, which forces a full snapshot reset on the first update.
-    private var lastAppliedVersion = -1
+    /// Consumer of the model's change log: what the data source shows (and
+    /// the cell provider's `linesByID` lookup), plus the changes held back
+    /// while the user reads scrollback. See `ChatListFeed`.
+    private var feed = ChatListFeed()
+
+    /// Latest model accessors, kept so a scroll callback (resuming tailing)
+    /// can flush the held-back changes immediately instead of waiting for the
+    /// next SwiftUI update — which never comes if the chat has gone quiet.
+    private var pullChanges: ((Int) -> ChatChangeLog.Delta)?
+    private var pullSnapshot: (() -> (version: Int, lines: [ChatLine]))?
+
+    /// Last unread count pushed to SwiftUI — report on change only.
+    private var lastReportedUnread = 0
+
+    /// Current row inputs (badges loaded, can moderate). Nil before the first
+    /// update. Read by the cell registration as the hosted row's identity.
+    private var rowInputs: ChatRowInputs?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -211,8 +245,15 @@ final class ChatListViewController: UIViewController {
 
     private func configureDataSource() {
         let registration = UICollectionView.CellRegistration<UICollectionViewCell, String> { [weak self] cell, _, id in
-            guard let self, let line = self.linesByID[id], let rowContent = self.rowContent else { return }
-            cell.contentConfiguration = UIHostingConfiguration { rowContent(line) }
+            guard let self, let line = self.feed.linesByID[id], let rowContent = self.rowContent else { return }
+            // `.id(rowInputs)`: ChatRow's hand-written `==` compares only the
+            // line and badge entries — it deliberately ignores closures, so a
+            // reconfigure that merely adds `onDelete` (mod status learned)
+            // would be short-circuited as "unchanged". Keying the hosted
+            // row's identity on the inputs token forces a fresh row exactly
+            // when those inputs change (rare), and is a no-op otherwise.
+            let inputs = self.rowInputs
+            cell.contentConfiguration = UIHostingConfiguration { rowContent(line).id(inputs) }
                 .margins(.all, 0)   // ChatRow + section insets own the spacing
             cell.backgroundConfiguration = .clear()
         }
@@ -235,13 +276,20 @@ final class ChatListViewController: UIViewController {
     }
 
     /// Restore the viewport so `anchor.id` sits at the same distance from the
-    /// top as before — cancels the jump a front-trim would otherwise cause.
+    /// top as before — cancels the jump an edit above the viewport would
+    /// otherwise cause. Forces a layout pass, so it runs only for edits that
+    /// land while unpinned (in-place edits and resets; trims are held back).
     private func restoreTopAnchor(_ anchor: (id: String, distanceFromTop: CGFloat)) {
         collectionView.layoutIfNeeded()
         guard let indexPath = dataSource.indexPath(for: anchor.id),
               let attrs = collectionView.layoutAttributesForItem(at: indexPath) else { return }
         var offset = collectionView.contentOffset
         offset.y = attrs.frame.minY - anchor.distanceFromTop
+        // Most unpinned edits land below the viewport (recent rows) and don't
+        // move the anchor. Skip the write then: `setContentOffset` kills any
+        // in-flight deceleration, so an unconditional restore would stop a
+        // fling through scrollback whenever a row got struck or delivered.
+        guard abs(offset.y - collectionView.contentOffset.y) > 0.5 else { return }
         collectionView.setContentOffset(offset, animated: false)
     }
 
@@ -270,104 +318,116 @@ final class ChatListViewController: UIViewController {
         )
     }
 
-    /// Apply a model publish. The data source is updated from the model's typed
-    /// change stream rather than a re-diff of the whole array:
-    ///   - version unchanged → no data work (SwiftUI re-ran update for some
-    ///     other reason, e.g. the `isAtBottom` binding); still honor the pill.
-    ///   - version == lastApplied + 1 → apply the incremental batch (fast path).
-    ///   - any other jump (first mount, or SwiftUI coalesced several publishes)
-    ///     → reset wholesale from the snapshot (safety net).
+    /// SwiftUI update (a model flush, or anything else that re-ran the parent
+    /// body): remember the model accessors, honor the jump-to-bottom pill,
+    /// then pull and apply everything new.
+    ///
+    /// There is no version arithmetic here. SwiftUI may fold several model
+    /// flushes into one update; the feed asks the model for every change
+    /// since the version IT last consumed, so nothing is skipped, and a
+    /// wholesale reset happens only on first mount or when the model's
+    /// bounded log no longer reaches back that far.
     func update(
-        version: Int,
-        latestChanges: () -> [ChatChange],
-        snapshot: () -> [ChatLine],
+        changes: @escaping (Int) -> ChatChangeLog.Delta,
+        snapshot: @escaping () -> (version: Int, lines: [ChatLine]),
+        rowInputs: ChatRowInputs,
         scrollToBottomToken: Int
     ) {
-        if version != lastAppliedVersion {
-            if version == lastAppliedVersion + 1 {
-                apply(changes: latestChanges())
-            } else {
-                apply(changes: [.reset(snapshot())])
-            }
-            lastAppliedVersion = version
-        }
+        pullChanges = changes
+        pullSnapshot = snapshot
 
-        if scrollToBottomToken != lastScrollToBottomToken {
+        // Row inputs changed (badges finished loading, mod status flipped):
+        // reconfigure every row already in the list, in the same apply as
+        // whatever data arrived. Not on the first update — every row is
+        // fresh then.
+        let inputsChanged = self.rowInputs != nil && self.rowInputs != rowInputs
+        self.rowInputs = rowInputs
+
+        let jumpRequested = scrollToBottomToken != lastScrollToBottomToken
+        if jumpRequested {
             lastScrollToBottomToken = scrollToBottomToken
-            // Jump-to-bottom pill: re-enter tailing. The per-pass
-            // pinToBottomIfNeeded (and the explicit pin in `apply`) glue the
-            // offset to the live edge from here — same mechanism as
-            // resumeTailingIfNearBottom, the controller's pin-based tailing.
+            // Jump-to-bottom pill: re-enter tailing BEFORE pulling, so the
+            // backlog held back while reading flushes in this same apply. The
+            // per-pass pinToBottomIfNeeded (and the explicit pin in `apply`)
+            // glue the offset to the live edge from here — same mechanism as
+            // resumeTailingIfNearBottom.
             isPinnedToBottom = true
-            pinToBottomIfNeeded()
         }
+        refresh(reconfigureAll: inputsChanged)
+        if jumpRequested { pinToBottomIfNeeded() }
     }
 
-    /// Folds a batch of `ChatChange` onto the diffable data source — the UIKit
-    /// mirror of `ChatChange.apply(_:to:)`, whose equivalence the buffer's
-    /// contract tests guarantee. Preserves the existing scroll behavior: snap
-    /// to the live edge when tailing, otherwise hold the reading position when
-    /// rows leave above the viewport.
-    private func apply(changes: [ChatChange]) {
-        guard !changes.isEmpty else { return }
-        let wasAtBottom = lastReportedAtBottom
+    /// Pulls everything the model published since the feed's last version and
+    /// applies it as one data-source edit. Pinned: all of it (held-back
+    /// backlog first). Unpinned: only in-place edits of on-screen rows and
+    /// wholesale resets; appends / trims / re-keys wait (see `ChatListFeed`).
+    private func refresh(reconfigureAll: Bool = false) {
+        guard let pullChanges, let pullSnapshot else { return }
+        let edit = feed.update(
+            pinned: isPinnedToBottom,
+            reconfigureAll: reconfigureAll,
+            changes: pullChanges,
+            snapshot: pullSnapshot
+        )
+        apply(edit)
+        reportUnreadCountIfChanged()
+    }
 
-        // Anchoring is only needed when scrolled up AND rows are leaving (a
-        // removal or a wholesale reset can drop rows above the viewport).
-        let mayDropRows = changes.contains { change in
-            switch change {
-            case .removed, .reset: return true
-            case .appended, .reconfigured: return false
-            }
-        }
+    private func reportUnreadCountIfChanged() {
+        let count = feed.unreadCount
+        guard count != lastReportedUnread else { return }
+        lastReportedUnread = count
+        onUnreadCountChanged?(count)
+    }
+
+    /// Folds one `ChatListEdit` into the diffable data source with a SINGLE
+    /// `apply` — structural steps and reconfigures on the same snapshot, no
+    /// whole-list `Set` rebuild (the feed tracks live ids incrementally).
+    /// Then keeps the viewport where it belongs: glued to the live edge when
+    /// pinned, otherwise holding the reading position.
+    private func apply(_ edit: ChatListEdit) {
+        guard !edit.isEmpty else { return }
+
+        // Pinned state — not the geometric `lastReportedAtBottom` — decides.
+        // Mid-drag near the bottom the pin is already released while the
+        // geometry still reads "at bottom"; keying off geometry skipped the
+        // anchor there and let the edit shove the content under the finger.
+        // Unpinned edits are rare (structural changes are held back), so
+        // anchoring every one is cheap, and it also absorbs height changes
+        // from in-place edits above the viewport (a delete flipping a row to
+        // its placeholder).
         let anchor: (id: String, distanceFromTop: CGFloat)? =
-            (!wasAtBottom && mayDropRows) ? currentTopAnchor() : nil
+            isPinnedToBottom ? nil : currentTopAnchor()
 
-        var snapshot = dataSource.snapshot()
-        if snapshot.numberOfSections == 0 { snapshot.appendSections([.main]) }
-        var toReconfigure: [String] = []
-
-        // Set mirror of `snapshot.itemIdentifiers`, kept in sync with the
-        // loop's edits. `itemIdentifiers` is a plain Array, so a per-element
-        // `contains` is O(rows) — and a chat-clear / user-timeout batch emits
-        // one `.reconfigured` per matching line, which would make the checks
-        // below O(rows × batch) on the main thread at the moment chat is
-        // busiest. The Set makes each check O(1).
-        var liveIds = Set(snapshot.itemIdentifiers)
-
-        for change in changes {
-            switch change {
-            case .appended(let line):
-                linesByID[line.id] = line
-                snapshot.appendItems([line.id], toSection: .main)
-                liveIds.insert(line.id)
-            case .removed(let id):
-                linesByID[id] = nil
-                if liveIds.remove(id) != nil { snapshot.deleteItems([id]) }
-            case .reconfigured(let line):
-                linesByID[line.id] = line
-                toReconfigure.append(line.id)
-            case .reset(let lines):
-                linesByID = lines.reduce(into: [:]) { $0[$1.id] = $1 }
-                snapshot = NSDiffableDataSourceSnapshot<Section, String>()
-                snapshot.appendSections([.main])
-                let ids = lines.map(\.id)
+        var snapshot: NSDiffableDataSourceSnapshot<Section, String>
+        if let resetIds = edit.resetIds {
+            snapshot = NSDiffableDataSourceSnapshot<Section, String>()
+            snapshot.appendSections([.main])
+            snapshot.appendItems(resetIds, toSection: .main)
+        } else {
+            snapshot = dataSource.snapshot()
+            if snapshot.numberOfSections == 0 { snapshot.appendSections([.main]) }
+        }
+        for step in edit.steps {
+            switch step {
+            case .delete(let ids):
+                snapshot.deleteItems(ids)
+            case .append(let ids):
                 snapshot.appendItems(ids, toSection: .main)
-                liveIds = Set(ids)
-                toReconfigure.removeAll()
+            case .replace(let from, let to):
+                // Optimistic row upgraded to its server id: the delivered row
+                // takes the dimmed one's slot.
+                snapshot.insertItems([to], beforeItem: from)
+                snapshot.deleteItems([from])
             }
         }
-
-        dataSource.apply(snapshot, animatingDifferences: false)
-
-        // Reconfigure only ids that survived the batch (a line can be
-        // reconfigured then removed within one batch).
-        let liveReconfigure = toReconfigure.filter { liveIds.contains($0) }
-        if !liveReconfigure.isEmpty {
-            var reconfig = dataSource.snapshot()
-            reconfig.reconfigureItems(liveReconfigure)
-            dataSource.apply(reconfig, animatingDifferences: false)
+        // Same snapshot, same apply. `ChatListEdit` guarantees each of these
+        // ids was in the data source before this edit and still is, so none
+        // is an insert (fresh cells read `feed.linesByID` anyway).
+        if !edit.reconfigure.isEmpty {
+            snapshot.reconfigureItems(edit.reconfigure)
         }
+        dataSource.apply(snapshot, animatingDifferences: false)
 
         if isPinnedToBottom {
             // Force the post-snapshot layout now, then pin. layoutIfNeeded
@@ -382,13 +442,12 @@ final class ChatListViewController: UIViewController {
             restoreTopAnchor(anchor)
         }
 
-        // A `.reset` is a mount / wholesale reload — the swipe-in path. The
+        // A reset is a mount / wholesale reload — the swipe-in path. The
         // cells are laid out now (the pin/anchor blocks above forced layout),
         // so this is the cheapest moment to learn the real row height for the
-        // NEXT page's layout. Gated on reset so the per-message `.appended`
-        // hot path never pays for it.
-        let didReset = changes.contains { if case .reset = $0 { return true } else { return false } }
-        if didReset { Self.refineEstimatedRowHeight(from: collectionView) }
+        // NEXT page's layout. Gated on reset so the per-flush append path
+        // never pays for it.
+        if edit.resetIds != nil { Self.refineEstimatedRowHeight(from: collectionView) }
     }
 
     /// Refine the process-wide row-height estimate from the cells that are
@@ -457,6 +516,10 @@ extension ChatListViewController: UICollectionViewDelegate {
             bottomInset: scrollView.adjustedContentInset.bottom
         ) else { return }
         isPinnedToBottom = true
+        // Back at the live edge: flush everything held back while reading
+        // right now — the next model publish may be a while away on a quiet
+        // channel — then glue the offset to the (new) bottom.
+        refresh()
         pinToBottomIfNeeded()
     }
 }
