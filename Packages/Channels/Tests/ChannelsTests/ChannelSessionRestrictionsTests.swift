@@ -77,7 +77,7 @@ struct ChannelSessionRestrictionsTests {
         let (subscription, _) = await session.subscribe()
 
         // A live `channel.chat_settings.update` lands first — followers-only.
-        // handle() sets cachedRestrictionsAreLive = true and delivers it.
+        // handle() marks the restrictions cache live and delivers it.
         let live = try chatSettingsUpdate(followerMode: true, followerDurationMinutes: 10)
         await session.handle(event: .chatSettingsUpdate(live))
 

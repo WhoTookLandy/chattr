@@ -56,7 +56,7 @@ struct ChannelSessionResyncTests {
 
     @Test("Divider lands between history and buffered-live")
     func dividerBetweenHistoryAndLive() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1"), message(id: "h2")],
             pendingLive: [message(id: "m3")],
             capacity: 500,
@@ -69,7 +69,7 @@ struct ChannelSessionResyncTests {
     func dividerAfterDedupedOverlap() {
         // h2 came back from rustlog AND arrived live during the fetch — it
         // keeps its history slot, so it must stay ABOVE the divider.
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1"), message(id: "h2")],
             pendingLive: [message(id: "h2"), message(id: "m3")],
             capacity: 500,
@@ -80,7 +80,7 @@ struct ChannelSessionResyncTests {
 
     @Test("Divider with no buffered-live ends the transcript")
     func dividerWithEmptyLiveTrails() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1")],
             pendingLive: [],
             capacity: 500,
@@ -91,7 +91,7 @@ struct ChannelSessionResyncTests {
 
     @Test("Nil divider reproduces the pre-divider merge exactly")
     func nilDividerUnchanged() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1")],
             pendingLive: [message(id: "m2")],
             capacity: 500,
@@ -102,7 +102,7 @@ struct ChannelSessionResyncTests {
 
     @Test("Cap trims from the head — divider ages out like any update")
     func capTrimsDividerWithOldHistory() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1"), message(id: "h2")],
             pendingLive: [message(id: "m3"), message(id: "m4")],
             capacity: 2,
@@ -118,26 +118,26 @@ struct ChannelSessionResyncTests {
     func gapFillReturnsOnlyMissing() {
         let ring = [message(id: "m1"), message(id: "m2")]
         let fetched = [record(id: "m1"), record(id: "gap1"), record(id: "m2"), record(id: "gap2")]
-        let missing = ChannelSession.missingMessages(fetched, notIn: ring)
+        let missing = ChannelHistoryMerge.missingMessages(fetched, notIn: ring)
         #expect(missing.map(\.message.messageId) == ["gap1", "gap2"])
     }
 
     @Test("Clean reconnect (nothing missed) yields nothing")
     func cleanReconnectYieldsNothing() {
         let ring = [message(id: "m1"), message(id: "m2")]
-        #expect(ChannelSession.missingMessages([record(id: "m1"), record(id: "m2")], notIn: ring).isEmpty)
+        #expect(ChannelHistoryMerge.missingMessages([record(id: "m1"), record(id: "m2")], notIn: ring).isEmpty)
     }
 
     @Test("Non-message ring rows (bubbles, prior dividers) don't block dedup")
     func nonMessageRingRowsIgnored() {
         let ring: [ChannelUpdate] = [divider(id: "div-old"), .chatCleared, message(id: "m1")]
-        let missing = ChannelSession.missingMessages([record(id: "m1"), record(id: "gap1")], notIn: ring)
+        let missing = ChannelHistoryMerge.missingMessages([record(id: "m1"), record(id: "gap1")], notIn: ring)
         #expect(missing.map(\.message.messageId) == ["gap1"])
     }
 
     @Test("Empty ring treats the whole fetch as the gap")
     func emptyRingTakesEverything() {
-        let missing = ChannelSession.missingMessages([record(id: "a"), record(id: "b")], notIn: [])
+        let missing = ChannelHistoryMerge.missingMessages([record(id: "a"), record(id: "b")], notIn: [])
         #expect(missing.map(\.message.messageId) == ["a", "b"])
     }
 
