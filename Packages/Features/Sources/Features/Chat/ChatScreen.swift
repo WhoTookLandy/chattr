@@ -121,6 +121,9 @@ public struct ChatScreen: View {
     /// is presented. Opened from the compose bar's gear button.
     @State private var showChatSettings = false
 
+    /// The transient join greeting (see `ChatWelcomePill`).
+    @State private var showWelcome = false
+
     // NOTE: compose-bar state (`composeText`, `isSending`, `composeFocused`)
     // lives inside the extracted `ComposeBar` view below — NOT here on
     // ChatScreen. That isolation matters: every keystroke in the
@@ -152,11 +155,9 @@ public struct ChatScreen: View {
     /// nil during previews / detached views just skips the prefetch.
     @Environment(\.chatImagePrefetcher) private var chatImagePrefetcher
 
-    /// True only for the tab currently centered in the pager. Gates the
-    /// top-bar settings gear so it's contributed by exactly ONE live
-    /// `ChatScreen` — every page is alive in the pager's `LazyHStack`, so
-    /// an ungated `.toolbar` would stack a gear per page and flicker the
-    /// bar (the same reason the channel pill is one stable item).
+    /// True only for the tab currently centered in the pager. Every page is
+    /// alive in the pager's `LazyHStack`, so per-page one-shot UI (the join
+    /// greeting) waits until its page is actually the one on screen.
     private let isActiveTab: Bool
 
     public init(
@@ -217,13 +218,35 @@ public struct ChatScreen: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Join greeting. Attached BEFORE the safe-area bars so it lays out
+        // inside them — under the stream header, not on top of it.
+        .overlay(alignment: .top) {
+            if showWelcome {
+                ChatWelcomePill(channelDisplayName: channelDisplayName)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: showWelcome)
         // Chat surface color — slightly lifted off pure black/white in
         // both schemes (see DesignSystem.Color.chatSurface). Applied here
         // (not on the list) so the empty/connecting states and the area
         // behind the glass compose bar share the same surface.
         .background(Color.chatSurface.ignoresSafeArea())
+        // Stream context (title, category, live/viewers/uptime, or offline
+        // + last live) pinned above the transcript. Its own view reading
+        // its own stores, so status refreshes never re-run this body.
+        .safeAreaBar(edge: .top) {
+            StreamHeaderView(channel: channel)
+        }
         .safeAreaBar(edge: .bottom) {
             composeBarView
+        }
+        .task(id: isActiveTab) {
+            guard isActiveTab, ChatWelcomePill.claimGreeting(for: channel.id) else { return }
+            showWelcome = true
+            try? await Task.sleep(for: .seconds(5))
+            showWelcome = false
         }
         // Send-failure alert is gone — drops and network errors now
         // surface inline on the failed row itself (red exclamation +
@@ -281,24 +304,9 @@ public struct ChatScreen: View {
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
-        // Chat settings entry point. Moved here from the compose bar's
-        // trailing slot (which now hosts only emote + send) into the top
-        // bar — the standard iOS home for per-screen settings. Gated on
-        // `isActiveTab` so only the centered page contributes the gear;
-        // see the property's note on why an ungated toolbar would stack.
-        .toolbar {
-            if isActiveTab {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showChatSettings = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .symbolRenderingMode(.hierarchical)
-                    }
-                    .accessibilityLabel("Chat settings")
-                }
-            }
-        }
+        // Chat settings entry point: the compose bar's ⋯ menu (see
+        // `ComposeBar.moreMenu`). The top-bar gear it replaced competed
+        // with the channel pill for the same glance.
         // No `.navigationTitle` here — the parent ChatTabsScreen sets it to
         // "Chat" and the active tab pill in the strip already identifies the
         // channel. Having ChatScreen also override the title to "#login"
@@ -481,7 +489,10 @@ public struct ChatScreen: View {
                     _ = await startSession()
                 }
                 await chatModel.send(text: draft)
-            }
+            },
+            // Settings live in the compose bar's ⋯ menu (moved out of the
+            // top bar, where the gear competed with the channel pill).
+            onOpenSettings: { showChatSettings = true }
         )
         // Write any draft still inside the debounce window when the compose
         // bar leaves (page swiped off, tab closed, account switched).

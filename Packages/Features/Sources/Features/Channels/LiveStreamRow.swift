@@ -84,6 +84,13 @@ struct LiveStreamRow: View {
             LiveBadge(viewerCount: stream.viewerCount, style: .overlay)
                 .padding(6)
         }
+        .overlay(alignment: .topTrailing) {
+            // Top corner: the bottom edge already carries the viewer badge,
+            // and both don't fit side by side at 140pt wide.
+            StreamUptimeBadge(startedAt: stream.startedAt)
+                .scaleEffect(0.85, anchor: .topTrailing)
+                .padding(4)
+        }
     }
 
     /// Builds the concrete CDN URL by substituting Twitch's `{width}`/`{height}`
@@ -102,9 +109,11 @@ struct LiveStreamRow: View {
         VStack(alignment: .leading, spacing: 3) {
             headerLine
             if !stream.title.isEmpty {
+                // Two lines: one cut most titles mid-thought ("Twitch con
+                // day 4 best…"), and the title is what you pick a stream by.
                 Text(stream.title)
                     .font(.subheadline)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .foregroundStyle(.primary)
             }
             if !stream.gameName.isEmpty {

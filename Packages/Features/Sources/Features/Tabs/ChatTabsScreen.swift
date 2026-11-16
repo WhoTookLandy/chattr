@@ -78,6 +78,14 @@ public struct ChatTabsScreen: View {
     @State private var showFollows = false
 
     @Environment(\.chatTabs) private var chatTabs
+    /// Only the store reference is read here (to drive refreshes) — never
+    /// its `statuses`, so status updates don't re-run this body.
+    @Environment(\.channelStatus) private var channelStatus
+
+    /// Channel ids of every open tab, in tab order.
+    private var openChannelIds: [String] {
+        (chatTabs?.tabs ?? []).flatMap { $0.channels.map(\.channelId) }
+    }
 
     /// Read for `edgeToEdge`: when the user runs chat full-bleed, the
     /// navigation bar's own background is hidden so the avatar / channel
@@ -154,6 +162,23 @@ public struct ChatTabsScreen: View {
                 chatDetail
             }
         }
+        // Live/offline status for every open channel, one batched call a
+        // minute while the Chats tab is on screen. On the NavigationStack
+        // (not its root list) so it keeps running while a chat is pushed —
+        // a root-level `.task` is cancelled by the push. Feeds the stream
+        // header, the pill's live dot and the list rows; restarts when the
+        // set of open channels changes.
+        .task(id: openChannelIds) {
+            guard let channelStatus else { return }
+            while !Task.isCancelled {
+                await channelStatus.refresh(
+                    channelIds: openChannelIds,
+                    account: account,
+                    accountStore: accountStore
+                )
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
         // Open-chats switcher.
         .sheet(isPresented: $showSwitcher) {
             if let chatTabs {
@@ -200,6 +225,11 @@ public struct ChatTabsScreen: View {
         Group {
             if let chatTabs {
                 pagedChatContent(chatTabs: chatTabs)
+                    // Neighbouring chats peek in from the edges after each
+                    // page change — the swipe affordance the bare pager lacked.
+                    .overlay {
+                        PagerEdgeHints(chatTabs: chatTabs)
+                    }
             }
         }
         // Same surface as the transcript itself (ChatScreen applies it
@@ -236,24 +266,9 @@ public struct ChatTabsScreen: View {
                 Button {
                     chatTabs.activeTabId = tab.id
                 } label: {
-                    HStack(spacing: 12) {
-                        tabAvatar(tab)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(tab.displayName)
-                                .font(.headline)
-                                .foregroundStyle(.primary)
-                            if let login = tab.channels.first?.channelLoginName {
-                                Text("#\(login)")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .contentShape(Rectangle())
+                    // Live dot/ring, viewers, category, uptime, title — or
+                    // offline + last live. See `OpenChatRow`.
+                    OpenChatRow(tab: tab, chatTabs: chatTabs)
                 }
                 .buttonStyle(.plain)
             }
@@ -339,6 +354,7 @@ public struct ChatTabsScreen: View {
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
+                        ChannelLiveDot(channelId: tab.channels.first?.channelId)
                         Spacer(minLength: 12)
                         if chatTabs.mentionedTabIds.contains(tab.id) {
                             Circle()
@@ -496,12 +512,38 @@ public struct ChatTabsScreen: View {
 private struct ChannelPillLabel: View {
     let chatTabs: ChatTabsModel?
 
+    @Environment(\.followsStore) private var followsStore
+    @Environment(\.channelStatus) private var channelStatus
+
+    /// Viewer count when the visible channel is live; nil when offline or
+    /// unknown. Read here (not in ChatTabsScreen) for the same isolation
+    /// reason as the mention dot.
+    private var liveViewers: Int? {
+        guard let chatTabs,
+              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
+              let channelId = chatTabs.tabs.first(where: { $0.id == visibleId })?.channels.first?.channelId
+        else { return nil }
+        return ChannelStatusStore.liveStream(for: channelId, status: channelStatus, follows: followsStore)?.viewerCount
+    }
+
     var body: some View {
         VStack(spacing: 3) {
             HStack(spacing: 5) {
                 Text(title)
                     .font(.headline)
                     .foregroundStyle(.primary)
+                // "soochu ● 41" — live state at a glance, Twitch-style.
+                if let liveViewers {
+                    HStack(spacing: 3) {
+                        Circle().fill(.red).frame(width: 6, height: 6)
+                        Text(StreamFormatting.viewers(liveViewers))
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .contentTransition(.numericText())
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Live, \(liveViewers) viewers")
+                }
                 Image(systemName: "chevron.down")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)

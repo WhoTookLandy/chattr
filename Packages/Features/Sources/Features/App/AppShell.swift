@@ -4,6 +4,9 @@ import Accounts
 import Channels
 import Core
 import os
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private let logger = AppLogger.make("Features.AppShell")
 
@@ -56,6 +59,19 @@ public struct AppShell: View {
     /// `onOpen`/`onClose` closures can mutate it.
     @State private var mentionWatchTokens = MentionWatchTokens()
 
+    #if canImport(UIKit)
+    /// The account avatar rendered for the You tab (see `ProfileTabIcon`).
+    @State private var profileIcon: UIImage?
+    #endif
+
+    /// The You tab's icon: the avatar once loaded, else the symbol.
+    private var profileTabImage: Image {
+        #if canImport(UIKit)
+        if let profileIcon { return Image(uiImage: profileIcon) }
+        #endif
+        return ProfileTabIcon.fallback
+    }
+
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
 
     /// The app's `ModelContext` (injected by `.modelContainer(...)` at
@@ -97,13 +113,16 @@ public struct AppShell: View {
             } label: {
                 Image(systemName: "bubble.left.and.bubble.right")
             }
+            // Unseen @-mentions across open chats (the active chat's are
+            // cleared as you read them). 0 hides the badge.
+            .badge(navigation.chatTabs.mentionedTabIds.count)
             .accessibilityLabel("Chats")
             Tab(value: AppTab.you) {
                 NavigationStack {
                     ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
                 }
             } label: {
-                Image(systemName: "person.crop.circle")
+                profileTabImage
             }
             .accessibilityLabel("You")
             // `role: .search` separates the tab on the trailing edge and
@@ -125,6 +144,11 @@ public struct AppShell: View {
         // `navigation` reference (not a per-body closure), so this env value
         // compares equal across body passes and doesn't churn its readers.
         .environment(\.openChannel, OpenChannelAction(navigation))
+        #if canImport(UIKit)
+        .task(id: account.profileImageURL) {
+            profileIcon = await ProfileTabIcon.load(urlString: account.profileImageURL)
+        }
+        #endif
         // Single appearance task that does, in this exact order:
         //
         //   0. Point `DraftStorage` at this account's drafts.

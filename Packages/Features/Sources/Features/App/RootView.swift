@@ -38,6 +38,7 @@ public struct RootView: View {
     @AppStorage(ChatAppearance.animatedEmotesKey) private var chatAnimatedEmotes: Bool = true
     @AppStorage(ChatAppearance.edgeToEdgeKey) private var chatEdgeToEdge: Bool = false
     @AppStorage(ChatAppearance.loginNameDisplayKey) private var chatLoginNameDisplay: ChatAppearance.LoginNameDisplay = .displayFirst
+    @AppStorage(ChatAppearance.compactBotsKey) private var chatCompactBots: Bool = true
     /// Observed only to re-fire the registry-sync `.task(id:)` below when
     /// the user changes the setting — consumers read the value through
     /// `ChatAppearance.chatHistoryLines()` (which also validates it).
@@ -59,7 +60,8 @@ public struct RootView: View {
             showBadges: chatShowBadges,
             animatedEmotes: chatAnimatedEmotes,
             edgeToEdge: chatEdgeToEdge,
-            loginNameDisplay: chatLoginNameDisplay
+            loginNameDisplay: chatLoginNameDisplay,
+            compactBots: chatCompactBots
         )
     }
 
@@ -79,6 +81,10 @@ public struct RootView: View {
     /// every back-nav refetched the entire follow list because the state
     /// lived in ChannelListScreen's `@State` and `.task` re-fired on appear.
     @State private var followsStore = FollowsStore()
+
+    /// Live/offline status for open chat channels (followed or not) — drives
+    /// the chat stream header, live dots and last-live captions.
+    @State private var channelStatus = ChannelStatusStore()
 
     /// Launch-time chat image prefetcher. Warms Nuke's memory + disk
     /// caches with Twitch global emotes + global badges (memory),
@@ -157,6 +163,7 @@ public struct RootView: View {
         .environment(\.globalCatalog, globalCatalog)
         .environment(\.blockStore, blockStore)
         .environment(\.followsStore, followsStore)
+        .environment(\.channelStatus, channelStatus)
         .environment(\.channelSessionRegistry, channelSessionRegistry)
         .environment(\.chatImagePrefetcher, chatImagePrefetcher)
         .environment(\.chatAppearance, chatAppearance)

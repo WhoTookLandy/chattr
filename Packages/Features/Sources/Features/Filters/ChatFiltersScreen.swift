@@ -12,6 +12,7 @@ struct ChatFiltersScreen: View {
     // no per-body closure allocation, no manual setX write-through.
     @AppStorage(ChatFilterSettings.hideCommandsKey) private var hideCommands = false
     @AppStorage(ChatFilterSettings.hideBotsKey) private var hideBots = false
+    @AppStorage(ChatAppearance.compactBotsKey) private var compactBots = true
 
     var body: some View {
         Form {
@@ -29,6 +30,15 @@ struct ChatFiltersScreen: View {
                 }
             } footer: {
                 Text("Hides messages from common chat bots — Nightbot, Fossabot, StreamElements and friends. Changes apply the next time you open a channel.")
+            }
+
+            Section {
+                Toggle(isOn: $compactBots) {
+                    Label("Compact Bot Messages", systemImage: "text.badge.minus")
+                }
+                .disabled(hideBots)
+            } footer: {
+                Text("Shows bot messages smaller and dimmed, capped at three lines, with decorative banner lines removed. Applies instantly.")
             }
         }
         .navigationTitle("Filters")
