@@ -57,7 +57,6 @@ import Core
 /// that arrived while the page was off-screen.
 public struct ChatTabsScreen: View {
     private let account: Account
-    private let accountStore: AccountStore
     /// Injected by AppShell: switches the app to the Home tab. Used by the
     /// empty state's CTA — with no chats open, the useful next step is the
     /// Home surface (live follows), not a modal.
@@ -78,6 +77,7 @@ public struct ChatTabsScreen: View {
     @State private var showFollows = false
 
     @Environment(\.chatTabs) private var chatTabs
+    @Environment(\.accountStore) private var accountStore
 
     /// Read for `edgeToEdge`: when the user runs chat full-bleed, the
     /// navigation bar's own background is hidden so the avatar / channel
@@ -99,9 +99,12 @@ public struct ChatTabsScreen: View {
     ///     mirror the new value back to `@SceneStorage`. The latest selection
     ///     is always durable.
     ///
-    /// Tab list itself lives in SwiftData (account-scoped, see
-    /// `PersistedChatTab`) — this storage is purely "which one was active
-    /// in this scene."
+    /// Tab list itself lives in SwiftData, scoped per account (rows carry
+    /// `PersistedChatTab.accountUserId`; `TabPersistence` only reads/writes
+    /// the signed-in account's rows) — this storage is purely "which one was
+    /// active in this scene." It is NOT account-scoped: after an account
+    /// switch the saved id simply won't match any of the new account's tabs,
+    /// and the restore below skips it.
     @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
 
     /// You → App → Resume Last Chat. When off, the Chats tab always
@@ -111,18 +114,16 @@ public struct ChatTabsScreen: View {
 
     public init(
         account: Account,
-        accountStore: AccountStore,
         goHome: (() -> Void)? = nil
     ) {
         self.account = account
-        self.accountStore = accountStore
         self.goHome = goHome
     }
 
     public var body: some View {
         NavigationStack {
             Group {
-                if let chatTabs, !chatTabs.tabs.isEmpty {
+                if !chatTabs.tabs.isEmpty {
                     openChatsList(chatTabs: chatTabs)
                 } else {
                     emptyState
@@ -137,14 +138,14 @@ public struct ChatTabsScreen: View {
                 // both selects the page and (via the derived binding
                 // below) presents the push.
                 if resumeLastChatOnLaunch,
-                   chatTabs?.activeTabId == nil,
+                   chatTabs.activeTabId == nil,
                    let savedId = persistedActiveTabId,
                    let uuid = UUID(uuidString: savedId),
-                   chatTabs?.tabs.contains(where: { $0.id == uuid }) == true {
-                    chatTabs?.activeTabId = uuid
+                   chatTabs.tabs.contains(where: { $0.id == uuid }) {
+                    chatTabs.activeTabId = uuid
                 }
             }
-            .onChange(of: chatTabs?.activeTabId) { _, newValue in
+            .onChange(of: chatTabs.activeTabId) { _, newValue in
                 persistedActiveTabId = newValue?.uuidString
             }
             .navigationDestination(isPresented: chatIsPresented) {
@@ -153,21 +154,19 @@ public struct ChatTabsScreen: View {
         }
         // Open-chats switcher.
         .sheet(isPresented: $showSwitcher) {
-            if let chatTabs {
-                ChannelSwitcherView(
-                    model: chatTabs,
-                    onBrowseFollows: {
-                        showSwitcher = false
-                        showFollows = true
-                    }
-                )
-            }
+            ChannelSwitcherView(
+                model: chatTabs,
+                onBrowseFollows: {
+                    showSwitcher = false
+                    showFollows = true
+                }
+            )
         }
         // Follows browse — kept as a sheet for the switcher's "Browse
         // Follows" shortcut. The primary Follows surface is the Home tab.
         .sheet(isPresented: $showFollows) {
             NavigationStack {
-                ChannelListScreen(account: account, accountStore: accountStore)
+                ChannelListScreen(account: account)
             }
         }
     }
@@ -179,12 +178,11 @@ public struct ChatTabsScreen: View {
     private var chatIsPresented: Binding<Bool> {
         Binding(
             get: {
-                guard let chatTabs else { return false }
-                return chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
+                chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
             },
             set: { presented in
                 if !presented {
-                    chatTabs?.activeTabId = nil
+                    chatTabs.activeTabId = nil
                 }
             }
         )
@@ -194,11 +192,7 @@ public struct ChatTabsScreen: View {
     /// channel pill header and — the point of the push — no tab bar.
     @ViewBuilder
     private var chatDetail: some View {
-        Group {
-            if let chatTabs {
-                pagedChatContent(chatTabs: chatTabs)
-            }
-        }
+        pagedChatContent(chatTabs: chatTabs)
         // Same surface as the transcript itself (ChatScreen applies it
         // too) — without this, the page-gutters sit on pure system black
         // and read as dead bars around the chat.
@@ -258,10 +252,9 @@ public struct ChatTabsScreen: View {
                 chatTabs.move(fromOffsets: source, toOffset: destination)
             }
             .onDelete { offsets in
-                let ids = offsets.map { chatTabs.tabs[$0].id }
-                for id in ids {
-                    chatTabs.close(tabId: id)
-                }
+                // One batched close: a single persistence save and one
+                // release pass, instead of a save per row.
+                chatTabs.close(tabIds: offsets.map { chatTabs.tabs[$0].id })
             }
         }
         .listStyle(.plain)
@@ -291,7 +284,7 @@ public struct ChatTabsScreen: View {
     /// inserted/removed conditionally (that would rebuild the bar and
     /// flicker; see axiom toolbars guidance).
     @ToolbarContentBuilder
-    private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
+    private func headerToolbar(chatTabs: ChatTabsModel) -> some ToolbarContent {
         ToolbarItem(placement: .principal) {
             // The label is its own `View` (`ChannelPillLabel`) so that
             // unseen-mention updates (`mentionedTabIds`) invalidate ONLY the
@@ -303,17 +296,15 @@ public struct ChatTabsScreen: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Switch channel")
-            .disabled(chatTabs?.tabs.isEmpty ?? true)
+            .disabled(chatTabs.tabs.isEmpty)
             // Quick switcher: a compact anchored popover, not the
             // management sheet — switching chats is a two-tap flick, and
             // the popover keeps the transcript visible behind it. The
             // full sheet (reorder, close, browse) remains reachable via
             // the popover's footer.
             .popover(isPresented: $showQuickSwitcher, arrowEdge: .top) {
-                if let chatTabs {
-                    quickSwitcherContent(chatTabs: chatTabs)
-                        .presentationCompactAdaptation(.popover)
-                }
+                quickSwitcherContent(chatTabs: chatTabs)
+                    .presentationCompactAdaptation(.popover)
             }
         }
         // The pill carries its own glass above; hide the bar's shared
@@ -476,95 +467,6 @@ public struct ChatTabsScreen: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)
-        }
-    }
-}
-
-/// The channel-pill *label*: the visible tab's name, a chevron, an
-/// unseen-mention dot, and (with 2+ tabs) miniature page dots.
-///
-/// Extracted from `ChatTabsScreen` into its own `View` purely for
-/// invalidation isolation. The pill reads `chatTabs.mentionedTabIds`, which
-/// changes whenever a ping lands in a *background* tab; left inline in
-/// `ChatTabsScreen.body` that read made every mention re-evaluate the whole
-/// screen body, including the paged `ScrollView` of `ChatScreen`s. As its own
-/// view the mention dependency is scoped here, so a background ping redraws
-/// the dot without touching the pager. (`ChatScreen` pages are protected by
-/// their own identity regardless; this avoids the wasted container rebuild.)
-private struct ChannelPillLabel: View {
-    let chatTabs: ChatTabsModel?
-
-    var body: some View {
-        VStack(spacing: 3) {
-            HStack(spacing: 5) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            // Unseen mention in a BACKGROUND tab: dot the pill so the ping is
-            // visible from inside another chat.
-            .overlay(alignment: .topTrailing) {
-                if hasBackgroundMention {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 7, height: 7)
-                        .offset(x: 10, y: -3)
-                        .accessibilityLabel("Unread mention in another chat")
-                }
-            }
-            pageDots
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        // The pill's own glass — `.interactive()` so it responds to the
-        // press like the standalone control it looks like.
-        .glassEffect(.regular.interactive(), in: Capsule())
-    }
-
-    /// Display name of the *visible* tab — `activeTabId`, falling back to
-    /// `tabs.first` before scene restoration runs (matching the pager). "Chat"
-    /// only when no tabs are open.
-    private var title: String {
-        guard let chatTabs,
-              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
-              let tab = chatTabs.tabs.first(where: { $0.id == visibleId })
-        else { return "Chat" }
-        return tab.displayName
-    }
-
-    /// True when any non-active tab holds an unseen mention.
-    private var hasBackgroundMention: Bool {
-        guard let chatTabs else { return false }
-        return !chatTabs.mentionedTabIds.subtracting([chatTabs.activeTabId].compactMap { $0 }).isEmpty
-    }
-
-    /// Miniature page dots — one per open tab, active highlighted, mention
-    /// dots red. Rendered only with 2+ tabs; with a single tab the pill is
-    /// just the name (nothing to switch between).
-    @ViewBuilder
-    private var pageDots: some View {
-        if let chatTabs, chatTabs.tabs.count > 1 {
-            HStack(spacing: 4) {
-                // Resolve the same way the title does: the pager shows
-                // `tabs.first` when `activeTabId` is still nil, so highlight
-                // that dot rather than leaving all of them dim.
-                let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
-                ForEach(chatTabs.tabs) { tab in
-                    // Mention beats position: a red dot says "that page
-                    // pinged you," which matters more than which page it is.
-                    Circle()
-                        .fill(chatTabs.mentionedTabIds.contains(tab.id)
-                            ? AnyShapeStyle(.red)
-                            : tab.id == visibleId
-                                ? AnyShapeStyle(.tint)
-                                : AnyShapeStyle(.secondary.opacity(0.35)))
-                        .frame(width: 5, height: 5)
-                }
-            }
-            .accessibilityHidden(true)
         }
     }
 }

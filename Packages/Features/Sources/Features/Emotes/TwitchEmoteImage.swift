@@ -34,18 +34,24 @@ struct TwitchEmoteImage: View {
         self.emoteURL = Endpoints.TwitchCDN.emote(id: emote.id, format: animated ? "animated" : "static")
     }
 
+    /// Fixed box from metadata (Twitch emotes are square), applied to every
+    /// state — the placeholder used to be the free-width emote name, so the
+    /// row reflowed when the image replaced it.
+    private static let box = EmoteDisplayMetrics.size(
+        aspectRatio: EmoteDisplayMetrics.twitchAspectRatio,
+        height: EmoteDisplayMetrics.lineHeight)
+
     var body: some View {
         EmoteImageView(
             url: emoteURL,
             isAnimated: isAnimated,
-            width: 28, height: 24,
-            accessibilityLabel: displayName
+            width: Self.box.width, height: Self.box.height,
+            accessibilityLabel: displayName,
+            boxSize: Self.box
         ) { image in
-            image.resizable().scaledToFit().frame(height: 24)
+            image.resizable().interpolation(.high).scaledToFit()
         } placeholder: { failed in
-            // Default (primary) colour once the load fails; secondary while
-            // it's still in flight.
-            Text(displayName).font(.callout).foregroundStyle(failed ? .primary : .secondary)
+            EmotePlaceholder(name: displayName, failed: failed)
         }
     }
 }

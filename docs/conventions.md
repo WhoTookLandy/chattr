@@ -13,8 +13,8 @@ only) over a strict-DAG of local SPM packages:
 
 ```
 Core  DesignSystem          ← leaves: zero internal deps
-  ↑        ↑
-EmoteSources  Accounts(+DS)  ← depend on Core / DesignSystem
+  ↑
+EmoteSources  Accounts       ← depend on Core (DesignSystem: Features only)
   ↑
 ChatModel(+EmoteSources)
   ↑

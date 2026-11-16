@@ -25,7 +25,8 @@ public struct BTTVProvider: EmoteProvider {
     }
 
     public func globalEmotes() async throws -> [Emote] {
-        let (data, _) = try await urlSession.data(from: Endpoints.BTTV.globalEmotes)
+        let (data, response) = try await urlSession.data(from: Endpoints.BTTV.globalEmotes)
+        try ProviderHTTP.requireSuccess(response)
         let emotes = try JSONDecoder().decode([EmoteJSON].self, from: data)
         return emotes.compactMap { Self.map($0, ownerChannelId: nil) }
     }
@@ -36,7 +37,8 @@ public struct BTTVProvider: EmoteProvider {
         // BTTV returns 404 for channels that don't have BTTV emotes configured.
         // That's the common case — most Twitch channels skip BTTV entirely —
         // so we treat 404 as "no emotes" rather than an error condition.
-        if (response as? HTTPURLResponse)?.statusCode == 404 { return [] }
+        // Any other non-2xx (429, 5xx) is a provider error, not a decode one.
+        if try ProviderHTTP.isNotFound(response) { return [] }
         let user = try JSONDecoder().decode(UserResponse.self, from: data)
         // `sharedEmotes` are emotes added to the channel by other users.
         // Both arrays are channel-scope for our purposes — merge them.

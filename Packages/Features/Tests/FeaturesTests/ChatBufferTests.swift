@@ -119,10 +119,113 @@ struct ChatBufferTests {
     func removeById() {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("a")); buf.append(line("b")); buf.append(line("c"))
-        #expect(buf.remove(id: "b") == true)
+        let removedFirst = buf.remove(id: "b")
+        #expect(removedFirst)
         #expect(buf.lines.map(\.id) == ["a", "c"])
         #expect(!buf.contains(id: "b"))
-        #expect(buf.remove(id: "b") == false)
+        let removedAgain = buf.remove(id: "b")
+        #expect(!removedAgain)
+    }
+
+    @Test("remove re-points only the shifted tail and keeps the id table exact across later trims")
+    func removeKeepsIndexExact() {
+        var buf = ChatBuffer(cap: 4)
+        for i in 0..<6 { buf.append(line("m\(i)")) }   // window m2…m5, ring head advanced
+        let removedm3 = buf.remove(id: "m3")
+        #expect(removedm3)
+        #expect(buf.lines.map(\.id) == ["m2", "m4", "m5"])
+        for id in ["m2", "m4", "m5"] { #expect(buf.line(id: id)?.id == id) }
+        #expect(!buf.contains(id: "m3"))
+
+        // Edits after the shift still land on the right rows…
+        buf.mutate(id: "m5") { $0.markingDeleted() }
+        #expect(buf.lines.last?.kind == .deletedPlaceholder)
+        // …and trims past the removal point stay consistent.
+        buf.append(line("m6")); buf.append(line("m7"))
+        #expect(buf.lines.map(\.id) == ["m4", "m5", "m6", "m7"])
+        #expect(buf.line(id: "m4")?.id == "m4")
+        let removedm7 = buf.remove(id: "m7")
+        #expect(removedm7)
+        #expect(buf.lines.map(\.id) == ["m4", "m5", "m6"])
+    }
+
+    @Test("visible-row lookups stay correct when blocked lines break index alignment")
+    func visibleLookupWithBlockedAuthors() {
+        var buf = ChatBuffer(cap: 100)
+        buf.blockedIds = ["villain"]
+        buf.append(line("a")); buf.append(line("v", author: "villain"))
+        buf.append(line("b")); buf.append(line("c"))
+        buf.mutate(id: "c") { $0.markingDeleted() }
+        #expect(buf.lines.map(\.kind) == [.message, .message, .deletedPlaceholder])
+        let removedb = buf.remove(id: "b")
+        #expect(removedb)
+        #expect(buf.lines.map(\.id) == ["a", "c"])
+        _ = buf.replace(id: "a", with: line("a", "edited"))
+        #expect(buf.lines.first?.runs == [.text("edited")])
+    }
+
+    // MARK: - Moderation of recently trimmed lines
+
+    private func reconfiguredIds(_ changes: [ChatChange]) -> Set<String> {
+        Set(changes.compactMap { change -> String? in
+            if case .reconfigured(let line) = change { return line.id } else { return nil }
+        })
+    }
+
+    @Test("moderating a line that just aged out is still reported, once")
+    func moderationReachesTrimmedLine() {
+        var buf = ChatBuffer(cap: 2)
+        buf.append(line("a")); buf.append(line("b")); buf.append(line("c"))   // trims a
+        _ = buf.takeChanges()
+        buf.mutate(id: "a") { $0.markingDeleted() }
+        let changes = buf.takeChanges()
+        #expect(changes.count == 1)
+        if case .reconfigured(let struck)? = changes.first {
+            #expect(struck.id == "a")
+            #expect(struck.kind == .deletedPlaceholder)
+        } else {
+            Issue.record("expected .reconfigured for the trimmed line")
+        }
+        #expect(!buf.contains(id: "a"))            // dedup still treats it as gone
+        #expect(buf.lines.map(\.id) == ["b", "c"])
+        buf.mutate(id: "a") { $0.markingDeleted() }  // idempotent: nothing new to show
+        #expect(buf.takeChanges().isEmpty)
+    }
+
+    @Test("user-timeout and chat-clear also reach recently trimmed lines")
+    func bulkModerationReachesTrimmedLines() {
+        var buf = ChatBuffer(cap: 2)
+        buf.append(line("a", author: "villain")); buf.append(line("b", author: "alice"))
+        buf.append(line("c")); buf.append(line("d"))   // trims a, b
+        _ = buf.takeChanges()
+        buf.mutateMatching(authorUserId: "villain") { $0.markingDeleted() }
+        #expect(reconfiguredIds(buf.takeChanges()) == ["a"])
+        buf.mutateAll { $0.markingDeleted() }
+        #expect(reconfiguredIds(buf.takeChanges()) == ["b", "c", "d"])   // a already struck
+    }
+
+    @Test("trimmed-line memory is bounded at cap and cleared by reset")
+    func trimmedMemoryIsBounded() {
+        var buf = ChatBuffer(cap: 2)
+        for i in 0..<6 { buf.append(line("m\(i)")) }   // trims m0…m3; remembers m2, m3
+        _ = buf.takeChanges()
+        buf.mutate(id: "m0") { $0.markingDeleted() }
+        #expect(buf.takeChanges().isEmpty)
+        buf.mutate(id: "m3") { $0.markingDeleted() }
+        #expect(buf.takeChanges().count == 1)
+        buf.reset(); _ = buf.takeChanges()
+        buf.mutate(id: "m2") { $0.markingDeleted() }
+        #expect(buf.takeChanges().isEmpty)
+    }
+
+    @Test("takeChanges drains once, then returns empty")
+    func takeChangesDrains() {
+        var buf = ChatBuffer(cap: 100)
+        #expect(buf.takeChanges().isEmpty)
+        let a = line("a")   // built once: ChatLine == includes its timestamp
+        buf.append(a)
+        #expect(buf.takeChanges() == [.appended(a)])
+        #expect(buf.takeChanges().isEmpty)
     }
 
     @Test("mutate transforms one line by id")

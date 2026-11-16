@@ -35,7 +35,17 @@ public final class BlockStore {
     private let accountUserId: String
     private let accountStore: AccountStore
     private let defaults: UserDefaults
-    private var storageKey: String { "blockedUsers.\(accountUserId)" }
+    private var storageKey: String { Self.persistenceKey(forAccountUserId: accountUserId) }
+
+    private static func persistenceKey(forAccountUserId accountUserId: String) -> String {
+        "blockedUsers.\(accountUserId)"
+    }
+
+    /// Drop an account's persisted block-list cache. Called when the account
+    /// is removed (see `AccountLocalData.remove`).
+    public static func removePersisted(forAccountUserId accountUserId: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: persistenceKey(forAccountUserId: accountUserId))
+    }
 
     public init(accountUserId: String, accountStore: AccountStore, defaults: UserDefaults = .standard) {
         self.accountUserId = accountUserId
@@ -48,17 +58,27 @@ public final class BlockStore {
 
     /// Seed from Twitch (authoritative), paginating the block list. Keeps the
     /// persisted cache on failure (best-effort).
+    ///
+    /// Every Helix call here goes through `AccountStore.withTokenRefresh` so
+    /// an expired access token refreshes (single-flight) and retries instead
+    /// of silently failing. The `@Sendable` operations capture plain values
+    /// (`client`, `userId`, `cursor`) — never `self`, which is @MainActor.
     public func load() async {
         let client = accountStore.client(forUserId: accountUserId)
+        let userId = accountUserId
         do {
             var fetched: [BlockedChatter] = []
             var cursor: String? = nil
             repeat {
-                let page = try await client.api.fetchUserBlockListPage(broadcasterID: accountUserId, first: nil, after: cursor)
-                fetched.append(contentsOf: page.data.map {
-                    BlockedChatter(id: $0.userId, login: $0.userLogin, displayName: $0.displayName)
-                })
-                cursor = page.pagination?.cursor
+                let (chatters, nextCursor) = try await accountStore.withTokenRefresh(forUserId: userId) { [cursor] () async throws -> ([BlockedChatter], String?) in
+                    let page = try await client.api.fetchUserBlockListPage(broadcasterID: userId, first: nil, after: cursor)
+                    let chatters = page.data.map {
+                        BlockedChatter(id: $0.userId, login: $0.userLogin, displayName: $0.displayName)
+                    }
+                    return (chatters, page.pagination?.cursor)
+                }
+                fetched.append(contentsOf: chatters)
+                cursor = nextCursor
             } while cursor != nil
             reconcile(with: fetched)
         } catch {
@@ -70,10 +90,13 @@ public final class BlockStore {
     public func block(userId: String, login: String, displayName: String, reason: UserBlockReason) async {
         guard !blockedIds.contains(userId) else { return }
         insert(BlockedChatter(id: userId, login: login, displayName: displayName))
+        let client = accountStore.client(forUserId: accountUserId)
         do {
-            try await accountStore.client(forUserId: accountUserId).api.blockUser(
-                targetUserID: userId, sourceContext: .chat, reason: reason
-            )
+            try await accountStore.withTokenRefresh(forUserId: accountUserId) {
+                try await client.api.blockUser(
+                    targetUserID: userId, sourceContext: .chat, reason: reason
+                )
+            }
         } catch {
             remove(id: userId)
             logger.error("block \(userId, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -84,8 +107,11 @@ public final class BlockStore {
     public func unblock(userId: String) async {
         guard let existing = blocked.first(where: { $0.id == userId }) else { return }
         remove(id: userId)
+        let client = accountStore.client(forUserId: accountUserId)
         do {
-            try await accountStore.client(forUserId: accountUserId).api.unblockUser(targetUserID: userId)
+            try await accountStore.withTokenRefresh(forUserId: accountUserId) {
+                try await client.api.unblockUser(targetUserID: userId)
+            }
         } catch {
             insert(existing)
             logger.error("unblock \(userId, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")

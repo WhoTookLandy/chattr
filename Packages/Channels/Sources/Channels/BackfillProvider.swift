@@ -5,6 +5,22 @@ import os
 
 private let logger = AppLogger.make("Channels.Backfill")
 
+/// One history line: the message plus when it was originally sent.
+///
+/// `TwitchKit.ChatMessage` has no timestamp field (EventSub's payload carries
+/// none — the time lives on the envelope), so the IRC `tmi-sent-ts` tag rides
+/// alongside instead of being lost in the JSON round-trip.
+public struct BackfillMessage: Sendable {
+    public let message: ChatMessage
+    /// The `tmi-sent-ts` tag, when the line carried a parseable one.
+    public let sentAt: Date?
+
+    public init(message: ChatMessage, sentAt: Date?) {
+        self.message = message
+        self.sentAt = sentAt
+    }
+}
+
 /// Fetches recent chat history from rustlog when a user joins a channel,
 /// so chat isn't empty for the first minute.
 ///
@@ -48,22 +64,30 @@ public enum BackfillProvider {
     ///     default to 150 for a "comfortable scrollback" without UI lag).
     ///   - urlSession: URLSession to use. Defaults to `.shared`; tests
     ///     inject a mocked session.
-    /// - Returns: Messages in chronological order. Empty array if rustlog
-    ///   returned no data or all lines failed to parse (we don't fail
-    ///   loudly — chat still works).
+    /// - Returns: Messages in chronological order, each with its
+    ///   `tmi-sent-ts`. Empty array if rustlog returned no data or all lines
+    ///   failed to parse (we don't fail loudly — chat still works).
+    ///
+    /// The request carries its own short timeout (`requestTimeout`): history
+    /// is enrichment, and URLSession's 60s default let a hung history host
+    /// keep the fetch (and the session that awaited it) pending for a
+    /// minute. `ChannelSession` separately stops *waiting* after ~3s and
+    /// merges anything later in place.
     public static func fetchRecentMessages(
         channelLogin: String,
         limit: Int = 150,
         urlSession: URLSession = .shared
-    ) async -> [ChatMessage] {
+    ) async -> [BackfillMessage] {
         let url = Endpoints.Rustlog.recentMessages(channelLogin: channelLogin, limit: limit)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = requestTimeout
 
         // Backfill is best-effort. If anything in the fetch + parse
         // pipeline fails, log and return empty rather than throwing —
         // the caller (ChannelSession.start) should NEVER fail because
         // backfill failed. Live chat takes priority.
         do {
-            let (data, response) = try await urlSession.data(from: url)
+            let (data, response) = try await urlSession.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 logger.warning("rustlog returned HTTP \(http.statusCode) for \(channelLogin, privacy: .public); skipping backfill")
                 return []
@@ -78,7 +102,7 @@ public enum BackfillProvider {
             // whole backfill.
             let messageDecoder = IRCMessageParser.makeDecoder()
             let messages = body.messages.compactMap {
-                IRCMessageParser.parse($0, channelLogin: channelLogin, decoder: messageDecoder)
+                IRCMessageParser.parseRecord($0, channelLogin: channelLogin, decoder: messageDecoder)
             }
             logger.info("Backfilled \(messages.count) message(s) for #\(channelLogin, privacy: .public)")
             return messages
@@ -91,6 +115,11 @@ public enum BackfillProvider {
             return []
         }
     }
+
+    /// Per-request timeout for the history fetch: generous next to the
+    /// session's ~3s wait (a late answer still merges in), far below
+    /// URLSession's 60s default.
+    static let requestTimeout: TimeInterval = 10
 
     // MARK: - Wrapper response shape
 
@@ -146,6 +175,12 @@ internal enum IRCMessageParser {
     /// The defaulted `decoder` keeps one-off call sites (tests) unchanged;
     /// batch callers pass a shared instance.
     static func parse(_ line: String, channelLogin: String, decoder: JSONDecoder = makeDecoder()) -> ChatMessage? {
+        parseRecord(line, channelLogin: channelLogin, decoder: decoder)?.message
+    }
+
+    /// `parse`, keeping the line's `tmi-sent-ts` (epoch milliseconds) as the
+    /// message's send time.
+    static func parseRecord(_ line: String, channelLogin: String, decoder: JSONDecoder = makeDecoder()) -> BackfillMessage? {
         // 1. Tag block: starts with '@', ends at first space.
         guard line.hasPrefix("@") else { return nil }
         let afterTags = line.dropFirst()  // strip leading '@'
@@ -213,9 +248,16 @@ internal enum IRCMessageParser {
             "message_type": "text",
         ]
 
+        let sentAt: Date? = tags["tmi-sent-ts"]
+            .flatMap { Double($0) }
+            .map { Date(timeIntervalSince1970: $0 / 1000) }
+
         do {
             let data = try JSONSerialization.data(withJSONObject: messageJSON)
-            return try decoder.decode(ChatMessage.self, from: data)
+            return BackfillMessage(
+                message: try decoder.decode(ChatMessage.self, from: data),
+                sentAt: sentAt
+            )
         } catch {
             // One line failed to decode — log and skip. Don't fail the
             // whole backfill for one malformed message. The log line is

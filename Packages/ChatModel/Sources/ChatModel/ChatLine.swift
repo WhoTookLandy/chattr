@@ -110,15 +110,27 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// True when this line is "highlighted" — currently:
     ///   - any `LineRun.mention(isMe: true)` in `runs`, OR
     ///   - any text run contains a configured highlight keyword
-    ///     (case-insensitive substring; configured per-user later).
+    ///     (case-insensitive substring; see `HighlightMatcher`).
     ///
     /// Drives the visual emphasis on the row (background tint, accent
     /// border, optional sound — none of that here, just the flag).
-    public let isHighlighted: Bool
+    ///
+    /// `var` (like `kind` / `isHistorical`) because the two halves are
+    /// computed in different places: the channel session normalizes once
+    /// for every tab and can only know the self-mention half (its account's
+    /// login), while each transcript layers its own viewer-configured
+    /// keywords on top without a full memberwise copy.
+    public var isHighlighted: Bool
 
-    /// When the message arrived. Used for relative-timestamp formatting
-    /// and for tie-breaking in any future "merge two channels in one tab"
-    /// sorted-merge logic.
+    /// When the message was sent: the IRC `tmi-sent-ts` for history, the
+    /// session's receipt time (captured once, then stored with the line) for
+    /// live events — TwitchKit doesn't surface EventSub's envelope time.
+    /// Used for relative-timestamp formatting and for tie-breaking in any
+    /// future "merge two channels in one tab" sorted-merge logic.
+    ///
+    /// Producers always pass it explicitly; the init's `.now` default is a
+    /// convenience for fixtures and previews only — a line rebuilt from the
+    /// same message must carry the same timestamp or it compares unequal.
     public let timestamp: Date
 
     /// True when this line arrived via a rustlog history fetch (join
@@ -342,27 +354,50 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// the rule intact rather than render it as struck-through nothing.
     public func markingDeleted() -> ChatLine {
         if case .newMessagesDivider = kind { return self }
+        // Copy-and-flip rather than a memberwise rebuild: a chat-clear runs
+        // this on every line in the window, and the init would recompute
+        // `hasLocalizedDisplayName` for each one. Everything else carries
+        // over as-is — content stays for the strikethrough, `deliveryState`
+        // survives (a `.failed` row a mod deleted stays failed, though the
+        // strikethrough takes visual priority), a deleted backfill row stays
+        // dimmed, and a deleted reply still belongs to its thread.
+        var deleted = self
+        deleted.kind = .deletedPlaceholder
+        deleted.isHighlighted = false   // deleted messages aren't highlighted
+        return deleted
+    }
+
+    /// Returns a copy in `deliveryState` — and, when `id` is given, re-keyed
+    /// to that id. The optimistic-send lifecycle uses it: a send that fails
+    /// keeps its `pending-…` id and flips to `.failed`; a send whose echo
+    /// never arrived settles as `.delivered` under its server-issued id.
+    /// Everything else (content, author styling, timestamp, provenance,
+    /// thread membership) carries over unchanged.
+    ///
+    /// A state-only change is a copy-and-set; a re-key needs the memberwise
+    /// init because `id` is a `let` (identity changes are rare — once per
+    /// stuck send — so the extra `hasLocalizedDisplayName` recompute is moot).
+    public func with(deliveryState: DeliveryState, id newId: String? = nil) -> ChatLine {
+        guard let newId, newId != id else {
+            var copy = self
+            copy.deliveryState = deliveryState
+            return copy
+        }
         return ChatLine(
-            id: id,
-            kind: .deletedPlaceholder,
+            id: newId,
+            kind: kind,
             authorBadges: authorBadges,
             originalBadges: originalBadges,
             authorUserId: authorUserId,
             authorDisplayName: authorDisplayName,
             authorUserLogin: authorUserLogin,
             authorColor: authorColor,
-            runs: runs,                       // keep content for strikethrough display
-            isHighlighted: false,             // deleted messages aren't highlighted
+            runs: runs,
+            isHighlighted: isHighlighted,
             timestamp: timestamp,
-            deliveryState: deliveryState,    // preserve send-state across delete
-                                              // (a row that was .failed when a mod
-                                              // deleted it stays failed — though
-                                              // the strikethrough takes visual
-                                              // priority over the retry icon)
-            isHistorical: isHistorical,       // a deleted backfill row stays dimmed
-            replyParent: replyParent          // preserve thread membership too —
-                                              // a deleted reply still belongs to
-                                              // its thread for view-thread purposes
+            deliveryState: deliveryState,
+            isHistorical: isHistorical,
+            replyParent: replyParent
         )
     }
 
@@ -391,15 +426,41 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         self.authorUserLogin = authorUserLogin
         self.authorColor = authorColor
         // Precompute the localized-name flag once — see the property doc.
-        self.hasLocalizedDisplayName =
-            !authorDisplayName.isEmpty
-            && !authorUserLogin.isEmpty
-            && authorDisplayName.lowercased() != authorUserLogin.lowercased()
+        self.hasLocalizedDisplayName = Self.isLocalized(
+            displayName: authorDisplayName,
+            login: authorUserLogin
+        )
         self.runs = runs
         self.isHighlighted = isHighlighted
         self.timestamp = timestamp
         self.deliveryState = deliveryState
         self.isHistorical = isHistorical
         self.replyParent = replyParent
+    }
+
+    /// `displayName.lowercased() != login.lowercased()`, without the two
+    /// heap allocations on the common path. Logins are ASCII and most display
+    /// names are their login re-capitalized, so an ASCII-only pair is
+    /// compared byte-wise with ASCII case folding (identical to `lowercased()`
+    /// for ASCII); anything non-ASCII takes the original allocating path so
+    /// Unicode case mapping is unchanged.
+    static func isLocalized(displayName: String, login: String) -> Bool {
+        guard !displayName.isEmpty, !login.isEmpty else { return false }
+        let display = displayName.utf8
+        let loginBytes = login.utf8
+        let isASCII = !display.contains { $0 >= 0x80 } && !loginBytes.contains { $0 >= 0x80 }
+        guard isASCII else {
+            return displayName.lowercased() != login.lowercased()
+        }
+        guard display.count == loginBytes.count else { return true }
+        for (a, b) in zip(display, loginBytes) where asciiLowercase(a) != asciiLowercase(b) {
+            return true
+        }
+        return false
+    }
+
+    private static func asciiLowercase(_ byte: UInt8) -> UInt8 {
+        // "A"..."Z" → "a"..."z"; every other ASCII byte is its own lowercase.
+        (byte >= 0x41 && byte <= 0x5A) ? byte | 0x20 : byte
     }
 }

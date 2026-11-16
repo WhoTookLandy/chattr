@@ -81,7 +81,7 @@ enum HomePreviewData {
     NavigationStack {
         HomeContent(
             liveStreams: HomePreviewData.streams,
-            userProfiles: [:],
+            profileImageURLs: [:],
             liveLoadState: .loaded,
             openTabs: HomePreviewData.openTabs,
             onStreamTap: { _ in },
@@ -96,7 +96,7 @@ enum HomePreviewData {
     NavigationStack {
         HomeContent(
             liveStreams: [],
-            userProfiles: [:],
+            profileImageURLs: [:],
             liveLoadState: .loaded,
             openTabs: [],
             onStreamTap: { _ in },
@@ -111,7 +111,7 @@ enum HomePreviewData {
     NavigationStack {
         HomeContent(
             liveStreams: [],
-            userProfiles: [:],
+            profileImageURLs: [:],
             liveLoadState: .loading,
             openTabs: HomePreviewData.openTabs,
             onStreamTap: { _ in },

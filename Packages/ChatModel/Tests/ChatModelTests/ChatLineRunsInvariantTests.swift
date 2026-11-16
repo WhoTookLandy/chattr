@@ -29,7 +29,7 @@ private func sampleRuns() -> [LineRun] {
         .text("hello"),
         .mention(login: "landy", isMe: true),
         .text("gg"),
-        .url("https://twitch.tv/landy"),
+        .cheermote(prefix: "cheer", bits: 100, tier: 1),
     ]
 }
 

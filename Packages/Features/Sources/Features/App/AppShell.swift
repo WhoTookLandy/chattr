@@ -32,14 +32,12 @@ private let logger = AppLogger.make("Features.AppShell")
 /// It also injects the `\.openChannel` action (open a channel as a new chat
 /// tab — used by Home, Following, and Search row taps) and, in a single
 /// appearance `.task`, wires `ChatTabsModel`'s `onOpen`/`onClose` to the
-/// session registry's acquire/release refcounting, installs
-/// `TabPersistence`, and hydrates persisted tabs on cold start.
+/// session registry's acquire/release refcounting, installs the
+/// account-scoped `TabPersistence`, and hydrates persisted tabs on cold
+/// start. On disappear (account switch / sign-out) it tears the tab model
+/// down, releasing every session it acquired.
 public struct AppShell: View {
     private let account: Account
-    private let accountStore: AccountStore
-    /// Twitch client id, threaded down to ProfileScreen → the account
-    /// switcher so "Add Account" can run the OAuth flow.
-    private let clientId: String
 
     /// The app's top-level destinations.
     enum AppTab: Hashable {
@@ -63,10 +61,8 @@ public struct AppShell: View {
     /// `.modelContainer(modelContainer)` modifier.
     @Environment(\.modelContext) private var modelContext
 
-    public init(account: Account, accountStore: AccountStore, clientId: String) {
+    public init(account: Account) {
         self.account = account
-        self.accountStore = accountStore
-        self.clientId = clientId
     }
 
     public var body: some View {
@@ -79,7 +75,6 @@ public struct AppShell: View {
             Tab(value: AppTab.home) {
                 HomeScreen(
                     account: account,
-                    accountStore: accountStore,
                     onResumeChat: { tab in navigation.resumeChat(tab) }
                 )
             } label: {
@@ -89,7 +84,6 @@ public struct AppShell: View {
             Tab(value: AppTab.chats) {
                 ChatTabsScreen(
                     account: account,
-                    accountStore: accountStore,
                     goHome: { navigation.goHome() }
                 )
             } label: {
@@ -98,7 +92,7 @@ public struct AppShell: View {
             .accessibilityLabel("Chats")
             Tab(value: AppTab.you) {
                 NavigationStack {
-                    ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
+                    ProfileScreen(account: account)
                 }
             } label: {
                 Image(systemName: "person.crop.circle")
@@ -110,7 +104,6 @@ public struct AppShell: View {
             Tab(value: AppTab.search, role: .search) {
                 AddChannelView(
                     account: account,
-                    accountStore: accountStore,
                     showsCancelButton: false
                 )
             } label: {
@@ -125,6 +118,7 @@ public struct AppShell: View {
         .environment(\.openChannel, OpenChannelAction(navigation))
         // Single appearance task that does, in this exact order:
         //
+        //   0. Point `DraftStorage` at this account's drafts.
         //   1. Wire `onOpen` / `onClose` on the ChatTabsModel — these
         //      bridge to the registry's `acquire` / `release` so refcounts
         //      track tab lifetime.
@@ -170,6 +164,12 @@ public struct AppShell: View {
             // was a direct `@State`.
             let chatTabs = navigation.chatTabs
 
+            // 0. Scope compose drafts to this account. Before hydration, so
+            //    every ChatScreen the restored tabs mount reads this
+            //    account's drafts (first run after upgrade also adopts the
+            //    pre-scoping drafts — see `DraftStorage.activate`).
+            DraftStorage.activate(accountUserId: account.userId)
+
             // 1. Wire callbacks.
             //
             // Capture stable Strings (`userId`, `login`) rather than the
@@ -200,15 +200,24 @@ public struct AppShell: View {
                         // Mention watcher: session-level (not ChatTranscriptModel)
                         // so @-mentions land the red dot even for tabs whose
                         // page isn't mounted. The handler is deliberately
-                        // tiny — a substring check, no normalization.
-                        let (token, _) = await session.subscribe { [weak chatTabs, tabId = tab.id] event in
-                            guard case .message(let message, let isHistorical) = event,
-                                  !isHistorical,
-                                  message.chatterUserId != accountUserId,
-                                  ChatTabsModel.containsMention(of: accountLogin, in: message.message.text)
-                            else { return }
-                            await chatTabs?.markMention(tabId: tabId)
-                        }
+                        // tiny — a substring check per message — and runs on
+                        // its own task per drained batch, so it never holds
+                        // up the session or the transcript.
+                        let token = await session.subscribe(onBatch: { [weak chatTabs, tabId = tab.id] batch in
+                            let mentioned = batch.contains { update in
+                                guard case .message(let normalized) = update,
+                                      !normalized.line.isHistorical,
+                                      normalized.message.chatterUserId != accountUserId
+                                else { return false }
+                                return ChatTabsModel.containsMention(
+                                    of: accountLogin,
+                                    in: normalized.message.message.text
+                                )
+                            }
+                            if mentioned {
+                                await chatTabs?.markMention(tabId: tabId)
+                            }
+                        })
                         mentionWatchTokens.byTab[tab.id, default: []]
                             .append((channelId: channel.channelId, token: token))
                     } catch is CancellationError {
@@ -253,7 +262,12 @@ public struct AppShell: View {
             //    here so AppShell doesn't have to take the container as
             //    an init parameter — `@Environment(\.modelContext)` is
             //    the canonical SwiftUI accessor.
-            let persistence = TabPersistence(modelContainer: modelContext.container)
+            //    Scoped to this account: it only reads and writes this
+            //    account's rows, so each account keeps its own strip.
+            let persistence = TabPersistence(
+                modelContainer: modelContext.container,
+                accountUserId: account.userId
+            )
             chatTabs.persistence = persistence
 
             // 3. Hydrate. This fires `onOpen` for each restored tab in
@@ -264,6 +278,25 @@ public struct AppShell: View {
             //    chat panel as soon as each subscription confirms.
             chatTabs.hydrateFromPersistence()
             logger.info("AppShell wired tab callbacks + persistence; hydration kicked off")
+        }
+        // Teardown: release every session this account's tabs acquired.
+        // RootView's `.id(userId)` replaces this AppShell on account switch
+        // (and removes it on sign-out), which fires `onDisappear` on the old
+        // instance — its `navigation.chatTabs` is still the old account's
+        // model here. Without this, nothing balanced the `onOpen` acquires
+        // and every switch leaked the previous account's chat sessions and
+        // EventSub subscriptions. `tearDown()` releases each acquired tab
+        // exactly once, skips opens that hadn't started, and doesn't touch
+        // the account's saved tabs; it is reversible (if this same AppShell
+        // re-appeared, the `.task` above would re-wire and re-hydrate).
+        //
+        // Deliberately doesn't read `account` here: on account removal the
+        // SwiftData `@Model` may already be deleted when this fires, and
+        // touching a deleted model's properties traps. The release closures
+        // captured `userId` as a String back when they were wired.
+        .onDisappear {
+            logger.notice("AppShell disappearing; tearing down chat tabs")
+            navigation.chatTabs.tearDown()
         }
     }
 }

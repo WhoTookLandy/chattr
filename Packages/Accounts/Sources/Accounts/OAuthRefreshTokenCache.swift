@@ -24,7 +24,7 @@ private let logger = AppLogger.make("Accounts.OAuthRefreshTokenCache")
 ///   5. The `catch` in `refreshIfNeeded` calls `try await logout()` →
 ///      **TwitchKit's Keychain entry is now empty**
 ///   6. Our `AccountStore.withTokenRefresh` catches `.oauth(...)` and calls
-///      `refreshTokens(for:)`, but `tokenProvider.token()` now throws
+///      `refreshTokens(userId:login:)`, but `tokenProvider.token()` now throws
 ///      `.notAuthenticated` because step 5 wiped the store.
 ///
 /// This cache is a second copy of the refresh_token in a Keychain entry

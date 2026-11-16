@@ -26,7 +26,16 @@ public extension Color {
     /// `@MainActor`-isolated rather than locked because the only caller is
     /// `ChatRow.body` (SwiftUI views are main-actor) — same rationale as
     /// `ChatListViewController.estimatedRowHeight`.
+    ///
+    /// Bounded by `twitchUsernameCacheLimit`: custom hexes are free-form, so
+    /// a long session across busy channels could otherwise grow it without
+    /// limit. On overflow the whole cache is dropped — the preset palette
+    /// re-warms within a few rows, and a clear is O(1) amortized with no
+    /// per-entry recency bookkeeping on the hot path.
     @MainActor private static var twitchUsernameCache: [String: Color] = [:]
+
+    /// Maximum cached `(scheme, hex)` entries before the cache is reset.
+    internal static let twitchUsernameCacheLimit = 1024
 
     /// Parse a Twitch user color (e.g. `"#FFD700"`) and return a SwiftUI Color
     /// with lightness clamped for the given color scheme. Falls back to
@@ -39,6 +48,9 @@ public extension Color {
         let key = (scheme == .dark ? "d:" : "l:") + hex
         if let cached = twitchUsernameCache[key] { return cached }
         let color = computeTwitchUsername(hex: hex, scheme: scheme)
+        if twitchUsernameCache.count >= twitchUsernameCacheLimit {
+            twitchUsernameCache.removeAll(keepingCapacity: true)
+        }
         twitchUsernameCache[key] = color
         return color
     }

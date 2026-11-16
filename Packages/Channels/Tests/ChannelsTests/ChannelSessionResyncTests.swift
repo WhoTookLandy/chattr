@@ -1,22 +1,24 @@
 import Testing
 import Foundation
 import TwitchKit
+import ChatModel
 @testable import Channels
 
-/// Tests for the two pure functions behind the "New" messages divider:
+/// Tests for the "New" messages divider and the reconnect gap-fill:
 ///
 ///   - `mergeBackfill(history:pendingLive:capacity:divider:)` — the join-time
 ///     placement: the divider must sit between rustlog history and the live
-///     events buffered during the fetch window, surviving dedup and the cap.
-///   - `reconnectGapEvents(fetched:ring:dividerId:timestamp:)` — the
-///     reconnect gap-fill: only messages the ring doesn't already hold come
-///     back (flagged historical), capped by a trailing divider so the rule
-///     marks where live resumes; a clean reconnect yields nothing.
+///     updates buffered during the fetch window, surviving dedup and the cap.
+///   - `missingMessages(_:notIn:)` — the reconnect dedup: only messages the
+///     ring doesn't already hold come back; a clean reconnect yields nothing.
+///   - `resyncAfterReconnect()` — the actor path: the gap (dimmed history +
+///     trailing divider) is committed and delivered as ONE contiguous batch.
 ///
-/// The actor-side commit paths (`applyBackfill`, `resyncAfterReconnect`) are
-/// deliberately thin wrappers over these — same testing strategy as
-/// `ChannelMergeTests`.
-@Suite("ChannelSession divider & reconnect gap-fill")
+/// Sessions are real but never `start()`ed; the injected `fetchBackfill`
+/// keeps everything offline. Delivery is read straight off the subscriber's
+/// mailbox: `emit` posts synchronously, so once an awaited session call
+/// returns, its rows are already there.
+@Suite("ChannelSession divider & reconnect gap-fill", .timeLimit(.minutes(1)))
 struct ChannelSessionResyncTests {
 
     /// Build a real `ChatMessage` with a controllable `messageId` by going
@@ -26,17 +28,25 @@ struct ChannelSessionResyncTests {
         return IRCMessageParser.parse(line, channelLogin: "ch")!
     }
 
-    private func message(id: String) -> ChannelSession.ChannelEvent {
-        .message(chatMessage(id: id), isHistorical: false)
+    private func record(id: String) -> BackfillMessage {
+        BackfillMessage(message: chatMessage(id: id), sentAt: nil)
     }
 
-    /// Flatten an event list to a readable shape: message ids verbatim,
-    /// dividers as their minted id (so position AND identity are asserted).
-    private func ids(_ events: [ChannelSession.ChannelEvent]) -> [String] {
+    private func message(id: String) -> ChannelUpdate {
+        .normalizedMessage(chatMessage(id: id), timestamp: Date(timeIntervalSince1970: 0))
+    }
+
+    private func divider(id: String) -> ChannelUpdate {
+        .row(ChatLine(id: id, kind: .newMessagesDivider, authorDisplayName: "", runs: [], timestamp: .distantPast))
+    }
+
+    /// Flatten an update list to a readable shape: message ids verbatim,
+    /// dividers as "|" (minted ids are random) — position is what matters.
+    private func shape(_ events: [ChannelUpdate]) -> [String] {
         events.compactMap {
             switch $0 {
-            case .message(let m, _): return m.messageId
-            case .newMessagesDivider(let id, _): return id
+            case .message(let m): return m.message.messageId
+            case .row(let line) where line.kind == .newMessagesDivider: return "|"
             default: return nil
             }
         }
@@ -46,149 +56,124 @@ struct ChannelSessionResyncTests {
 
     @Test("Divider lands between history and buffered-live")
     func dividerBetweenHistoryAndLive() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1"), message(id: "h2")],
             pendingLive: [message(id: "m3")],
             capacity: 500,
-            divider: .newMessagesDivider(id: "div-1", timestamp: .now)
+            divider: divider(id: "div-1")
         )
-        #expect(ids(merged) == ["h1", "h2", "div-1", "m3"])
+        #expect(shape(merged) == ["h1", "h2", "|", "m3"])
     }
 
     @Test("Divider sits below a deduped overlap message (history position wins)")
     func dividerAfterDedupedOverlap() {
         // h2 came back from rustlog AND arrived live during the fetch — it
         // keeps its history slot, so it must stay ABOVE the divider.
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1"), message(id: "h2")],
             pendingLive: [message(id: "h2"), message(id: "m3")],
             capacity: 500,
-            divider: .newMessagesDivider(id: "div-1", timestamp: .now)
+            divider: divider(id: "div-1")
         )
-        #expect(ids(merged) == ["h1", "h2", "div-1", "m3"])
+        #expect(shape(merged) == ["h1", "h2", "|", "m3"])
     }
 
     @Test("Divider with no buffered-live ends the transcript")
     func dividerWithEmptyLiveTrails() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1")],
             pendingLive: [],
             capacity: 500,
-            divider: .newMessagesDivider(id: "div-1", timestamp: .now)
+            divider: divider(id: "div-1")
         )
-        #expect(ids(merged) == ["h1", "div-1"])
+        #expect(shape(merged) == ["h1", "|"])
     }
 
     @Test("Nil divider reproduces the pre-divider merge exactly")
     func nilDividerUnchanged() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1")],
             pendingLive: [message(id: "m2")],
             capacity: 500,
             divider: nil
         )
-        #expect(ids(merged) == ["h1", "m2"])
+        #expect(shape(merged) == ["h1", "m2"])
     }
 
-    @Test("Cap trims from the head — divider ages out like any event")
+    @Test("Cap trims from the head — divider ages out like any update")
     func capTrimsDividerWithOldHistory() {
-        let merged = ChannelSession.mergeBackfill(
+        let merged = ChannelHistoryMerge.mergeBackfill(
             history: [message(id: "h1"), message(id: "h2")],
             pendingLive: [message(id: "m3"), message(id: "m4")],
             capacity: 2,
-            divider: .newMessagesDivider(id: "div-1", timestamp: .now)
+            divider: divider(id: "div-1")
         )
         // Full list h1, h2, div-1, m3, m4 → newest 2 survive.
-        #expect(ids(merged) == ["m3", "m4"])
+        #expect(shape(merged) == ["m3", "m4"])
     }
 
-    // MARK: - reconnectGapEvents
+    // MARK: - missingMessages
 
-    @Test("Only messages the ring doesn't hold come back, capped by the divider")
+    @Test("Only messages the ring doesn't hold come back, in fetched order")
     func gapFillReturnsOnlyMissing() {
         let ring = [message(id: "m1"), message(id: "m2")]
-        let fetched = [
-            chatMessage(id: "m1"),       // already have it
-            chatMessage(id: "m2"),       // already have it
-            chatMessage(id: "gap1"),     // missed during the drop
-            chatMessage(id: "gap2"),
-        ]
-        let events = ChannelSession.reconnectGapEvents(
-            fetched: fetched, ring: ring, dividerId: "div-r", timestamp: .now
-        )
-        #expect(ids(events) == ["gap1", "gap2", "div-r"])
+        let fetched = [record(id: "m1"), record(id: "gap1"), record(id: "m2"), record(id: "gap2")]
+        let missing = ChannelHistoryMerge.missingMessages(fetched, notIn: ring)
+        #expect(missing.map(\.message.messageId) == ["gap1", "gap2"])
     }
 
-    @Test("Clean reconnect (nothing missed) yields no events — and no divider")
+    @Test("Clean reconnect (nothing missed) yields nothing")
     func cleanReconnectYieldsNothing() {
         let ring = [message(id: "m1"), message(id: "m2")]
-        let fetched = [chatMessage(id: "m1"), chatMessage(id: "m2")]
-        let events = ChannelSession.reconnectGapEvents(
-            fetched: fetched, ring: ring, dividerId: "div-r", timestamp: .now
-        )
-        #expect(events.isEmpty)
+        #expect(ChannelHistoryMerge.missingMessages([record(id: "m1"), record(id: "m2")], notIn: ring).isEmpty)
     }
 
-    @Test("Fetched order is preserved for the gap block")
-    func gapPreservesFetchedOrder() {
-        let events = ChannelSession.reconnectGapEvents(
-            fetched: [chatMessage(id: "a"), chatMessage(id: "b"), chatMessage(id: "c")],
-            ring: [message(id: "b")],
-            dividerId: "div-r",
-            timestamp: .now
-        )
-        #expect(ids(events) == ["a", "c", "div-r"])
-    }
-
-    @Test("Non-message ring events (bubbles, prior dividers) don't block dedup")
-    func nonMessageRingEventsIgnored() {
-        let ring: [ChannelSession.ChannelEvent] = [
-            .newMessagesDivider(id: "div-old", timestamp: .now),
-            .chatCleared,
-            message(id: "m1"),
-        ]
-        let events = ChannelSession.reconnectGapEvents(
-            fetched: [chatMessage(id: "m1"), chatMessage(id: "gap1")],
-            ring: ring,
-            dividerId: "div-r",
-            timestamp: .now
-        )
-        #expect(ids(events) == ["gap1", "div-r"])
+    @Test("Non-message ring rows (bubbles, prior dividers) don't block dedup")
+    func nonMessageRingRowsIgnored() {
+        let ring: [ChannelUpdate] = [divider(id: "div-old"), .chatCleared, message(id: "m1")]
+        let missing = ChannelHistoryMerge.missingMessages([record(id: "m1"), record(id: "gap1")], notIn: ring)
+        #expect(missing.map(\.message.messageId) == ["gap1"])
     }
 
     @Test("Empty ring treats the whole fetch as the gap")
     func emptyRingTakesEverything() {
-        let events = ChannelSession.reconnectGapEvents(
-            fetched: [chatMessage(id: "a"), chatMessage(id: "b")],
-            ring: [],
-            dividerId: "div-r",
-            timestamp: .now
-        )
-        #expect(ids(events) == ["a", "b", "div-r"])
+        let missing = ChannelHistoryMerge.missingMessages([record(id: "a"), record(id: "b")], notIn: [])
+        #expect(missing.map(\.message.messageId) == ["a", "b"])
     }
 
     // MARK: - Actor path (offline via injected fetchBackfill)
 
-    /// Order-preserving sink for fan-out events and fetch invocations.
-    private actor Recorder {
-        var events: [ChannelSession.ChannelEvent] = []
-        var fetchCount = 0
-        func record(_ event: ChannelSession.ChannelEvent) { events.append(event) }
-        func recordFetch() { fetchCount += 1 }
+    private actor FetchLog {
+        var count = 0
+        func recordFetch() { count += 1 }
     }
 
-    /// Real but never-`start()`ed session — the injected `fetchBackfill`
-    /// keeps the resync path entirely offline (same NullTokenStore pattern
-    /// as ChatTranscriptModelModerationTests).
-    private func makeSession(
-        recorder: Recorder,
-        fetched: [ChatMessage]
-    ) -> ChannelSession {
-        struct NullTokenStore: TwitchTokenStore {
-            func loadToken() async throws -> OAuthToken? { nil }
-            func saveToken(_ token: OAuthToken) async throws {}
-            func deleteToken() async throws {}
+    /// Holds a fetch open until the test releases it.
+    private actor Gate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { waiters.append($0) }
         }
+        func open() {
+            isOpen = true
+            for waiter in waiters { waiter.resume() }
+            waiters = []
+        }
+    }
+
+    private struct NullTokenStore: TwitchTokenStore {
+        func loadToken() async throws -> OAuthToken? { nil }
+        func saveToken(_ token: OAuthToken) async throws {}
+        func deleteToken() async throws {}
+    }
+
+    private func makeSession(
+        fetches: FetchLog,
+        gate: Gate? = nil,
+        fetched: [BackfillMessage]
+    ) -> ChannelSession {
         let client = TwitchClient(clientId: "test-client", tokenStore: NullTokenStore())
         return ChannelSession(
             client: client,
@@ -196,74 +181,84 @@ struct ChannelSessionResyncTests {
             channelLoginName: "ch",
             accountUserId: "me",
             fetchBackfill: { _, _ in
-                await recorder.recordFetch()
+                await fetches.recordFetch()
+                await gate?.wait()
                 return fetched
             }
         )
     }
 
-    @Test("Resync commits divider + missing to the ring and fans them out in order")
-    func resyncCommitsAndFansOut() async {
-        let recorder = Recorder()
-        let session = makeSession(
-            recorder: recorder,
-            fetched: [chatMessage(id: "m1"), chatMessage(id: "gap1")]
-        )
+    @Test("Resync commits dimmed gap + trailing divider to the ring and delivers it as one batch")
+    func resyncCommitsAndDelivers() async throws {
+        let fetches = FetchLog()
+        let session = makeSession(fetches: fetches, fetched: [record(id: "m1"), record(id: "gap1")])
         // End the buffering window with m1 as history → ring: [m1, join-divider].
-        await session.applyBackfill([chatMessage(id: "m1")])
-        _ = await session.subscribe { event in await recorder.record(event) }
+        await session.applyBackfill([record(id: "m1")])
+        let (subscription, _) = await session.subscribe()
 
         await session.resyncAfterReconnect()
 
         // Ring: m1, join divider, gap1 (historical), resync divider — the
         // divider TRAILS the gap so it marks where live messages resume.
         let ring = await session.currentSnapshot()
-        let ringIds = ids(ring)
-        #expect(ringIds.count == 4)
-        #expect(ringIds.first == "m1")
-        if case .message(let gap, let isHistorical) = ring[2] {
-            #expect(gap.messageId == "gap1")
-            #expect(isHistorical)   // gap-fill rows render dimmed
+        try #require(shape(ring) == ["m1", "|", "gap1", "|"])
+        if case .message(let gap) = ring[2] {
+            #expect(gap.line.isHistorical)   // gap-fill rows render dimmed
         } else {
             Issue.record("Expected the gap message above the divider, got \(ring[2])")
         }
-        if case .newMessagesDivider = ring[3] {} else {
-            Issue.record("Expected the divider to trail the gap, got \(ring[3])")
-        }
-        // Fan-out delivered exactly the gap batch, divider last. The fan-out
-        // TaskGroup is awaited inside resyncAfterReconnect, so no waiting here.
-        let received = await recorder.events
-        #expect(received.count == 2)
-        #expect(ids(received).first == "gap1")
-        if case .newMessagesDivider = received[1] {} else {
-            Issue.record("Expected the divider to fan out last, got \(received[1])")
-        }
+        // Delivered: exactly the gap batch, divider last.
+        #expect(shape(subscription.takePending()) == ["gap1", "|"])
     }
 
-    @Test("Clean resync (nothing missed) leaves the ring untouched and fans out nothing")
+    @Test("A live message during the gap fetch can't land inside the delivered gap")
+    func gapIsContiguousAroundLiveTraffic() async throws {
+        let fetches = FetchLog()
+        let gate = Gate()
+        let session = makeSession(
+            fetches: fetches,
+            gate: gate,
+            fetched: [record(id: "gap1"), record(id: "gap2")]
+        )
+        await session.applyBackfill([])
+        let (subscription, _) = await session.subscribe()
+
+        let resync = Task { await session.resyncAfterReconnect() }
+        // Wait until the fetch is in flight (the actor is free meanwhile).
+        while await fetches.count == 0 { await Task.yield() }
+        await session.handle(event: .chatMessage(chatMessage(id: "live1")))
+        await gate.open()
+        await resync.value
+
+        // Live traffic during the fetch precedes the gap; the gap and its
+        // divider arrive back-to-back with nothing in between.
+        #expect(shape(subscription.takePending()) == ["live1", "gap1", "gap2", "|"])
+    }
+
+    @Test("Clean resync (nothing missed) leaves the ring untouched and delivers nothing")
     func cleanResyncIsSilent() async {
-        let recorder = Recorder()
-        let session = makeSession(recorder: recorder, fetched: [chatMessage(id: "m1")])
-        await session.applyBackfill([chatMessage(id: "m1")])
-        _ = await session.subscribe { event in await recorder.record(event) }
+        let fetches = FetchLog()
+        let session = makeSession(fetches: fetches, fetched: [record(id: "m1")])
+        await session.applyBackfill([record(id: "m1")])
+        let (subscription, _) = await session.subscribe()
 
         await session.resyncAfterReconnect()
 
         let ring = await session.currentSnapshot()
         #expect(ring.count == 2)   // m1 + join divider, nothing added
-        #expect(await recorder.events.isEmpty)
-        #expect(await recorder.fetchCount == 1)
+        #expect(subscription.takePending().isEmpty)
+        #expect(await fetches.count == 1)
     }
 
     @Test("Resync is skipped while the initial backfill is still pending")
     func resyncSkippedWhileBackfillPending() async {
-        let recorder = Recorder()
-        let session = makeSession(recorder: recorder, fetched: [chatMessage(id: "gap1")])
+        let fetches = FetchLog()
+        let session = makeSession(fetches: fetches, fetched: [record(id: "gap1")])
         // No applyBackfill — the session is still in its buffering window.
 
         await session.resyncAfterReconnect()
 
-        #expect(await recorder.fetchCount == 0)   // bailed before fetching
+        #expect(await fetches.count == 0)   // bailed before fetching
         #expect(await session.currentSnapshot().isEmpty)
     }
 

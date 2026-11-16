@@ -18,8 +18,6 @@ import SwiftUI
 struct FlowLayout: Layout {
     var spacing: CGFloat
     var alignment: VerticalAlignment
-    /// Indent applied to every wrapped (non-first) row. 0 = classic flow.
-    var hangingIndent: CGFloat
 
     /// Per-layout-pass cache of subview sizes AND the wrapping result. SwiftUI
     /// calls `makeCache` once when the Layout's view tree is built and reuses
@@ -39,10 +37,9 @@ struct FlowLayout: Layout {
         var result: FlowLayoutEngine.Result?
     }
 
-    init(spacing: CGFloat = 4, alignment: VerticalAlignment = .firstTextBaseline, hangingIndent: CGFloat = 0) {
+    init(spacing: CGFloat = 4, alignment: VerticalAlignment = .firstTextBaseline) {
         self.spacing = spacing
         self.alignment = alignment
-        self.hangingIndent = hangingIndent
     }
 
     func makeCache(subviews: Subviews) -> Cache { Cache() }
@@ -121,7 +118,9 @@ struct FlowLayout: Layout {
             sizes: cache.sizes,
             containerWidth: containerWidth,
             spacing: spacing,
-            hangingIndent: hangingIndent
+            // Classic flow. The engine's hanging-indent support stays (it's
+            // pure and unit-tested) but no caller of this view uses it.
+            hangingIndent: 0
         )
     }
 }

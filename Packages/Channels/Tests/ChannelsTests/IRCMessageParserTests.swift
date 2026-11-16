@@ -182,4 +182,23 @@ struct IRCMessageParserTests {
         let m2 = try #require(IRCMessageParser.parse(line, channelLogin: "ch"))
         #expect(m1.messageId != m2.messageId)
     }
+
+    @Test("tmi-sent-ts (epoch ms) becomes the record's send time")
+    func parsesSentTimestamp() throws {
+        let line = "@id=t-1;room-id=1;tmi-sent-ts=1700000000123;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :hi"
+        let record = try #require(IRCMessageParser.parseRecord(line, channelLogin: "ch"))
+        #expect(record.message.messageId == "t-1")
+        let sentAt = try #require(record.sentAt)
+        #expect(abs(sentAt.timeIntervalSince1970 - 1_700_000_000.123) < 0.000_5)
+    }
+
+    @Test("A missing or malformed tmi-sent-ts leaves the send time unset")
+    func missingSentTimestamp() throws {
+        let missing = "@id=t-2;room-id=1;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :hi"
+        let withoutTag = try #require(IRCMessageParser.parseRecord(missing, channelLogin: "ch"))
+        #expect(withoutTag.sentAt == nil)
+        let garbage = "@id=t-3;room-id=1;tmi-sent-ts=soon;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :hi"
+        let malformed = try #require(IRCMessageParser.parseRecord(garbage, channelLogin: "ch"))
+        #expect(malformed.sentAt == nil)
+    }
 }

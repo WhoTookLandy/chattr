@@ -1,10 +1,8 @@
+import AuthenticationServices
 import Foundation
 import TwitchKit
 import Core
 import os
-#if canImport(UIKit)
-import UIKit
-#endif
 
 private let logger = AppLogger.make("Accounts.TwitchSignIn")
 
@@ -14,10 +12,16 @@ private let logger = AppLogger.make("Accounts.TwitchSignIn")
 ///
 /// Before this existed, the flow was inline in `SignInView.signIn()`,
 /// which meant adding a second account would have had to duplicate the
-/// OAuth URL construction, window-anchor lookup, `OAuthFlow.run`, and
-/// `AccountStore.add` plumbing — including the scope list (a
-/// duplicate-source-of-truth risk if the two drifted). Centralizing
-/// here keeps one definition of "what it means to sign in to chattr."
+/// OAuth URL construction, `OAuthFlow.run`, and `AccountStore.add`
+/// plumbing — including the scope list (a duplicate-source-of-truth risk
+/// if the two drifted). Centralizing here keeps one definition of "what
+/// it means to sign in to chattr."
+///
+/// UI-free by design: the window the auth sheet presents from is supplied
+/// by the caller through the `presentationAnchor` provider. The UIKit
+/// window lookup lives in `Features` (`TwitchSignIn+Presentation.swift`),
+/// which also offers the anchor-less `run(accountStore:)`
+/// convenience the views call.
 @MainActor
 public enum TwitchSignIn {
 
@@ -91,17 +95,22 @@ public enum TwitchSignIn {
     /// `/users` probe + Keychain persistence + SwiftData insert.
     ///
     /// Works for BOTH first sign-in and adding an additional account —
-    /// `AccountStore.add` is account-count-agnostic. The new account's
-    /// `lastSelectedAt` defaults to `.now`, so it becomes active
-    /// automatically (RootView sorts by that descending).
+    /// `AccountStore.add` is account-count-agnostic. `add` also writes the
+    /// new account's userId to the active-account UserDefaults key
+    /// (`AccountStore.activeAccountUserIdKey`), so it becomes active
+    /// automatically — RootView's `@AppStorage` observes that key.
     ///
+    /// - Parameter presentationAnchor: Returns the window to present the
+    ///   auth sheet from, or nil if none is available. Called once, on the
+    ///   main actor, before the sheet is shown.
     /// - Returns: the newly-added `Account`.
     /// - Throws: `AppError` if no window anchor is available; rethrows
     ///   OAuth / network errors from the flow.
     @discardableResult
     public static func run(
         accountStore: AccountStore,
-        clientId: String
+        clientId: String,
+        presentationAnchor: @MainActor () -> ASPresentationAnchor?
     ) async throws -> Account {
         let oauthClient = TwitchOAuthClient(
             clientId: clientId,
@@ -110,11 +119,7 @@ public enum TwitchSignIn {
         let authURL = oauthClient.authorizationCodeURL(scopes: scopes)
 
         #if canImport(UIKit)
-        guard
-            let scene = UIApplication.shared.connectedScenes
-                .first(where: { $0 is UIWindowScene }) as? UIWindowScene,
-            let anchor = scene.windows.first
-        else {
+        guard let anchor = presentationAnchor() else {
             throw AppError(message: "Couldn't find a window to present sign-in from.")
         }
 

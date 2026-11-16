@@ -1,10 +1,9 @@
 import SwiftUI
-import AuthenticationServices
-import TwitchKit
+import Accounts
 import Core
 import os
 
-private let logger = AppLogger.make("Accounts.SignInView")
+private let logger = AppLogger.make("Features.SignInView")
 
 /// First-launch screen: presents a "Sign in with Twitch" button that runs the OAuth flow
 /// via the Vercel bridge.
@@ -16,10 +15,12 @@ private let logger = AppLogger.make("Accounts.SignInView")
 /// call is needed here — Vercel did the exchange already.
 ///
 /// On success, the new Account is persisted via `AccountStore.add(token:scopes:)`. RootView's
-/// `@Query` observes the new SwiftData row and re-renders to ChannelListScreen automatically.
-public struct SignInView: View {
-    private let accountStore: AccountStore
-    private let clientId: String
+/// `@Query` observes the new SwiftData row and re-renders to the app shell automatically.
+///
+/// Lives in `Features` (all SwiftUI does); the UI-free flow it drives is
+/// `Accounts.TwitchSignIn`.
+struct SignInView: View {
+    @Environment(\.accountStore) private var accountStore
 
     @State private var isSigningIn = false
     @State private var errorMessage: String?
@@ -39,12 +40,7 @@ public struct SignInView: View {
     // switcher's "Add Account" — so there's one source of truth for what
     // "sign in to chattr" means.
 
-    public init(accountStore: AccountStore, clientId: String) {
-        self.accountStore = accountStore
-        self.clientId = clientId
-    }
-
-    public var body: some View {
+    var body: some View {
         VStack(spacing: 24) {
             Spacer()
 
@@ -150,7 +146,7 @@ public struct SignInView: View {
                     sessionExpiredLogin = login
                 }
                 UserDefaults.standard.removeObject(forKey: AccountStore.lastSessionExpiredLoginKey)
-                logger.info("SignInView: showing session-expired banner for @\(login)")
+                logger.info("SignInView: showing session-expired banner for @\(login, privacy: .public)")
             }
         }
     }
@@ -167,9 +163,9 @@ public struct SignInView: View {
             // the client_secret stays off-device), and hands the token
             // to AccountStore.add. RootView's @Query observes the new
             // row and transitions away from this view automatically.
-            _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
+            _ = try await TwitchSignIn.run(accountStore: accountStore)
         } catch {
-            logger.error("Sign-in failed: \(error.localizedDescription)")
+            logger.error("Sign-in failed: \(error.localizedDescription, privacy: .public)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription
         }
     }

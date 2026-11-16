@@ -13,7 +13,6 @@ import PackageDescription
 // list depends back, preventing cycles):
 //
 //   ChatModel
-//     ├─ Core              (AppLogger only, for the few logging sites)
 //     ├─ EmoteSources      (Emote type + EmoteIndex snapshot access)
 //     └─ TwitchKit         (ChatMessage / ChatFragment / EmoteReference input shape)
 //
@@ -29,9 +28,8 @@ let package = Package(
         .library(name: "ChatModel", targets: ["ChatModel"]),
     ],
     dependencies: [
-        .package(path: "../Core"),
         .package(path: "../EmoteSources"),
-        // TwitchKit pulled in transitively via... no, it's not — we need it directly.
+        // TwitchKit is a direct dependency (not transitive):
         // ChatModel needs TwitchKit.ChatMessage as input to Normalizer.
         .package(url: "https://github.com/AndrewBeshay/TwitchKit.git", exact: "0.3.4"),
     ],
@@ -39,7 +37,6 @@ let package = Package(
         .target(
             name: "ChatModel",
             dependencies: [
-                "Core",
                 "EmoteSources",
                 .product(name: "TwitchKit", package: "TwitchKit"),
             ],

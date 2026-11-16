@@ -9,12 +9,9 @@ import ChatModel
 /// highest-confidence things to pin down because the renderer and the
 /// thread-view sheet both depend on their exact output.
 ///
-/// NOTE: the optimistic-send echo-reconciliation state machine (`apply`,
-/// `upgradeOptimistic`, `cleanupPending`) and the 500-line ring buffer (`cap`,
-/// `appendLines`) are `private` and driven by `ChannelSession.ChannelEvent`.
-/// Covering them needs either a small visibility relaxation (`private` →
-/// `internal`) or extraction of the pure matching decision out of `apply`.
-/// That's the natural next increment now that this target exists.
+/// The optimistic-send echo reconciliation is covered separately, as a pure
+/// state machine, by `OutgoingMessageReconcilerTests`; the ring buffer by
+/// `ChatBufferTests`.
 @Suite("ChatTranscriptModel reply & snippet helpers")
 @MainActor
 struct ChatTranscriptModelReplyTests {

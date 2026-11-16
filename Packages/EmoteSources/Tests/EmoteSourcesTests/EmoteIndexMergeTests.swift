@@ -13,6 +13,9 @@ final class ScriptedProvider: EmoteProvider, @unchecked Sendable {
     private let channel: [Emote]
     private let globalDelay: Duration?
     private let channelDelay: Duration?
+    /// Per-instance so several `ScriptedProvider`s standing in for different
+    /// providers don't share one `GlobalEmoteCatalog` entry.
+    let globalCatalogKey = "scripted-\(UUID().uuidString)"
 
     init(
         global: [Emote] = [],
@@ -125,5 +128,42 @@ struct EmoteIndexMergeTests {
 
         #expect(index.snapshot()["GlobalOnly"] != nil)
         #expect(index.snapshot()["ChannelOnly"] != nil)
+    }
+}
+
+@Suite("EmoteIndex compose (publish-time merge)")
+struct EmoteIndexComposeTests {
+
+    private func emote(_ name: String, source: Emote.Source, owner: String? = nil) -> Emote {
+        Emote(
+            id: "\(source):\(name):\(owner ?? "global")",
+            name: name,
+            urls: [.x1: URL(string: "https://cdn/\(name)")!],
+            isAnimated: false, isZeroWidth: false,
+            source: source, ownerChannelId: owner)
+    }
+
+    @Test("compose applies channel > global, then 7TV > BTTV > FFZ, independent of set order")
+    func composePrecedence() {
+        let globals: [[Emote]] = [
+            [emote("A", source: .ffz), emote("B", source: .ffz)],
+            [emote("A", source: .sevenTV)],
+            [emote("C", source: .sevenTV)],
+        ]
+        let channel: [[Emote]] = [
+            [emote("C", source: .ffz, owner: "1")],
+            [emote("B", source: .bttv, owner: "1"), emote("B", source: .sevenTV, owner: "1")],
+        ]
+        let orders: [([[Emote]], [[Emote]])] = [
+            (globals, channel),
+            (Array(globals.reversed()), Array(channel.reversed())),
+        ]
+        for (g, c) in orders {
+            let merged = EmoteIndex.compose(globals: g, channel: c)
+            #expect(merged["A"]?.source == .sevenTV)              // same scope: 7TV wins
+            #expect(merged["B"]?.source == .sevenTV)              // channel 7TV beats channel BTTV + global FFZ
+            #expect(merged["B"]?.ownerChannelId == "1")
+            #expect(merged["C"]?.source == .ffz)                  // channel FFZ beats global 7TV
+        }
     }
 }

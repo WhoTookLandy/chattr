@@ -21,9 +21,7 @@ private let logger = AppLogger.make("Features.AccountSwitcher")
 /// AppShell. So tapping a row + dismiss is all the UI does; the rest
 /// flows through the data layer.
 struct AccountSwitcherView: View {
-    let accountStore: AccountStore
-    let clientId: String
-
+    @Environment(\.accountStore) private var accountStore
     @Environment(\.dismiss) private var dismiss
 
     /// Same sort as RootView — most-recently-added first.
@@ -166,7 +164,7 @@ struct AccountSwitcherView: View {
         errorMessage = nil
         defer { isAddingAccount = false }
         do {
-            _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
+            _ = try await TwitchSignIn.run(accountStore: accountStore)
             dismiss()
         } catch {
             logger.error("Re-authorize failed for @\(account.login): \(error.localizedDescription)")
@@ -175,14 +173,14 @@ struct AccountSwitcherView: View {
     }
 
     /// Run the shared OAuth flow to add a new account. On success it
-    /// becomes active automatically (its lastSelectedAt defaults to now),
+    /// becomes active automatically (`AccountStore.add` selects it),
     /// so we dismiss — RootView re-renders into the new account.
     private func addAccount() async {
         isAddingAccount = true
         errorMessage = nil
         defer { isAddingAccount = false }
         do {
-            _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
+            _ = try await TwitchSignIn.run(accountStore: accountStore)
             dismiss()
         } catch {
             logger.error("Add account failed: \(error.localizedDescription)")

@@ -25,6 +25,10 @@ import TwitchKit
 
 // MARK: - Fixture helpers
 
+/// Fixed send time for every normalized fixture — the Normalizer no longer
+/// reads the clock, so lines built from the same message compare equal.
+private let testStamp = Date(timeIntervalSince1970: 1_700_000_000)
+
 /// Build a minimal `Emote` for the tests. Most fields don't matter for
 /// the tokenizer (it only reads `name`); we fill in URLs to satisfy the
 /// constructor.
@@ -147,7 +151,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         #expect(line.runs == [.text("hello"), .text("world")])
         #expect(line.isHighlighted == false)
@@ -163,7 +167,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         // Expect 3 runs: "hi", twitchEmote(Kappa), "wave" — surrounding
         // whitespace is dropped (FlowLayout spacing renders the gaps).
@@ -183,7 +187,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: ["poggers": poggers],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         // Expect: "lul", emote(poggers), "w"
         try? #require(line.runs.count == 3)
@@ -201,7 +205,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         try? #require(line.runs.count == 4)  // mention + "how" + "are" + "you"
         if case .mention(let login, let isMe) = line.runs[0] {
@@ -220,7 +224,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         if case .mention(_, let isMe) = line.runs[0] { #expect(isMe == false) }
         #expect(line.isHighlighted == false)
@@ -235,7 +239,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: ["KEKW": kekw, "LULW": lulw, "POG": pog],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         // Expect: [emote(KEKW), emote(LULW), emote(POG)]
         try? #require(line.runs.count == 3)
@@ -250,7 +254,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me",
+            currentUserLogin: "me", timestamp: testStamp,
             highlightKeywords: ["clip"]   // lowercase
         )
         // "Clip" (capital C) in message; "clip" in keyword list. Case-insensitive substring match.
@@ -264,7 +268,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: ["clipit": pog],
-            currentUserLogin: "me",
+            currentUserLogin: "me", timestamp: testStamp,
             highlightKeywords: ["clip"]
         )
         // Token "clipit" matched the emote map → became .emote run, NOT a text run.
@@ -278,7 +282,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         #expect(line.runs.isEmpty)
     }
@@ -294,7 +298,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         #expect(line.runs == [.text("hello"), .text("world")])
 
@@ -303,7 +307,7 @@ struct NormalizerTokenizationTests {
         let splitLine = Normalizer.normalize(
             message: split,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         #expect(splitLine.runs == [.text("hello")])
     }
@@ -315,7 +319,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: ["Kappa": kappa],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         #expect(line.runs == [.text("hi"), .emote(kappa), .text("bye")])
     }
@@ -326,7 +330,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me",
+            currentUserLogin: "me", timestamp: testStamp,
             highlightKeywords: ["free crypto"]
         )
         #expect(line.isHighlighted == true)
@@ -339,7 +343,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: ["KEKW": kekw],
-            currentUserLogin: "me",
+            currentUserLogin: "me", timestamp: testStamp,
             highlightKeywords: ["free crypto"]
         )
         // "free" and "crypto" are separated by an emote run — they were
@@ -359,7 +363,7 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "me"
+            currentUserLogin: "me", timestamp: testStamp
         )
         #expect(line.runs == [.text("hello"), .text("there")])
         #expect(line.replyParent?.parentMessageId == "parent1")
@@ -382,9 +386,128 @@ struct NormalizerTokenizationTests {
         let line = Normalizer.normalize(
             message: message,
             emoteSnapshot: [:],
-            currentUserLogin: "someoneelse"
+            currentUserLogin: "someoneelse", timestamp: testStamp
         )
         #expect(line.authorUserLogin == "tester")
         #expect(line.authorDisplayName == "Tester")
+    }
+
+    // MARK: - Timestamps & stable identity
+
+    @Test("The caller's timestamp lands on the line; re-normalizing is equal")
+    func timestampIsCallerSupplied() {
+        let message = makeMessage(fragments: [textSpec("hello")])
+        let first = Normalizer.normalize(
+            message: message, emoteSnapshot: [:], currentUserLogin: "me", timestamp: testStamp
+        )
+        let second = Normalizer.normalize(
+            message: message, emoteSnapshot: [:], currentUserLogin: "me", timestamp: testStamp
+        )
+        #expect(first.timestamp == testStamp)
+        // No hidden clock read: the same inputs produce the same line.
+        #expect(first == second)
+    }
+
+    @Test("Raid lines use the caller-minted id and timestamp")
+    func raidLineIdentityIsCallerMinted() throws {
+        let json = """
+        {
+            "from_broadcaster_user_id": "77",
+            "from_broadcaster_user_login": "raider",
+            "from_broadcaster_user_name": "Raider",
+            "to_broadcaster_user_id": "1",
+            "to_broadcaster_user_login": "broadcaster",
+            "to_broadcaster_user_name": "Broadcaster",
+            "viewers": 42
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let raid = try decoder.decode(EventSubRaid.self, from: Data(json.utf8))
+
+        let id = Normalizer.raidLineID(fromBroadcasterUserId: raid.fromBroadcasterUserId, receivedAt: testStamp)
+        #expect(id == "raid-77-1700000000000")
+        let a = Normalizer.line(from: raid, id: id, timestamp: testStamp)
+        let b = Normalizer.line(from: raid, id: id, timestamp: testStamp)
+        #expect(a.id == id)
+        #expect(a.timestamp == testStamp)
+        #expect(a == b)
+    }
+
+    // MARK: - Tokenizer paths
+
+    @Test("ASCII whitespace of every kind separates words (byte fast path)")
+    func asciiWhitespaceKinds() {
+        let runs = Normalizer.wordRuns(text: "a\tb\nc\r\nd\u{0B}e\u{0C}f  g")
+        #expect(runs == [.text("a"), .text("b"), .text("c"), .text("d"), .text("e"), .text("f"), .text("g")])
+    }
+
+    @Test("Non-ASCII text takes the Character path: NBSP splits, emoji survive")
+    func nonASCIITokenization() {
+        let runs = Normalizer.wordRuns(text: "héllo\u{00A0}wörld 👋🏽 ok")
+        #expect(runs == [.text("héllo"), .text("wörld"), .text("👋🏽"), .text("ok")])
+    }
+
+    @Test("A combining mark on a space stays one whitespace grapheme")
+    func combiningMarkOnSpace() {
+        // " \u{301}" is ONE Character whose first scalar is whitespace, so the
+        // whole cluster separates — the mark doesn't leak into the next word.
+        let runs = Normalizer.wordRuns(text: "a \u{301}b")
+        #expect(runs == [.text("a"), .text("b")])
+    }
+
+    @Test("ASCII fast path resolves third-party emotes per word")
+    func asciiFastPathEmotes() {
+        let kappa = makeEmote("Kappa")
+        let runs = Normalizer.wordRuns(text: "Kappa\tKappa x", emoteSnapshot: ["Kappa": kappa])
+        #expect(runs == [.emote(kappa), .emote(kappa), .text("x")])
+    }
+}
+
+// MARK: - HighlightMatcher
+
+@Suite("HighlightMatcher")
+struct HighlightMatcherTests {
+
+    private func words(_ text: String) -> [LineRun] {
+        Normalizer.wordRuns(text: text)
+    }
+
+    @Test("An empty keyword list (or only empty keywords) never matches")
+    func emptyMatcher() {
+        #expect(HighlightMatcher(keywords: []).isEmpty)
+        #expect(HighlightMatcher(keywords: [""]).isEmpty)
+        #expect(!HighlightMatcher(keywords: []).matches(words("anything at all")))
+    }
+
+    @Test("Single-word keywords match case-insensitively inside a word")
+    func singleWordSubstring() {
+        let matcher = HighlightMatcher(keywords: ["CLIP"])
+        #expect(matcher.matches(words("watch this clipped thing")))
+        #expect(!matcher.matches(words("nothing here")))
+    }
+
+    @Test("Phrases match across adjacent words, not across non-text runs")
+    func phraseSpans() {
+        let matcher = HighlightMatcher(keywords: ["Free Crypto"])
+        #expect(matcher.matches(words("get free crypto now")))
+        let kekw = makeEmote("KEKW")
+        #expect(!matcher.matches([.text("free"), .emote(kekw), .text("crypto")]))
+    }
+
+    @Test("Mentions and emote names are invisible to keywords")
+    func nonTextRunsIgnored() {
+        let matcher = HighlightMatcher(keywords: ["xqc"])
+        #expect(!matcher.matches([.mention(login: "xqc", isMe: false), .text("hi")]))
+    }
+
+    @Test("Non-ASCII keywords fall back to Foundation case folding")
+    func nonASCIIFallback() {
+        let matcher = HighlightMatcher(keywords: ["ÉCOLE"])
+        #expect(matcher.matches(words("à l'école demain")))
+        // ASCII keyword against non-ASCII text uses the same fallback, so
+        // Foundation's folding ("ß" ~ "ss") is preserved exactly.
+        let sharpS = HighlightMatcher(keywords: ["strasse"])
+        #expect(sharpS.matches(words("die Straße")) == ("die Straße".range(of: "strasse", options: .caseInsensitive) != nil))
     }
 }

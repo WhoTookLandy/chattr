@@ -37,10 +37,7 @@ struct ChannelSwitcherView: View {
                         model.move(fromOffsets: source, toOffset: destination)
                     }
                     .onDelete { offsets in
-                        let ids = offsets.map { model.tabs[$0].id }
-                        for id in ids {
-                            model.close(tabId: id)
-                        }
+                        model.close(tabIds: offsets.map { model.tabs[$0].id })
                     }
                 }
             }

@@ -1,0 +1,108 @@
+name: CI
+
+# Build + test on every push to main and every PR. This is the first place the
+# code is actually compiled, so keep it fast and fail loudly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-tests:
+    name: swift test (${{ matrix.package }})
+    runs-on: macos-26
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Features is iOS-only in practice (UIKit + iOS toolbar placements), so
+        # it's tested on a simulator in the `features-tests` job below.
+        package: [Core, DesignSystem, EmoteSources, Accounts, ChatModel, Channels]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v5
+        with:
+          path: |
+            Packages/${{ matrix.package }}/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ matrix.package }}-${{ hashFiles('Packages/*/Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-${{ matrix.package }}-
+
+      - name: swift test
+        run: swift test --package-path "Packages/${{ matrix.package }}" --parallel
+
+  features-tests:
+    name: Features tests (iOS Simulator)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: spm-features-${{ runner.os }}-${{ hashFiles('Packages/*/Package.swift') }}
+          restore-keys: spm-features-${{ runner.os }}-
+
+      - name: Test on iOS Simulator
+        working-directory: Packages/Features
+        run: |
+          set -o pipefail
+          UDID=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
+          echo "Using simulator $UDID"
+          # SwiftPM generates "<Name>-Package" when a package has several
+          # products/targets; otherwise the scheme is just the package name.
+          SCHEME=$(xcodebuild -list -json | jq -r '.workspace.schemes as $s
+            | if ($s | index("Features-Package")) then "Features-Package" else "Features" end')
+          xcodebuild test \
+            -scheme "$SCHEME" \
+            -destination "id=$UDID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            | xcbeautify --renderer github-actions
+
+  app-build:
+    name: Build app (iOS Simulator)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: spm-app-${{ runner.os }}-${{ hashFiles('Packages/*/Package.swift') }}
+          restore-keys: spm-app-${{ runner.os }}-
+
+      - name: Build for testing
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project chattr.xcodeproj \
+            -scheme chattr \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions

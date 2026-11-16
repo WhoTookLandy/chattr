@@ -2,6 +2,7 @@ import SwiftUI
 import Accounts
 import TwitchKit
 import Core
+import Nuke
 import NukeUI
 import os
 
@@ -18,13 +19,13 @@ private let logger = AppLogger.make("Features.AddChannel")
 /// require a follow relationship.
 struct AddChannelView: View {
     let account: Account
-    let accountStore: AccountStore
     /// False when hosted in the Search tab (a persistent destination has
     /// nothing to cancel); true for the legacy sheet presentation.
     var showsCancelButton: Bool = true
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openChannel) private var openChannel
+    @Environment(\.accountStore) private var accountStore
 
     @State private var query: String = ""
     @State private var results: [SearchChannel] = []
@@ -194,7 +195,7 @@ struct AddChannelView: View {
     /// broadcaster's profile image (per Twitch docs), so it doubles as
     /// the tab-strip avatar.
     private func open(_ channel: SearchChannel) {
-        openChannel?(ChannelDescriptor(
+        openChannel(ChannelDescriptor(
             platform: .twitch,
             channelId: channel.id,
             channelLoginName: channel.broadcasterLogin,
@@ -218,7 +219,7 @@ struct AddChannelView: View {
             let user = try await accountStore.withTokenRefresh(for: account) { [login] in
                 try await client.api.fetchUser(login: login)
             }
-            openChannel?(ChannelDescriptor(
+            openChannel(ChannelDescriptor(
                 platform: .twitch,
                 channelId: user.id,
                 channelLoginName: user.login,
@@ -242,7 +243,7 @@ private struct SearchResultRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            LazyImage(url: URL(string: channel.thumbnailUrl)) { state in
+            LazyImage(request: ImageRequest.avatar(url: URL(string: channel.thumbnailUrl), side: 40)) { state in
                 if let image = state.image {
                     image.resizable().scaledToFill()
                 } else {

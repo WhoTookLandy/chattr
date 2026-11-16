@@ -145,3 +145,60 @@ struct DecodedAnimationDisplaySizeTests {
         #expect(size == CGSize(width: 12, height: 24))
     }
 }
+
+@Suite("DecodedAnimation downsampling and frame cap")
+struct DecodedAnimationBudgetTests {
+
+    @Test("maxPixelSize decodes frames as thumbnails bounded by the longer side")
+    func downsamplesToMaxPixelSize() throws {
+        let data = DecodedAnimationTests.apng(alphas: [1, 1], width: 64, height: 32)
+        let decoded = try #require(DecodedAnimation(data: data, maxPixelSize: 16))
+        #expect(decoded.frameCount == 2)
+        #expect(decoded.firstFrame.width == 16)
+        #expect(decoded.firstFrame.height == 8)
+        // Cache cost tracks the downsampled bitmap, not the source.
+        #expect(decoded.byteCost == 2 * 16 * 8 * 4)
+    }
+
+    @Test("Without maxPixelSize frames keep their native size")
+    func nilMaxPixelSizeKeepsNativeSize() throws {
+        let data = DecodedAnimationTests.apng(alphas: [1, 1], width: 64, height: 32)
+        let decoded = try #require(DecodedAnimation(data: data))
+        #expect(decoded.firstFrame.width == 64)
+        #expect(decoded.firstFrame.height == 32)
+    }
+
+    @Test("Long animations are capped and keep their total loop duration")
+    func capsFrameCountPreservingDuration() throws {
+        let frameCount = 300
+        let data = DecodedAnimationTests.apng(
+            alphas: Array(repeating: 1, count: frameCount),
+            delays: Array(repeating: 0.05, count: frameCount))
+        let decoded = try #require(DecodedAnimation(data: data, maxPixelSize: 16))
+        #expect(decoded.frameCount <= DecodedAnimation.maxFrameCount)
+        #expect(decoded.frameCount == 100)                       // every 3rd frame of 300
+        #expect(abs(decoded.totalDuration - Double(frameCount) * 0.05) < 0.01)
+        #expect(decoded.normalizedKeyTimes.count == decoded.frameCount + 1)
+    }
+
+    @Test("Animations within the cap keep every frame")
+    func underCapKeepsAllFrames() throws {
+        let data = DecodedAnimationTests.apng(alphas: Array(repeating: 1, count: 120))
+        let decoded = try #require(DecodedAnimation(data: data, maxPixelSize: 16))
+        #expect(decoded.frameCount == 120)
+    }
+}
+
+@Suite("AnimatedEmoteDecoder pixel-size buckets")
+struct AnimatedEmoteDecoderBucketTests {
+
+    @Test("Pixel size is the box's longer side × scale, rounded up to 16")
+    func bucketsLongerSide() {
+        // 28×24pt at @3x → 84px → bucket 96.
+        #expect(AnimatedEmoteDecoder.maxPixelSize(for: CGSize(width: 28, height: 24), scale: 3) == 96)
+        // 24×24pt at @2x → 48px, already a multiple of 16.
+        #expect(AnimatedEmoteDecoder.maxPixelSize(for: CGSize(width: 24, height: 24), scale: 2) == 48)
+        // Degenerate input still yields a usable minimum.
+        #expect(AnimatedEmoteDecoder.maxPixelSize(for: .zero, scale: 0) == 16)
+    }
+}

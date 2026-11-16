@@ -102,6 +102,6 @@ struct ChannelEmoteCachePayloadTests {
 
         #expect(decoded.broadcasterId == "99")
         #expect(decoded.byName["ZULUL"] == emote)
-        #expect(ChannelEmoteCachePayload.cacheVersion == 2)
+        #expect(ChannelEmoteCachePayload.cacheVersion == 3)
     }
 }

@@ -30,9 +30,13 @@ import TwitchKit
 /// ## Why `.emote` and `.twitchEmote` are separate cases
 ///
 /// They render differently:
-///   - `.emote(EmoteSources.Emote)` → AsyncImage against a 7TV/BTTV/FFZ CDN URL
+///   - `.emote(EmoteSources.Emote)` → an image from the provider's own
+///     7TV/BTTV/FFZ CDN URL (carried on the `Emote`)
 ///   - `.twitchEmote(TwitchKit.EmoteReference)` → composed URL via
 ///     `static-cdn.jtvnw.net/emoticons/v2/<id>/...`
+///
+/// There is deliberately no URL case: nothing produces one (Twitch sends
+/// links as plain text fragments), so a link renders as a `.text` word.
 ///
 /// Folding them into one case would force the renderer to branch internally
 /// on which CDN family the emote belongs to. Two cases keeps each renderer
@@ -60,11 +64,6 @@ public enum LineRun: Sendable, Equatable {
     /// matches the current user — drives the "highlighted" message
     /// styling (your name in the chat = visual emphasis).
     case mention(login: String, isMe: Bool)
-
-    /// A URL detected in the text. Slice-2 renders these as plain styled
-    /// text (foreground tint, optional underline); future slices can
-    /// upgrade to tappable links / OG previews without changing this enum.
-    case url(String)
 
     /// A cheermote (bits). Twitch fragments expose these pre-tokenized
     /// (e.g., "cheer100" → `(prefix: "cheer", bits: 100, tier: 1)`).
