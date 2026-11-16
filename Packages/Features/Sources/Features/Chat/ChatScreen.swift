@@ -641,26 +641,12 @@ public struct ChatScreen: View {
             // released, but the underlying `ChannelSession` stays alive in
             // the registry (other tabs may share it, ref counting in commit E).
             //
-            // Phase 2.2 addition: hand in the per-channel EmoteIndex so each
-            // incoming message gets normalized through
-            // `Normalizer.normalize(...)` against the third-party emote
-            // table. The index may not be loaded yet at this point — the
-            // model tolerates a nil/empty snapshot and tokens stay as text
-            // until the snapshot fills in.
-            //
-            // T11: index comes from the registry (same object across all
-            // ChatScreen mounts for this channel). Fall through to a
-            // throwaway EmoteIndex if registry is missing — startSession
-            // already errored out above in that case, so this branch is
-            // effectively unreachable; the fallback exists only to keep
-            // the type-checker happy without forcing a force-unwrap.
-            let index = registry.emoteIndex(
-                forAccountUserId: account.userId,
-                channelId: channelId
-            )
+            // Rows arrive already normalized: the session tokenizes each
+            // message once, off the main actor, against the registry-owned
+            // EmoteIndex this screen's emote `.task` loads (same instance),
+            // and every tab showing the channel shares the result.
             let epoch = await chatModel.attach(
                 sessions: [session],
-                emoteIndex: index,
                 currentUserId: account.userId,
                 currentUserLogin: account.login,
                 currentUserDisplayName: account.displayName,
@@ -668,21 +654,14 @@ public struct ChatScreen: View {
                 // Keywords). Read at attach time — changing them mid-session
                 // applies on the next channel attach (reopen / relaunch).
                 // Self-mentions are always highlighted regardless of this
-                // list; keywords are additive.
+                // list (the session flags them); keywords are additive and
+                // applied by this model, per attach.
                 highlightKeywords: HighlightSettings.keywords(),
                 // Chat History setting — read at attach time, like the
                 // keywords. Tab remounts re-attach, so a changed setting
                 // takes hold on the next swipe back to (or reopen of) a
                 // channel.
                 lineCap: ChatAppearance.chatHistoryLines(),
-                // Registry-owned normalize memo — survives this screen's
-                // unmount so swiping back re-primes from cache hits
-                // instead of re-tokenizing the whole ring (see
-                // NormalizedLineCache).
-                lineCache: registry.normalizedLineCache(
-                    forAccountUserId: account.userId,
-                    channelId: channelId
-                ),
                 // Composite draft key — the model clears the persisted
                 // draft under this key after a successful send. Passed
                 // from the descriptor here so the model never has to

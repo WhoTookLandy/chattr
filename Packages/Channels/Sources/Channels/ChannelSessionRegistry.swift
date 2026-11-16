@@ -211,7 +211,6 @@ public final class ChannelSessionRegistry {
 
     private var emoteIndexes: [String: EmoteIndex] = [:]
     private var badgeStores: [String: ChatBadgeStore] = [:]
-    private var normalizedLineCaches: [String: NormalizedLineCache] = [:]
 
     /// Ring capacity handed to each NEWLY constructed `ChannelSession` —
     /// the user's Chat History setting. Kept in sync by `RootView` (set at
@@ -278,7 +277,12 @@ public final class ChannelSessionRegistry {
             channelId: channelId,
             channelLoginName: channelLoginName,
             accountUserId: accountUserId,
+            accountLogin: accountLogin,
             ringCapacity: chatHistoryLimit,
+            // The same registry-owned index the channel's ChatScreen loads —
+            // the session normalizes against it (lock-protected snapshot, no
+            // actor hop), so every tab shares one emote-resolved row.
+            emoteIndex: emoteIndex(forAccountUserId: accountUserId, channelId: channelId),
             refreshTokenHandler: {
                 try await refreshTokens(accountUserId, accountLogin)
             }
@@ -567,7 +571,6 @@ public final class ChannelSessionRegistry {
         // also waste memory across closed-then-reopened tabs.
         emoteIndexes[key] = nil
         badgeStores[key] = nil
-        normalizedLineCaches[key] = nil
 
         let id = nextToken()
         let work: Task<Void, Never>
@@ -676,24 +679,6 @@ public final class ChannelSessionRegistry {
         }
         let new = ChatBadgeStore()
         badgeStores[key] = new
-        return new
-    }
-
-    /// Returns the shared `NormalizedLineCache` for this account × channel
-    /// pair, creating it on first access. Same lifetime semantics as
-    /// `emoteIndex(...)` — surviving tab swipes is its entire reason to
-    /// exist (see the type's doc comment).
-    ///
-    /// Capacity is 2× the chat-history limit so a full ring re-prime is all
-    /// cache hits even after the ring has churned somewhat past the entries'
-    /// insertion order.
-    public func normalizedLineCache(forAccountUserId accountUserId: String, channelId: String) -> NormalizedLineCache {
-        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
-        if let existing = normalizedLineCaches[key] {
-            return existing
-        }
-        let new = NormalizedLineCache(capacity: chatHistoryLimit * 2)
-        normalizedLineCaches[key] = new
         return new
     }
 
@@ -945,7 +930,7 @@ public final class ChannelSessionRegistry {
     // MARK: - Helpers
 
     /// Cache key for everything this registry owns per account × channel
-    /// (sessions, emote indexes, badge stores, line caches).
+    /// (sessions, emote indexes, badge stores).
     ///
     /// ## Twitch-scoped until sessions are platform-abstracted
     ///

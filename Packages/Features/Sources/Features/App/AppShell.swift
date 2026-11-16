@@ -202,15 +202,24 @@ public struct AppShell: View {
                         // Mention watcher: session-level (not ChatTranscriptModel)
                         // so @-mentions land the red dot even for tabs whose
                         // page isn't mounted. The handler is deliberately
-                        // tiny — a substring check, no normalization.
-                        let (token, _) = await session.subscribe { [weak chatTabs, tabId = tab.id] event in
-                            guard case .message(let message, let isHistorical) = event,
-                                  !isHistorical,
-                                  message.chatterUserId != accountUserId,
-                                  ChatTabsModel.containsMention(of: accountLogin, in: message.message.text)
-                            else { return }
-                            await chatTabs?.markMention(tabId: tabId)
-                        }
+                        // tiny — a substring check per message — and runs on
+                        // its own task per drained batch, so it never holds
+                        // up the session or the transcript.
+                        let token = await session.subscribe(onBatch: { [weak chatTabs, tabId = tab.id] batch in
+                            let mentioned = batch.contains { update in
+                                guard case .message(let normalized) = update,
+                                      !normalized.line.isHistorical,
+                                      normalized.message.chatterUserId != accountUserId
+                                else { return false }
+                                return ChatTabsModel.containsMention(
+                                    of: accountLogin,
+                                    in: normalized.message.message.text
+                                )
+                            }
+                            if mentioned {
+                                await chatTabs?.markMention(tabId: tabId)
+                            }
+                        })
                         mentionWatchTokens.byTab[tab.id, default: []]
                             .append((channelId: channel.channelId, token: token))
                     } catch is CancellationError {

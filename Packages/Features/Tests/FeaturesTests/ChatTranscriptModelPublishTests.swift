@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import TwitchKit
 import ChatModel
+import Channels
 @testable import Features
 
 /// Tests for `ChatTranscriptModel`'s coalesced publish surface: mutations
@@ -48,7 +49,7 @@ struct ChatTranscriptModelPublishTests {
     }
 
     private func receive(_ model: ChatTranscriptModel, _ id: String) {
-        model.apply(.message(chatMessage(id: id), isHistorical: false))
+        model.apply(.normalizedMessage(chatMessage(id: id), timestamp: Date(timeIntervalSince1970: 0)))
     }
 
     @Test("many messages inside one window publish as ONE version")

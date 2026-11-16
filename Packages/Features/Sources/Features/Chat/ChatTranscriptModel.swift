@@ -10,6 +10,11 @@ import os
 
 private let logger = AppLogger.make("Features.ChatTranscriptModel")
 
+/// `apply-batch`: the main-actor half of the message pipeline (one interval
+/// per drained batch). Pair with `Channels.Pipeline`'s `normalize` /
+/// `deliver` intervals in Instruments.
+private let signposter = AppLogger.signposter("Features.ChatTranscriptModel")
+
 /// Per-tab message store. Subscribes to one or more `ChannelSession`s and
 /// surfaces a unified, observable `lines` array for `ChatScreen` to render.
 ///
@@ -32,10 +37,12 @@ private let logger = AppLogger.make("Features.ChatTranscriptModel")
 /// Why `@MainActor`: the observed publish surface (`changeVersion`, `isEmpty`,
 /// …) drives SwiftUI body recomputes. Mutating from any other actor would
 /// either need explicit MainActor hops everywhere or trip Swift 6's data-race
-/// checks. @MainActor keeps everything simple at the cost of one actor hop per
-/// inbound message. A raid pushes 100+ messages/sec, so that hop does only
-/// the O(1) buffer mutation; publishing is coalesced to at most one flush per
-/// `coalescingWindow` (~one frame) — see "Coalesced change channel" below.
+/// checks. The main actor does as little as possible per message: rows arrive
+/// already normalized by `ChannelSession` (once per channel, off-main), in
+/// BATCHES — each drain of the subscription mailbox is one main-actor turn
+/// however many messages it holds — and each row costs only the O(1) buffer
+/// mutation plus echo reconciliation. Publishing is coalesced to at most one
+/// flush per `coalescingWindow` (~one frame) — see "Coalesced change channel".
 @MainActor
 @Observable
 public final class ChatTranscriptModel {
@@ -191,26 +198,21 @@ public final class ChatTranscriptModel {
     /// always operate on all of them together.
     private var subscriptions: [(session: ChannelSession, token: UUID)] = []
 
-    // MARK: - Normalization state
+    /// One drain task per subscription: wakes when its session posts, takes
+    /// everything queued as one batch, applies it in a single main-actor
+    /// turn. Started only after priming (the mailbox buffers until then), and
+    /// cancelled by `detach`.
+    @ObservationIgnored private var consumers: [Task<Void, Never>] = []
+
+    // MARK: - Per-attach viewer state
     //
-    // These are set at attach() time and consulted on every append(). They
-    // live on the model so the per-message handler doesn't need them
-    // captured in a closure — keeps the subscriber callback tight.
+    // Set at attach() time and consulted per inbound row. Normalization
+    // itself now happens in `ChannelSession` (once per channel, off the main
+    // actor); what's left here is what depends on THIS viewer's attach.
 
-    /// EmoteIndex for resolving third-party emote names. Held weakly... well,
-    /// strongly — an actor is a reference type, but Sendable, so this is
-    /// safe to capture inside the @MainActor model. Reading
-    /// `index.snapshot()` is nonisolated (lock-protected internally) so
-    /// the hot append path doesn't need an actor hop.
-    ///
-    /// Nullable so the model is constructible without an index (tests + the
-    /// brief pre-attach window). When nil, all tokens stay as plain text —
-    /// the renderer degrades gracefully to "no third-party emotes."
-    private var emoteIndex: EmoteIndex?
-
-    /// The signed-in user's lowercase login. Used to mark self-mentions
-    /// for highlighting. Empty by default — no message highlights as
-    /// "@me" until set.
+    /// The signed-in user's lowercase login. Stamped onto optimistic send
+    /// rows. (Self-mention highlighting is computed by the session, which
+    /// knows its account's login.)
     private var currentUserLogin: String = ""
 
     /// The signed-in user's Twitch user ID. Used to recognize our own
@@ -241,9 +243,17 @@ public final class ChatTranscriptModel {
     /// first message renders badge-less and every one after is styled.
     private var selfBadges: [ChatBadge] = []
 
-    /// Case-insensitive substrings that trigger row highlighting. Empty
-    /// by default — keyword highlighting disabled.
-    private var highlightKeywords: [String] = []
+    /// The viewer's highlight keywords, prepared once per attach. Applied to
+    /// each message row as it lands (see `withKeywordHighlight`) on top of the
+    /// session's self-mention flag.
+    ///
+    /// Why keywords stay here rather than in the session: they're a per-
+    /// attach viewer preference (read from `HighlightSettings` when a tab
+    /// attaches), while a session's rows are shared by every tab showing the
+    /// channel — baking one tab's keywords into them would leak into others.
+    /// The check is cheap: empty matcher (the default) is one branch, and a
+    /// configured one is a lowercase-contains per word.
+    @ObservationIgnored private var highlightMatcher = HighlightMatcher(keywords: [])
 
     /// At-attach snapshots of the chat filters (You → Chat → Filters).
     /// See `ChatFilterSettings` — read once in `attach`, consulted by
@@ -264,22 +274,16 @@ public final class ChatTranscriptModel {
         )
     }
 
-    /// Registry-owned memo of normalize results for this channel — survives
-    /// this model's detach/re-attach across tab swipes, which is the whole
-    /// point: re-priming from the session ring becomes dictionary hits
-    /// instead of re-tokenizing every message on the main thread. nil in
-    /// tests / pre-attach; everything degrades to plain normalization.
-    private var lineCache: NormalizedLineCache?
-
-    /// Fingerprint of the inputs normalization depends on, for cache
-    /// stamping. `emoteVersion` is the emote index's publish generation —
-    /// see `NormalizedLineCache.Context`.
-    private func cacheContext(emoteVersion: Int) -> NormalizedLineCache.Context {
-        NormalizedLineCache.Context(
-            emoteVersion: emoteVersion,
-            currentUserLogin: currentUserLogin,
-            highlightKeywords: highlightKeywords
-        )
+    /// The row as this viewer sees it: the session's line, plus this attach's
+    /// keyword highlight. Message rows only — bubbles never highlighted.
+    private func withKeywordHighlight(_ line: ChatLine) -> ChatLine {
+        guard !line.isHighlighted,
+              !highlightMatcher.isEmpty,
+              case .message = line.kind,
+              highlightMatcher.matches(line.runs) else { return line }
+        var highlighted = line
+        highlighted.isHighlighted = true
+        return highlighted
     }
 
     // MARK: - Send-orchestration state
@@ -540,7 +544,7 @@ public final class ChatTranscriptModel {
     // MARK: - Attach / detach
 
     /// Subscribes to each session, primes `lines` from their combined current
-    /// state, and starts receiving new messages via callback.
+    /// state, and starts draining new rows from each session's mailbox.
     ///
     /// **Re-entry safety (epoch supersession)**: SwiftUI's `.task` can fire two
     /// overlapping `attach`es for the same model — e.g. a ChatScreen appearance
@@ -562,13 +566,11 @@ public final class ChatTranscriptModel {
     @discardableResult
     public func attach(
         sessions: [ChannelSession],
-        emoteIndex: EmoteIndex? = nil,
         currentUserId: String = "",
         currentUserLogin: String = "",
         currentUserDisplayName: String = "",
         highlightKeywords: [String] = [],
         lineCap: Int = 500,
-        lineCache: NormalizedLineCache? = nil,
         // The composite `ChannelDescriptor.ID` used to clear the persisted
         // draft after a successful send. Passed in by the view (which owns
         // the descriptor) rather than derived from the session's bare
@@ -600,42 +602,37 @@ public final class ChatTranscriptModel {
         await detach(ifEpoch: nil)
         guard myEpoch == attachEpoch else { return myEpoch }   // superseded mid-detach
 
-        // Stash normalization context for the per-message handler. Captured
-        // here rather than inside the closure so the closure stays small
-        // and so updates to keywords (future feature) flow through without
-        // resubscribing.
-        self.emoteIndex = emoteIndex
+        // Stash the per-viewer context consulted for each inbound row.
         self.currentUserId = currentUserId
         self.currentUserLogin = currentUserLogin
         self.currentUserDisplayName = currentUserDisplayName
-        self.highlightKeywords = highlightKeywords
+        self.highlightMatcher = HighlightMatcher(keywords: highlightKeywords)
         // Chat filters: snapshot the toggles once per attach (same
         // lifecycle as highlight keywords). Both ingest paths — live
         // apply() and the priming loop — consult these copies, so a
         // mid-session toggle can't make live and re-primed history drift.
         self.filterHideCommands = ChatFilterSettings.hideCommands()
         self.filterHideBots = ChatFilterSettings.hideBots()
-        self.lineCache = lineCache
         self.onModerationRevoked = onModerationRevoked
 
         attachState = .attaching
 
-        var combined: [ChannelSession.ChannelEvent] = []
+        var combined: [ChannelUpdate] = []
+        var newSubscriptions: [ChannelSubscription] = []
         for session in sessions {
             // Atomic prime + subscribe — see ChannelSession.subscribe docs.
-            let (token, snapshot) = await session.subscribe { [weak self] event in
-                // Handler runs in whichever actor the Task happens to be on.
-                // Hop to MainActor to convert + apply.
-                await self?.apply(event)
-            }
+            // Rows arrive normalized by the session; nothing is re-tokenized
+            // on the main actor, here or per live message.
+            let (subscription, snapshot) = await session.subscribe()
             guard myEpoch == attachEpoch else {
                 // A newer attach superseded us while we awaited subscribe — undo
                 // the subscription we just made so we don't leak a subscriber on
                 // the registry-owned session, then bail.
-                await session.unsubscribe(token)
+                await session.unsubscribe(subscription.token)
                 return myEpoch
             }
-            subscriptions.append((session, token))
+            subscriptions.append((session, subscription.token))
+            newSubscriptions.append(subscription)
             combined.append(contentsOf: snapshot)
         }
 
@@ -695,20 +692,35 @@ public final class ChatTranscriptModel {
 
         // Apply the priming snapshot. For single-session tabs `combined`
         // is already in arrival order; the ring buffer maintains insertion
-        // order. For multi-session tabs we'd sort by event timestamp here
+        // order. For multi-session tabs we'd sort by row timestamp here
         // — TODO when N > 1 ships.
         //
-        // We rebuild the buffer from scratch by replaying each ChannelEvent
+        // We rebuild the buffer from scratch by replaying each update
         // through `ingest` — the SAME dispatch the live path uses (apply()
         // calls ingest too). Priming therefore shares the cap + block-filter
         // logic with live ingestion; no separate "initial state" path to
         // drift. The buffer's own cap handles the multi-session overflow the
         // old `Self.cap(primed)` did.
         buffer.reset()
-        for event in combined {
-            ingest(event)
+        for update in combined {
+            ingest(update)
         }
         publishPending()
+
+        // Only now start draining live batches. Everything posted since
+        // `subscribe()` is waiting in the mailbox, so nothing is lost — and
+        // nothing can be applied BEFORE the prime above (whose `reset` would
+        // otherwise wipe it). Each batch is one main-actor turn.
+        for subscription in newSubscriptions {
+            consumers.append(Task { @MainActor [weak self] in
+                for await _ in subscription.wakeups {
+                    // A wakeup already in flight when `detach` cancelled us
+                    // still resumes the loop once — don't apply it.
+                    guard !Task.isCancelled, let self else { return }
+                    self.apply(subscription.takePending())
+                }
+            })
+        }
         attachState = .attached
         logger.info("ChatTranscriptModel attached to \(sessions.count) session(s) [epoch \(myEpoch)], primed with \(self.lines.count) line(s)")
         return myEpoch
@@ -755,6 +767,14 @@ public final class ChatTranscriptModel {
         // channel this model attaches to next.
         moderationSeedTask?.cancel()
         moderationSeedTask = nil
+
+        // Stop draining before unsubscribing: a batch must not land in a
+        // model that's no longer attached (it would resurface after the
+        // next attach's prime reset, or into the wrong channel).
+        for consumer in consumers {
+            consumer.cancel()
+        }
+        consumers.removeAll()
 
         guard !subscriptions.isEmpty else { return }
 
@@ -1289,41 +1309,60 @@ public final class ChatTranscriptModel {
 
     // MARK: - Internals
 
-    /// Apply one `ChannelEvent` to the `lines` array. Called from the
-    /// per-session subscriber handler when a new event arrives, and (via
-    /// the appendLines helper) on each event in the priming snapshot.
+    /// Applies one drained batch — everything the session posted since the
+    /// last drain — in a single main-actor turn, then schedules ONE coalesced
+    /// publish for all of it. Called by the per-subscription consumer task
+    /// started in `attach`.
+    ///
+    /// Internal (not private) so FeaturesTests can drive event application
+    /// directly. Production callers remain the consumer tasks.
+    func apply(_ batch: [ChannelUpdate]) {
+        guard !batch.isEmpty else { return }
+        let interval = signposter.beginInterval(
+            "apply-batch",
+            id: signposter.makeSignpostID(),
+            "updates=\(batch.count)"
+        )
+        defer { signposter.endInterval("apply-batch", interval) }
+
+        for update in batch {
+            applyOne(update)
+        }
+        publishPending()
+    }
+
+    /// Single-update convenience over `apply(_:)` (tests).
+    func apply(_ update: ChannelUpdate) {
+        apply([update])
+    }
+
+    /// Apply one `ChannelUpdate` to the buffer. Rows arrive already
+    /// normalized by the session; this decides only what each one does to
+    /// THIS transcript.
     ///
     /// Dispatch:
-    ///   - `.message`  → normalize + append a `.message` ChatLine
+    ///   - `.message`  → append the session's line (plus keyword highlight)
     ///       - dedup-by-id (Helix returned first, we already swapped our
     ///         pending-id to the canonical id, then the echo arrives)
     ///       - echo-of-pending-send (echo beat the Helix response): swap
-    ///         our optimistic row in place with the normalized echo
-    ///   - `.notification` / `.raid` → convert via Normalizer.line(from:),
-    ///     append a bubble ChatLine
+    ///         our optimistic row in place with the echo's line
+    ///   - `.row` → append the bubble / divider line as-is
     ///   - `.messageDeleted(id)` → find by id, flip kind to .deletedPlaceholder
     ///   - `.chatCleared` → flip every line to .deletedPlaceholder
     ///   - `.messagesClearedFromUser(userId)` → flip matching lines
+    ///   - `.reprime(snapshot)` → rebuild from the snapshot, keeping local
+    ///     (in-flight / failed) send rows
     ///
-    /// **Race tolerance**: if the EmoteIndex hasn't loaded yet (snapshot is
-    /// empty), the message normalizes with no third-party emote
-    /// resolution — emote-name tokens stay as plain text. Subsequent
-    /// messages received after the load completes will resolve their
-    /// emotes correctly. Re-normalizing pre-load messages is deferred to
-    /// a future iteration.
-    // Internal (not private) so FeaturesTests can drive event application
-    // directly — the visibility relaxation ChatTranscriptModelReplyTests' header
-    // note anticipated. Production callers remain the subscribe handlers
-    // registered in `attach`.
-    func apply(_ event: ChannelSession.ChannelEvent) {
+    /// **Race tolerance**: rows normalized before the channel's EmoteIndex
+    /// loaded carry emote names as plain text; the session re-normalizes
+    /// them against the loaded table the next time a tab subscribes.
+    private func applyOne(_ event: ChannelUpdate) {
         // Restrictions-update events don't produce a row — they're
         // pure state changes. Update the observed property and bail
         // before the rest of apply tries to add a line.
         //
-        // Caught here (in the instance method) rather than in the
-        // static appendLines helper because the static can't mutate
-        // self. The priming path in attach() doesn't pass restrictions
-        // updates through this method (it pulls the snapshot
+        // The priming path in attach() doesn't pass restrictions updates
+        // through this method (it reads the session's cached snapshot
         // separately) so we never double-apply.
         if case .restrictionsUpdated(let restrictions) = event {
             chatRestrictions = restrictions
@@ -1351,12 +1390,20 @@ public final class ChatTranscriptModel {
             return
         }
 
+        // The ring changed in a way that isn't a tail append (late join
+        // history landed above live rows), or this subscriber fell too far
+        // behind: rebuild from the session's snapshot.
+        if case .reprime(let snapshot) = event {
+            reprime(with: snapshot)
+            return
+        }
+
         // Chat filters: drop hidden messages before ANY processing —
         // echo reconciliation, ingest, and (critically) the highlight
         // sound below, which reads `buffer.last` and would otherwise
         // ping off a stale row when the filtered message never landed.
         // Own messages are exempt inside `isFiltered`.
-        if case .message(let chatMessage, _) = event, isFiltered(chatMessage) {
+        if case .message(let normalized) = event, isFiltered(normalized.message) {
             return
         }
 
@@ -1366,7 +1413,8 @@ public final class ChatTranscriptModel {
         // `lines` and write access to both correlation maps — neither of
         // which the static (used for priming, where no pending sends
         // exist) has.
-        if case .message(let chatMessage, _) = event {
+        if case .message(let normalized) = event {
+            let chatMessage = normalized.message
             // Mod-status side-observation. We look at the badges
             // attached to OUR own echoed messages. If we see a
             // "moderator" or "broadcaster" set_id, we're a mod here.
@@ -1404,7 +1452,7 @@ public final class ChatTranscriptModel {
             if !helixMessageIdByPendingId.isEmpty,
                let matchedPendingId = helixMessageIdByPendingId.first(where: { $0.value == chatMessage.messageId })?.key {
                 cleanupPending(pendingId: matchedPendingId)
-                if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
+                if upgradeOptimistic(at: matchedPendingId, with: normalized) { return }
                 // Optimistic row was removed under us (e.g., a Helix
                 // failure cleanup raced this echo). Fall through to
                 // normal append so the echo still shows up — Twitch
@@ -1455,7 +1503,7 @@ public final class ChatTranscriptModel {
                 // FIFO: oldest pending matches first echo, matching
                 // Twitch's broadcast order.
                 cleanupPending(pendingId: matchedPendingId)
-                if upgradeOptimistic(at: matchedPendingId, with: chatMessage) { return }
+                if upgradeOptimistic(at: matchedPendingId, with: normalized) { return }
                 // Optimistic row was removed under us — fall through to
                 // normal append.
             }
@@ -1467,65 +1515,47 @@ public final class ChatTranscriptModel {
         // message that's highlighted, if the user has sounds on.
         //
         // Why this is the right gate:
-        //   - apply() is the LIVE path; priming/backfill uses
-        //     appendLines directly in attach(), so historical messages
-        //     never reach here. (No ping for messages that arrived
-        //     while you were away.)
+        //   - apply() is the LIVE path; priming calls `ingest` directly
+        //     in attach(), and history that arrives live (reconnect gap-
+        //     fill) is flagged `isHistorical` by the session — so no ping
+        //     for messages that arrived while you were away.
         //   - The echo-reconciliation paths above (0/1/2) already
         //     `return`ed for our OWN messages, so a `.message` reaching
         //     this fall-through is someone else's. The explicit
         //     `chatterUserId != currentUserId` guard covers the rare
         //     own-message-fell-through edge (failed send + late echo).
         //   - `buffer.last?.isHighlighted` reads the just-appended row —
-        //     true when it's a self-mention OR matches a configured
-        //     keyword (the Normalizer set the flag).
+        //     true when it's a self-mention (flagged by the session) OR
+        //     matches a configured keyword (`withKeywordHighlight`).
         //   - `soundEnabled()` is checked LAST so the UserDefaults read
         //     only happens for an actual highlighted foreign message
         //     (rare), not every message.
         //   - `!blockedIds.contains(...)` keeps a blocked user silent: blocking
         //     means "invisible to me," so their (still-arriving) messages must
         //     not ping the highlight sound even if they @-mention us.
-        if case .message(let m, let isHistorical) = event,
-           !isHistorical,
-           m.chatterUserId != currentUserId,
-           !blockedIds.contains(m.chatterUserId),
+        if case .message(let normalized) = event,
+           !normalized.line.isHistorical,
+           normalized.message.chatterUserId != currentUserId,
+           !blockedIds.contains(normalized.message.chatterUserId),
            buffer.last?.isHighlighted == true,
            HighlightSettings.soundEnabled() {
             HighlightSoundPlayer.shared.play()
         }
-
-        publishPending()
     }
 
-    /// Replaces the optimistic row at `pendingId` with a freshly-normalized
-    /// `ChatLine` built from the echoed `chatMessage`. Returns `true` if
-    /// the swap happened (row was present); `false` if the row was gone
-    /// (caller falls through to normal-append behavior).
+    /// Replaces the optimistic row at `pendingId` with the echo's line, as
+    /// normalized by the session (the same row the session's ring holds, so
+    /// a later re-prime replays it identically). Returns `true` if the swap
+    /// happened (row was present); `false` if the row was gone (caller falls
+    /// through to normal-append behavior).
     ///
     /// Pulled out of `apply` so Paths 0 and 2 share the same upgrade logic
-    /// — without it the same six-line block would appear twice with the
-    /// same content but different match-key sources, inviting drift.
-    private func upgradeOptimistic(at pendingId: String, with chatMessage: ChatMessage) -> Bool {
-        let versioned = emoteIndex?.snapshotWithGeneration()
-        let snapshot = versioned?.emotes ?? [:]
-        let normalizedLine = Normalizer.normalize(
-            message: chatMessage,
-            emoteSnapshot: snapshot,
-            currentUserLogin: currentUserLogin,
-            timestamp: .now,
-            highlightKeywords: highlightKeywords
-        )
-        // Memo the echo's normalized form: the echo event sits in the
-        // session ring under this canonical messageId, so the next tab
-        // remount replays it through `ingest` — which should hit, not
-        // re-normalize. (The optimistic `pending-…` row itself is never
-        // cached; it isn't a ring event.)
-        lineCache?.store(normalizedLine, context: cacheContext(emoteVersion: versioned?.generation ?? 0))
+    /// — without it the same block would appear twice with the same content
+    /// but different match-key sources, inviting drift.
+    private func upgradeOptimistic(at pendingId: String, with normalized: NormalizedMessage) -> Bool {
         // `replace` returns false (a no-op) when the optimistic row was already
         // removed under us — the caller then falls through to a normal append.
-        let didReplace = buffer.replace(id: pendingId, with: normalizedLine)
-        publishPending()
-        return didReplace
+        buffer.replace(id: pendingId, with: withKeywordHighlight(normalized.line))
     }
 
     /// Removes any correlation-map entries pointing at `pendingId` from
@@ -1554,68 +1584,30 @@ public final class ChatTranscriptModel {
         sendFallbackTimers.removeValue(forKey: pendingId)
     }
 
-    /// Applies one `ChannelEvent` to the `buffer`. Shared by the live path
-    /// (`apply`, after echo reconciliation) and the priming loop (`attach`),
-    /// so initial state and live ingestion can't drift. The buffer owns the
-    /// cap + block-filter; this method only decides *what* mutation each event
-    /// kind produces.
-    ///
-    /// Instance method (was a `static` taking the model as a context) because
-    /// it reads `emoteIndex` / `currentUserLogin` / `highlightKeywords` and
-    /// writes `buffer` — all instance state.
-    private func ingest(_ event: ChannelSession.ChannelEvent) {
+    /// Applies one `ChannelUpdate` to the `buffer`. Shared by the live path
+    /// (`apply`, after echo reconciliation), the priming loop (`attach`) and
+    /// `reprime`, so initial state and live ingestion can't drift. The buffer
+    /// owns the cap + block-filter; this method only decides *what* mutation
+    /// each update produces. Rows arrive normalized — nothing is tokenized
+    /// here.
+    private func ingest(_ event: ChannelUpdate) {
         switch event {
-        case .message(let chatMessage, let isHistorical):
+        case .message(let normalized):
             // Chat filters, priming-path edition: `apply` already guards
             // the live path, but the priming loop in `attach` calls this
             // directly — without this check, re-primed history would
             // resurrect messages the live path dropped.
-            if isFiltered(chatMessage) { return }
-            // EmoteIndex.snapshot() is nonisolated + lock-protected, so
-            // it's safe to call from @MainActor without an await.
-            // Snapshot + generation read atomically: the generation stamps
-            // the cache entry, so it must belong to the table we normalize
-            // against.
-            let versioned = emoteIndex?.snapshotWithGeneration()
-            let snapshot = versioned?.emotes ?? [:]
-            let context = cacheContext(emoteVersion: versioned?.generation ?? 0)
-            // Memo hit: this exact message was normalized before (live
-            // arrival, or a prior tab mount) under the same inputs. The
-            // re-prime path on tab swipes is ~all hits, which is what
-            // keeps swiping between open chats cheap. The provenance flag
-            // is re-stamped on every append (it rides the ring event, not
-            // the cache) so a hit can never carry a stale dim state.
-            if var cached = lineCache?.line(id: chatMessage.messageId, context: context) {
-                cached.isHistorical = isHistorical
-                buffer.append(cached)
-                return
-            }
-            var line = Normalizer.normalize(
-                message: chatMessage,
-                emoteSnapshot: snapshot,
-                currentUserLogin: currentUserLogin,
-                timestamp: .now,
-                highlightKeywords: highlightKeywords
-            )
-            line.isHistorical = isHistorical
-            lineCache?.store(line, context: context)
+            if isFiltered(normalized.message) { return }
+            // The provenance flag, timestamp and self-mention highlight were
+            // all decided by the session and ride the row; only this
+            // viewer's keywords are layered on.
+            buffer.append(withKeywordHighlight(normalized.line))
+
+        case .row(let line):
+            // Bubbles (sub / raid / system) and the "New" divider, built once
+            // by the session with stable ids — a re-prime (tab swipe back)
+            // replays the same identity instead of a fresh row.
             buffer.append(line)
-
-        case .notification(let n):
-            // The Normalizer skips notice types we don't render (returns
-            // nil) — those are dropped here. Logging the skip is the
-            // caller's job; the Normalizer stays sync-and-pure.
-            if let line = Normalizer.line(from: n, timestamp: .now) {
-                buffer.append(line)
-            }
-
-        case .raid(let r):
-            let receivedAt = Date.now
-            buffer.append(Normalizer.line(
-                from: r,
-                id: Normalizer.raidLineID(fromBroadcasterUserId: r.fromBroadcasterUserId, receivedAt: receivedAt),
-                timestamp: receivedAt
-            ))
 
         case .messageDeleted(let targetMessageId):
             // Mutation in place: find the row by id, replace with a
@@ -1637,19 +1629,6 @@ public final class ChatTranscriptModel {
             // this work — without it we'd have no key to match against.
             buffer.mutateMatching(authorUserId: targetUserId) { $0.markingDeleted() }
 
-        case .newMessagesDivider(let id, let timestamp):
-            // The red "New" rule. Pure presentation — empty author, empty
-            // runs; ChatRow dispatches on the kind. The id was minted with
-            // the ring event, so a re-prime (tab swipe back) replays the
-            // same stable identity instead of a fresh row.
-            buffer.append(ChatLine(
-                id: id,
-                kind: .newMessagesDivider,
-                authorDisplayName: "",
-                runs: [],
-                timestamp: timestamp
-            ))
-
         case .restrictionsUpdated:
             // Restrictions updates produce no row — they're pure state
             // changes consumed by `apply()` before this switch runs.
@@ -1661,6 +1640,35 @@ public final class ChatTranscriptModel {
             // own sources (broadcaster check, moderated-set seed, badge
             // observation), all of which post-date a replayed ring event.
             break
+
+        case .reprime:
+            // Never part of a ring snapshot; handled by `apply()`.
+            break
         }
+    }
+
+    /// Rebuilds the buffer from a session snapshot — the same replay attach
+    /// primes with — while keeping this transcript's local-only rows: sends
+    /// still in flight or marked failed exist nowhere in the session's ring.
+    ///
+    /// A local row whose echo is already in the snapshot (Helix told us its
+    /// canonical id) is settled instead of re-appended. A `.sending` row whose
+    /// echo arrived before Helix answered is kept; when Helix does answer, the
+    /// stuck-send fallback sees the canonical id already present and drops
+    /// the optimistic row (see `synthesizeStuckUpgrade`).
+    private func reprime(with snapshot: [ChannelUpdate]) {
+        let localRows = buffer.lines.filter { $0.deliveryState != .delivered }
+        buffer.reset()
+        for update in snapshot {
+            ingest(update)
+        }
+        for row in localRows where !buffer.contains(id: row.id) {
+            if let canonicalId = helixMessageIdByPendingId[row.id], buffer.contains(id: canonicalId) {
+                cleanupPending(pendingId: row.id)
+                continue
+            }
+            buffer.append(row)
+        }
+        logger.info("ChatTranscriptModel re-primed from \(snapshot.count) session update(s), kept \(localRows.count) local row(s)")
     }
 }
