@@ -532,6 +532,12 @@ public struct ChatScreen: View {
     /// Builds the row for one line — badge lookup plus callbacks — in one
     /// place, so both the collection-view cell provider and the legacy
     /// `LazyVStack` (macOS) use the same construction.
+    ///
+    /// Callback rule: a closure may capture only the `line` and stable
+    /// references (`chatModel`, `@State` storage, the block store). ChatRow
+    /// compares callbacks by presence, not identity (`ChatRow.Affordances`),
+    /// so when a row compares equal SwiftUI keeps the OLD closures — one
+    /// capturing any other changing value would silently go stale.
     private func chatRow(for line: ChatLine) -> ChatRow {
         ChatRow(
             line: line,

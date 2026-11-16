@@ -57,8 +57,9 @@ struct EmoteImageView<StaticContent: View, Placeholder: View>: View {
                 }
             }
         }
-        // `nil` width/height is a flexible (non-constraining) frame, so inline
-        // emotes pass through untouched while picker cells get their square.
+        // A `nil` box leaves both dimensions unconstrained; every current
+        // caller pins one (inline emotes their metadata box, picker cells a
+        // square).
         .frame(width: boxSize?.width, height: boxSize?.height)
         .accessibilityLabel(Text(accessibilityLabel))
     }

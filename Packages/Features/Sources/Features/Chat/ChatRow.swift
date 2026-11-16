@@ -128,36 +128,19 @@ struct ChatRow: View, Equatable {
 
     // MARK: - Equatable (profile-guided perf fix)
     //
-    // Without explicit Equatable, SwiftUI's default View diffing compares
-    // stored properties by Swift's structural equality — but `ChatScreen`
-    // passes freshly-allocated arrays (`badgeEntries`) and closures
-    // (`onRetry`/`onReply`/`onViewThread`/`onDelete`) per body
-    // re-evaluation. Closures aren't Equatable in Swift, so SwiftUI gives
-    // up and treats every parent re-eval as "params changed" → re-runs
-    // ChatRow.body even when nothing visible changed.
+    // Without it, SwiftUI can't compare the fresh closures and arrays
+    // `ChatScreen` passes on every body re-evaluation, treats every parent
+    // re-eval as "params changed", and re-runs ChatRow.body — a profile
+    // measured ~1,400 evals/sec (1.48s of main-thread CPU in 68s).
     //
-    // Profile measured: 93,732 ChatRow body evaluations in a 68-second
-    // recording (~1,378/sec) — far beyond what visible-row × 60Hz could
-    // justify. Each individual eval was fast (~15µs), but the volume
-    // accumulated to 1.48s of CPU on the main thread.
-    //
-    // With explicit Equatable comparing what the row actually renders from,
-    // SwiftUI's diff short-circuits when nothing visible changed:
-    //   - `line`: ChatLine is itself Equatable; identical line → equal
-    //   - `badgeEntries`: element-wise; typically stable per line
-    //   - `showsQuotedReply`: a plain flag
-    //   - Callbacks: compared by PRESENCE (`affordances`), never by
-    //     identity. A fresh closure per body re-eval does the same thing as
-    //     the last one (same `line.id`, same model), so it must not defeat
-    //     the short-circuit — but gaining or losing one changes the row
-    //     (a menu item, the retry strip, the quote's tap), so it must. That
-    //     last part used to be missing: with closures ignored outright, a
-    //     reconfigure that only added `onDelete` (mod status learned) was
-    //     swallowed as "unchanged" and the list had to force fresh row
-    //     identity to show it.
-    //
-    // SwiftUI applies this comparison automatically when a View conforms
-    // to Equatable — no need to wrap in `EquatableView()` at call sites.
+    // So `==` compares what the row renders from: `line`, `badgeEntries`,
+    // `showsQuotedReply`, and the callbacks by PRESENCE (`affordances`),
+    // never identity. A fresh closure does the same thing as the last one
+    // (same line, same model), so it must not defeat the short-circuit; but
+    // gaining or losing one changes the row (a menu item, the retry strip,
+    // the quote's tap), so it must count. (Ignoring closures outright used
+    // to swallow a reconfigure that only added `onDelete` once mod status
+    // was learned.) SwiftUI applies this automatically for Equatable views.
     //
     // `nonisolated` because Equatable conformance from a @MainActor View
     // requires `==` to be callable from any actor. Every compared field is
