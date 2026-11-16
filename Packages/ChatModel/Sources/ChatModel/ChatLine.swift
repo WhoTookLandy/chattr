@@ -367,6 +367,40 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         return deleted
     }
 
+    /// Returns a copy in `deliveryState` — and, when `id` is given, re-keyed
+    /// to that id. The optimistic-send lifecycle uses it: a send that fails
+    /// keeps its `pending-…` id and flips to `.failed`; a send whose echo
+    /// never arrived settles as `.delivered` under its server-issued id.
+    /// Everything else (content, author styling, timestamp, provenance,
+    /// thread membership) carries over unchanged.
+    ///
+    /// A state-only change is a copy-and-set; a re-key needs the memberwise
+    /// init because `id` is a `let` (identity changes are rare — once per
+    /// stuck send — so the extra `hasLocalizedDisplayName` recompute is moot).
+    public func with(deliveryState: DeliveryState, id newId: String? = nil) -> ChatLine {
+        guard let newId, newId != id else {
+            var copy = self
+            copy.deliveryState = deliveryState
+            return copy
+        }
+        return ChatLine(
+            id: newId,
+            kind: kind,
+            authorBadges: authorBadges,
+            originalBadges: originalBadges,
+            authorUserId: authorUserId,
+            authorDisplayName: authorDisplayName,
+            authorUserLogin: authorUserLogin,
+            authorColor: authorColor,
+            runs: runs,
+            isHighlighted: isHighlighted,
+            timestamp: timestamp,
+            deliveryState: deliveryState,
+            isHistorical: isHistorical,
+            replyParent: replyParent
+        )
+    }
+
     public init(
         id: String,
         kind: Kind = .message,

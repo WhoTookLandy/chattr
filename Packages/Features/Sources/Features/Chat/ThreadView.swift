@@ -31,8 +31,7 @@ struct ThreadRootID: Identifiable, Equatable {
 ///     inside the thread sheet either (threading is automatic, no
 ///     need for explicit "Reply").
 ///
-/// Future polish (not in this commit):
-///   - Scroll to the most recent message on open.
+/// Future polish:
 ///   - Inline "View profile" / "Mention" actions on rows.
 ///   - Persisted scroll position so re-opening the sheet returns to
 ///     where you were reading.
@@ -142,9 +141,12 @@ struct ThreadView: View {
                     channelDisplayName: channelDisplayName,
                     replyTarget: threadReplyTarget,
                     onSend: { draft in
+                        // The sheet shows the new reply itself; leave the
+                        // main transcript behind it where the user was.
                         await chatModel.send(
                             text: draft,
-                            replyOverride: threadReplyTarget
+                            replyOverride: threadReplyTarget,
+                            repinsTranscript: false
                         )
                     }
                 )

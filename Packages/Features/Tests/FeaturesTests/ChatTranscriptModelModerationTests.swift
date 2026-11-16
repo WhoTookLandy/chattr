@@ -6,10 +6,9 @@ import Channels
 
 /// Tests for the attach-time `currentUserCanModerate` seeding paths:
 /// the instant broadcaster check and the moderated-channels pre-seed
-/// (`moderatedChannelIds` provider). The badge-observation upgrade path
-/// lives in the private `apply(_:)` and stays untested here for the same
-/// reason noted in `ChatTranscriptModelReplyTests` — it's driven by
-/// `ChannelSession.ChannelEvent` and needs a visibility relaxation first.
+/// (`moderatedChannelIds` provider), plus the live mod/unmod events. The
+/// badge-observation upgrade path is covered in
+/// `ChatTranscriptModelDependencyTests`.
 ///
 /// The `ChannelSession`s here are real but never `start()`ed, so nothing
 /// touches the network or Twitch. attach only exercises offline-safe

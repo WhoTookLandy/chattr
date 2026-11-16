@@ -11,10 +11,10 @@ import os
 private let logger = AppLogger.make("Features.ChatScreen")
 private let signposter = AppLogger.signposter("Features.ChatScreen")
 
-/// Renders live `channel.chat.message` events from EventSub as inline-emote rows.
-///
-/// Slice-2 interlude scope: Twitch native emote fragments render as CDN images.
-/// Third-party emote providers (7TV/BTTV/FFZ) and animated WebP arrive in later slices.
+/// One channel's chat: the transcript (`ChatTranscript`), the compose bar,
+/// and the sheets hanging off them (thread, chat settings). Owns the per-tab
+/// `ChatTranscriptModel` and its session lifecycle; rows render Twitch-native
+/// and 7TV / BTTV / FFZ emotes (animated included) inline.
 public struct ChatScreen: View {
     private let account: Account
     private let accountStore: AccountStore
@@ -33,11 +33,10 @@ public struct ChatScreen: View {
     private var channelLoginName: String { channel.channelLoginName }
     private var channelDisplayName: String { channel.channelDisplayName }
 
-    /// Per-tab chat state — owns the rendered `lines` and the session
-    /// subscriptions. Replaces the previous `@State session` + `@State lines`
-    /// pair plus the `for-await session.lines` loop. New messages arrive via
-    /// the model's pub-sub subscriber callback, which appends to `lines` on
-    /// MainActor (the model is `@MainActor @Observable`).
+    /// Per-tab chat state — owns the transcript and the session
+    /// subscriptions. New rows arrive already normalized, drained from the
+    /// session's mailbox in batches on the main actor (the model is
+    /// `@MainActor @Observable`).
     @State private var chatModel = ChatTranscriptModel()
 
     @State private var errorMessage: String?
@@ -46,10 +45,10 @@ public struct ChatScreen: View {
     /// exactly once at construction (see `init`). `ComposeBar` only consumes
     /// `seedDraft` at first mount thanks to its own `@State(initialValue:)`
     /// semantics, so re-reading it on every `body` evaluation — as the old
-    /// `composeBarView` did — was pure waste on the per-message hot path
-    /// (`body` re-evaluates on each new chat line). Seeding it here moves the
-    /// UserDefaults read to struct construction (parent rebuilds), off the
-    /// per-message path, while preserving exact first-mount behavior.
+    /// `composeBarView` did — was wasted UserDefaults work (back then `body`
+    /// re-evaluated on each new chat line). Seeding it here moves the read to
+    /// struct construction (parent rebuilds) while preserving exact
+    /// first-mount behavior.
     @State private var draftSeed: String
 
     // T11: badgeStore and emoteIndex are NOT `@State` here anymore — they
@@ -122,17 +121,12 @@ public struct ChatScreen: View {
     /// is presented. Opened from the compose bar's gear button.
     @State private var showChatSettings = false
 
-    /// When true, the user has Reduce Motion on in system Accessibility — we
-    /// skip the easeOut tween on auto-scroll so chat snaps instantly to the
-    /// newest message instead of animating.
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     // NOTE: compose-bar state (`composeText`, `isSending`, `composeFocused`)
     // lives inside the extracted `ComposeBar` view below — NOT here on
     // ChatScreen. That isolation matters: every keystroke in the
     // TextField mutates the draft, and if the @State lived on ChatScreen
-    // each keystroke would re-evaluate the whole body (which contains
-    // the LazyVStack of chat rows). Pulling the state into a child View
+    // each keystroke would re-evaluate the whole screen body (transcript
+    // wiring, sheets, toolbar). Pulling the state into a child View
     // confines re-evaluation to the compose bar itself, eliminating a
     // visible source of typing lag.
 
@@ -199,12 +193,13 @@ public struct ChatScreen: View {
             } else {
                 // The transcript (empty state + message list + pills) is a
                 // separate child view for OBSERVATION SCOPING: it is the only
-                // body that reads `chatModel.lines`, so per-message buffer
-                // mutations re-evaluate just that subtree. Before this split,
-                // the `lines.isEmpty` read right here subscribed ALL of
-                // ChatScreen.body to the buffer — the whole screen (compose
-                // bar closures, sheets, alert wiring) re-ran for every
-                // inbound message, 50–200×/sec during raids.
+                // body that reads the model's per-flush state
+                // (`changeVersion`, `isEmpty`), so publishes re-evaluate just
+                // that subtree. Before this split, the `lines.isEmpty` read
+                // right here subscribed ALL of ChatScreen.body to the buffer —
+                // the whole screen (compose bar closures, sheets, alert
+                // wiring) re-ran for every inbound message, 50–200×/sec
+                // during raids.
                 //
                 // Passing `chatModel` itself registers NO dependency — only
                 // property reads do. `rowContent` closes over ChatScreen's
@@ -327,8 +322,8 @@ public struct ChatScreen: View {
         //   - Cancellation comes from view tear-down (paged ScrollView
         //     unmounts off-screen ChatScreens during swipes) OR an id change.
         //   - On cancellation, the `try?` swallows the CancellationError and
-        //     `await chatModel.detach()` runs synchronously in the task's
-        //     final breath — structurally bound to view lifetime instead of
+        //     `await chatModel.detach(ifEpoch:)` runs in the task's final
+        //     breath — structurally bound to view lifetime instead of
         //     fired-and-forgotten from `.onDisappear`.
         //
         // The audit (CR HIGH 5) flagged the previous `.onDisappear { Task {
@@ -534,9 +529,15 @@ public struct ChatScreen: View {
         )
     }
 
-    /// Builds the row for one line — same badge lookup + callbacks the
-    /// `ForEach` used, lifted into a helper so both the collection-view cell
-    /// provider and the legacy `LazyVStack` can call it.
+    /// Builds the row for one line — badge lookup plus callbacks — in one
+    /// place, so both the collection-view cell provider and the legacy
+    /// `LazyVStack` (macOS) use the same construction.
+    ///
+    /// Callback rule: a closure may capture only the `line` and stable
+    /// references (`chatModel`, `@State` storage, the block store). ChatRow
+    /// compares callbacks by presence, not identity (`ChatRow.Affordances`),
+    /// so when a row compares equal SwiftUI keeps the OLD closures — one
+    /// capturing any other changing value would silently go stale.
     private func chatRow(for line: ChatLine) -> ChatRow {
         ChatRow(
             line: line,
@@ -626,20 +627,21 @@ public struct ChatScreen: View {
             )
             logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
 
-            // Hand the session to the tab model, which atomically primes
-            // `chatModel.lines` from the session's current ring buffer AND
-            // subscribes for future messages via `ChannelSession.subscribe(_:)`.
+            // Hand the session to the tab model, which atomically primes its
+            // transcript from the session's current ring buffer AND
+            // subscribes for future rows via `ChannelSession.subscribe()`.
             //
             // For the MVP this is always a single-element array. When multi-
             // channel tabs ship, `attach(sessions: [a, b, c])` will subscribe
             // to all of them with the same model — the rest of ChatScreen
             // doesn't need to change.
             //
-            // Lifecycle: detach() is called from `.onDisappear` in the body
-            // below. The model's pub-sub subscriptions stay live as long as
-            // this ChatScreen instance is mounted; on tear-down they're
-            // released, but the underlying `ChannelSession` stays alive in
-            // the registry (other tabs may share it, ref counting in commit E).
+            // Lifecycle: the session-lifecycle `.task(id: channelId)` in the
+            // body detaches (with the epoch returned here) when SwiftUI
+            // cancels it. The model's subscriptions stay live as long as this
+            // ChatScreen instance is mounted; on tear-down they're released,
+            // but the underlying `ChannelSession` stays alive in the registry
+            // (other tabs may share it — it's ref-counted there).
             //
             // Rows arrive already normalized: the session tokenizes each
             // message once, off the main actor, against the registry-owned
