@@ -119,17 +119,20 @@ struct ChatBufferTests {
     func removeById() {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("a")); buf.append(line("b")); buf.append(line("c"))
-        #expect(buf.remove(id: "b") == true)
+        let removedFirst = buf.remove(id: "b")
+        #expect(removedFirst)
         #expect(buf.lines.map(\.id) == ["a", "c"])
         #expect(!buf.contains(id: "b"))
-        #expect(buf.remove(id: "b") == false)
+        let removedAgain = buf.remove(id: "b")
+        #expect(!removedAgain)
     }
 
     @Test("remove re-points only the shifted tail and keeps the id table exact across later trims")
     func removeKeepsIndexExact() {
         var buf = ChatBuffer(cap: 4)
         for i in 0..<6 { buf.append(line("m\(i)")) }   // window m2…m5, ring head advanced
-        #expect(buf.remove(id: "m3"))
+        let removedm3 = buf.remove(id: "m3")
+        #expect(removedm3)
         #expect(buf.lines.map(\.id) == ["m2", "m4", "m5"])
         for id in ["m2", "m4", "m5"] { #expect(buf.line(id: id)?.id == id) }
         #expect(!buf.contains(id: "m3"))
@@ -141,7 +144,8 @@ struct ChatBufferTests {
         buf.append(line("m6")); buf.append(line("m7"))
         #expect(buf.lines.map(\.id) == ["m4", "m5", "m6", "m7"])
         #expect(buf.line(id: "m4")?.id == "m4")
-        #expect(buf.remove(id: "m7"))
+        let removedm7 = buf.remove(id: "m7")
+        #expect(removedm7)
         #expect(buf.lines.map(\.id) == ["m4", "m5", "m6"])
     }
 
@@ -153,7 +157,8 @@ struct ChatBufferTests {
         buf.append(line("b")); buf.append(line("c"))
         buf.mutate(id: "c") { $0.markingDeleted() }
         #expect(buf.lines.map(\.kind) == [.message, .message, .deletedPlaceholder])
-        #expect(buf.remove(id: "b"))
+        let removedb = buf.remove(id: "b")
+        #expect(removedb)
         #expect(buf.lines.map(\.id) == ["a", "c"])
         _ = buf.replace(id: "a", with: line("a", "edited"))
         #expect(buf.lines.first?.runs == [.text("edited")])
