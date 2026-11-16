@@ -50,9 +50,17 @@ enum OAuthRefreshTokenCache {
 
     /// Backend used for all Keychain reads/writes. Defaults to the real
     /// system Keychain; tests replace it with an in-memory fake (and restore
-    /// it after). `nonisolated(unsafe)` is the same pragmatic test seam as
-    /// `URLSession.shared` injection — callers that swap it do so serially.
-    nonisolated(unsafe) static var keychain: RefreshTokenKeychain = SystemRefreshTokenKeychain()
+    /// it after). Lock-backed rather than `nonisolated(unsafe)` so a swap
+    /// racing a read is a compile-checked, well-defined handoff instead of a
+    /// data race the compiler was told to ignore.
+    static var keychain: any RefreshTokenKeychain {
+        get { keychainStore.withLock { $0 } }
+        set { keychainStore.withLock { $0 = newValue } }
+    }
+
+    private static let keychainStore = OSAllocatedUnfairLock<any RefreshTokenKeychain>(
+        initialState: SystemRefreshTokenKeychain()
+    )
 
     /// Keychain key for a userId. Keep this distinct from TwitchKit's
     /// `chattr.account.{userId}` namespace so the two stores never collide.

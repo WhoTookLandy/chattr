@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 @testable import EmoteSources
 
 // Decoding-only tests for the three providers. Each test pipes a captured
@@ -30,17 +31,14 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
     // Registration table. Lock-protected for cross-thread safety —
     // tests register from a Task, the URLProtocol callback may fire on
     // a Foundation-owned thread.
-    nonisolated(unsafe) static var responses: [URL: (Data, Int)] = [:]
-    static let lock = NSLock()
+    private static let responses = OSAllocatedUnfairLock<[URL: (Data, Int)]>(initialState: [:])
 
     static func register(_ url: URL, data: Data, statusCode: Int) {
-        lock.lock(); defer { lock.unlock() }
-        responses[url] = (data, statusCode)
+        responses.withLock { $0[url] = (data, statusCode) }
     }
 
     static func lookup(_ url: URL) -> (Data, Int)? {
-        lock.lock(); defer { lock.unlock() }
-        return responses[url]
+        responses.withLock { $0[url] }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import Observation
+import os
 import TwitchKit
 import ChatModel
 import Channels
@@ -17,7 +18,13 @@ import Channels
 /// mid-test; `flushPendingChanges()` flushes deterministically.
 /// Flag for `withObservationTracking`'s @Sendable onChange. File scope (not
 /// nested in the @MainActor suite) so it stays nonisolated.
-private final class ObservationFired: @unchecked Sendable { var value = false }
+private final class ObservationFired: Sendable {
+    private let state = OSAllocatedUnfairLock(initialState: false)
+    var value: Bool {
+        get { state.withLock { $0 } }
+        set { state.withLock { $0 = newValue } }
+    }
+}
 
 @Suite("ChatTranscriptModel coalesced publishing")
 @MainActor

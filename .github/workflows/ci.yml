@@ -29,7 +29,7 @@ jobs:
 
       - uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "26.6"
 
       - name: Cache SwiftPM
         uses: actions/cache@v5
@@ -52,7 +52,7 @@ jobs:
 
       - uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "26.6"
 
       - name: Cache SwiftPM
         uses: actions/cache@v5
@@ -87,7 +87,7 @@ jobs:
 
       - uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "26.6"
 
       - name: Cache SwiftPM
         uses: actions/cache@v5
@@ -97,6 +97,46 @@ jobs:
           restore-keys: spm-app-${{ runner.os }}-
 
       - name: Build for testing
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project chattr.xcodeproj \
+            -scheme chattr \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions
+
+  # Early warning for the iOS 27 SDK. The jobs above build with Xcode 26.6
+  # (the newest on the GA macos-26 image); this one compiles the app and runs
+  # the host-side package tests with Xcode 27 on GitHub's `xcode-27` preview
+  # image. Non-blocking while that image is in preview. Simulator tests are
+  # skipped here because the preview image's iOS 27 simulator runtime is
+  # currently flaky (actions/runner-images#15334, #15337).
+  # Once xcode-27 goes GA: move every job (and testflight.yml) onto it,
+  # pin Xcode 27.x, and delete this job.
+  xcode-27-preview:
+    name: Xcode 27 (preview, non-blocking)
+    runs-on: xcode-27
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "27.1"
+
+      - name: swift test (host-testable packages)
+        run: |
+          set -o pipefail
+          for pkg in Core DesignSystem EmoteSources Accounts ChatModel Channels; do
+            echo "::group::swift test $pkg"
+            swift test --package-path "Packages/$pkg" --parallel
+            echo "::endgroup::"
+          done
+
+      - name: Build app against the iOS 27 SDK
         run: |
           set -o pipefail
           xcodebuild build-for-testing \

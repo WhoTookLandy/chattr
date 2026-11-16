@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 import Core
 import TwitchKit
 @testable import Accounts
@@ -12,28 +13,23 @@ import TwitchKit
 // EmoteSources' ProviderDecodingTests.
 
 private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var responses: [URL: (Data, Int)] = [:]
-    nonisolated(unsafe) static var requestBodies: [URL: Data] = [:]
-    static let lock = NSLock()
+    private static let responses = OSAllocatedUnfairLock<[URL: (Data, Int)]>(initialState: [:])
+    private static let requestBodies = OSAllocatedUnfairLock<[URL: Data]>(initialState: [:])
 
     static func register(_ url: URL, json: String, statusCode: Int) {
-        lock.lock(); defer { lock.unlock() }
-        responses[url] = (Data(json.utf8), statusCode)
+        responses.withLock { $0[url] = (Data(json.utf8), statusCode) }
     }
 
     static func lookup(_ url: URL) -> (Data, Int)? {
-        lock.lock(); defer { lock.unlock() }
-        return responses[url]
+        responses.withLock { $0[url] }
     }
 
     static func recordBody(_ data: Data?, for url: URL) {
-        lock.lock(); defer { lock.unlock() }
-        requestBodies[url] = data
+        requestBodies.withLock { $0[url] = data }
     }
 
     static func body(for url: URL) -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        return requestBodies[url]
+        requestBodies.withLock { $0[url] }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
