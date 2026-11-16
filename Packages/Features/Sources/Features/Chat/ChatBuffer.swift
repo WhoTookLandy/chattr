@@ -52,7 +52,7 @@ struct ChatBuffer {
     }
 
     /// Number of currently-visible lines — O(1), avoids materializing `lines`.
-    /// Internal (not private): `ChatTranscriptModel.isEmpty` reads it so the
+    /// Internal (not private): `TranscriptStore.publishPending` reads it so the
     /// empty-state check matches the *filtered* projection without paying the
     /// `lines` getter's window copy.
     var visibleCount: Int { _lines.count - linesHead }

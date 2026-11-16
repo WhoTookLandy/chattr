@@ -81,7 +81,7 @@ struct ChatTranscript: View {
         // `isEmpty` (not `lines.isEmpty`): the `lines` getter materializes the
         // full visible window once the ring wraps, and this body re-runs per
         // flush — while `isEmpty` is a stored flag that only invalidates when
-        // it flips. See ChatTranscriptModel.isEmpty's doc comment.
+        // it flips. See TranscriptStore.isEmpty's doc comment.
         if chatModel.isEmpty {
             // Distinguish "attaching" (sessions not yet subscribed) from
             // "attached but quiet" (subscriptions live, but no messages
