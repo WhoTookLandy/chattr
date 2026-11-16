@@ -31,12 +31,16 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     env:
-      ARCHIVE_PATH: ${{ runner.temp }}/chattr.xcarchive
-      EXPORT_PATH: ${{ runner.temp }}/export
-      KEY_PATH: ${{ runner.temp }}/AuthKey.p8
       BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}
     steps:
       - uses: actions/checkout@v4
+
+      # `runner.temp` is only available inside steps, not job-level env.
+      - name: Set paths
+        run: |
+          echo "ARCHIVE_PATH=$RUNNER_TEMP/chattr.xcarchive" >> "$GITHUB_ENV"
+          echo "EXPORT_PATH=$RUNNER_TEMP/export" >> "$GITHUB_ENV"
+          echo "KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
 
       - uses: maxim-lobanov/setup-xcode@v1
         with:
