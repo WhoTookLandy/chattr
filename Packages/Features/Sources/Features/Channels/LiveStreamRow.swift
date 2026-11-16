@@ -1,5 +1,6 @@
 import SwiftUI
 import TwitchKit
+import Nuke
 import NukeUI
 
 /// Rich row for the Follows tab's Live segment. Models Twitch mobile's
@@ -12,9 +13,9 @@ import NukeUI
 ///   └────────────┘
 ///
 /// Pure presentational struct. All data is passed in via two parameters:
-/// the `TwitchStream` (live-stream metadata from `/streams/followed`) and an
-/// optional `TwitchUser` for the profile image URL + broadcasterType (used
-/// for the verified-partner checkmark).
+/// the `TwitchStream` (live-stream metadata from `/streams/followed`) and the
+/// broadcaster's already-resolved profile image URL (from
+/// `FollowsStore.profileImageURLs`).
 ///
 /// Contrast with `ChannelRow` — that view is the compact single-line layout
 /// used by the All segment, where most rows are offline channels and a
@@ -24,8 +25,8 @@ import NukeUI
 struct LiveStreamRow: View {
     let stream: TwitchStream
     /// Optional — loads lazily after `fetchUsers` populates the profile.
-    /// While nil we show placeholder avatar and skip the verified badge.
-    let profile: TwitchUser?
+    /// While nil we show a placeholder avatar.
+    let profileImageURL: URL?
 
     /// Standard preview size from Twitch's CDN. 440×248 is 16:9 at 2x — sharp
     /// on @3x iPhones (downscale) without wasting bandwidth on @1x devices.
@@ -144,7 +145,7 @@ struct LiveStreamRow: View {
     /// 20pt circle avatar. Placeholder while the profile fetch is in flight.
     @ViewBuilder
     private var avatar: some View {
-        LazyImage(url: profile.flatMap { URL(string: $0.profileImageUrl) }) { state in
+        LazyImage(request: ImageRequest.avatar(url: profileImageURL, side: 20)) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else {

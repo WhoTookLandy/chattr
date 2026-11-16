@@ -2,6 +2,7 @@ import SwiftUI
 import Accounts
 import TwitchKit
 import DesignSystem
+import Nuke
 import NukeUI
 
 /// The Home tab — the app's landing surface. Answers "who's live right
@@ -55,12 +56,11 @@ public struct HomeScreen: View {
         NavigationStack {
             HomeContent(
                 liveStreams: followsStore?.liveStreamsOrdered ?? [],
-                userProfiles: followsStore?.userProfiles ?? [:],
+                profileImageURLs: followsStore?.profileImageURLs ?? [:],
                 liveLoadState: followsStore?.liveLoadState ?? .idle,
                 openTabs: chatTabs?.tabs ?? [],
                 onStreamTap: { stream in
-                    let profileURL = followsStore?.userProfiles[stream.userId]
-                        .flatMap { URL(string: $0.profileImageUrl) }
+                    let profileURL = followsStore?.profileImageURLs[stream.userId]
                     openChannel?(stream: stream, profileImageURL: profileURL)
                 },
                 onResumeChat: onResumeChat
@@ -83,10 +83,12 @@ public struct HomeScreen: View {
             }
             .refreshable {
                 guard let store = followsStore else { return }
-                await store.refreshLive(account: account, accountStore: accountStore)
+                // Explicit user intent — bypass the staleness throttle.
+                await store.refreshLive(account: account, accountStore: accountStore, force: true)
             }
-            // Fresh live data every time Home appears (tab switches
-            // included) — same policy as the Following list.
+            // Live data whenever Home appears (tab switches included) —
+            // same policy as the Following list. Throttled + coalesced in
+            // FollowsStore, so a recent refresh makes this a no-op.
             .task {
                 guard let store = followsStore else { return }
                 await store.refreshLive(account: account, accountStore: accountStore)
@@ -106,7 +108,7 @@ enum HomeRoute: Hashable {
 /// values — no stores, no account — so `#Preview` can drive every state.
 struct HomeContent: View {
     let liveStreams: [TwitchStream]
-    let userProfiles: [String: TwitchUser]
+    let profileImageURLs: [String: URL]
     let liveLoadState: FollowsStore.LoadState
     let openTabs: [ChatTab]
     let onStreamTap: (TwitchStream) -> Void
@@ -174,7 +176,7 @@ struct HomeContent: View {
                     } label: {
                         LiveStreamRow(
                             stream: stream,
-                            profile: userProfiles[stream.userId]
+                            profileImageURL: profileImageURLs[stream.userId]
                         )
                     }
                     .buttonStyle(.plain)
@@ -277,7 +279,7 @@ struct HomeContent: View {
     private func openChatCircle(for tab: ChatTab) -> some View {
         let isLive = tab.channels.contains { liveChannelIds.contains($0.channelId) }
         return VStack(spacing: 6) {
-            LazyImage(url: tab.profileImageURL) { state in
+            LazyImage(request: ImageRequest.avatar(url: tab.profileImageURL, side: 56)) { state in
                 if let image = state.image {
                     image.resizable().scaledToFill()
                 } else {

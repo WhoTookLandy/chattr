@@ -1,5 +1,6 @@
 import SwiftUI
 import TwitchKit
+import Nuke
 import NukeUI
 
 /// Single row in the followed-channels list. Shows the broadcaster's avatar,
@@ -60,7 +61,7 @@ struct ChannelRow: View {
     /// 40pt circle avatar.
     @ViewBuilder
     private var avatar: some View {
-        LazyImage(url: profileImageURL) { state in
+        LazyImage(request: ImageRequest.avatar(url: profileImageURL, side: 40)) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else {

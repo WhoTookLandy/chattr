@@ -5,11 +5,14 @@
 
 import Accounts
 import Channels
+import Core
 import DesignSystem
 import Features
 import SwiftData
 import SwiftUI
-import TwitchKit
+import os
+
+private let logger = AppLogger.make("App.Bootstrap")
 
 @main
 struct chattrApp: App {
@@ -38,29 +41,65 @@ struct chattrApp: App {
         // correct home for it. Previously called from RootView.body, where it
         // re-ran (guarded, but wastefully) on every re-evaluation.
         ImagePipelineSetup.configure()
+        // PersistedChatTab is the SwiftData projection of ChatTab — added
+        // in commit E so chat tabs survive cold start. Lives in the
+        // Features package alongside the runtime ChatTab struct it
+        // mirrors.
+        //
+        // Built against an explicit VersionedSchema + SchemaMigrationPlan
+        // (see AppSchema.swift) rather than the bare model list, so future
+        // schema changes can ship as MigrationStages instead of crashing
+        // existing users at launch. V1 is structurally identical to the
+        // old bare schema; V1 stores migrate to the latest version via
+        // `AppMigrationPlan`'s stages.
+        let schema = Schema(versionedSchema: AppSchemaLatest.self)
+        let container = Self.makeModelContainer(schema: schema)
+        self.modelContainer = container
+        let store = AccountStore(modelContainer: container, clientId: Self.clientId)
+        self.accountStore = store
+        self.channelSessionRegistry = ChannelSessionRegistry(accountStore: store)
+    }
+
+    /// Opens the on-disk SwiftData store. If that fails (a corrupt store, or a
+    /// schema change the migration plan can't express), logs the error,
+    /// deletes the store files and retries once with a fresh store before
+    /// giving up.
+    ///
+    /// Losing the local store is recoverable — it holds account rows and
+    /// persisted tabs; OAuth tokens live in the Keychain, and the user can
+    /// sign in again — whereas failing here is a crash on every launch.
+    private static func makeModelContainer(schema: Schema) -> ModelContainer {
         do {
-            // PersistedChatTab is the SwiftData projection of ChatTab — added
-            // in commit E so chat tabs survive cold start. Lives in the
-            // Features package alongside the runtime ChatTab struct it
-            // mirrors.
-            //
-            // Built against an explicit VersionedSchema + SchemaMigrationPlan
-            // (see AppSchema.swift) rather than the bare model list, so future
-            // schema changes can ship as MigrationStages instead of crashing
-            // existing users at launch. V1 is structurally identical to the
-            // old bare schema; V1 stores migrate to the latest version via
-            // `AppMigrationPlan`'s stages.
-            let schema = Schema(versionedSchema: AppSchemaLatest.self)
-            let container = try ModelContainer(
-                for: schema,
-                migrationPlan: AppMigrationPlan.self
-            )
-            self.modelContainer = container
-            let store = AccountStore(modelContainer: container, clientId: Self.clientId)
-            self.accountStore = store
-            self.channelSessionRegistry = ChannelSessionRegistry(accountStore: store)
+            return try ModelContainer(for: schema, migrationPlan: AppMigrationPlan.self)
         } catch {
-            fatalError("Failed to initialize SwiftData: \(error)")
+            logger.fault("Failed to open SwiftData store: \(String(describing: error), privacy: .public). Deleting and recreating it.")
+        }
+
+        // A default `ModelConfiguration` resolves to the same store URL the
+        // configuration-less initializer above uses.
+        deleteStoreFiles(at: ModelConfiguration().url)
+
+        do {
+            let container = try ModelContainer(for: schema, migrationPlan: AppMigrationPlan.self)
+            logger.notice("Recreated SwiftData store after open failure")
+            return container
+        } catch {
+            fatalError("Failed to initialize SwiftData after recreating the store: \(error)")
+        }
+    }
+
+    /// Removes a SQLite-backed store and its WAL/SHM sidecars. Missing files
+    /// are fine; other failures are logged and the retry proceeds anyway.
+    private static func deleteStoreFiles(at storeURL: URL) {
+        let fileManager = FileManager.default
+        let paths = [storeURL.path, storeURL.path + "-shm", storeURL.path + "-wal"]
+        for path in paths where fileManager.fileExists(atPath: path) {
+            do {
+                try fileManager.removeItem(atPath: path)
+                logger.notice("Deleted store file \(path, privacy: .public)")
+            } catch {
+                logger.error("Couldn't delete store file \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

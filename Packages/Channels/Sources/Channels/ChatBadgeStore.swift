@@ -1,11 +1,11 @@
 import Foundation
-import SwiftUI
+import Observation
 import Accounts
 import TwitchKit
 import Core
 import os
 
-private let logger = AppLogger.make("Features.ChatBadgeStore")
+private let logger = AppLogger.make("Channels.ChatBadgeStore")
 
 /// Stable composite key matching `ChatBadge`'s identity pair. Public so
 /// `GlobalCatalog` can expose pre-flattened global badges with the same type.
@@ -129,7 +129,7 @@ public final class ChatBadgeStore {
         // SwiftUI view churn the `.task` modifier can cancel us mid-flight,
         // and the next-mount needs to retry from a clean slate.
         guard !Task.isCancelled else {
-            logger.info("ChatBadgeStore load cancelled for channel \(channelId); not publishing partial entries")
+            logger.info("ChatBadgeStore load cancelled for channel \(channelId, privacy: .public); not publishing partial entries")
             return
         }
 
@@ -145,7 +145,7 @@ public final class ChatBadgeStore {
         // `entries(for:)` re-resolves against the freshly merged table.
         resolvedCache.removeAll(keepingCapacity: true)
         loadedChannelId = channelId
-        logger.info("Loaded \(merged.count) badge entries for channel \(channelId) (global=\(global.count), channel=\(channel.count))")
+        logger.info("Loaded \(merged.count) badge entries for channel \(channelId, privacy: .public) (global=\(global.count), channel=\(channel.count))")
     }
 
     /// Resolves a per-message badge list to drawable entries, preserving order
@@ -188,7 +188,7 @@ public final class ChatBadgeStore {
             return [:]
         } catch {
             // Non-fatal: chat still renders without badges.
-            logger.error("Failed to load global badges: \(error.localizedDescription)")
+            logger.error("Failed to load global badges: \(error.localizedDescription, privacy: .public)")
             return [:]
         }
     }
@@ -210,7 +210,7 @@ public final class ChatBadgeStore {
             // ChatScreen instance. Silently exit instead of polluting logs.
             return [:]
         } catch {
-            logger.error("Failed to load channel badges for \(channelId): \(error.localizedDescription)")
+            logger.error("Failed to load channel badges for \(channelId, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return [:]
         }
     }

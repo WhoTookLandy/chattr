@@ -90,7 +90,7 @@ public struct UIPreviewRoot: View {
                 NavigationStack {
                     HomeContent(
                         liveStreams: HomePreviewData.streams,
-                        userProfiles: [:],
+                        profileImageURLs: [:],
                         liveLoadState: .loaded,
                         openTabs: HomePreviewData.openTabs,
                         onStreamTap: { _ in },
