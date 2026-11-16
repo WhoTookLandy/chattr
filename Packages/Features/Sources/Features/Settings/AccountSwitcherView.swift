@@ -175,7 +175,7 @@ struct AccountSwitcherView: View {
     }
 
     /// Run the shared OAuth flow to add a new account. On success it
-    /// becomes active automatically (its lastSelectedAt defaults to now),
+    /// becomes active automatically (`AccountStore.add` selects it),
     /// so we dismiss — RootView re-renders into the new account.
     private func addAccount() async {
         isAddingAccount = true
