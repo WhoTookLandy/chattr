@@ -1,4 +1,5 @@
 import Foundation
+import TwitchKit
 
 /// Pure merge/dedup rules for splicing chat history into a channel's ring:
 /// the join-time backfill (history + buffered live, with a "New" divider

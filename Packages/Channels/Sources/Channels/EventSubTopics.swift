@@ -14,8 +14,8 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 /// a 409 "already subscribed", where Twitch keeps the existing subscription
 /// alive on our WebSocket and returns no record) and `ChannelSession` keeps
 /// the bookkeeping (`activeSubscriptionIds`, the moderation-enabled flag) on
-/// the actor. Every method inherits the caller's isolation, so from the
-/// session these run on the actor exactly as the inline calls did.
+/// the actor, mutated at the same points as before. Every method inherits
+/// the caller's isolation, so no Sendable hop is needed to call it.
 struct EventSubTopics: Sendable {
     let client: TwitchClient
     let channelId: String

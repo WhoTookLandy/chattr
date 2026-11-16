@@ -11,8 +11,9 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 /// (refresh via the bridge, retry once).
 ///
 /// Stateless — `ChannelSession` owns the cache / fan-out side effects. Every
-/// method inherits the caller's isolation, so from the session these run on
-/// the session actor exactly as the inline calls did.
+/// method inherits the caller's isolation (so the session needs no Sendable
+/// hop to call it); the closures handed to `authRetry` touch no session
+/// state, only the Sendable client and ids.
 struct HelixChatActions: Sendable {
     let client: TwitchClient
     let channelId: String
