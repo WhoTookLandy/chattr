@@ -87,7 +87,7 @@ chattr app target                  ← composition root + DI wiring only
 | **EmoteSources** | 7TV / BTTV / FFZ providers and the per-channel `EmoteIndex` actor. |
 | **ChatModel** | Display-ready `ChatLine` / `LineRun` model and the `Normalizer` (EventSub & IRC-tag → `ChatLine`). |
 | **Accounts** | Multi-account state — `Account` (SwiftData), `AccountStore`, OAuth flow. |
-| **Channels** | Chat-session lifecycle — `ChannelSession` actor (which owns the per-channel ring buffer), `ChannelSessionRegistry`, badge lookup, backfill, optimistic send. |
+| **Channels** | Chat-session lifecycle — `ChannelSession` actor (normalizes each message once and owns the per-channel ring of display-ready rows), `ChannelSessionRegistry`, off-main event routing, badge lookup, backfill, optimistic send. |
 | **Features** | Every SwiftUI screen, grouped by feature folder (`Home`, `Chat`, `Channels`, `Emotes`, `Highlights`, `Filters`, `Settings`, `Tabs`, `App`, `Shared`). |
 
 ### External dependencies
@@ -100,12 +100,22 @@ chattr app target                  ← composition root + DI wiring only
 
 ### Data flow, in one breath
 
-EventSub WebSocket frame → `EventSubClient` decodes → `ChannelSession` filters
-for its `(account, channel)` → `Normalizer` tokenizes fragments and substitutes
-emotes/mentions into a `ChatLine` → ring buffer (cap ~500/channel) → coalesced
-snapshot (~15 ms) → diffable `UICollectionView` applies the diff →
-`MessageRowView` renders. Sends are optimistic: the line appears immediately as
-`.sending` and reconciles when Helix responds and EventSub echoes it back.
+EventSub WebSocket frame → `EventSubClient` decodes → the account's dispatcher
+(a detached task, never the main actor) hands it to `ChannelEventRouter`, which
+drops it into the owning `ChannelSession`'s inbox without waiting → the session
+translates it and runs the `Normalizer` **once per channel, off-main** (word
+tokens, emotes, self-mentions; timestamps and row ids minted once) → ring
+buffer of display-ready rows (cap = Chat History setting) → posted to each
+subscriber's mailbox (the session never waits on a subscriber) →
+`ChatTranscriptModel` drains everything queued as **one batch per main-actor
+hop**, layers on the viewer's highlight keywords, and coalesces a publish
+(~15 ms) → `ChatListView` applies the change log to its diffable
+`UICollectionView` → `ChatRow` renders. Join history waits at most ~3 s and
+merges in above live chat if it's late; reconnect gaps land as one contiguous
+batch. Sends are optimistic: the line appears immediately as `.sending` and
+reconciles when Helix responds and EventSub echoes it back. Instruments:
+`Channels.Pipeline` (`normalize`, `deliver`) and `Features.ChatTranscriptModel`
+(`apply-batch`) signpost intervals.
 
 For the full design rationale, see
 [`docs/superpowers/specs/2026-05-24-chattr-design.md`](docs/superpowers/specs/2026-05-24-chattr-design.md).
