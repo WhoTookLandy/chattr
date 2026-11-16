@@ -32,36 +32,34 @@ import NukeUI
 /// the layout from plain values without a signed-in account.
 public struct HomeScreen: View {
     private let account: Account
-    private let accountStore: AccountStore
     /// Injected by AppShell: makes `tab` the active chat tab and switches
     /// the app to the Chats tab. Kept as a closure (not environment) —
     /// only Home needs it, and the tab-selection state lives in AppShell.
     private let onResumeChat: (ChatTab) -> Void
 
+    @Environment(\.accountStore) private var accountStore
     @Environment(\.followsStore) private var followsStore
     @Environment(\.chatTabs) private var chatTabs
     @Environment(\.openChannel) private var openChannel
 
     public init(
         account: Account,
-        accountStore: AccountStore,
         onResumeChat: @escaping (ChatTab) -> Void
     ) {
         self.account = account
-        self.accountStore = accountStore
         self.onResumeChat = onResumeChat
     }
 
     public var body: some View {
         NavigationStack {
             HomeContent(
-                liveStreams: followsStore?.liveStreamsOrdered ?? [],
-                profileImageURLs: followsStore?.profileImageURLs ?? [:],
-                liveLoadState: followsStore?.liveLoadState ?? .idle,
-                openTabs: chatTabs?.tabs ?? [],
+                liveStreams: followsStore.liveStreamsOrdered,
+                profileImageURLs: followsStore.profileImageURLs,
+                liveLoadState: followsStore.liveLoadState,
+                openTabs: chatTabs.tabs,
                 onStreamTap: { stream in
-                    let profileURL = followsStore?.profileImageURLs[stream.userId]
-                    openChannel?(stream: stream, profileImageURL: profileURL)
+                    let profileURL = followsStore.profileImageURLs[stream.userId]
+                    openChannel(stream: stream, profileImageURL: profileURL)
                 },
                 onResumeChat: onResumeChat
             )
@@ -76,22 +74,19 @@ public struct HomeScreen: View {
                     // switches to All from there.
                     ChannelListScreen(
                         account: account,
-                        accountStore: accountStore,
                         initialMode: .live
                     )
                 }
             }
             .refreshable {
-                guard let store = followsStore else { return }
                 // Explicit user intent — bypass the staleness throttle.
-                await store.refreshLive(account: account, accountStore: accountStore, force: true)
+                await followsStore.refreshLive(account: account, accountStore: accountStore, force: true)
             }
             // Live data whenever Home appears (tab switches included) —
             // same policy as the Following list. Throttled + coalesced in
             // FollowsStore, so a recent refresh makes this a no-op.
             .task {
-                guard let store = followsStore else { return }
-                await store.refreshLive(account: account, accountStore: accountStore)
+                await followsStore.refreshLive(account: account, accountStore: accountStore)
             }
         }
     }

@@ -12,9 +12,13 @@ private let logger = AppLogger.make("Features.Root")
 ///
 /// `accounts` is driven by SwiftData's `@Query` so it auto-refreshes when
 /// `AccountStore.add(...)` inserts a new row.
+///
+/// RootView is the single injection point for app-wide dependencies: every
+/// store a screen needs (`\.accountStore`, `\.followsStore`,
+/// `\.channelSessionRegistry`, …) is set in the environment here, once, so
+/// screens read them instead of threading them through their inits.
 public struct RootView: View {
     private let accountStore: AccountStore
-    private let clientId: String
     /// Owned by chattrApp, not by RootView — re-instantiating RootView (e.g.
     /// on a future hot reload or scene rebuild) shouldn't blow away in-flight
     /// chat sessions.
@@ -93,11 +97,9 @@ public struct RootView: View {
 
     public init(
         accountStore: AccountStore,
-        clientId: String,
         channelSessionRegistry: ChannelSessionRegistry
     ) {
         self.accountStore = accountStore
-        self.clientId = clientId
         self.channelSessionRegistry = channelSessionRegistry
         // Carry the pre-slider discrete text-size choice into the points
         // key (no-op once migrated or when the user has set the slider).
@@ -139,7 +141,7 @@ public struct RootView: View {
         // of `body` avoids re-running it on every re-evaluation.
         Group {
             if let active = activeAccount {
-                AppShell(account: active, accountStore: accountStore, clientId: clientId)
+                AppShell(account: active)
                     // `.id(userId)` forces a fresh AppShell when the active
                     // account changes (switch / add / remove). A new account
                     // means new chat sessions, a new follow list, new
@@ -154,9 +156,10 @@ public struct RootView: View {
                     // only AppShell holds that account's tab model.
                     .id(active.userId)
             } else {
-                SignInView(accountStore: accountStore, clientId: clientId)
+                SignInView()
             }
         }
+        .environment(\.accountStore, accountStore)
         .environment(\.globalCatalog, globalCatalog)
         .environment(\.blockStore, blockStore)
         .environment(\.followsStore, followsStore)

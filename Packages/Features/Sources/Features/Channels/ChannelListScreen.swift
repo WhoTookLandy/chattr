@@ -20,8 +20,8 @@ private let logger = AppLogger.make("Features.ChannelList")
 /// survives navigation away and back.
 public struct ChannelListScreen: View {
     private let account: Account
-    private let accountStore: AccountStore
 
+    @Environment(\.accountStore) private var accountStore
     @Environment(\.followsStore) private var followsStore
     @Environment(\.openChannel) private var openChannel
     @Environment(\.dismiss) private var dismiss
@@ -78,26 +78,24 @@ public struct ChannelListScreen: View {
 
     public init(
         account: Account,
-        accountStore: AccountStore,
         initialMode: ViewMode? = nil
     ) {
         self.account = account
-        self.accountStore = accountStore
         self.initialMode = initialMode
     }
 
     // MARK: - Convenience accessors
 
-    private var channels: [FollowedChannel] { followsStore?.channels ?? [] }
-    private var liveStreamsDict: [String: TwitchStream] { followsStore?.liveStreams ?? [:] }
-    private var liveStreamsOrdered: [TwitchStream] { followsStore?.liveStreamsOrdered ?? [] }
-    private var profileImageURLs: [String: URL] { followsStore?.profileImageURLs ?? [:] }
-    private var allLoadState: FollowsStore.LoadState { followsStore?.allLoadState ?? .idle }
-    private var liveLoadState: FollowsStore.LoadState { followsStore?.liveLoadState ?? .idle }
-    private var allLoadProgress: Int { followsStore?.allLoadProgress ?? 0 }
-    private var totalFollowed: Int? { followsStore?.totalFollowed }
-    private var allErrorMessage: String? { followsStore?.allErrorMessage }
-    private var liveErrorMessage: String? { followsStore?.liveErrorMessage }
+    private var channels: [FollowedChannel] { followsStore.channels }
+    private var liveStreamsDict: [String: TwitchStream] { followsStore.liveStreams }
+    private var liveStreamsOrdered: [TwitchStream] { followsStore.liveStreamsOrdered }
+    private var profileImageURLs: [String: URL] { followsStore.profileImageURLs }
+    private var allLoadState: FollowsStore.LoadState { followsStore.allLoadState }
+    private var liveLoadState: FollowsStore.LoadState { followsStore.liveLoadState }
+    private var allLoadProgress: Int { followsStore.allLoadProgress }
+    private var totalFollowed: Int? { followsStore.totalFollowed }
+    private var allErrorMessage: String? { followsStore.allErrorMessage }
+    private var liveErrorMessage: String? { followsStore.liveErrorMessage }
 
     private var selectedMode: ViewMode {
         ViewMode(rawValue: rawViewMode) ?? .live
@@ -112,7 +110,7 @@ public struct ChannelListScreen: View {
     /// rather than once per body invocation (which previously meant once per
     /// keystroke in search).
     private var sortedAllChannels: [FollowedChannel] {
-        followsStore?.sortedAllChannels ?? []
+        followsStore.sortedAllChannels
     }
 
     /// Filters against `FollowsStore.sortedAllChannelSearchKeys` — lowercased
@@ -122,7 +120,7 @@ public struct ChannelListScreen: View {
         let sorted = sortedAllChannels
         guard !searchText.isEmpty else { return sorted }
         let query = searchText.lowercased()
-        let keys = followsStore?.sortedAllChannelSearchKeys ?? []
+        let keys = followsStore.sortedAllChannelSearchKeys
         return zip(sorted, keys).compactMap { channel, key in
             key.contains(query) ? channel : nil
         }
@@ -136,7 +134,7 @@ public struct ChannelListScreen: View {
         var streams = liveStreamsOrdered
         if !searchText.isEmpty {
             let query = searchText.lowercased()
-            let keys = followsStore?.liveStreamSearchKeys ?? [:]
+            let keys = followsStore.liveStreamSearchKeys
             streams = streams.filter { stream in
                 keys[stream.userId]?.contains(query) ?? false
             }
@@ -243,7 +241,7 @@ public struct ChannelListScreen: View {
             }
         }
         .sheet(isPresented: $showingAddChannel) {
-            AddChannelView(account: account, accountStore: accountStore)
+            AddChannelView(account: account)
         }
         .confirmationDialog(
             "Sign out of @\(account.login)?",
@@ -284,13 +282,12 @@ public struct ChannelListScreen: View {
         .searchable(text: $searchText, prompt: searchPrompt)
         // Pull-to-refresh routes to the right refresher.
         .refreshable {
-            guard let store = followsStore else { return }
             switch selectedMode {
             case .live:
                 // Explicit user intent — bypass the staleness throttle.
-                await store.refreshLive(account: account, accountStore: accountStore, force: true)
+                await followsStore.refreshLive(account: account, accountStore: accountStore, force: true)
             case .all:
-                await store.refreshAll(account: account, accountStore: accountStore)
+                await followsStore.refreshAll(account: account, accountStore: accountStore)
             }
         }
         // Refresh live data whenever the user visits the Follows tab. The
@@ -299,8 +296,7 @@ public struct ChannelListScreen: View {
         // coalesces it with any in-flight refresh and skips it when the
         // live list is younger than `liveStalenessInterval`.
         .task {
-            guard let store = followsStore else { return }
-            await store.refreshLive(account: account, accountStore: accountStore)
+            await followsStore.refreshLive(account: account, accountStore: accountStore)
         }
     }
 
@@ -340,7 +336,7 @@ public struct ChannelListScreen: View {
                 ForEach(filtered, id: \.userId) { stream in
                     let profileURL = avatarURLs[stream.userId]
                     Button {
-                        openChannel?(stream: stream, profileImageURL: profileURL)
+                        openChannel(stream: stream, profileImageURL: profileURL)
                         dismiss()
                     } label: {
                         LiveStreamRow(stream: stream, profileImageURL: profileURL)
@@ -362,8 +358,7 @@ public struct ChannelListScreen: View {
                 description: Text(liveErrorMessage ?? "Unknown error")
             )
             Button("Retry") {
-                guard let store = followsStore else { return }
-                Task { await store.refreshLive(account: account, accountStore: accountStore, force: true) }
+                Task { await followsStore.refreshLive(account: account, accountStore: accountStore, force: true) }
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)
@@ -424,8 +419,7 @@ public struct ChannelListScreen: View {
             // errors, same as liveFailedView. Sign-out stays available as
             // the escalation for genuinely broken auth, not the default.
             Button("Retry") {
-                guard let store = followsStore else { return }
-                Task { await store.refreshAll(account: account, accountStore: accountStore) }
+                Task { await followsStore.refreshAll(account: account, accountStore: accountStore) }
             }
             .buttonStyle(.borderedProminent)
             .tint(.accentColor)
@@ -451,7 +445,7 @@ public struct ChannelListScreen: View {
                 ForEach(filtered) { channel in
                     let profileURL = avatarURLs[channel.broadcasterId]
                     Button {
-                        openChannel?(channel: channel, profileImageURL: profileURL)
+                        openChannel(channel: channel, profileImageURL: profileURL)
                         dismiss()
                     } label: {
                         ChannelRow(
@@ -491,8 +485,7 @@ public struct ChannelListScreen: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Retry") {
-                    guard let store = followsStore else { return }
-                    Task { await store.refreshAll(account: account, accountStore: accountStore) }
+                    Task { await followsStore.refreshAll(account: account, accountStore: accountStore) }
                 }
                 .font(.footnote)
             }
@@ -524,9 +517,12 @@ public struct ChannelListScreen: View {
     private func signOut() async {
         isSigningOut = true
         defer { isSigningOut = false }
+        // Read before removal: the row is deleted once `remove` returns, and
+        // touching a deleted @Model's properties traps.
+        let login = account.login
         do {
             try await accountStore.remove(account: account)
-            logger.info("Signed out @\(account.login)")
+            logger.info("Signed out @\(login)")
         } catch {
             logger.error("Sign out had an error: \(error.localizedDescription)")
             errorMessage = "Sign out: \(error.localizedDescription)"

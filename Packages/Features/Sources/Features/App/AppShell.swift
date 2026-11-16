@@ -38,10 +38,6 @@ private let logger = AppLogger.make("Features.AppShell")
 /// down, releasing every session it acquired.
 public struct AppShell: View {
     private let account: Account
-    private let accountStore: AccountStore
-    /// Twitch client id, threaded down to ProfileScreen → the account
-    /// switcher so "Add Account" can run the OAuth flow.
-    private let clientId: String
 
     /// The app's top-level destinations.
     enum AppTab: Hashable {
@@ -65,10 +61,8 @@ public struct AppShell: View {
     /// `.modelContainer(modelContainer)` modifier.
     @Environment(\.modelContext) private var modelContext
 
-    public init(account: Account, accountStore: AccountStore, clientId: String) {
+    public init(account: Account) {
         self.account = account
-        self.accountStore = accountStore
-        self.clientId = clientId
     }
 
     public var body: some View {
@@ -81,7 +75,6 @@ public struct AppShell: View {
             Tab(value: AppTab.home) {
                 HomeScreen(
                     account: account,
-                    accountStore: accountStore,
                     onResumeChat: { tab in navigation.resumeChat(tab) }
                 )
             } label: {
@@ -91,7 +84,6 @@ public struct AppShell: View {
             Tab(value: AppTab.chats) {
                 ChatTabsScreen(
                     account: account,
-                    accountStore: accountStore,
                     goHome: { navigation.goHome() }
                 )
             } label: {
@@ -100,7 +92,7 @@ public struct AppShell: View {
             .accessibilityLabel("Chats")
             Tab(value: AppTab.you) {
                 NavigationStack {
-                    ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
+                    ProfileScreen(account: account)
                 }
             } label: {
                 Image(systemName: "person.crop.circle")
@@ -112,7 +104,6 @@ public struct AppShell: View {
             Tab(value: AppTab.search, role: .search) {
                 AddChannelView(
                     account: account,
-                    accountStore: accountStore,
                     showsCancelButton: false
                 )
             } label: {
