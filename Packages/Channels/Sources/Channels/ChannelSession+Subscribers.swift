@@ -98,10 +98,12 @@ extension ChannelSession {
         let table = normalizer.currentEmoteTable()
         guard table.generation != 0 else { return }
 
-        let normalizer = self.normalizer
+        // A local copy, so the ring rewrite's closure captures a value rather
+        // than the actor while `hub` is being mutated.
+        let rowNormalizer = normalizer
         let interval = signposter.beginInterval("renormalize", id: signposter.makeSignpostID())
         let refreshed = hub.refreshMessages { stale in
-            normalizer.renormalized(stale, table: table)
+            rowNormalizer.renormalized(stale, table: table)
         }
         signposter.endInterval("renormalize", interval, "refreshed=\(refreshed)")
     }
