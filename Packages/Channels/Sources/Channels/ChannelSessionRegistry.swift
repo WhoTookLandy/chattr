@@ -201,7 +201,7 @@ public final class ChannelSessionRegistry {
     //
     // EmoteIndex and ChatBadgeStore live HERE (registry-owned) instead of as
     // `@State` on `ChatScreen`. The reason: ChatScreen is in a paged
-    // LazyHStack inside ChatTabsScreen — when the user swipes off-screen,
+    // LazyHStack inside ChatPagerScreen — when the user swipes off-screen,
     // the ChatScreen unmounts and its `@State` properties (and any in-flight
     // loads / cached data inside them) die. Re-mounting the screen would
     // re-fetch the 6 emote-provider HTTPS calls + 2 Helix-badge calls,

@@ -10,7 +10,7 @@ import Nuke
 /// Non-interactive (`allowsHitTesting(false)`) — it's a hint, not a control;
 /// the swipe itself and the channel pill remain the ways to switch. Takes
 /// the model (not precomputed neighbours) so `activeTabId` changes
-/// invalidate only this view, not `ChatTabsScreen`'s pager.
+/// invalidate only this view, not `ChatPagerScreen`'s pager.
 struct PagerEdgeHints: View {
     let chatTabs: ChatTabsModel
 

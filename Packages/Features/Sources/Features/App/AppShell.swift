@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Accounts
 import Channels
+import ChatModel
 import Core
 import os
 #if canImport(UIKit)
@@ -12,9 +13,11 @@ private let logger = AppLogger.make("Features.AppShell")
 
 /// Top-level shell for a signed-in user. Four tabs:
 ///
-///   - **Home**: live follows + open-chat pills + the full follow list as
-///     a push. The app's landing surface — answers "who's live?" on open.
-///   - **Chats**: the paged chat surface (`ChatTabsScreen`), unchanged.
+///   - **Home**: Live / Following / Chats as top tabs (`HomeScreen`);
+///     opening a chat pushes the full-screen `ChatPagerScreen`. The app's
+///     landing surface — answers "who's live?" on open.
+///   - **Activity**: @-mentions and keyword hits across open chats
+///     (`ActivityScreen`, fed by the mention watcher wired below).
 ///   - **You**: profile / appearance / storage — the old Profile sheet's
 ///     content as a persistent destination.
 ///   - **Search**: open any channel by name (`role: .search` gives it the
@@ -48,7 +51,7 @@ public struct AppShell: View {
 
     /// The app's top-level destinations.
     enum AppTab: Hashable {
-        case home, chats, you, search
+        case home, activity, you, search
     }
 
     @State private var navigation = AppNavigation()
@@ -94,29 +97,30 @@ public struct AppShell: View {
             // SF Symbol (no caption), with `.accessibilityLabel` preserving the
             // VoiceOver name the visible title used to carry. The `.search` tab
             // keeps its role-driven treatment below.
+            // Home carries Live / Following / Chats as top tabs (see
+            // `HomeScreen`), leaving this bar for app-wide destinations.
             Tab(value: AppTab.home) {
                 HomeScreen(
                     account: account,
                     accountStore: accountStore,
-                    onResumeChat: { tab in navigation.resumeChat(tab) }
+                    section: $navigation.homeSection
                 )
             } label: {
                 Image(systemName: "house")
             }
             .accessibilityLabel("Home")
-            Tab(value: AppTab.chats) {
-                ChatTabsScreen(
-                    account: account,
-                    accountStore: accountStore,
-                    goHome: { navigation.goHome() }
+            Tab(value: AppTab.activity) {
+                ActivityScreen(
+                    store: navigation.activity,
+                    onOpen: { channel in navigation.openChannel(channel) }
                 )
             } label: {
-                Image(systemName: "bubble.left.and.bubble.right")
+                Image(systemName: "bell")
             }
-            // Unseen @-mentions across open chats (the active chat's are
-            // cleared as you read them). 0 hides the badge.
-            .badge(navigation.chatTabs.mentionedTabIds.count)
-            .accessibilityLabel("Chats")
+            // Mentions + keyword hits since Activity was last viewed.
+            // 0 hides the badge.
+            .badge(navigation.activity.unreadCount)
+            .accessibilityLabel("Activity")
             Tab(value: AppTab.you) {
                 NavigationStack {
                     ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
@@ -217,8 +221,9 @@ public struct AppShell: View {
             // cycle — the old ChatTabsModel (plus its tabs, TabPersistence,
             // and MentionWatchTokens) would leak on every account switch,
             // since RootView's `.id(userId)` rebuilds AppShell each time.
+            let activity = navigation.activity
             chatTabs.onOpen = {
-                [weak channelSessionRegistry, weak chatTabs, mentionWatchTokens,
+                [weak channelSessionRegistry, weak chatTabs, weak activity, mentionWatchTokens,
                  accountUserId = account.userId,
                  accountLogin = account.login] tab in
                 guard let registry = channelSessionRegistry else { return }
@@ -236,19 +241,40 @@ public struct AppShell: View {
                         // tiny — a substring check per message — and runs on
                         // its own task per drained batch, so it never holds
                         // up the session or the transcript.
-                        let token = await session.subscribe(onBatch: { [weak chatTabs, tabId = tab.id] batch in
-                            let mentioned = batch.contains { update in
+                        //
+                        // It also feeds the Activity inbox: @-mentions, plus
+                        // highlight-keyword hits (keywords read at tab open,
+                        // like the transcript's own highlighting).
+                        let keywordMatcher = HighlightMatcher(keywords: HighlightSettings.keywords())
+                        let token = await session.subscribe(onBatch: {
+                            [weak chatTabs, weak activity, tabId = tab.id, channel, keywordMatcher] batch in
+                            var mentioned = false
+                            var hits: [ActivityStore.Entry] = []
+                            for update in batch {
                                 guard case .message(let normalized) = update,
                                       !normalized.line.isHistorical,
                                       normalized.message.chatterUserId != accountUserId
-                                else { return false }
-                                return ChatTabsModel.containsMention(
-                                    of: accountLogin,
-                                    in: normalized.message.message.text
-                                )
+                                else { continue }
+                                let text = normalized.message.message.text
+                                let isMention = ChatTabsModel.containsMention(of: accountLogin, in: text)
+                                guard isMention || keywordMatcher.matches(normalized.line.runs) else { continue }
+                                mentioned = mentioned || isMention
+                                let line = normalized.line
+                                hits.append(ActivityStore.Entry(
+                                    id: line.id,
+                                    channel: channel,
+                                    authorDisplayName: line.authorDisplayName,
+                                    authorColor: line.authorColor,
+                                    text: text,
+                                    timestamp: line.timestamp,
+                                    reason: isMention ? .mention : .keyword
+                                ))
                             }
                             if mentioned {
                                 await chatTabs?.markMention(tabId: tabId)
+                            }
+                            if !hits.isEmpty {
+                                await activity?.record(hits)
                             }
                         })
                         mentionWatchTokens.byTab[tab.id, default: []]
@@ -355,21 +381,18 @@ final class AppNavigation {
     /// via `\.chatTabs` for the chat header's switcher.
     let chatTabs = ChatTabsModel()
 
-    /// Open `channel` as a chat tab and land the user in the Chats tab —
-    /// "tap a channel anywhere → land in its chat," from any tab.
+    /// Which Home top tab is showing (Live / Following / Chats).
+    var homeSection: HomeSection = .live
+
+    /// Mentions + keyword hits across open chats (the Activity tab).
+    let activity = ActivityStore()
+
+    /// Open `channel` as a chat tab and land the user in its chat — Home →
+    /// Chats with the chat pushed — "tap a channel anywhere → land in its
+    /// chat," from any tab. (`open` makes the tab active, which pushes it.)
     func openChannel(_ channel: ChannelDescriptor) {
         chatTabs.open(channel: channel)
-        selectedTab = .chats
-    }
-
-    /// Re-focus an already-open tab (Home's resume-chat row) and show Chats.
-    func resumeChat(_ tab: ChatTab) {
-        chatTabs.activeTabId = tab.id
-        selectedTab = .chats
-    }
-
-    /// Return to Home (the Chats empty-state CTA when nothing is open).
-    func goHome() {
+        homeSection = .chats
         selectedTab = .home
     }
 }

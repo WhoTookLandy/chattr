@@ -83,9 +83,7 @@ enum HomePreviewData {
             liveStreams: HomePreviewData.streams,
             profileImageURLs: [:],
             liveLoadState: .loaded,
-            openTabs: HomePreviewData.openTabs,
-            onStreamTap: { _ in },
-            onResumeChat: { _ in }
+            onStreamTap: { _ in }
         )
         .navigationTitle("Home")
         .toolbarTitleDisplayMode(.inlineLarge)
@@ -98,9 +96,7 @@ enum HomePreviewData {
             liveStreams: [],
             profileImageURLs: [:],
             liveLoadState: .loaded,
-            openTabs: [],
-            onStreamTap: { _ in },
-            onResumeChat: { _ in }
+            onStreamTap: { _ in }
         )
         .navigationTitle("Home")
         .toolbarTitleDisplayMode(.inlineLarge)
@@ -113,9 +109,7 @@ enum HomePreviewData {
             liveStreams: [],
             profileImageURLs: [:],
             liveLoadState: .loading,
-            openTabs: HomePreviewData.openTabs,
-            onStreamTap: { _ in },
-            onResumeChat: { _ in }
+            onStreamTap: { _ in }
         )
         .navigationTitle("Home")
         .toolbarTitleDisplayMode(.inlineLarge)

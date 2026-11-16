@@ -4,30 +4,25 @@ import DesignSystem
 import NukeUI
 import Core
 
-/// Root content of the Chats tab.
+/// The full-screen chat surface pushed from Home → Chats.
 ///
-/// Structured like Messages: the tab's root is a *list* of open chats;
-/// tapping one pushes the transcript full-screen with the tab bar hidden
-/// (`.toolbar(.hidden, for: .tabBar)` on the pushed destination). A chat
-/// transcript is an immersive surface — compose bar at the bottom, every
-/// point of height mattering — so app-level chrome gets out of the way
-/// and the system back button is the exit. The tab bar reappears at the
-/// list root.
+/// Structured like Messages: the list of open chats lives in Home's Chats
+/// section (`OpenChatsList`); tapping one pushes THIS screen with the tab bar
+/// hidden (`.toolbar(.hidden, for: .tabBar)`). A chat transcript is an
+/// immersive surface — compose bar at the bottom, every point of height
+/// mattering — so app-level chrome gets out of the way and the system back
+/// button is the exit.
 ///
 /// Layout:
-///   1. A single `NavigationStack`. Root: open-chats list (reorder /
-///      swipe-to-close) or the empty state. Pushed: the chat pager.
-///   2. The pushed pager is a horizontally-paged `ScrollView` of
-///      `ChatScreen` pages — one page per open tab. Swipe left/right to
-///      switch chats without popping back.
-///   3. The toolbar header of the pushed pager is the floating channel
-///      pill (name + page dots) → opens the switcher sheet.
+///   1. A horizontally-paged `ScrollView` of `ChatScreen` pages — one page
+///      per open tab. Swipe left/right to switch chats without popping back.
+///   2. The toolbar header is the floating channel pill (name, live dot,
+///      page dots) → opens the quick-switcher popover.
 ///
-/// Push state is *derived from* `ChatTabsModel.activeTabId` (non-nil =
-/// a chat is open) rather than a separate Bool — opening a channel from
-/// Home/Search sets `activeTabId`, which both selects the page and
-/// presents the push; popping back clears it. One source of truth, no
-/// sync bugs between "which chat" and "is a chat showing."
+/// Push state is *derived from* `ChatTabsModel.activeTabId` (non-nil = a
+/// chat is open) by the presenting `HomeScreen` — opening a channel from
+/// anywhere sets `activeTabId`, which both selects the page and presents the
+/// push; popping back clears it.
 ///
 /// ## How the paging works
 ///
@@ -55,13 +50,9 @@ import Core
 /// user swipes back and the ChatScreen remounts, `ChatTranscriptModel.attach`
 /// primes from the ring's current snapshot — so the user sees every message
 /// that arrived while the page was off-screen.
-public struct ChatTabsScreen: View {
+struct ChatPagerScreen: View {
     private let account: Account
     private let accountStore: AccountStore
-    /// Injected by AppShell: switches the app to the Home tab. Used by the
-    /// empty state's CTA — with no chats open, the useful next step is the
-    /// Home surface (live follows), not a modal.
-    private let goHome: (() -> Void)?
 
     @State private var showSwitcher = false
     /// The compact anchored popover the channel pill opens — quick tab
@@ -78,150 +69,18 @@ public struct ChatTabsScreen: View {
     @State private var showFollows = false
 
     @Environment(\.chatTabs) private var chatTabs
-    /// Only the store reference is read here (to drive refreshes) — never
-    /// its `statuses`, so status updates don't re-run this body.
-    @Environment(\.channelStatus) private var channelStatus
-
-    /// Channel ids of every open tab, in tab order.
-    private var openChannelIds: [String] {
-        (chatTabs?.tabs ?? []).flatMap { $0.channels.map(\.channelId) }
-    }
 
     /// Read for `edgeToEdge`: when the user runs chat full-bleed, the
-    /// navigation bar's own background is hidden so the avatar / channel
-    /// pill / heart become free-standing glass over the transcript
-    /// (Reddit-style) instead of sitting on a bar.
+    /// navigation bar's own background is hidden so the channel pill becomes
+    /// free-standing glass over the transcript instead of sitting on a bar.
     @Environment(\.chatAppearance) private var appearance
 
-    /// Scene-scoped restoration of the active tab id. `@SceneStorage` only
-    /// supports primitive types, so we round-trip through UUID's
-    /// `uuidString` representation. Persisted per-scene (each window has
-    /// its own active tab — relevant for iPad multi-window where the user
-    /// might want one window focused on chat A, another on chat B).
-    ///
-    /// Lifecycle:
-    ///   - On VStack appear, if a saved id matches an existing tab, write
-    ///     it back to `chatTabs.activeTabId`. The header title updates; the
-    ///     ScrollView snaps.
-    ///   - On every `activeTabId` change (swipe a page, activate via switcher),
-    ///     mirror the new value back to `@SceneStorage`. The latest selection
-    ///     is always durable.
-    ///
-    /// Tab list itself lives in SwiftData, scoped per account (rows carry
-    /// `PersistedChatTab.accountUserId`; `TabPersistence` only reads/writes
-    /// the signed-in account's rows) — this storage is purely "which one was
-    /// active in this scene." It is NOT account-scoped: after an account
-    /// switch the saved id simply won't match any of the new account's tabs,
-    /// and the restore below skips it.
-    @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
-
-    /// You → App → Resume Last Chat. When off, the Chats tab always
-    /// starts at the list; the saved active-tab id is still recorded so
-    /// turning the toggle back on resumes again.
-    @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
-
-    public init(
-        account: Account,
-        accountStore: AccountStore,
-        goHome: (() -> Void)? = nil
-    ) {
+    init(account: Account, accountStore: AccountStore) {
         self.account = account
         self.accountStore = accountStore
-        self.goHome = goHome
     }
 
-    public var body: some View {
-        NavigationStack {
-            Group {
-                if let chatTabs, !chatTabs.tabs.isEmpty {
-                    openChatsList(chatTabs: chatTabs)
-                } else {
-                    emptyState
-                }
-            }
-            .navigationTitle("Chats")
-            .toolbarTitleDisplayMode(.inlineLarge)
-            .onAppear {
-                // Scene restoration: resume the chat that was open when
-                // the scene was last torn down (user-controllable via
-                // You → App → Resume Last Chat). Setting `activeTabId`
-                // both selects the page and (via the derived binding
-                // below) presents the push.
-                if resumeLastChatOnLaunch,
-                   chatTabs?.activeTabId == nil,
-                   let savedId = persistedActiveTabId,
-                   let uuid = UUID(uuidString: savedId),
-                   chatTabs?.tabs.contains(where: { $0.id == uuid }) == true {
-                    chatTabs?.activeTabId = uuid
-                }
-            }
-            .onChange(of: chatTabs?.activeTabId) { _, newValue in
-                persistedActiveTabId = newValue?.uuidString
-            }
-            .navigationDestination(isPresented: chatIsPresented) {
-                chatDetail
-            }
-        }
-        // Live/offline status for every open channel, one batched call a
-        // minute while the Chats tab is on screen. On the NavigationStack
-        // (not its root list) so it keeps running while a chat is pushed —
-        // a root-level `.task` is cancelled by the push. Feeds the stream
-        // header, the pill's live dot and the list rows; restarts when the
-        // set of open channels changes.
-        .task(id: openChannelIds) {
-            guard let channelStatus else { return }
-            while !Task.isCancelled {
-                await channelStatus.refresh(
-                    channelIds: openChannelIds,
-                    account: account,
-                    accountStore: accountStore
-                )
-                try? await Task.sleep(for: .seconds(60))
-            }
-        }
-        // Open-chats switcher.
-        .sheet(isPresented: $showSwitcher) {
-            if let chatTabs {
-                ChannelSwitcherView(
-                    model: chatTabs,
-                    onBrowseFollows: {
-                        showSwitcher = false
-                        showFollows = true
-                    }
-                )
-            }
-        }
-        // Follows browse — kept as a sheet for the switcher's "Browse
-        // Follows" shortcut. The primary Follows surface is the Home tab.
-        .sheet(isPresented: $showFollows) {
-            NavigationStack {
-                ChannelListScreen(account: account, accountStore: accountStore)
-            }
-        }
-    }
-
-    /// Push state, derived from the model: a chat is presented exactly
-    /// when a tab is active. Popping (interactive swipe-back included)
-    /// writes `false`, which clears the selection — the list root never
-    /// shows with a stale "active" chat.
-    private var chatIsPresented: Binding<Bool> {
-        Binding(
-            get: {
-                guard let chatTabs else { return false }
-                return chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
-            },
-            set: { presented in
-                if !presented {
-                    chatTabs?.activeTabId = nil
-                }
-            }
-        )
-    }
-
-    /// The pushed, full-screen chat surface: the paged transcript with the
-    /// channel pill header and — the point of the push — no tab bar.
-    @ViewBuilder
-    private var chatDetail: some View {
+    var body: some View {
         Group {
             if let chatTabs {
                 pagedChatContent(chatTabs: chatTabs)
@@ -254,34 +113,24 @@ public struct ChatTabsScreen: View {
         #if os(iOS)
         .toolbar(.hidden, for: .tabBar)
         #endif
-    }
-
-    /// Root list of open chats — Messages-style rows: avatar, channel
-    /// name, login. Swipe to close (releases the session via the model's
-    /// `onClose`), drag to reorder (defines the pager's swipe order).
-    @ViewBuilder
-    private func openChatsList(chatTabs: ChatTabsModel) -> some View {
-        List {
-            ForEach(chatTabs.tabs) { tab in
-                Button {
-                    chatTabs.activeTabId = tab.id
-                } label: {
-                    // Live dot/ring, viewers, category, uptime, title — or
-                    // offline + last live. See `OpenChatRow`.
-                    OpenChatRow(tab: tab, chatTabs: chatTabs)
-                }
-                .buttonStyle(.plain)
-            }
-            .onMove { source, destination in
-                chatTabs.move(fromOffsets: source, toOffset: destination)
-            }
-            .onDelete { offsets in
-                // One batched close: a single persistence save and one
-                // release pass, instead of a save per row.
-                chatTabs.close(tabIds: offsets.map { chatTabs.tabs[$0].id })
+        // Open-chats management sheet (reorder, close, browse).
+        .sheet(isPresented: $showSwitcher) {
+            if let chatTabs {
+                ChannelSwitcherView(
+                    model: chatTabs,
+                    onBrowseFollows: {
+                        showSwitcher = false
+                        showFollows = true
+                    }
+                )
             }
         }
-        .listStyle(.plain)
+        // Follows browse — the switcher's "Browse Follows" shortcut.
+        .sheet(isPresented: $showFollows) {
+            NavigationStack {
+                ChannelListScreen(account: account, accountStore: accountStore)
+            }
+        }
     }
 
     /// Circle avatar for a list row (40pt) or quick-switcher row (28pt).
@@ -312,7 +161,7 @@ public struct ChatTabsScreen: View {
         ToolbarItem(placement: .principal) {
             // The label is its own `View` (`ChannelPillLabel`) so that
             // unseen-mention updates (`mentionedTabIds`) invalidate ONLY the
-            // pill, not this `ChatTabsScreen` body — which also builds the
+            // pill, not this `ChatPagerScreen` body — which also builds the
             // paged transcript. A ping arriving in a background tab redraws
             // the dot without re-evaluating the pager. See `ChannelPillLabel`.
             Button { showQuickSwitcher = true } label: {
@@ -474,37 +323,15 @@ public struct ChatTabsScreen: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
-
-    /// Shown when no channel tabs are open. Points at the Home tab (live
-    /// follows) — falls back to the Follows sheet when AppShell didn't
-    /// inject `goHome` (previews, tests).
-    @ViewBuilder
-    private var emptyState: some View {
-        ContentUnavailableView {
-            Label("No chats open", systemImage: "bubble.left.and.bubble.right")
-        } description: {
-            Text("Pick a live channel from Home to start chatting.")
-        } actions: {
-            Button("See who's live") {
-                if let goHome {
-                    goHome()
-                } else {
-                    showFollows = true
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.accentColor)
-        }
-    }
 }
 
 /// The channel-pill *label*: the visible tab's name, a chevron, an
 /// unseen-mention dot, and (with 2+ tabs) miniature page dots.
 ///
-/// Extracted from `ChatTabsScreen` into its own `View` purely for
+/// Extracted from `ChatPagerScreen` into its own `View` purely for
 /// invalidation isolation. The pill reads `chatTabs.mentionedTabIds`, which
 /// changes whenever a ping lands in a *background* tab; left inline in
-/// `ChatTabsScreen.body` that read made every mention re-evaluate the whole
+/// `ChatPagerScreen.body` that read made every mention re-evaluate the whole
 /// screen body, including the paged `ScrollView` of `ChatScreen`s. As its own
 /// view the mention dependency is scoped here, so a background ping redraws
 /// the dot without touching the pager. (`ChatScreen` pages are protected by
@@ -516,7 +343,7 @@ private struct ChannelPillLabel: View {
     @Environment(\.channelStatus) private var channelStatus
 
     /// Viewer count when the visible channel is live; nil when offline or
-    /// unknown. Read here (not in ChatTabsScreen) for the same isolation
+    /// unknown. Read here (not in ChatPagerScreen) for the same isolation
     /// reason as the mention dot.
     private var liveViewers: Int? {
         guard let chatTabs,
