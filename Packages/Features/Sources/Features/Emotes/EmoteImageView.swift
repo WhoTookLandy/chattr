@@ -32,8 +32,8 @@ struct EmoteImageView<StaticContent: View, Placeholder: View>: View {
     var body: some View {
         Group {
             if isAnimated {
-                AnimatedImageView(url: url, width: width, height: height) {
-                    placeholder(false)
+                AnimatedImageView(url: url, width: width, height: height) { failed in
+                    placeholder(failed)
                 }
             } else {
                 LazyImage(url: url) { state in

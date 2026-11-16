@@ -38,3 +38,21 @@ struct EmoteDisplayMetricsTests {
         #expect(EmoteDisplayMetrics.width(aspectRatio: 2.0, height: 36) == 72)
     }
 }
+
+@Suite("Emote display box")
+struct EmoteDisplayBoxTests {
+
+    @Test("Inline box is metadata width × line height")
+    func boxFromMetadata() {
+        #expect(EmoteDisplayMetrics.size(aspectRatio: 2.0, height: 24) == CGSize(width: 48, height: 24))
+        #expect(EmoteDisplayMetrics.size(aspectRatio: nil, height: 24) == CGSize(width: 28, height: 24))
+    }
+
+    @Test("Twitch native emotes get a square box")
+    func twitchIsSquare() {
+        let box = EmoteDisplayMetrics.size(
+            aspectRatio: EmoteDisplayMetrics.twitchAspectRatio,
+            height: EmoteDisplayMetrics.lineHeight)
+        #expect(box == CGSize(width: 24, height: 24))
+    }
+}

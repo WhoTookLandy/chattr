@@ -20,10 +20,24 @@ enum EmoteDisplayMetrics {
     /// or corrupt ratio from collapsing the emote to an invisible sliver.
     static let aspectRange: ClosedRange<CGFloat> = 0.25...4.0
 
+    /// Inline emote line height at the default text size (scale 1).
+    static let lineHeight: CGFloat = 24
+
+    /// Twitch native emotes are always square — Twitch only accepts square
+    /// uploads — so their box needs no per-emote metadata.
+    static let twitchAspectRatio: Double = 1
+
     /// Display width for an emote rendered at `height`.
     static func width(aspectRatio: Double?, height: CGFloat) -> CGFloat {
         guard let aspectRatio else { return height * fallbackAspect }
         let clamped = min(max(CGFloat(aspectRatio), aspectRange.lowerBound), aspectRange.upperBound)
         return height * clamped
+    }
+
+    /// The fixed inline box for an emote. Every state of an inline emote
+    /// (loading, failed, loaded, animated) renders at exactly this size, so
+    /// a row's layout is final before any image arrives.
+    static func size(aspectRatio: Double?, height: CGFloat) -> CGSize {
+        CGSize(width: width(aspectRatio: aspectRatio, height: height), height: height)
     }
 }
