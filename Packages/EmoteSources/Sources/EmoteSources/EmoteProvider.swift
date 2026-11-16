@@ -45,3 +45,43 @@ public protocol EmoteProvider: Sendable {
     /// - Throws: Network or decoding errors.
     func channelEmotes(broadcasterId: String, broadcasterLogin: String) async throws -> [Emote]
 }
+
+extension EmoteProvider {
+    /// Identity under which `GlobalEmoteCatalog` caches and coalesces this
+    /// provider's `globalEmotes()` result. Global sets are a property of the
+    /// provider *kind*, not the instance — every channel's 7TV provider sees
+    /// the same global set — so the default keys by concrete type. Test
+    /// doubles that stand in for several providers with one type override
+    /// this with a per-instance key.
+    public var globalCatalogKey: String { String(reflecting: Self.self) }
+}
+
+/// Failures a provider raises itself (as opposed to transport errors from
+/// `URLSession` or `DecodingError`s from a malformed body).
+public enum EmoteProviderError: Error, Equatable, Sendable {
+    /// Upstream answered with a non-success HTTP status — typically 429
+    /// (rate limited) or 5xx (outage). Raised *before* decoding so an error
+    /// page body isn't misreported as a schema drift `DecodingError`.
+    case httpStatus(Int)
+}
+
+/// Shared HTTP status policy for the three providers.
+enum ProviderHTTP {
+    /// Throws `EmoteProviderError.httpStatus` unless the response is 2xx.
+    /// Non-HTTP responses (only seen with exotic URL schemes) pass.
+    static func requireSuccess(_ response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse else { return }
+        guard (200..<300).contains(http.statusCode) else {
+            throw EmoteProviderError.httpStatus(http.statusCode)
+        }
+    }
+
+    /// Channel-endpoint variant: 404 means "this channel never set the
+    /// provider up" (the common case) and returns `true` so the caller can
+    /// answer `[]`; any other non-2xx status throws.
+    static func isNotFound(_ response: URLResponse) throws -> Bool {
+        if (response as? HTTPURLResponse)?.statusCode == 404 { return true }
+        try requireSuccess(response)
+        return false
+    }
+}
