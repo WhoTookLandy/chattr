@@ -20,8 +20,8 @@ struct ThreadRootID: Identifiable, Equatable {
 ///   - Lives in a NavigationStack with a Done button so the sheet
 ///     reads as a deliberate modal (not a swipe-down popover).
 ///   - Compose bar always threads — `replyOverride` is built from
-///     the latest line in the thread, so the user doesn't need to
-///     manually pick a parent for each send.
+///     the latest delivered message in the thread, so the user doesn't
+///     need to manually pick a parent for each send.
 ///   - Long-press inside the thread sheet does NOT offer "View
 ///     Thread" again (would be a no-op — we're already in it).
 ///   - "Reply" inside the thread sheet sets the model's reply
@@ -64,11 +64,42 @@ struct ThreadView: View {
     /// Change-log version `threadLines` reflects. `-1` until seeded on appear.
     @State private var threadVersion = -1
 
-    /// Reply target for the thread compose bar — latest message in the thread,
-    /// built via the centralized factory so it matches the main compose bar's
-    /// reply chip formatting exactly. O(1) over the snapshot.
+    /// Reply target for the thread compose bar, built via the centralized
+    /// factory so it matches the main compose bar's reply chip formatting
+    /// exactly.
     private var threadReplyTarget: ChatTranscriptModel.ReplyContext? {
-        threadLines.last.map { ChatTranscriptModel.replyContext(for: $0) }
+        Self.replyTarget(in: threadLines, rootMessageId: rootMessageId)
+    }
+
+    /// What a send from the thread sheet replies to: the latest line Twitch
+    /// can actually thread against — a delivered, non-deleted message. The
+    /// user's own `.sending` / `.failed` rows are skipped (they carry a
+    /// local `pending-…` id, not a message id), as are deleted placeholders.
+    /// With no such line the reply goes to the thread root. Nil only for an
+    /// empty thread.
+    static func replyTarget(
+        in threadLines: [ChatLine],
+        rootMessageId: String
+    ) -> ChatTranscriptModel.ReplyContext? {
+        if let latest = threadLines.last(where: { $0.kind == .message && $0.deliveryState == .delivered }) {
+            return ChatTranscriptModel.replyContext(for: latest)
+        }
+        if let root = threadLines.first(where: { $0.id == rootMessageId }) {
+            return ChatTranscriptModel.replyContext(for: root)
+        }
+        // The root has aged out of the buffer; every remaining member is a
+        // reply and so names the root. A direct reply to it also carries
+        // the root's author and text for the prompt.
+        guard !threadLines.isEmpty else { return nil }
+        let quotedRoot = threadLines
+            .compactMap(\.replyParent)
+            .first(where: { $0.parentMessageId == rootMessageId })
+        return ChatTranscriptModel.ReplyContext(
+            parentMessageId: rootMessageId,
+            parentAuthorDisplayName: quotedRoot?.parentAuthorDisplayName ?? "",
+            parentSnippet: quotedRoot?.parentBody ?? "",
+            threadRootMessageId: rootMessageId
+        )
     }
 
     var body: some View {
@@ -168,9 +199,12 @@ struct ThreadView: View {
             }
         }
         // Seed on open, then on each publish re-filter only if the published
-        // changes touch this thread — never on plain render passes.
+        // changes touch this thread — never on plain render passes. The
+        // publish trigger is read by `ThreadChangeObserver`, not here.
         .onAppear { reloadThread() }
-        .onChange(of: chatModel.changeVersion) { _, _ in refreshThreadIfTouched() }
+        .background {
+            ThreadChangeObserver(chatModel: chatModel) { refreshThreadIfTouched() }
+        }
     }
 
     /// Re-filters the buffer for this thread and records the version it
@@ -197,6 +231,23 @@ struct ThreadView: View {
                 threadVersion = through
             }
         }
+    }
+}
+
+/// Runs `onPublish` each time the transcript publishes. A zero-size view of
+/// its own so the per-flush `changeVersion` read invalidates only this —
+/// read in `ThreadView.body`, it re-ran the whole sheet (every row, the
+/// compose bar) for each batch of unrelated chat.
+private struct ThreadChangeObserver: View {
+    let chatModel: ChatTranscriptModel
+    let onPublish: () -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onChange(of: chatModel.changeVersion) { _, _ in onPublish() }
     }
 }
 
@@ -229,7 +280,11 @@ struct ThreadComposeBar: View {
 
     private var prompt: String {
         if let target = replyTarget {
-            return "Reply to \(target.parentAuthorDisplayName)"
+            // No name when the target is a thread root that has aged out
+            // of the buffer.
+            return target.parentAuthorDisplayName.isEmpty
+                ? "Reply in thread"
+                : "Reply to \(target.parentAuthorDisplayName)"
         }
         return "Send to #\(channelLoginName)"
     }

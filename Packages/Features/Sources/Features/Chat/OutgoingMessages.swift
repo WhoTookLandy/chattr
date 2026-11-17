@@ -23,6 +23,12 @@ final class OutgoingMessages {
     /// Sleeps until the earliest armed stuck-send deadline.
     private var fallbackWake: Task<Void, Never>?
 
+    /// True while the transcript isn't draining its mailbox (the app is in
+    /// the background): a send's echo may be sitting there unread, so an
+    /// overdue deadline proves nothing yet. Deadlines stay armed; nothing
+    /// acts on them until the hold is released.
+    private var fallbacksHeld = false
+
     init(store: TranscriptStore, reconciler: OutgoingMessageReconciler = OutgoingMessageReconciler()) {
         self.store = store
         self.reconciler = reconciler
@@ -122,11 +128,26 @@ final class OutgoingMessages {
         reconciler.cancelFallbacks()
     }
 
+    /// Holds (`true`) or releases (`false`) the stuck-send fallback — see
+    /// `fallbacksHeld`. Release only after the mailbox backlog has been
+    /// applied: echoes found there upgrade their rows as usual, and what is
+    /// still overdue then is settled here at once.
+    func setFallbacksHeld(_ held: Bool) {
+        guard held != fallbacksHeld else { return }
+        fallbacksHeld = held
+        if held {
+            fallbackWake?.cancel()
+            fallbackWake = nil
+        } else {
+            settleOverdueSends()
+        }
+    }
+
     /// One task covers every armed send: it sleeps until the earliest
     /// deadline, settles whatever is overdue, and re-arms for the next.
     private func scheduleFallbackWake() {
         fallbackWake?.cancel()
-        guard let deadline = reconciler.nextFallbackDeadline else {
+        guard !fallbacksHeld, let deadline = reconciler.nextFallbackDeadline else {
             fallbackWake = nil
             return
         }

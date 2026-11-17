@@ -115,9 +115,9 @@ public struct ChatScreen: View {
     // the per-message hot path.
 
     /// Brief "Reported & blocked" confirmation; auto-clears after ~2s.
-    /// Stays on ChatScreen (not ChatTranscript) because it's WRITTEN by the
-    /// report closures built in `chatRow(for:)` here; the transcript reads
-    /// it through a binding for the pill overlay.
+    /// Stays on ChatScreen (not ChatTranscript) because it's WRITTEN by
+    /// `blockAuthor(of:reason:isReport:)` here; the transcript reads it
+    /// through a binding for the pill overlay.
     @State private var showReportConfirmation = false
     @State private var reportConfirmationDismiss: Task<Void, Never>?
 
@@ -208,6 +208,12 @@ public struct ChatScreen: View {
         // declaring @Bindable inside body for view-scoped projections).
         @Bindable var bindableChatModel = chatModel
         @Bindable var clipLinkRouter = clipLinks
+        // Resolved once here and captured by the row factory below, which
+        // runs once per cell (see `RowDependencies`).
+        let rowDependencies = RowDependencies(
+            accountUserId: account.userId,
+            badgeStore: badgeStore
+        )
         // `.safeAreaBar(edge: .bottom)` pins the compose bar below the
         // scrolling content with integrated glass blur (iOS 26). The bar
         // lives INSIDE ChatScreen (not in ChatPagerScreen) because each
@@ -237,13 +243,20 @@ public struct ChatScreen: View {
                     channelLoginName: channelLoginName,
                     tabId: tabId,
                     connectionStatus: connectionStatus,
-                    rowContent: { line in chatRow(for: line) },
-                    rowInputs: rowInputs,
+                    rowContent: { line in chatRow(for: line, rowDependencies) },
+                    rowInputs: rowInputs(badgeStore: rowDependencies.badgeStore),
                     openURL: clipLinks.openURLAction,
                     onLineTapped: { line in
                         // Only real chat messages have an author to show.
                         guard line.kind == .message, !line.authorUserId.isEmpty else { return }
-                        userCardTarget = UserCardTarget(line: line)
+                        // The author's recent lines are filtered out of the
+                        // transcript here, once per presentation — not in
+                        // the sheet's content closure, which re-runs with
+                        // this body.
+                        userCardTarget = UserCardTarget(
+                            line: line,
+                            transcript: chatModel.transcriptSnapshot().lines
+                        )
                     },
                     showReportConfirmation: $showReportConfirmation
                 )
@@ -338,48 +351,29 @@ public struct ChatScreen: View {
         // User card: a short sheet over a still-usable chat; drag up for
         // bio + this user's recent messages here.
         .sheet(item: $userCardTarget) { target in
-            let row = chatRow(for: target.line)
+            let isOwnLine = target.line.authorUserId == rowDependencies.accountUserId
             UserCardSheet(
                 line: target.line,
-                badges: row.badgeEntries,
+                badges: rowDependencies.badgeStore?.entries(for: target.line.originalBadges) ?? [],
                 account: account,
                 accountStore: accountStore,
-                recentLines: chatModel.transcriptSnapshot().lines.filter {
-                    $0.authorUserId == target.line.authorUserId && $0.kind == .message
+                recentLines: target.recentLines,
+                rowContent: { chatRow(for: $0, rowDependencies) },
+                // An undelivered row has only its local `pending-…` id —
+                // nothing Twitch can thread a reply against.
+                onReply: target.line.deliveryState == .delivered
+                    ? { chatModel.beginReply(to: target.line) }
+                    : nil,
+                onBlock: isOwnLine ? nil : {
+                    blockAuthor(of: target.line, reason: .other, isReport: false)
                 },
-                rowContent: { chatRow(for: $0) },
-                onReply: { chatModel.beginReply(to: target.line) },
-                onBlock: target.line.authorUserId == account.userId ? nil : {
-                    Task {
-                        await blockStore?.block(
-                            userId: target.line.authorUserId,
-                            login: target.line.authorUserLogin,
-                            displayName: target.line.authorDisplayName,
-                            reason: .other
-                        )
-                    }
-                },
-                onReport: target.line.authorUserId == account.userId ? nil : { reason in
-                    Task {
-                        await blockStore?.block(
-                            userId: target.line.authorUserId,
-                            login: target.line.authorUserLogin,
-                            displayName: target.line.authorDisplayName,
-                            reason: reason
-                        )
-                        showReportConfirmation = true
-                        reportConfirmationDismiss?.cancel()
-                        reportConfirmationDismiss = Task { @MainActor in
-                            try? await Task.sleep(for: .seconds(2))
-                            guard !Task.isCancelled else { return }
-                            showReportConfirmation = false
-                        }
-                    }
+                onReport: isOwnLine ? nil : { reason in
+                    blockAuthor(of: target.line, reason: reason, isReport: true)
                 },
                 // Mods get timeouts / ban / warn — never on themselves or
                 // the broadcaster (Twitch refuses both anyway).
                 moderation: (chatModel.currentUserCanModerate
-                             && target.line.authorUserId != account.userId
+                             && !isOwnLine
                              && target.line.authorUserId != channelId)
                     ? chatModel : nil
             )
@@ -391,7 +385,7 @@ public struct ChatScreen: View {
             ThreadView(
                 rootMessageId: root.id,
                 chatModel: chatModel,
-                badgeStore: badgeStore,
+                badgeStore: rowDependencies.badgeStore,
                 channelLoginName: channelLoginName,
                 channelDisplayName: channelDisplayName
             )
@@ -535,17 +529,29 @@ public struct ChatScreen: View {
         //
         // Result: structured concurrency is preserved (no orphan tasks
         // outliving the view) AND the data layer is robust under remount.
+        //
+        // The load goes through the registry, not straight to the index:
+        // the registry starts it too when it creates the session (a restored
+        // background tab never mounts this screen), and when the table
+        // changes it has the session re-normalize the rows it tokenized
+        // against the old one. This call is the remount retry.
         .task {
-            guard let index = emoteIndex else { return }
+            guard let registry = channelSessionRegistry else { return }
+            let accountUserId = account.userId
+            let index = registry.emoteIndex(
+                forAccountUserId: accountUserId,
+                channelId: channelId
+            )
             let id = signposter.makeSignpostID()
             let state = signposter.beginInterval(
                 "emote-load",
                 id: id,
                 "channel=\(channelLoginName)"
             )
-            await index.load(
-                broadcasterId: channelId,
-                broadcasterLogin: channelLoginName
+            await registry.loadEmotes(
+                accountUserId: accountUserId,
+                channelId: channelId,
+                channelLoginName: channelLoginName
             )
             let count = index.snapshot().count
             signposter.endInterval("emote-load", state, "count=\(count)")
@@ -592,6 +598,7 @@ public struct ChatScreen: View {
         ComposeBar(
             channelLoginName: channelLoginName,
             channelDisplayName: channelDisplayName,
+            tabId: tabId,
             replyContext: chatModel.replyContext,
             chatRestrictions: chatModel.chatRestrictions,
             // The state object, not its value: only the bar observes it.
@@ -689,11 +696,22 @@ public struct ChatScreen: View {
     /// re-renders the transcript and the list reconfigures its rows. Both
     /// change rarely (badges load once per channel; mod status flips at most
     /// a few times), so the extra dependencies cost nothing at message rate.
-    private var rowInputs: ChatRowInputs {
+    private func rowInputs(badgeStore: ChatBadgeStore?) -> ChatRowInputs {
         ChatRowInputs(
             badgeEntryCount: badgeStore?.entries.count ?? 0,
             canModerate: chatModel.currentUserCanModerate
         )
+    }
+
+    /// What `chatRow(for:_:)` needs besides the line and the model, resolved
+    /// once per `body`. The row factory runs once per configured cell, and
+    /// resolving these there meant a registry lookup (which builds its key
+    /// string) and several `account.userId` reads (a SwiftData getter) for
+    /// every cell. Both are fixed for this screen's lifetime, so capturing
+    /// them obeys the callback rule below.
+    private struct RowDependencies {
+        let accountUserId: String
+        let badgeStore: ChatBadgeStore?
     }
 
     /// Builds the row for one line — badge lookup plus callbacks — in one
@@ -705,47 +723,48 @@ public struct ChatScreen: View {
     /// compares callbacks by presence, not identity (`ChatRow.Affordances`),
     /// so when a row compares equal SwiftUI keeps the OLD closures — one
     /// capturing any other changing value would silently go stale.
-    private func chatRow(for line: ChatLine) -> ChatRow {
-        ChatRow(
+    private func chatRow(for line: ChatLine, _ dependencies: RowDependencies) -> ChatRow {
+        let isOwnLine = line.authorUserId == dependencies.accountUserId
+        return ChatRow(
             line: line,
-            badgeEntries: badgeStore?.entries(for: line.originalBadges) ?? [],
+            badgeEntries: dependencies.badgeStore?.entries(for: line.originalBadges) ?? [],
             onRetry: { Task { await chatModel.retry(failedLineId: line.id) } },
             onReply: { chatModel.beginReply(to: line) },
             onViewThread: {
                 viewingThreadRootId = ThreadRootID(id: ChatTranscriptModel.threadRoot(of: line))
             },
-            onDelete: (chatModel.currentUserCanModerate
-                       && line.authorUserId != account.userId)
+            onDelete: (chatModel.currentUserCanModerate && !isOwnLine)
                 ? { Task { await chatModel.deleteMessage(withId: line.id) } }
                 : nil,
-            onBlock: line.authorUserId == account.userId ? nil : {
-                Task {
-                    await blockStore?.block(
-                        userId: line.authorUserId,
-                        login: line.authorDisplayName,
-                        displayName: line.authorDisplayName,
-                        reason: .other
-                    )
-                }
+            onBlock: isOwnLine ? nil : {
+                blockAuthor(of: line, reason: .other, isReport: false)
             },
-            onReport: line.authorUserId == account.userId ? nil : { reason in
-                Task {
-                    await blockStore?.block(
-                        userId: line.authorUserId,
-                        login: line.authorDisplayName,
-                        displayName: line.authorDisplayName,
-                        reason: reason
-                    )
-                    showReportConfirmation = true
-                    reportConfirmationDismiss?.cancel()
-                    reportConfirmationDismiss = Task { @MainActor in
-                        try? await Task.sleep(for: .seconds(2))
-                        guard !Task.isCancelled else { return }
-                        showReportConfirmation = false
-                    }
-                }
+            onReport: isOwnLine ? nil : { reason in
+                blockAuthor(of: line, reason: reason, isReport: true)
             }
         )
+    }
+
+    /// Blocks the author of `line` — the one path behind Block and Report,
+    /// from the row menu and the user card alike. A report is a block with
+    /// a reason, and also flashes the "Reported & blocked" pill for ~2s.
+    private func blockAuthor(of line: ChatLine, reason: UserBlockReason, isReport: Bool) {
+        Task {
+            await blockStore?.block(
+                userId: line.authorUserId,
+                login: line.authorUserLogin,
+                displayName: line.authorDisplayName,
+                reason: reason
+            )
+            guard isReport else { return }
+            showReportConfirmation = true
+            reportConfirmationDismiss?.cancel()
+            reportConfirmationDismiss = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                showReportConfirmation = false
+            }
+        }
     }
 
     // MARK: - Session lifecycle
@@ -828,8 +847,9 @@ public struct ChatScreen: View {
             //
             // Rows arrive already normalized: the session tokenizes each
             // message once, off the main actor, against the registry-owned
-            // EmoteIndex this screen's emote `.task` loads (same instance),
-            // and every tab showing the channel shares the result.
+            // EmoteIndex (the registry loads it; this screen's emote `.task`
+            // retries on remount), and every tab showing the channel shares
+            // the result.
             let epoch = await chatModel.attach(
                 sessions: [session],
                 currentUserId: account.userId,

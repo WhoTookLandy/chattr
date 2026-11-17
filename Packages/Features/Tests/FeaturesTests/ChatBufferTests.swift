@@ -256,6 +256,25 @@ struct ChatBufferTests {
         #expect(buf.line(id: "v2")?.kind == .deletedPlaceholder)
     }
 
+    @Test("deliveryState(of:) reads a line's state by id, through blocks and re-keys; nil when absent")
+    func deliveryStateLookup() {
+        var buf = ChatBuffer(cap: 2)
+        buf.blockedIds = ["villain"]
+        let sending = ChatLine(id: "pending-1", authorDisplayName: "me", runs: [.text("x")], deliveryState: .sending)
+        buf.append(sending)
+        buf.append(line("v", author: "villain"))
+        #expect(buf.deliveryState(of: "pending-1") == .sending)
+        #expect(buf.deliveryState(of: "v") == .delivered)   // filtered from view, still stored
+        #expect(buf.deliveryState(of: "missing") == nil)
+
+        _ = buf.replace(id: "pending-1", with: sending.with(deliveryState: .delivered, id: "msg-1"))
+        #expect(buf.deliveryState(of: "pending-1") == nil)
+        #expect(buf.deliveryState(of: "msg-1") == .delivered)
+
+        buf.append(line("b")); buf.append(line("c"))   // trims msg-1 and v
+        #expect(buf.deliveryState(of: "msg-1") == nil)
+    }
+
     @Test("reset empties the buffer")
     func resetClears() {
         var buf = ChatBuffer(cap: 100)

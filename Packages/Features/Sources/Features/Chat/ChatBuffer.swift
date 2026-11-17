@@ -15,7 +15,8 @@ import ChatModel
 ///     the oldest line is a pointer bump + batch compaction, not a memmove.
 ///   - **Change emission:** each op records `.appended` / `.removed` /
 ///     `.reconfigured` / `.reset` into `pendingChanges`; `takeChanges()` drains
-///     them. The contract (`ChatChangeContractTests`) guarantees applying a
+///     them (a `replaceAll` rebuild records one `.reset` for the lot). The
+///     contract (`ChatChangeContractTests`) guarantees applying a
 ///     batch to the previous visible state reproduces the new one exactly, so
 ///     the view never has to re-diff.
 ///   - **Late moderation:** visible lines that age out are remembered (up to
@@ -118,6 +119,14 @@ struct ChatBuffer {
     func line(id: String) -> ChatLine? {
         guard let idx = index(of: id) else { return nil }
         return storage[idx]
+    }
+
+    /// The delivery state of the line with `id`, or nil when absent — read
+    /// in place, so the per-message echo check doesn't copy a whole
+    /// `ChatLine` to look at one enum.
+    func deliveryState(of id: String) -> ChatLine.DeliveryState? {
+        guard let idx = index(of: id) else { return nil }
+        return storage[idx].deliveryState
     }
 
     /// Drains and returns the changes accumulated since the last call.
@@ -241,6 +250,32 @@ struct ChatBuffer {
 
     /// Empties the buffer (keeps the configured `cap` and block set).
     mutating func reset() {
+        removeAllLines()
+        pendingChanges.append(.reset([]))
+    }
+
+    /// Replaces the whole contents with whatever `rebuild` puts into the
+    /// emptied buffer (a reprime: the session's snapshot replayed through the
+    /// usual appends and edits), recorded as ONE `.reset` of the final
+    /// visible lines.
+    ///
+    /// The steps in between are not changes a view may see: emitted one by
+    /// one (`.reset([])`, then an `.appended` per row) they would empty the
+    /// list of a reader in scrollback, whose feed shows a reset at once but
+    /// holds appends back until it returns to the live edge.
+    mutating func replaceAll(_ rebuild: (inout ChatBuffer) -> Void) {
+        removeAllLines()
+        let recorded = pendingChanges.count
+        rebuild(&self)
+        pendingChanges.removeSubrange(recorded...)
+        pendingChanges.append(.reset(lines))
+    }
+
+    // MARK: - Internals
+
+    /// Drops every line, retained trimmed ones included, without recording a
+    /// change — the caller records the wholesale one.
+    private mutating func removeAllLines() {
         storage.removeAll(keepingCapacity: true)
         head = 0
         _lines.removeAll(keepingCapacity: true)
@@ -249,10 +284,7 @@ struct ChatBuffer {
         trimmed.removeAll()
         trimmedOrder.removeAll()
         trimmedHead = 0
-        pendingChanges.append(.reset([]))
     }
-
-    // MARK: - Internals
 
     /// Remembers a visible line the window just dropped (see `trimmed`),
     /// evicting the oldest past `cap`. O(1) amortized — same head-index ring

@@ -58,7 +58,12 @@ struct ChatListEdit: Equatable {
 /// same id (order must hold). A row's own deferred trim doesn't block an
 /// in-place edit: the buffer keeps reporting moderation of recently trimmed
 /// lines precisely so held rows get struck. A `.reset` applies immediately
-/// too: it is wholesale (a block-list change) and supersedes the backlog.
+/// too: it is wholesale (a block-list change, or a reprime that rebuilt the
+/// transcript) and supersedes the backlog — the rows on screen can no longer
+/// be trusted, and holding them would keep a just-blocked author visible.
+/// It always carries the complete new list, so the reader is never left with
+/// an empty one; rows that survive keep their cells, and the controller
+/// re-anchors the viewport on the first visible row that does.
 /// The backlog is bounded by `maxDeferredChanges`; past it the feed drops it
 /// and resets from a snapshot on resume, since a full buffer's worth of churn
 /// has replaced every row anyway.
@@ -202,9 +207,10 @@ struct ChatListFeed {
         for change in published {
             switch change {
             case .reset:
-                // Wholesale (block-list change): show it now; it supersedes
-                // whatever was held back. `unreadCount` is kept on purpose:
-                // the held appends land below the viewport, still unseen.
+                // Wholesale (block-list change, reprime): show it now; it
+                // supersedes whatever was held back. `unreadCount` is kept on
+                // purpose: the held appends land below the viewport, still
+                // unseen.
                 clearDeferred()
                 process(change)
             case .reconfigured(let line) where liveIds.contains(line.id) && !deferredIds.contains(line.id):

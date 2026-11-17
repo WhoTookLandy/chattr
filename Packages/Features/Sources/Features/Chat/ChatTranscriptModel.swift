@@ -198,6 +198,49 @@ public final class ChatTranscriptModel {
         store.threadSnapshot(rootedAt: rootMessageId)
     }
 
+    /// How many lines the transcript retains — the ceiling for the jump
+    /// pill's "N new". Not observed.
+    var lineCap: Int { store.lineCap }
+
+    // MARK: - Background pause
+
+    /// True while the backlog a pause left behind is being applied: those
+    /// rows are not news any more, so they don't ping.
+    @ObservationIgnored private var isCatchingUp = false
+
+    /// Parks (`true`) or resumes (`false`) the live feed while the app is in
+    /// the background. The EventSub socket can stay up there (background
+    /// audio, Picture in Picture) and the session keeps its ring current,
+    /// but nobody can see this transcript: draining would spend a main-actor
+    /// turn per batch on rows, echo reconciliation and publishes for nothing.
+    ///
+    /// Paused, updates wait in the subscription mailboxes — bounded, with
+    /// the session swapping an overflowing backlog for one `.reprime` — and
+    /// the stuck-send fallback holds, since the echo it would give up on may
+    /// be waiting there. Resuming applies the backlog in this turn through
+    /// the usual `apply` (restrictions, mod status and our own timeout /
+    /// ban land in order with the rows), silently — a mention from minutes
+    /// ago must not ping now — and publishes at once, so the list is current
+    /// by the first foreground frame. Mention watchers have their own
+    /// subscriptions and never pause.
+    ///
+    /// Idempotent; a no-op while detached beyond remembering the state for
+    /// the next attach.
+    func setLiveUpdatesPaused(_ paused: Bool) {
+        guard paused != attachment.isDrainingPaused else { return }
+        if paused {
+            attachment.setDrainingPaused(true)
+            outgoing.setFallbacksHeld(true)
+            return
+        }
+        isCatchingUp = true
+        let caughtUp = attachment.setDrainingPaused(false)
+        isCatchingUp = false
+        // After the catch-up: whatever is still overdue really has no echo.
+        outgoing.setFallbacksHeld(false)
+        if caughtUp { store.flushPendingChanges() }
+    }
+
     // MARK: - Attach / detach
 
     /// Subscribes to each session, primes the transcript from their combined
@@ -545,8 +588,7 @@ public final class ChatTranscriptModel {
     private func applyLiveMessage(_ normalized: NormalizedMessage) {
         let message = normalized.message
         // Filter first: a hidden message must not reach echo reconciliation,
-        // ingest, or the highlight sound (which reads the newest row and
-        // would otherwise ping off a stale one). Own messages are exempt.
+        // the transcript, or the highlight sound. Own messages are exempt.
         if policy.hides(message) { return }
         observeOwnEcho(message)
 
@@ -554,20 +596,25 @@ public final class ChatTranscriptModel {
             policy.presenting(normalized.line)
         }
         if consumed { return }
-        store.ingest(.message(normalized), policy: policy)
-        playHighlightSoundIfNeeded(for: normalized)
+        // Already filtered above, so append directly rather than through
+        // `ingest`, which would run the filter a second time.
+        if store.appendLiveMessage(normalized, policy: policy) {
+            playHighlightSoundIfNeeded(for: normalized)
+        }
     }
 
-    /// Pings for a freshly appended highlighted row (`store.last`: a
-    /// self-mention or keyword match) — only LIVE (history never pings),
-    /// only someone else's (an own message here is a failed send's late
-    /// echo), never a blocked user's. The setting is read last, so only an
-    /// actual candidate pays for it.
+    /// Pings for a freshly appended row the caller found highlighted (a
+    /// self-mention or keyword match — the one check nearly every message
+    /// fails, so it runs first and the rest is paid only by a candidate) —
+    /// only LIVE (history never pings, nor does the backlog a background
+    /// pause left behind), only someone else's (an own message here is a
+    /// failed send's late echo), never a blocked user's. The setting is read
+    /// last.
     private func playHighlightSoundIfNeeded(for normalized: NormalizedMessage) {
-        guard !normalized.line.isHistorical,
+        guard !isCatchingUp,
+              !normalized.line.isHistorical,
               !selfChatter.wrote(normalized.message),
               !store.blockedIds.contains(normalized.message.chatterUserId),
-              store.last?.isHighlighted == true,
               dependencies.isHighlightSoundEnabled() else { return }
         dependencies.playHighlightSound()
     }
@@ -596,12 +643,15 @@ public final class ChatTranscriptModel {
     /// answers is settled and its optimistic row dropped rather than swapped.
     /// Only new echoes count, so an old identical message in late history
     /// can't settle a fresh send.
+    ///
+    /// The echoes are settled BEFORE the replay (neither step reads rows), so
+    /// the surviving local rows go into the same rebuild and the views get
+    /// one wholesale change — not a reset followed by appends, which a reader
+    /// in scrollback would have held back as "new".
     private func reprime(with snapshot: [ChannelUpdate]) {
         let previousLines = store.currentLines
         let previousIds = Set(previousLines.map(\.id))
         let localRows = previousLines.filter { outgoing.isLocalOnly($0) }
-
-        store.replay(snapshot, policy: policy)
 
         var settledPendingIds = Set<String>()
         for update in snapshot {
@@ -614,11 +664,11 @@ public final class ChatTranscriptModel {
             }
         }
 
-        var kept = 0
-        for row in localRows where !settledPendingIds.contains(row.id) && !store.contains(id: row.id) {
-            store.append(row)
-            kept += 1
-        }
+        let kept = store.replay(
+            snapshot,
+            policy: policy,
+            keeping: localRows.filter { !settledPendingIds.contains($0.id) }
+        )
         outgoing.pruneLocallySettled()
         // The live updates this replaces may have included our own clear or
         // echo (a mailbox overflow drops them) — and the snapshot only

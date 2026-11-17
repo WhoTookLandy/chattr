@@ -1,4 +1,5 @@
 import SwiftUI
+import Core
 import Channels
 
 /// A slim notice at the top of chat when the signed-in user is timed out,
@@ -81,7 +82,7 @@ struct OwnChatRestrictionBanner: View {
         switch restriction {
         case .warned:
             Button("Open") {
-                if let url = URL(string: "https://www.twitch.tv/\(channelLoginName)") {
+                if let url = Endpoints.TwitchWeb.channel(login: channelLoginName) {
                     openURL(url)
                 }
             }

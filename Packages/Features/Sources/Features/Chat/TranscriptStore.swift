@@ -118,8 +118,12 @@ final class TranscriptStore {
     /// A row's delivery state, or nil when no row has that id — the lookup
     /// `OutgoingMessageReconciler` decides against.
     func deliveryState(ofRow id: String) -> ChatLine.DeliveryState? {
-        buffer.line(id: id)?.deliveryState
+        buffer.deliveryState(of: id)
     }
+
+    /// How many lines the transcript retains (the Chat History setting) —
+    /// the most "new messages" a jump to the live edge can reveal.
+    var lineCap: Int { buffer.cap }
 
     /// Every line of the thread rooted at `rootMessageId` — the root plus any
     /// reply naming it as root, in order. O(lines): computed on demand
@@ -165,6 +169,27 @@ final class TranscriptStore {
     /// priming, reprime), so initial state and live state can't drift. Rows
     /// arrive normalized by the session; nothing is tokenized here.
     func ingest(_ update: ChannelUpdate, policy: ChatViewerPolicy) {
+        Self.ingest(update, into: &buffer, policy: policy)
+    }
+
+    /// Appends a live message the caller has already checked against
+    /// `policy.hides` (it filters before echo reconciliation), so the filter
+    /// runs once per message. Returns whether the row, as this viewer sees
+    /// it, is highlighted.
+    @discardableResult
+    func appendLiveMessage(_ normalized: NormalizedMessage, policy: ChatViewerPolicy) -> Bool {
+        let line = policy.presenting(normalized.line)
+        buffer.append(line)
+        return line.isHighlighted
+    }
+
+    /// `ingest` against an explicit buffer, so `replay` can run it inside
+    /// the buffer's own rebuild.
+    private static func ingest(
+        _ update: ChannelUpdate,
+        into buffer: inout ChatBuffer,
+        policy: ChatViewerPolicy
+    ) {
         switch update {
         case .message(let normalized):
             // The live path filters before echo reconciliation; this check
@@ -205,12 +230,31 @@ final class TranscriptStore {
         }
     }
 
-    /// Rebuilds the rows from scratch by replaying `updates` through `ingest`.
-    func replay(_ updates: [ChannelUpdate], policy: ChatViewerPolicy) {
-        buffer.reset()
-        for update in updates {
-            ingest(update, policy: policy)
+    /// Rebuilds the rows from scratch by replaying `updates` through `ingest`,
+    /// then re-appending at the tail each of `localRows` (rows only this
+    /// transcript holds) the replay didn't already produce. Returns how many
+    /// of those it re-appended.
+    ///
+    /// Views receive the whole rebuild as ONE wholesale change (see
+    /// `ChatBuffer.replaceAll`), local rows included — never an emptied list
+    /// that refills row by row.
+    @discardableResult
+    func replay(
+        _ updates: [ChannelUpdate],
+        policy: ChatViewerPolicy,
+        keeping localRows: [ChatLine] = []
+    ) -> Int {
+        var kept = 0
+        buffer.replaceAll { rebuilt in
+            for update in updates {
+                Self.ingest(update, into: &rebuilt, policy: policy)
+            }
+            for row in localRows where !rebuilt.contains(id: row.id) {
+                rebuilt.append(row)
+                kept += 1
+            }
         }
+        return kept
     }
 
     // MARK: - Publishing

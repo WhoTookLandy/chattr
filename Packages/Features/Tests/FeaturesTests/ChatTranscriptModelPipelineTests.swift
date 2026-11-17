@@ -150,6 +150,26 @@ struct ChatTranscriptModelPipelineTests {
         await model.detach()
     }
 
+    @Test("A reprime reaches readers as ONE wholesale reset, kept local rows included")
+    func reprimePublishesOneReset() async throws {
+        let model = ChatTranscriptModel()
+        await model.attach(sessions: [makeSession()], currentUserId: "me-1", currentUserLogin: "me")
+        model.apply(message("old"))
+        // Offline, so the send fails at once and stays as a local row.
+        await model.send(text: "my message")
+        let local = try #require(model.lines.last)
+        let before = model.transcriptSnapshot().version
+
+        model.apply(.reprime([message("h1"), message("old")]))
+
+        let rebuilt = model.lines
+        #expect(rebuilt.map(\.id) == ["h1", "old", local.id])
+        // Not `.reset([])` plus an append per row: a list in scrollback
+        // applies resets at once and holds appends back.
+        #expect(model.changes(since: before) == .changes([.reset(rebuilt)], through: before + 1))
+        await model.detach()
+    }
+
     @Test("An own echo arriving inside a reprime settles its in-flight send instead of duplicating it")
     func reprimeSettlesInFlightSendByEcho() async throws {
         let session = ChannelSession(
