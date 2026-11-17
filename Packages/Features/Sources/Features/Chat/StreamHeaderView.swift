@@ -143,6 +143,7 @@ struct StreamHeaderView: View {
         .onChange(of: landscapeStage.isActive) { _, staged in
             if !staged, isActive { wirePlayerCallbacks() }
         }
+        .retainsPictureInPictureFlag(for: channel.channelId, in: playback)
         #endif
     }
 

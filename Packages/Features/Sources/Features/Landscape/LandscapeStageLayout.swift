@@ -180,6 +180,9 @@ struct LandscapeStageLayout: ViewModifier {
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
+        #if os(iOS)
+        .retainsPictureInPictureFlag(for: channel.channelId, in: playback)
+        #endif
     }
 
     /// Written once per drag, on release — the only point where the chat

@@ -205,6 +205,11 @@ enum TwitchWebPlayer {
                 controller.update(\.isPaused, to: paused)
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
+                // First play of the page is its autoplay: `noteDidPlay`
+                // pauses it again if the user had paused (say, while native
+                // was buffering before this fallback), and it never counts
+                // as the user resuming.
+                if paused { controller.noteDidPause() }
                 if body["playing"] as? Bool == true { controller.noteDidPlay() }
             case "pipStart":
                 controller.pictureInPictureDidStart()

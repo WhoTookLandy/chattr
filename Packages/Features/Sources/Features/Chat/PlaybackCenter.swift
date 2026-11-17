@@ -121,11 +121,16 @@ final class PlaybackCenter {
 
     // MARK: Per-channel PiP
 
-    /// One observable flag per channel page that has asked
+    /// One observable flag per channel with a mounted reader
     /// (`pictureInPictureFlag(for:)`). Not observed itself: reading the
     /// dictionary registers no dependency, only reading a flag's
     /// `isActive` does.
     @ObservationIgnored private var pictureInPictureFlags: [String: ChannelPictureInPictureFlag] = [:]
+    /// Mounted views holding each channel's flag
+    /// (`retainsPictureInPictureFlag(for:in:)`). A flag goes once its last
+    /// holder unmounts, so channels visited once don't keep one for the
+    /// app's lifetime.
+    @ObservationIgnored private var pictureInPictureFlagOwners: [String: Int] = [:]
     /// The channel whose flag is currently set, if any.
     @ObservationIgnored private var pictureInPictureChannelID: String?
 
@@ -135,6 +140,9 @@ final class PlaybackCenter {
     /// re-render on any PiP transition. A PiP start or stop here writes at
     /// most two flags — the channel leaving PiP and the one entering — so
     /// only the affected page re-evaluates.
+    ///
+    /// Read from `body`: allocates only the first time a channel is asked
+    /// for. Readers keep it with `retainsPictureInPictureFlag(for:in:)`.
     func pictureInPictureFlag(for channelId: String) -> ChannelPictureInPictureFlag {
         if let flag = pictureInPictureFlags[channelId] { return flag }
         let flag = ChannelPictureInPictureFlag()
@@ -142,6 +150,39 @@ final class PlaybackCenter {
         pictureInPictureFlags[channelId] = flag
         return flag
     }
+
+    /// A view reading `channelId`'s flag mounted. Refcount, like
+    /// `claim` / `release` for hosts.
+    func retainPictureInPictureFlag(for channelId: String) {
+        _ = pictureInPictureFlag(for: channelId)
+        pictureInPictureFlagOwners[channelId, default: 0] += 1
+    }
+
+    /// A view reading `channelId`'s flag unmounted. With no holder left the
+    /// flag is dropped on the next main-actor turn, not here: a remount (or
+    /// a pager window shift) runs the new view's `body` — reading the
+    /// existing flag — before the old view's disappear and the new one's
+    /// appear. Dropping it in between would leave the new view observing a
+    /// flag that's no longer written.
+    func releasePictureInPictureFlag(for channelId: String) {
+        guard let owners = pictureInPictureFlagOwners[channelId] else { return }
+        guard owners <= 1 else {
+            pictureInPictureFlagOwners[channelId] = owners - 1
+            return
+        }
+        pictureInPictureFlagOwners[channelId] = nil
+        Task { @MainActor [weak self] in
+            self?.dropUnownedPictureInPictureFlag(channelId)
+        }
+    }
+
+    private func dropUnownedPictureInPictureFlag(_ channelId: String) {
+        guard pictureInPictureFlagOwners[channelId] == nil else { return }
+        pictureInPictureFlags[channelId] = nil
+    }
+
+    /// Flags held by mounted views — for tests.
+    var pictureInPictureFlagCount: Int { pictureInPictureFlags.count }
 
     private func syncPictureInPictureFlags() {
         let current = controller.isPictureInPictureActive ? channel?.channelId : nil
@@ -311,6 +352,16 @@ final class PlaybackCenter {
 @Observable
 final class ChannelPictureInPictureFlag {
     fileprivate(set) var isActive = false
+}
+
+extension View {
+    /// Keeps `channelId`'s PiP flag (`PlaybackCenter.pictureInPictureFlag(for:)`)
+    /// alive while this view is mounted. Appear / disappear only — no
+    /// observation, nothing per render.
+    func retainsPictureInPictureFlag(for channelId: String, in center: PlaybackCenter?) -> some View {
+        onAppear { center?.retainPictureInPictureFlag(for: channelId) }
+            .onDisappear { center?.releasePictureInPictureFlag(for: channelId) }
+    }
 }
 
 /// A pause taken with `PlaybackCenter.holdPlayback`.
