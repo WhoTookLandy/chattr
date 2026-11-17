@@ -1,50 +1,34 @@
 Watch while you chat
 
 NEW
-• Signed-out "just look around" chat now shows emotes: Twitch, 7TV, BTTV and FFZ, with name colors, using the same chat rows as when signed in.
-• @ mentions: type @ in the message box and pick a name from the suggestions (recent chatters and the streamer).
-• The keyboard now goes away after you send.
-• The button left of the message box is now ⋯ (More) instead of +.
-• Mini player: drag it anywhere and let go, it settles in the nearest corner. Pinch it to make it bigger or smaller.
-• New setting, Settings → Video & Device → PiP When Leaving Chat: backing out of a playing chat uses Apple’s floating PiP window (drag, resize, works outside the app) instead of the mini player.
-• Picture in picture: the video area in chat collapses to a slim bar so chat gets the space; the floating mini player stays out of the way; PiP return button takes you back to the chat.
-• New sign-in screen, plus "just look around": type a channel name to watch its stream and read chat without an account.
-• Replies look cleaner: a thin connector into a one-line quote, no grey box.
-• Video controls are plain icons again. Swipe down on the video for picture in picture.
-• Tap the viewer count on the video for the viewer list (moderators only; sign out and back in once to grant the new permission).
-• A compact Subscribe button next to the stream info (hold it for Gift a Sub).
-• New tab bar: Home, Chats, Activity, Search. Chats has its own tab (with a red badge when someone mentions you). Settings live behind your avatar on Home.
-• Home: swipe between Live and Following. Following is split into Live and Offline.
-• Chats: live chats first, swipe left to close, and the top-right menu closes all offline chats at once.
-• Long-press any channel for a preview with Watch, Listen (audio only) and Chat only.
-• Search shows who you follow that is live (by category) before you type, and your followed channels first as you type.
-• Streams play right inside chat. Tap the video for controls, the title, tags and Subscribe; swipe down on it to hide it.
-• Mini player: back out of a chat and the stream keeps playing in a floating player across the app. Tap it to return, × or fling it down to stop, drag it to another corner.
-• Audio only (headphones button on the video, or More → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
-• Native video player (You → Video, experimental): Apple's player with picture-in-picture, fullscreen and a max-quality setting. If it can't load a stream, chattr switches to Twitch's web player.
-• Jump between open chats from the "1 / N" chip on the video. Close a chat from the ⋯ menu next to the message box.
-• Home → Live now lists every live channel you follow (no more "See all").
-• Tap any chat message to see that user's card: badges, join date, bio and their recent messages (drag it up). Reply, block or report from there.
-• Message bar: press Return to send, and tap ⋯ for more options. Tap the chat to put the keyboard away.
-• Bots look like everyone else again (no more greyed-out messages). Compact bots is still an option in Filters.
-• Followers-only, slow mode and other chat restrictions now show in the message box.
-• Moderators: tap someone's message for one-tap timeouts (1m, 10m, 1h, 1d; edit the list from the shield menu), plus Ban, Warn and Unban. Sign out and back in once to grant the new permissions.
-• If you're timed out, banned or warned in a chat, a notice at the top says so (with a countdown for timeouts) and the message box explains why you can't send.
+• Settings are reorganised into Appearance, Chat, Video & Device, Accounts & Data and About, with search at the top.
+• Sign in with a code: tap Approve on Twitch (or enter the code at twitch.tv/activate). "Use browser instead" is still there.
+• Landscape: turn the phone sideways while a stream plays for chat beside (or over) the video. Drag the divider to resize chat. Options in Settings → Video & Device → Landscape.
+• Create Clip from the ⋯ menu while a channel is live. Clip links in chat now play inside the app.
+• Polls, predictions and Hype Trains appear as banners at the top of chat on your own channel (Twitch only shares them with the broadcaster). Toggles in Settings → Chat → Filters.
+• Moderators: one-tap timeouts on the user card (1m, 10m, 1h, 1d; edit them from the shield menu), plus Ban, Warn and Unban.
+• If you're timed out, banned or warned, a notice at the top of chat says so (with a countdown) and the message box explains why you can't send.
+• Settings → Video & Device: Picture in Picture (With Sound On / Always / Off), When a Chat Opens (as last left / closed / autoplay muted on Wi-Fi), PiP When Leaving Chat, Keep Screen Awake and Haptic Feedback.
+• Mini player: drag it anywhere and it settles in the nearest corner; pinch to resize.
+• @ mentions: type @ and pick a name from the suggestions.
+• Signed-out "just look around" chat now shows emotes and name colors.
+• The keyboard goes away after you send, and the button left of the message box is now ⋯ (More).
+
+Sign out and back in once to grant the new permissions (moderation, clips, polls and predictions).
 
 FIXED
-• Tapping the "Latest" pill sometimes tapped the message underneath it instead.
+• Being signed out out of the blue when Twitch briefly rejected a request: token refreshes now always go through chattr's sign-in server.
+• Tapping the "Latest" pill sometimes tapped the message underneath it.
 • The Live / Offline bar no longer sticks to the top of lists.
-• The app freezing after tapping back from a chat (for real this time).
 
 PLEASE TEST
-A. Type @ and a few letters: do the right names show? Tap one, keep typing.
-B. Drag and pinch the mini player, with the web player and with the native player.
-C. Turn on PiP When Leaving Chat and back out of a playing chat.
-0. The new tabs: open a channel from Home or Search (it should land in Chats), and relaunch the app with a chat open (it should reopen that chat).
-1. Back out of a playing chat: does the mini player appear without the stream restarting?
-2. Tap the mini player, then back out again a few times.
-3. Audio only, with and without the native player turned on.
-4. A mature channel: if the native player falls back to the web player, does "Start Watching" appear and work?
-5. Tap back from a chat, several times and across different chats: no freezes?
-6. Swipe in from the left edge to go back while a video is playing.
-7. In a channel you moderate (use an alt account): time it out from its user card and check the countdown banner and disabled message box on the alt. On the alt, swipe two chats away and back: the banner and countdown should still be there. Then Unban from the card (in the shield menu, unless it is your own channel). Try Ban (confirmation) and Warn (reason required).
+1. Settings: search for "pip", "sleep" and "poll" and open each result.
+2. Sign out, then sign in with the code (try Approve on Twitch with the Twitch app installed). Use the app for a while: you should stay signed in.
+3. Rotate to landscape with a stream playing: drag the divider, flip chat sides, open the keyboard, rotate back. The stream shouldn't restart.
+4. Create a clip on a live channel, and tap a clip link in chat.
+5. Picture in Picture on With Sound On: leave the app muted, then unmuted. Then try Keep Screen Awake and Autoplay on Wi-Fi.
+6. Open a clip while a stream plays, leave the app, come back, close the clip: the stream should resume only once you're back.
+7. On your own channel, start a poll or prediction from the Twitch dashboard and watch the banner.
+8. In a channel you moderate (use an alt): time the alt out from its user card and check the banner and countdown on the alt, including after swiping two chats away and back. Try Ban, Warn and Unban.
+9. Type @ and a few letters, tap a name, keep typing.
+10. Turn on PiP When Leaving Chat and back out of a playing chat.
