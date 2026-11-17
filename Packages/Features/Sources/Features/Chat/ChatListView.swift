@@ -49,6 +49,10 @@ struct ChatListView: UIViewControllerRepresentable {
     /// effect: `.hard` cutoff when the list stops at the safe-area edge,
     /// system-default soft dissolve when content runs underneath glass.
     var extendsToTop: Bool = false
+    /// False for a mounted-but-off-screen pager neighbour: the list keeps
+    /// up at a throttled rate instead of applying every flush, and catches
+    /// up at once when it becomes the visible page.
+    var isVisible: Bool = true
     /// A message row was tapped (with the keyboard down — a tap while
     /// typing just dismisses the keyboard).
     var onLineTapped: (ChatLine) -> Void = { _ in }
@@ -79,6 +83,7 @@ struct ChatListView: UIViewControllerRepresentable {
         vc.rowContent = rowContent
         vc.extendsToTop = extendsToTop
         vc.onLineTapped = onLineTapped
+        vc.isVisible = isVisible
         vc.update(
             changes: changes,
             snapshot: snapshot,

@@ -226,6 +226,7 @@ public struct ChatScreen: View {
                 ChatTranscript(
                     chatModel: chatModel,
                     channelLoginName: channelLoginName,
+                    tabId: tabId,
                     connectionStatus: connectionStatus,
                     rowContent: { line in chatRow(for: line) },
                     rowInputs: rowInputs,
