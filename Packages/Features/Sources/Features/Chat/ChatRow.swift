@@ -491,7 +491,11 @@ struct ChatRow: View, Equatable {
             )
 
         case .twitchEmote(let reference, let displayName):
-            TwitchEmoteImage(emote: reference, displayName: displayName)
+            TwitchEmoteImage(
+                emote: reference,
+                displayName: displayName,
+                allowAnimation: appearance.animatedEmotes
+            )
 
         case .mention(let login, let isMe):
             // @mentions render in accent color. Self-mentions get an

@@ -291,10 +291,19 @@ public final class ChatTranscriptModel {
     ///   to the live edge to show the new row (see `outgoingSendCount`). The
     ///   thread sheet passes false: it shows the row itself, and yanking the
     ///   list behind it would lose the reader's place in scrollback.
+    /// - Parameter fromMainComposer: whether this send came from the MAIN
+    ///   compose bar. Only such a send consumes that bar's state: its pending
+    ///   reply chip (`replyContext`) and its persisted draft (`draftKey`). The
+    ///   thread sheet's composer and a failed-row retry pass false — their
+    ///   text and reply target never came from the main bar, so they must
+    ///   neither discard what the user has half-typed there nor hijack a
+    ///   reply chip the user just selected. With false, the reply is exactly
+    ///   `replyOverride` (nil = not a reply).
     public func send(
         text: String,
         replyOverride: ReplyContext? = nil,
-        repinsTranscript: Bool = true
+        repinsTranscript: Bool = true,
+        fromMainComposer: Bool = true
     ) async {
         // Trim exactly as `ChannelSession.send` does, or the echo's text
         // match would miss.
@@ -308,15 +317,17 @@ public final class ChatTranscriptModel {
         let reply: ReplyContext?
         if let replyOverride {
             reply = replyOverride
-        } else {
+        } else if fromMainComposer {
             reply = replyContext
             replyContext = nil
+        } else {
+            reply = nil
         }
 
         // Starting the send is the deliberate draft-clear point: the message
         // is on screen from here, and a failed row offers Retry — restoring
         // the draft on failure would only confuse.
-        if !draftKey.isEmpty {
+        if fromMainComposer, !draftKey.isEmpty {
             dependencies.clearDraft(draftKey)
         }
 
@@ -369,7 +380,10 @@ public final class ChatTranscriptModel {
         // and its echo can't find two rows.
         store.remove(id: failedLineId)
         store.publishPending()
-        await send(text: retryText, replyOverride: preservedReply)
+        // The retried text and reply target come from the failed row, not
+        // the compose bar — whatever the user has typed or selected there
+        // since must survive, and a non-reply stays a non-reply.
+        await send(text: retryText, replyOverride: preservedReply, fromMainComposer: false)
     }
 
     /// View-facing reset for the error alert.

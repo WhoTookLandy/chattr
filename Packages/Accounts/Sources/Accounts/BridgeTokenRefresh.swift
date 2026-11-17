@@ -16,12 +16,19 @@ private let logger = AppLogger.make("Accounts.BridgeTokenRefresh")
 /// tested against a stubbed `URLSession`.
 struct BridgeTokenRefresh: Sendable {
 
-    /// The bridge answered 4xx: Twitch rejected the refresh_token (revoked,
-    /// expired, or issued to a different client_id). Terminal — this
-    /// credential can never work again, so the caller signs the account out.
+    /// The bridge answered 400 / 401 / 403: Twitch rejected the
+    /// refresh_token (revoked, expired, or issued to a different client_id).
+    /// Terminal — this credential can never work again, so the caller signs
+    /// the account out.
     struct Rejected: Error, Equatable {
         let status: Int
     }
+
+    /// Statuses that mean "this refresh_token is dead". Deliberately NOT
+    /// every 4xx: the bridge passes Twitch's status through, and a 429 (rate
+    /// limited) or 408 (timeout) says nothing about the credential — treating
+    /// those as terminal would force-sign-out a user over a transient blip.
+    static let rejectionStatuses: Set<Int> = [400, 401, 403]
 
     let endpoint: URL
     let session: URLSession
@@ -33,10 +40,11 @@ struct BridgeTokenRefresh: Sendable {
 
     /// Exchanges `refreshToken` for fresh tokens.
     ///
-    /// - Throws: `Rejected` on a 4xx; `AppError.bridgeRefreshFailed(status:)`
-    ///   on any other non-200 (5xx = bridge / Twitch having a bad day —
-    ///   transient, the credentials are probably still good); transport and
-    ///   decoding errors as-is.
+    /// - Throws: `Rejected` on 400 / 401 / 403;
+    ///   `AppError.bridgeRefreshFailed(status:)` on any other non-200 (5xx,
+    ///   408, 429, … = bridge / Twitch having a bad day — transient, the
+    ///   credentials are probably still good); transport and decoding errors
+    ///   as-is.
     /// - Returns: the new token. When Twitch's response omits a
     ///   refresh_token (rotation is conditional on Twitch's own policy), the
     ///   one we *used* is carried forward — persisting `nil` would leave the
@@ -56,7 +64,7 @@ struct BridgeTokenRefresh: Sendable {
             let body = String(data: data, encoding: .utf8) ?? "(no body)"
             // body is server-side debug text (no secrets) — public is fine.
             logger.error("Bridge refresh failed for @\(login, privacy: .public) (HTTP \(http.statusCode)): \(body, privacy: .public)")
-            if (400..<500).contains(http.statusCode) {
+            if Self.rejectionStatuses.contains(http.statusCode) {
                 throw Rejected(status: http.statusCode)
             }
             throw AppError.bridgeRefreshFailed(status: http.statusCode)

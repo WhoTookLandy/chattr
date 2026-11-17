@@ -21,6 +21,8 @@ private let logger = AppLogger.make("EmoteSources.FFZ")
 public struct FFZProvider: EmoteProvider {
     private let urlSession: URLSession
 
+    public var emoteSource: Emote.Source? { .ffz }
+
     public init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
     }

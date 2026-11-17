@@ -19,6 +19,8 @@ private let logger = AppLogger.make("EmoteSources.SevenTV")
 public struct SevenTVProvider: EmoteProvider {
     private let urlSession: URLSession
 
+    public var emoteSource: Emote.Source? { .sevenTV }
+
     public init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
     }

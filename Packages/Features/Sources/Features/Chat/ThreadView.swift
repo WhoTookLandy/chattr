@@ -142,11 +142,13 @@ struct ThreadView: View {
                     replyTarget: threadReplyTarget,
                     onSend: { draft in
                         // The sheet shows the new reply itself; leave the
-                        // main transcript behind it where the user was.
+                        // main transcript behind it where the user was —
+                        // and the main compose bar's saved draft with it.
                         await chatModel.send(
                             text: draft,
                             replyOverride: threadReplyTarget,
-                            repinsTranscript: false
+                            repinsTranscript: false,
+                            fromMainComposer: false
                         )
                     }
                 )

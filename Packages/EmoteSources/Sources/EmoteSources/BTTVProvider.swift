@@ -20,6 +20,8 @@ private let logger = AppLogger.make("EmoteSources.BTTV")
 public struct BTTVProvider: EmoteProvider {
     private let urlSession: URLSession
 
+    public var emoteSource: Emote.Source? { .bttv }
+
     public init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
     }

@@ -64,6 +64,12 @@ public enum TwitchSignIn {
     ///   server-side otherwise. Same re-sign-in caveat too — pre-scope
     ///   tokens get a swallowed 403 on subscribe and mod status simply
     ///   stays attach-time-static, exactly the pre-existing behavior.
+    /// - `userReadBlockedUsers` / `userManageBlockedUsers`: the Twitch
+    ///   block list (`BlockStore`) — Get User Block List needs the read
+    ///   scope, Block / Unblock User need the manage scope. Same re-sign-in
+    ///   caveat: older tokens keep the locally cached block list, and
+    ///   block/unblock roll back with an unauthorized error until the
+    ///   account signs in again.
     public static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,
@@ -79,6 +85,8 @@ public enum TwitchSignIn {
         .moderatorReadWarnings,
         .moderatorReadModerators,
         .moderatorReadVips,
+        .userReadBlockedUsers,
+        .userManageBlockedUsers,
         // Viewer list (GET /chat/chatters) for channels you moderate.
         .moderatorReadChatters,
     ]
