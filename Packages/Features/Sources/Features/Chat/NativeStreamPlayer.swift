@@ -62,6 +62,10 @@ final class StreamPlayerController {
     var isPaused = false
     var isMuted = false
     var canPictureInPicture = false
+    /// The stream is in the system picture-in-picture window. The chat
+    /// header gives its video area back to chat, and the mini player
+    /// stays out of the way, while this is true.
+    var isPictureInPictureActive = false
     /// Flips once real frames are playing.
     var hasStarted = false
     /// The native player couldn't get a playlist / failed to play — the
@@ -77,6 +81,26 @@ final class StreamPlayerController {
     @ObservationIgnored var onSwipeDown: (() -> Void)?
     /// Native engine failed — `PlaybackCenter` rebuilds on the web engine.
     @ObservationIgnored var onNativeFailure: (() -> Void)?
+    /// PiP's "return to app" button — go back to this stream's chat.
+    @ObservationIgnored var onRestoreFromPictureInPicture: (() -> Void)?
+    /// PiP was closed with its × (not restored) — nothing left on screen.
+    @ObservationIgnored var onPictureInPictureClosed: (() -> Void)?
+    @ObservationIgnored private var isRestoringFromPictureInPicture = false
+
+    func pictureInPictureDidStart() {
+        isPictureInPictureActive = true
+    }
+
+    func pictureInPictureWillRestore() {
+        isRestoringFromPictureInPicture = true
+        onRestoreFromPictureInPicture?()
+    }
+
+    func pictureInPictureDidStop() {
+        isPictureInPictureActive = false
+        if !isRestoringFromPictureInPicture { onPictureInPictureClosed?() }
+        isRestoringFromPictureInPicture = false
+    }
 
     var isNative: Bool { avPlayer != nil }
 
@@ -84,6 +108,7 @@ final class StreamPlayerController {
         isPaused = false
         isMuted = false
         canPictureInPicture = false
+        isPictureInPictureActive = false
         hasStarted = false
     }
 
@@ -283,6 +308,7 @@ enum NativePlayer {
             if AVPictureInPictureController.isPictureInPictureSupported(),
                let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
                 pip.canStartPictureInPictureAutomaticallyFromInline = true
+                pip.delegate = self
                 controller.pictureInPicture = pip
                 controller.canPictureInPicture = true
             }
@@ -318,6 +344,25 @@ enum NativePlayer {
             controller.avPlayer = nil
             controller.pictureInPicture = nil
         }
+    }
+}
+// MARK: - Picture in picture state
+
+extension NativePlayer.Coordinator: @preconcurrency AVPictureInPictureControllerDelegate {
+    func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        controller.pictureInPictureDidStart()
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        controller.pictureInPictureDidStop()
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+    ) {
+        controller.pictureInPictureWillRestore()
+        completionHandler(true)
     }
 }
 #endif

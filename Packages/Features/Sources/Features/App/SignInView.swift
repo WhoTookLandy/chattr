@@ -46,106 +46,57 @@ struct SignInView: View {
         self.clientId = clientId
     }
 
+    /// "Just looking" — a channel to peek at without an account.
+    @State private var guestLogin = ""
+    @State private var guestChannel: GuestTarget?
+    @FocusState private var guestFieldFocused: Bool
+
+    struct GuestTarget: Identifiable {
+        let login: String
+        var id: String { login }
+    }
+
+    private var trimmedGuestLogin: String {
+        guestLogin.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "#@"))
+            .lowercased()
+    }
+
+    /// Twitch logins: 3–25 letters, digits or underscores.
+    private var guestLoginIsValid: Bool {
+        let login = trimmedGuestLogin
+        return (3...25).contains(login.count)
+            && login.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+    }
+
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            Image(systemName: "bubble.left.and.bubble.right")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 80, height: 80)
-                .foregroundStyle(Color.accentColor)
-
-            VStack(spacing: 8) {
-                Text("chattr")
-                    .font(.largeTitle)
-                    .bold()
-                Text("Twitch chat, multi-account.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            // Soft "session expired" banner — only renders if the previous
-            // app session was force-signed-out (refresh_token revoked,
-            // expired, or wiped by TwitchKit's defensive cleanup). Frames
-            // the sign-in CTA with context so the user understands WHY
-            // they're back here.
-            //
-            // Tone: orange + clock symbol, not red + warning — this is a
-            // routine session timeout, not a security incident.
-            if let sessionExpiredLogin {
-                VStack(spacing: 8) {
-                    Image(systemName: "clock.badge.exclamationmark")
-                        .font(.title2)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.orange)
-                    Text("Your session for @\(sessionExpiredLogin) expired")
-                        .font(.callout.weight(.medium))
-                        .multilineTextAlignment(.center)
-                    Text("Sign in again to continue.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+        ScrollView {
+            VStack(spacing: 28) {
+                hero
+                features
+                if let sessionExpiredLogin {
+                    sessionExpiredBanner(sessionExpiredLogin)
                 }
-                .padding()
-                .frame(maxWidth: .infinity)
-                // Stays on `.regularMaterial` deliberately. The iOS 26
-                // equivalent for content-container glass —
-                // `.glassBackgroundEffect()` — is visionOS-only despite
-                // showing up in cross-platform docs. On iOS we have:
-                //   - `.glassEffect()` for controls / navigation chrome
-                //   - `.regularMaterial` (or `.thickMaterial`) for content
-                //     cards
-                // This banner is a content-layer callout (a small floating
-                // card inside SignInView's VStack — not navigation chrome).
-                // The skill says glass goes on the navigation layer; for
-                // content cards, `.regularMaterial` IS the right iOS 26
-                // material. It adapts to Reduce Transparency and Increase
-                // Contrast automatically.
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal)
-                // Smooth fade-in on first render — feels less abrupt than
-                // appearing instantly with the rest of the layout.
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                actions
             }
-
-            Button {
-                Task { await signIn() }
-            } label: {
-                if isSigningIn {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                } else {
-                    Text("Sign in with Twitch")
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.accentColor)
-            .disabled(isSigningIn)
-            .padding(.horizontal)
-
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-            }
-
-            Spacer().frame(height: 32)
+            .padding(.horizontal, 24)
+            .padding(.top, 56)
+            .padding(.bottom, 24)
+            .frame(maxWidth: 480)
+            .frame(maxWidth: .infinity)
         }
-        // One-shot read of the session-expired flag. Done in `.onAppear`
-        // (not at view-init time) so the value is stored in @State and
-        // SwiftUI's `if let sessionExpiredLogin` re-renders when the
-        // flag transitions from nil → value. Cleared immediately so the
-        // banner doesn't reappear on subsequent navigations back to
-        // SignInView (e.g. user signs in successfully, signs out manually,
-        // returns to SignInView — no stale banner).
+        .scrollDismissesKeyboard(.interactively)
+        .scrollBounceBehavior(.basedOnSize)
+        .background { backdrop }
+        #if os(iOS)
+        .fullScreenCover(item: $guestChannel) { target in
+            GuestChannelView(login: target.login) {
+                Task { await signIn() }
+            }
+        }
+        #endif
+        // One-shot read of the session-expired flag (then cleared, so the
+        // banner doesn't reappear on later visits to this screen).
         .onAppear {
             if let login = UserDefaults.standard.string(forKey: AccountStore.lastSessionExpiredLoginKey) {
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -155,6 +106,181 @@ struct SignInView: View {
                 logger.info("SignInView: showing session-expired banner for @\(login, privacy: .public)")
             }
         }
+    }
+
+    // MARK: - Pieces
+
+    /// Soft Twitch-purple glow behind the hero, fading into the system
+    /// background. Works in light and dark.
+    private var backdrop: some View {
+        ZStack {
+            #if os(iOS)
+            Color(.systemBackground)
+            #else
+            Color(.windowBackgroundColor)
+            #endif
+            RadialGradient(
+                colors: [Color.twitchPurple.opacity(0.35), .clear],
+                center: .top,
+                startRadius: 20,
+                endRadius: 420
+            )
+        }
+        .ignoresSafeArea()
+    }
+
+    private var hero: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .font(.system(size: 38, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 84, height: 84)
+                .background(
+                    LinearGradient(
+                        colors: [Color.twitchPurple, Color.twitchPurple.opacity(0.7)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                )
+                .shadow(color: Color.twitchPurple.opacity(0.45), radius: 18, y: 8)
+                .accessibilityHidden(true)
+            VStack(spacing: 6) {
+                Text("chattr")
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                Text("Twitch chat, built for watching.")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
+
+    private var features: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            featureRow("play.rectangle.fill",
+                       title: "Watch while you chat",
+                       detail: "The stream sits right above chat, or floats in picture in picture.")
+            featureRow("bubble.left.and.bubble.right.fill",
+                       title: "All your chats in one place",
+                       detail: "Swipe between channels; mentions light up the Chats tab.")
+            featureRow("person.2.fill",
+                       title: "More than one account",
+                       detail: "Switch accounts without signing out.")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func featureRow(_ systemImage: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(Color.twitchPurple)
+                .frame(width: 30)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func sessionExpiredBanner(_ login: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "clock.badge.exclamationmark")
+                .font(.title3)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Your session for @\(login) expired")
+                    .font(.callout.weight(.medium))
+                Text("Sign in again to continue.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    private var actions: some View {
+        VStack(spacing: 16) {
+            Button {
+                Task { await signIn() }
+            } label: {
+                Group {
+                    if isSigningIn {
+                        ProgressView().tint(.white)
+                    } else {
+                        Text("Sign in with Twitch")
+                            .font(.headline)
+                    }
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, minHeight: 54)
+                .background(Color.twitchPurple, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(isSigningIn)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+            }
+
+            HStack(spacing: 10) {
+                Rectangle().fill(.quaternary).frame(height: 1)
+                Text("or just look around")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Rectangle().fill(.quaternary).frame(height: 1)
+            }
+
+            guestField
+
+            Text("You sign in on Twitch; chattr never sees your password.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    /// Channel name → read-only stream + chat, no account needed.
+    private var guestField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Channel name", text: $guestLogin)
+                .focused($guestFieldFocused)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+                .submitLabel(.go)
+                .onSubmit(openGuest)
+            Button("Watch", action: openGuest)
+                .font(.subheadline.weight(.semibold))
+                .disabled(!guestLoginIsValid)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 50)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func openGuest() {
+        guard guestLoginIsValid else { return }
+        guestFieldFocused = false
+        guestChannel = GuestTarget(login: trimmedGuestLogin)
     }
 
     @MainActor

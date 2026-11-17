@@ -122,11 +122,12 @@ enum TwitchWebPlayer {
         var v = video();
         if (!v) return;
         var pip = !!(v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture'));
-        var state = { type: 'state', paused: v.paused, muted: v.muted, pip: pip, playing: !v.paused && v.readyState > 2 };
+        var pipActive = v.webkitPresentationMode === 'picture-in-picture';
+        var state = { type: 'state', paused: v.paused, muted: v.muted, pip: pip, pipActive: pipActive, playing: !v.paused && v.readyState > 2 };
         var key = JSON.stringify(state);
         if (key !== lastState) { lastState = key; post(state); }
       };
-      ['play', 'playing', 'pause', 'volumechange', 'loadeddata', 'waiting'].forEach(function (n) {
+      ['play', 'playing', 'pause', 'volumechange', 'loadeddata', 'waiting', 'webkitpresentationmodechanged'].forEach(function (n) {
         document.addEventListener(n, report, true);
       });
       setInterval(report, 1000);
@@ -165,6 +166,12 @@ enum TwitchWebPlayer {
                 controller.isPaused = body["paused"] as? Bool ?? false
                 controller.isMuted = body["muted"] as? Bool ?? false
                 controller.canPictureInPicture = body["pip"] as? Bool ?? false
+                // The web player can't tell "returned to app" from "closed",
+                // so it only mirrors whether PiP is showing.
+                let pipActive = body["pipActive"] as? Bool ?? false
+                if pipActive != controller.isPictureInPictureActive {
+                    controller.isPictureInPictureActive = pipActive
+                }
                 if body["playing"] as? Bool == true { controller.hasStarted = true }
             default:
                 break
