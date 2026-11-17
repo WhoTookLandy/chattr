@@ -131,6 +131,12 @@ struct JumpToBottomPill: View, Equatable {
             // `.interactive()` so the glass responds to the press —
             // it's a button now, not a status pill.
             .glassEffect(.regular.interactive(), in: Capsule())
+            // A `.plain` button only hit-tests the label's drawn pixels
+            // (glyph + text), not the padding or the glass behind them —
+            // so a tap on the pill's edge fell through to the chat row
+            // underneath (TestFlight: "clicking Latest ends up tapping the
+            // username below it"). Claim the whole capsule.
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(

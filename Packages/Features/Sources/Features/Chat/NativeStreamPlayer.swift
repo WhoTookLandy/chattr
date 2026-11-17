@@ -20,6 +20,10 @@ enum PlayerSettings {
     /// Listen-only mode: no video surface, just chat + stream audio. The
     /// native player switches to Twitch's audio-only rendition (saves data).
     static let audioOnlyKey = "chattr.player.audioOnly"
+    /// Leaving a chat with video playing hands it to the system
+    /// picture-in-picture window instead of the in-app mini player. Off by
+    /// default; the mini player stays as the fallback when PiP can't start.
+    static let systemPictureInPictureKey = "chattr.player.systemPiPOnLeave"
 }
 
 /// Resolution cap for the native player. `auto` lets AVPlayer adapt freely.

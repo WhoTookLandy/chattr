@@ -13,6 +13,7 @@ struct VideoDeviceSettingsScreen: View {
     @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
     @AppStorage(PlaybackPreferences.videoOnOpenKey) private var videoOnOpen: VideoOnOpen = .lastUsed
     @AppStorage(PlaybackPreferences.pictureInPictureKey) private var pictureInPicture: PictureInPictureMode = .whenSoundOn
+    @AppStorage(PlayerSettings.systemPictureInPictureKey) private var pictureInPictureLeavingChat = false
     @AppStorage(PlaybackPreferences.keepScreenAwakeKey) private var keepScreenAwake = false
     @AppStorage(HapticSettings.enabledKey) private var hapticsEnabled = true
 
@@ -68,6 +69,13 @@ struct VideoDeviceSettingsScreen: View {
                         "Picture in Picture",
                         systemImage: "pip",
                         subtitle: pictureInPicture.subtitle
+                    )
+                }
+                Toggle(isOn: $pictureInPictureLeavingChat) {
+                    SettingLabel(
+                        "PiP When Leaving Chat",
+                        systemImage: "pip.exit",
+                        subtitle: "Apple's floating player instead of the mini player"
                     )
                 }
             } header: {
