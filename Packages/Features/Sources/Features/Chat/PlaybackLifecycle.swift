@@ -105,9 +105,9 @@ final class PlaybackLifecycleObserver: NSObject {
         // Pause what's playing now, and hold an engine that's still loading
         // (or rebuilding) paused when it finishes — otherwise it would
         // start playing in the background.
-        if backgroundHold == nil {
-            backgroundHold = center.holdPlayback(.background)
-        }
+        // (nil while this stream already has one: keep that; a lapsed one
+        // from an earlier stream is simply replaced.)
+        backgroundHold = center.holdPlayback(.background) ?? backgroundHold
     }
 
     @objc private func willEnterForeground() {
