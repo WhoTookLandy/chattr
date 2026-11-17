@@ -38,7 +38,7 @@ public struct RootView: View {
     @AppStorage(ChatAppearance.animatedEmotesKey) private var chatAnimatedEmotes: Bool = true
     @AppStorage(ChatAppearance.edgeToEdgeKey) private var chatEdgeToEdge: Bool = false
     @AppStorage(ChatAppearance.loginNameDisplayKey) private var chatLoginNameDisplay: ChatAppearance.LoginNameDisplay = .displayFirst
-    @AppStorage(ChatAppearance.compactBotsKey) private var chatCompactBots: Bool = true
+    @AppStorage(ChatAppearance.compactBotsKey) private var chatCompactBots: Bool = false
     /// Observed only to re-fire the registry-sync `.task(id:)` below when
     /// the user changes the setting — consumers read the value through
     /// `ChatAppearance.chatHistoryLines()` (which also validates it).

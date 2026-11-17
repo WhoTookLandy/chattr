@@ -54,6 +54,21 @@ public final class ChatTabsModel {
         }
     }
 
+    /// Whether the chat pager is pushed on screen. Separate from
+    /// `activeTabId` on purpose: the push used to be derived from
+    /// `activeTabId != nil`, so popping wrote `nil` into the id the pager's
+    /// `.scrollPosition(id:)` is bound to — and the pager wrote the visible
+    /// page's id straight back, re-presenting the chat mid-pop (the
+    /// back-button freeze). Popping now only clears this flag.
+    public var isPresented = false {
+        didSet {
+            // Coming back to a chat acknowledges its ping, like switching to it.
+            if isPresented, let activeTabId {
+                mentionedTabIds.remove(activeTabId)
+            }
+        }
+    }
+
     /// Tabs holding an unseen @-mention of the signed-in user — drives the
     /// red dots in the quick-switcher popover and the channel pill.
     /// Populated by the session-level watcher AppShell installs in `onOpen`
@@ -66,7 +81,9 @@ public final class ChatTabsModel {
     /// tab (the user is looking at it) and for unknown ids (a stale watcher
     /// firing after its tab closed).
     public func markMention(tabId: UUID) {
-        guard tabId != activeTabId,
+        // Only skip the chat the user is actually looking at — the active
+        // tab of a popped pager is off screen, so its pings still count.
+        guard !(isPresented && tabId == activeTabId),
               tabs.contains(where: { $0.id == tabId }) else { return }
         mentionedTabIds.insert(tabId)
     }
@@ -284,6 +301,7 @@ public final class ChatTabsModel {
             persistTabs()
         }
         activeTabId = tab.id
+        isPresented = true
         if isNew {
             scheduleOpen(tab)
         }
@@ -302,11 +320,13 @@ public final class ChatTabsModel {
         // creating a duplicate (idempotent open-from-follows).
         if let existing = tabs.first(where: { $0.channels.count == 1 && $0.channels[0] == channel }) {
             activeTabId = existing.id
+            isPresented = true
             return existing.id
         }
         let tab = ChatTab(channel: channel)
         tabs.append(tab)
         activeTabId = tab.id
+        isPresented = true
         persistTabs()
         scheduleOpen(tab)
         return tab.id
@@ -356,6 +376,7 @@ public final class ChatTabsModel {
             }
         }
         guard !closedTabs.isEmpty else { return }
+        if tabs.isEmpty { isPresented = false }
         persistTabs()
 
         // A draft belongs to a channel, not a tab: keep it while any remaining

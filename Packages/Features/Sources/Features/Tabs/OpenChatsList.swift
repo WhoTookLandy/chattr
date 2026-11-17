@@ -19,6 +19,7 @@ struct OpenChatsList: View {
                 ForEach(chatTabs.tabs) { tab in
                     Button {
                         chatTabs.activeTabId = tab.id
+                        chatTabs.isPresented = true
                     } label: {
                         OpenChatRow(tab: tab, chatTabs: chatTabs)
                     }

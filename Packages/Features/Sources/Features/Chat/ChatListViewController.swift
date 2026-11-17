@@ -34,6 +34,13 @@ final class ChatListViewController: UIViewController {
     /// representable). Fired only when the count changes.
     var onUnreadCountChanged: ((Int) -> Void)?
 
+    /// A message row was tapped while the keyboard was down.
+    var onLineTapped: ((ChatLine) -> Void)?
+
+    /// Tracked from keyboard notifications: a tap on the transcript while
+    /// typing dismisses the keyboard instead of opening a user card.
+    private var keyboardVisible = false
+
     /// Mirrors `ChatListView.extendsToTop` — applied on change (and once
     /// at viewDidLoad, since the representable sets it before the view
     /// loads). Full-bleed hides the top edge effect entirely so messages
@@ -131,6 +138,31 @@ final class ChatListViewController: UIViewController {
         applyTopEdgeTreatment()
         collectionView.delegate = self
         view.addSubview(collectionView)
+
+        // Tap on empty transcript space → put the keyboard away. Doesn't
+        // cancel touches, so scrolling, links and row taps still work.
+        let backgroundTap = UITapGestureRecognizer(target: self, action: #selector(transcriptTapped(_:)))
+        backgroundTap.cancelsTouchesInView = false
+        collectionView.addGestureRecognizer(backgroundTap)
+
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyboardWillShow),
+            name: UIResponder.keyboardWillShowNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyboardWillHide),
+            name: UIResponder.keyboardWillHideNotification, object: nil
+        )
+    }
+
+    @objc private func keyboardWillShow() { keyboardVisible = true }
+    @objc private func keyboardWillHide() { keyboardVisible = false }
+
+    @objc private func transcriptTapped(_ gesture: UITapGestureRecognizer) {
+        // Row taps are handled in shouldSelectItemAt; this covers the gaps.
+        let point = gesture.location(in: collectionView)
+        guard collectionView.indexPathForItem(at: point) == nil else { return }
+        view.window?.endEditing(true)
     }
 
     /// Learned average chat-row height, used as the self-sizing ESTIMATE for
@@ -399,6 +431,19 @@ final class ChatListViewController: UIViewController {
 }
 
 extension ChatListViewController: UICollectionViewDelegate {
+    /// Row tap. Never actually selects (returns false): while typing it puts
+    /// the keyboard away; otherwise it reports the line (user card).
+    func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
+        if keyboardVisible {
+            view.window?.endEditing(true)
+            return false
+        }
+        if let id = dataSource.itemIdentifier(for: indexPath), let line = feed.linesByID[id] {
+            onLineTapped?(line)
+        }
+        return false
+    }
+
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         let atBottom = ScrollAnchor.isNearBottom(
             contentHeight: scrollView.contentSize.height,

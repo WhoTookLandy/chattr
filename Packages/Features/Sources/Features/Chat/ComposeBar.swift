@@ -295,10 +295,17 @@ struct ComposeBar: View {
                 // floating circle.
                 moreMenu
 
-                TextField(textFieldPrompt, text: $composeText, axis: .vertical)
+                // Single-line: Return sends (no send button), and the keyboard
+                // stays up for the next message. Chat messages are one line
+                // on Twitch anyway.
+                TextField(textFieldPrompt, text: $composeText)
                     .textFieldStyle(.plain)
-                    .lineLimit(1...5)
                     .focused($focused)
+                    .submitLabel(.send)
+                    .onSubmit {
+                        Task { await sendDraft() }
+                        focused = true
+                    }
                     // Forward every text change to the parent, which hands
                     // it to `DraftStorage.scheduleSave` — debounced (~400ms),
                     // so a burst of typing costs one UserDefaults write, and
@@ -335,8 +342,6 @@ struct ComposeBar: View {
                         // 44pt outer frame (Apple HIG minimum touch target;
                         // this and send are the most-tapped controls in the
                         // app) around the unchanged 30pt visual disc.
-                        // Bare glyph — no grey disc; the orange send button
-                        // is the only filled shape in the bar.
                         .frame(width: 30, height: 30)
                         .frame(width: 44, height: 44)
                         .contentShape(Circle())
@@ -344,36 +349,6 @@ struct ComposeBar: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Emotes")
 
-                // Send — only once there's text. The single filled/tinted
-                // shape in the bar; `.glassProminent` reads as a control
-                // sitting on the pill, matching the iMessage send affordance.
-                if hasDraft {
-                    Button {
-                        Task { await sendDraft() }
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                            // Flat orange circle (Color.sendButton, not the
-                            // blue app accent) — the single warm CTA in the
-                            // bar, mirroring the Claude composer's send
-                            // affordance. An explicit Circle (not
-                            // `.glassProminent`, whose ~44pt min height made
-                            // the button hang below the emote) so the inner
-                            // 30pt disc and the emote share one 40pt frame and
-                            // sit perfectly level under `.bottom` alignment.
-                            // 44pt outer frame to match the emote button —
-                            // HIG-minimum touch target, unchanged 30pt disc.
-                            .frame(width: 30, height: 30)
-                            .background(Color.sendButton, in: Circle())
-                            .frame(width: 44, height: 44)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isSending)
-                    .transition(.blurReplace)
-                    .accessibilityLabel("Send message")
-                }
             }
             // Trailing inset keeps the emote/send off the pill's right edge.
             .padding(.trailing, 5)
@@ -477,15 +452,18 @@ struct ComposeBar: View {
                 }
             }
         } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 20, weight: .regular))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
+            // A filled "+" disc, iMessage-style: reads as a button that opens
+            // more options, where a bare ⋯ read as decoration.
+            Image(systemName: "plus")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 30, height: 30)
+                .background(Color.emoteButton, in: Circle())
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
         .padding(.leading, 4)
-        .accessibilityLabel("More chat actions")
+        .accessibilityLabel("More options")
     }
 
     private var channelURL: URL? {

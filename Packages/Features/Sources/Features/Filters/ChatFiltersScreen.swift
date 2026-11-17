@@ -12,7 +12,7 @@ struct ChatFiltersScreen: View {
     // no per-body closure allocation, no manual setX write-through.
     @AppStorage(ChatFilterSettings.hideCommandsKey) private var hideCommands = false
     @AppStorage(ChatFilterSettings.hideBotsKey) private var hideBots = false
-    @AppStorage(ChatAppearance.compactBotsKey) private var compactBots = true
+    @AppStorage(ChatAppearance.compactBotsKey) private var compactBots = false
 
     var body: some View {
         Form {

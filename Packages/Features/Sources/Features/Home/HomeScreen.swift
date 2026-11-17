@@ -98,11 +98,19 @@ public struct HomeScreen: View {
                    let uuid = UUID(uuidString: savedId),
                    chatTabs.tabs.contains(where: { $0.id == uuid }) {
                     chatTabs.activeTabId = uuid
+                    chatTabs.isPresented = true
                     section = .chats
                 }
             }
+            // Persist the chat that's open on screen (nil once popped), so
+            // "resume last chat" restores what the user was actually in.
             .onChange(of: chatTabs?.activeTabId) { _, newValue in
-                persistedActiveTabId = newValue?.uuidString
+                if chatTabs?.isPresented == true {
+                    persistedActiveTabId = newValue?.uuidString
+                }
+            }
+            .onChange(of: chatTabs?.isPresented) { _, presented in
+                persistedActiveTabId = presented == true ? chatTabs?.activeTabId?.uuidString : nil
             }
         }
         // Live data whenever Home appears (tab switches included).
@@ -163,12 +171,12 @@ public struct HomeScreen: View {
         Binding(
             get: {
                 guard let chatTabs else { return false }
-                return chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
+                return chatTabs.isPresented && chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
             },
             set: { presented in
-                if !presented {
-                    chatTabs?.activeTabId = nil
-                }
+                // Only the flag — never touch activeTabId here (see
+                // ChatTabsModel.isPresented for the freeze this caused).
+                chatTabs?.isPresented = presented
             }
         )
     }

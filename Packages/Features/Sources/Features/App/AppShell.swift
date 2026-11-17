@@ -65,7 +65,7 @@ public struct AppShell: View {
     /// shows in its header there, so no mini player.
     private var chatOnScreen: Bool {
         navigation.selectedTab == .home
-            && navigation.chatTabs.activeTabId != nil
+            && navigation.chatTabs.isPresented
             && !navigation.chatTabs.tabs.isEmpty
     }
 

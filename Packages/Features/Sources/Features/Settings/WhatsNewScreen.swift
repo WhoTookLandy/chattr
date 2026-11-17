@@ -24,6 +24,8 @@ struct WhatsNewScreen: View {
                 "Audio only: listen to the stream while chat takes the whole screen.",
                 "Native video player (You → Video): picture-in-picture, fullscreen and a quality setting.",
                 "Jump between open chats from the chip on the video, and close a chat from the ⋯ menu.",
+                "Tap a chat message for that user's card: badges, join date, bio and recent messages.",
+                "Press Return to send; tap the chat to put the keyboard away.",
                 "Chat restrictions like followers-only now show in the message box.",
                 "Fixed: the app freezing after tapping back from a chat.",
             ]
