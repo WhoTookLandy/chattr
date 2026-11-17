@@ -122,6 +122,10 @@ extension AccountStore {
         }
 
         try Self.checkStillCurrent(entry, login: login)
+        // Ordered after every token issued before it, so a TwitchKit save of
+        // an older one that arrives late is dropped (see
+        // `AccountTokenGate.admitSave`).
+        clients.tokenGate(forUserId: userId).recordIssued(newToken)
         // The guarded token store re-checks the lifecycle under the account's
         // token gate, so this save is dropped if the client was retired first.
         try await twitchClient.auth.setToken(newToken)
@@ -145,6 +149,11 @@ extension AccountStore {
 
     /// The refresh_token to POST. Two sources, in priority order:
     ///   1. TwitchKit's own store via `tokenProvider.token()` — the happy path.
+    ///      Unless the account's token gate knows a newer bridge-issued token
+    ///      (the provider was handed an older one late, and the re-seed
+    ///      hasn't landed yet): then that token's refresh_token, which is
+    ///      also what the chattr-side cache mirrors. The older one was
+    ///      already spent, and POSTing it risks `invalid_grant`.
     ///   2. Our chattr-side `OAuthRefreshTokenCache` — fallback for the case
     ///      where TwitchKit's auto-refresh failed and wiped the store as
     ///      defensive cleanup. Without this fallback, the first refresh
@@ -163,6 +172,11 @@ extension AccountStore {
         // wants.
         do {
             let currentToken = try await entry.client.auth.tokenProvider.token()
+            if let newer = clients.tokenGate(forUserId: userId).newerToken(than: currentToken),
+               let token = newer.refreshToken, !token.isEmpty {
+                logger.notice("TwitchKit holds a superseded token for @\(login, privacy: .public); refreshing with the newest refresh_token")
+                return token
+            }
             if let token = currentToken.refreshToken, !token.isEmpty {
                 return token
             }

@@ -301,7 +301,16 @@ private let freshBridgeJSON = #"""
 {"access_token":"fresh-access","refresh_token":"refresh-2","expires_in":14400,"scope":["user:manage:chat_color"],"token_type":"bearer"}
 """#
 
-private let invalidGrantJSON = #"{"status":400,"message":"Invalid refresh token","error":"invalid_grant"}"#
+/// What a second bridge refresh issues after `freshToken`.
+private let newestBridgeJSON = #"""
+{"access_token":"newest-access","refresh_token":"refresh-3","expires_in":14400,"scope":["user:manage:chat_color"],"token_type":"bearer"}
+"""#
+
+private let thirdBridgeJSON = #"""
+{"access_token":"third-access","refresh_token":"refresh-4","expires_in":14400,"scope":["user:manage:chat_color"],"token_type":"bearer"}
+"""#
+
+private let invalidGrantJSON =#"{"status":400,"message":"Invalid refresh token","error":"invalid_grant"}"#
 
 /// Whether `error` is the `HelixError.networkError` TwitchKit wraps a thrown
 /// transport error in.
@@ -532,7 +541,8 @@ struct AccountStoreTwitchKitRefreshTests {
         bridgeJSON: String,
         tokenStore: CountingTokenStore = CountingTokenStore(staleToken),
         gate: BridgeGate? = nil,
-        storeGate: BridgeGate? = nil
+        storeGate: BridgeGate? = nil,
+        validAccessToken: String = freshToken.accessToken
     ) throws -> Harness {
         let container = try ModelContainer(
             for: Account.self,
@@ -551,7 +561,7 @@ struct AccountStoreTwitchKitRefreshTests {
             config.protocolClasses = [BridgeStubURLProtocol.self]
         }
 
-        let helix = HelixStub(validAccessToken: freshToken.accessToken)
+        let helix = HelixStub(validAccessToken: validAccessToken)
         let refreshKeychain = InMemoryRefreshTokenKeychain()
         let backingStore: any TwitchTokenStore
         if let storeGate {
@@ -733,6 +743,126 @@ struct AccountStoreTwitchKitRefreshTests {
         // No retry with the discarded token.
         #expect(h.helix.helixRequests.count == 1)
         #expect(h.helix.twitchTokenEndpointRequests == 0)
+    }
+
+    @Test("TwitchKit saving a refresh's token after a newer refresh landed can't roll the account back")
+    func lateSaveOfSupersededTokenKeepsNewest() async throws {
+        // Helix accepts only refresh B's token, so the retry of the call
+        // proves which token TwitchKit's provider ended up holding.
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON, validAccessToken: "newest-access")
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let login = h.account.login
+        let clients = h.store.clients
+        let entry = clients.entry(forUserId: userId)
+
+        // Hold refresh A's answer after its bridge refresh has finished
+        // (persisted, mirrored, single-flight slot cleared) but before the
+        // interceptor hands it to TwitchKit.
+        let holdA = BridgeGate()
+        guard let answer = clients.refreshHandler else {
+            Issue.record("AccountStore didn't install its refresh handler")
+            return
+        }
+        clients.refreshHandler = { id, lifecycle in
+            let result = await answer(id, lifecycle)
+            await waitUntilOpened(holdA)
+            return result
+        }
+
+        // Refresh A: the call 401s and TwitchKit refreshes through the bridge.
+        let call = Task {
+            try await entry.client.api.updateUserChatColor(userID: userId, color: "blue")
+        }
+        await holdA.waitForArrival()
+        #expect(h.tokenStore.token?.accessToken == "fresh-access")
+        #expect(h.cachedRefreshToken() == "refresh-2")
+
+        // Refresh B completes while A's response is still held.
+        BridgeStubURLProtocol.register(h.bridgeURL, json: newestBridgeJSON, statusCode: 200)
+        let refreshedB = try await h.store.refreshTokens(userId: userId, login: login)
+        #expect(refreshedB.accessToken == "newest-access")
+        #expect(h.tokenStore.token?.accessToken == "newest-access")
+        #expect(h.cachedRefreshToken() == "refresh-3")
+
+        // TwitchKit now consumes A's response and saves A's token.
+        holdA.open()
+        try await call.value
+
+        // Keychain and provider both stay on B's token; the stale save
+        // wrote nothing, and the retried call carried B's access token.
+        #expect(h.tokenStore.saves == 2)
+        #expect(h.tokenStore.deletes == 0)
+        #expect(h.tokenStore.token?.accessToken == "newest-access")
+        #expect(h.tokenStore.token?.refreshToken == "refresh-3")
+        let providerToken = try await entry.client.auth.tokenProvider.token()
+        #expect(providerToken.accessToken == "newest-access")
+        #expect(providerToken.refreshToken == "refresh-3")
+        #expect(h.cachedRefreshToken() == "refresh-3")
+        #expect(h.helix.helixRequests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer newest-access")
+
+        // The next refresh spends B's refresh token, not A's.
+        BridgeStubURLProtocol.register(h.bridgeURL, json: thirdBridgeJSON, statusCode: 200)
+        try await h.store.refreshTokens(userId: userId, login: login)
+        let sent = try BridgeStubURLProtocol.bodies(for: h.bridgeURL).map {
+            try JSONDecoder().decode([String: String].self, from: $0)["refresh_token"]
+        }
+        #expect(sent == ["refresh-1", "refresh-2", "refresh-3"])
+        #expect(h.tokenStore.token?.accessToken == "third-access")
+        #expect(!h.account.needsReauth)
+        #expect(h.helix.twitchTokenEndpointRequests == 0)
+    }
+
+    @Test("A late save of the token the client started with is dropped and the provider re-seeded with the newest")
+    func lateSaveOfStartingTokenIsDropped() async throws {
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let login = h.account.login
+        let entry = h.store.clients.entry(forUserId: userId)
+
+        // Refresh to `freshToken`, then put the provider back on the token it
+        // started with, as a late `.unavailable(current:)` save would. The
+        // store drops that save and re-seeds the provider.
+        try await h.store.refreshTokens(userId: userId, login: login)
+        try await entry.client.auth.setToken(staleToken)
+        let reseeded = try await entry.client.auth.tokenProvider.token()
+        #expect(reseeded.accessToken == "fresh-access")
+        #expect(h.tokenStore.token?.accessToken == "fresh-access")
+
+        BridgeStubURLProtocol.register(h.bridgeURL, json: newestBridgeJSON, statusCode: 200)
+        try await h.store.refreshTokens(userId: userId, login: login)
+        let sent = try BridgeStubURLProtocol.bodies(for: h.bridgeURL).map {
+            try JSONDecoder().decode([String: String].self, from: $0)["refresh_token"]
+        }
+        #expect(sent == ["refresh-1", "refresh-2"])
+        #expect(h.tokenStore.token?.accessToken == "newest-access")
+    }
+
+    @Test("The token gate orders bridge-issued tokens and forgets them on reset")
+    func tokenGateOrdersBridgeTokens() {
+        let gate = AccountTokenGate()
+        let newest = OAuthToken(accessToken: "newest-access", refreshToken: "refresh-3")
+
+        // Nothing bridge-issued persisted yet: everything is written.
+        #expect(gate.admitSave(staleToken) == .write)
+
+        gate.recordIssued(freshToken)
+        gate.didPersist(freshToken)
+        gate.recordIssued(newest)
+        // Issued after the newest persisted one: written.
+        #expect(gate.admitSave(newest) == .write)
+        gate.didPersist(newest)
+
+        #expect(gate.admitSave(newest) == .alreadyStored)
+        #expect(gate.admitSave(freshToken) == .superseded(by: newest))
+        #expect(gate.admitSave(staleToken) == .superseded(by: newest))
+        #expect(gate.newerToken(than: freshToken)?.refreshToken == "refresh-3")
+        #expect(gate.newerToken(than: newest) == nil)
+
+        gate.resetFreshness()
+        #expect(gate.admitSave(freshToken) == .write)
+        #expect(gate.newerToken(than: freshToken) == nil)
     }
 
     /// Holds the bridge, re-authorizes the account through the same
@@ -1008,8 +1138,9 @@ struct AccountStoreTwitchKitRefreshTests {
 
         storeGate.open()
         let replacement = try await reauthorization.value
-        try await removal.value
+        let outcome = try await removal.value
 
+        #expect(outcome == .superseded)
         #expect(h.tokenStore.deletes == 1)
         #expect(old.lifecycle.current == .retired)
         expectReauthorizedSessionSurvived(h, replacement: replacement)

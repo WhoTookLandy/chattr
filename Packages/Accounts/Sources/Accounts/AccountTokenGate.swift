@@ -1,4 +1,5 @@
 import Foundation
+import TwitchKit
 import os
 
 /// A FIFO async mutex for one account's stored token. `TwitchClientCache`
@@ -44,6 +45,17 @@ import os
 /// unaffected.
 ///
 /// Not on any read path: `loadToken` and request handling never touch it.
+///
+/// ## Token freshness
+///
+/// The gate also remembers the account's newest bridge-issued token, so a
+/// late TwitchKit save can't roll it back. A refresh persists T1 and leaves
+/// the single-flight slot *before* TwitchKit consumes the synthesized
+/// response for it, so a second refresh can persist T2 in between; TwitchKit
+/// then calls `setToken(T1)` on a client that is still active.
+/// `LifecycleGuardedTokenStore` asks `admitSave(_:)` while holding the lock
+/// and drops that save. The record is plain lock-protected state (it never
+/// waits), reset on re-authorization and sign-out.
 final class AccountTokenGate: Sendable {
     private struct Watcher: Sendable {
         let waiters: Int
@@ -65,6 +77,31 @@ final class AccountTokenGate: Sendable {
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// Bridge-issued tokens, in the order the bridge issued them.
+    private struct Freshness: Sendable {
+        var nextSequence: UInt64 = 0
+        /// Issued, not yet persisted: access token → sequence. Normally at
+        /// most one (refreshes are single-flight); pruned on every persist.
+        var pending: [String: UInt64] = [:]
+        /// The newest bridge-issued token persisted since the last reset,
+        /// and its sequence. The account's token entry holds exactly this.
+        var newest: OAuthToken?
+        var newestSequence: UInt64 = 0
+    }
+
+    private let freshness = OSAllocatedUnfairLock(initialState: Freshness())
+
+    /// What `LifecycleGuardedTokenStore` may do with a save.
+    enum SaveAdmission: Sendable, Equatable {
+        /// Write it.
+        case write
+        /// The entry already holds this token: nothing to write.
+        case alreadyStored
+        /// Older than the newest bridge-issued token, which the entry holds
+        /// (and the client's provider should hold too).
+        case superseded(by: OAuthToken)
+    }
 
     /// Runs `body` once every earlier caller's `body` has finished. `body`
     /// runs in the caller's isolation.
@@ -102,6 +139,71 @@ final class AccountTokenGate: Sendable {
             return state.waiters.removeFirst()
         }
         next?.resume()
+    }
+
+    // MARK: Freshness
+
+    /// Records a token the bridge just issued, before it is persisted.
+    /// Called in issue order: refreshes are single-flight per account.
+    func recordIssued(_ token: OAuthToken) {
+        freshness.withLock { record in
+            record.nextSequence += 1
+            record.pending[token.accessToken] = record.nextSequence
+        }
+    }
+
+    /// Whether a save of `token` may be written. A saving caller must hold
+    /// the gate, so no other save interleaves between this and the write.
+    ///
+    /// Until a bridge-issued token has been persisted, everything is
+    /// written. After that, only a token the bridge issued *later* is.
+    /// Anything else is older: an earlier bridge token that TwitchKit saves
+    /// late, or the token the client started with, handed back through
+    /// `.unavailable(current:)`. Re-authorization never comes through here:
+    /// it writes the base store directly and resets the record.
+    func admitSave(_ token: OAuthToken) -> SaveAdmission {
+        freshness.withLock { record in
+            guard let newest = record.newest else { return .write }
+            if token.accessToken == newest.accessToken { return .alreadyStored }
+            if let sequence = record.pending[token.accessToken], sequence > record.newestSequence {
+                return .write
+            }
+            return .superseded(by: newest)
+        }
+    }
+
+    /// Records that `token` was written. A bridge-issued token becomes the
+    /// newest; any other token (only written before the first bridge token)
+    /// leaves the record alone.
+    func didPersist(_ token: OAuthToken) {
+        freshness.withLock { record in
+            guard let sequence = record.pending[token.accessToken] else { return }
+            record.newest = token
+            record.newestSequence = sequence
+            record.pending = record.pending.filter { $0.value > sequence }
+        }
+    }
+
+    /// The newest bridge-issued token when `token` is older than it, else
+    /// `nil`. Lets a refresh avoid POSTing a refresh token already spent.
+    /// Reads the record only; never waits on the gate.
+    ///
+    /// Needed beside the store's re-seed: if TwitchKit's late `setToken`
+    /// lands while a newer refresh is between issuing and persisting its
+    /// token, the late save is still the newest *persisted* one and isn't
+    /// dropped, so the provider can briefly hold it (a still-valid access
+    /// token). The next refresh then comes here and spends the newest
+    /// refresh token instead of the provider's spent one.
+    func newerToken(than token: OAuthToken) -> OAuthToken? {
+        guard case .superseded(let newest) = admitSave(token) else { return nil }
+        return newest
+    }
+
+    /// Forgets every issued token. Called while holding the lock when the
+    /// account is re-authorized or signed out: the next credential has no
+    /// ordering relation to the old ones.
+    func resetFreshness() {
+        freshness.withLock { $0 = Freshness() }
     }
 
     /// Test hook: returns once at least `count` callers are queued behind

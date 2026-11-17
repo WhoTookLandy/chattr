@@ -365,8 +365,10 @@ public final class AccountStore {
     /// the account is re-authorized while the removal is in flight, the
     /// removal stops and the re-authorized account stays (row, token,
     /// selection): deleting the row from under a fresh session would leave
-    /// its token orphaned.
-    public func remove(account: Account) async throws {
+    /// its token orphaned. That case returns `.superseded`, so callers don't
+    /// report a removal that didn't happen.
+    @discardableResult
+    public func remove(account: Account) async throws -> RemovalOutcome {
         // Read the row's fields up front: once deleted, touching the @Model's
         // properties is undefined behavior.
         let userId = account.userId
@@ -381,7 +383,7 @@ public final class AccountStore {
         do {
             guard try await clients.logOut(expected, userId: userId) else {
                 logger.notice("remove: @\(login, privacy: .public) was re-authorized before the removal began; keeping it")
-                return
+                return .superseded
             }
         } catch {
             // .warning, not .error: removal proceeds regardless. A leftover
@@ -409,11 +411,21 @@ public final class AccountStore {
         }
         guard removed else {
             logger.notice("remove: @\(login, privacy: .public) was re-authorized while being removed; keeping it")
-            return
+            return .superseded
         }
         if let deleteError { throw deleteError }
         logger.notice("Removed account @\(login, privacy: .public)")
         onAccountRemoved?(userId)
+        return .removed
+    }
+
+    /// What `remove(account:)` did.
+    public enum RemovalOutcome: Sendable, Equatable {
+        /// The account was signed out and its row deleted.
+        case removed
+        /// The account was re-authorized while the removal ran; the new
+        /// session was kept and nothing was removed.
+        case superseded
     }
 
     // MARK: - Refresh-token cache warm-up

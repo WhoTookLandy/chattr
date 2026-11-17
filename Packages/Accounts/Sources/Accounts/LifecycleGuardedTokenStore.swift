@@ -24,24 +24,71 @@ private let logger = AppLogger.make("Accounts.LifecycleGuardedTokenStore")
 /// while the client was active therefore finishes before the client can be
 /// retired, and before a re-authorization writes its new credential.
 ///
+/// Within one active client, saves are also ordered by freshness (see
+/// `AccountTokenGate.admitSave`): a save of a token older than the newest
+/// bridge-issued one is dropped, so a TwitchKit save that arrives late can't
+/// roll the account back to a superseded token. TwitchKit's
+/// `TwitchTokenProvider.setToken` assigns its in-memory token *before* it
+/// calls the store, so dropping the write alone would leave the provider on
+/// the old token. After releasing the gate, the store therefore hands the
+/// newest token back to the provider (`providerLink`). That second
+/// `setToken` re-enters this store, finds the entry already holds the token
+/// and writes nothing, so it can't loop.
+///
 /// Dropped writes don't throw: TwitchKit treats a throwing store as one more
 /// refresh failure and calls `logout()` again.
 struct LifecycleGuardedTokenStore: TwitchTokenStore {
     let base: any TwitchTokenStore
     let lifecycle: TwitchClientLifecycle
     let gate: AccountTokenGate
+    /// The provider of the client this store belongs to, attached once the
+    /// client exists. Only used to re-seed it after a superseded save.
+    let providerLink: TokenProviderLink
+
+    init(
+        base: any TwitchTokenStore,
+        lifecycle: TwitchClientLifecycle,
+        gate: AccountTokenGate,
+        providerLink: TokenProviderLink = TokenProviderLink()
+    ) {
+        self.base = base
+        self.lifecycle = lifecycle
+        self.gate = gate
+        self.providerLink = providerLink
+    }
 
     func loadToken() async throws -> OAuthToken? {
         try await base.loadToken()
     }
 
     func saveToken(_ token: OAuthToken) async throws {
-        try await gate.withLock {
+        let newest = try await gate.withLock { () async throws -> OAuthToken? in
             guard lifecycle.isActive else {
                 logger.notice("Dropped a token save from a client that is no longer the account's client")
-                return
+                return nil
             }
-            try await base.saveToken(token)
+            switch gate.admitSave(token) {
+            case .write:
+                try await base.saveToken(token)
+                gate.didPersist(token)
+                return nil
+            case .alreadyStored:
+                return nil
+            case .superseded(let newer):
+                logger.notice("Dropped a save of a superseded token; keeping the newest bridge-issued token")
+                return newer
+            }
+        }
+        // Outside the gate: this `setToken` comes back through `saveToken`,
+        // and the gate isn't reentrant.
+        guard let newest, let provider = providerLink.provider else { return }
+        do {
+            try await provider.setToken(newest)
+        } catch {
+            // Not expected: the re-seed writes nothing (the entry already
+            // holds `newest`), and the provider has taken `newest` in
+            // memory before calling the store either way.
+            logger.warning("Re-seeding the token provider after a superseded save failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

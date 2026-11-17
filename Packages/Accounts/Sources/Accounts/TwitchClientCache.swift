@@ -118,10 +118,12 @@ final class TwitchClientCache {
         let namespace = Self.namespace(for: userId)
         let lifecycle = TwitchClientLifecycle()
         let baseStore = tokenStoreFactory?(namespace) ?? KeychainTokenStore(clientId: clientId, namespace: namespace)
+        let providerLink = TokenProviderLink()
         let tokenStore = LifecycleGuardedTokenStore(
             base: baseStore,
             lifecycle: lifecycle,
-            gate: tokenGate(forUserId: userId)
+            gate: tokenGate(forUserId: userId),
+            providerLink: providerLink
         )
         // Weak: the cache owns the clients, so a strong capture would be a
         // cycle. A refresh that outlives the cache saves nothing.
@@ -139,6 +141,7 @@ final class TwitchClientCache {
             httpClient: http,
             isLive: { signal.hasActiveSessions }
         )
+        providerLink.attach(client.auth.tokenProvider)
         return Entry(client: client, lifecycle: lifecycle, tokenStore: baseStore)
     }
 
@@ -178,10 +181,14 @@ final class TwitchClientCache {
     /// and the next `client(forUserId:)` builds a fresh client.
     func replaceClient(forUserId userId: String, seededWith token: OAuthToken) async throws -> Entry {
         let replacement = makeClient(forUserId: userId)
-        try await tokenGate(forUserId: userId).withLock {
+        let gate = tokenGate(forUserId: userId)
+        try await gate.withLock {
             // The old client stays cached (retired) during the write, so
             // nothing builds another active client in the meantime.
             entries[userId]?.lifecycle.retire()
+            // The new credential isn't ordered against the old client's
+            // bridge-issued tokens.
+            gate.resetFreshness()
             do {
                 try await replacement.tokenStore.saveToken(token)
             } catch {
@@ -248,10 +255,12 @@ final class TwitchClientCache {
         ifCurrent lifecycle: TwitchClientLifecycle,
         cleanup: () -> Void = {}
     ) async -> Bool {
-        await tokenGate(forUserId: userId).withLock { () -> Bool in
+        let gate = tokenGate(forUserId: userId)
+        return await gate.withLock { () -> Bool in
             guard isCurrent(lifecycle, forUserId: userId) else { return false }
             entries.removeValue(forKey: userId)
             lifecycle.retire()
+            gate.resetFreshness()
             cleanup()
             return true
         }
