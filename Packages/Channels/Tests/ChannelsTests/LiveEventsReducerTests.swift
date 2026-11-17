@@ -745,8 +745,11 @@ struct LiveEventsReducerTests {
         // And an older same-id snapshot can't roll the tally back.
         state.apply(try update(.pollProgress(poll(id: "B", votes: [5, 5], startedAt: bStart))), at: bStart.addingTimeInterval(2))
         let older = LiveEventUpdate(helixPoll: try helixPoll(id: "B", status: "ACTIVE", votes: 4, startedAt: bStart))
-        let result728 = state.reconcile(.poll, snapshot: older, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(3))
-        #expect(!result728)
+        // It still counts as Helix confirming poll B is running (that refreshes
+        // its confirmation time, so `reconcile` reports a change), but the
+        // tally stays at the newer EventSub value.
+        _ = state.reconcile(.poll, snapshot: older, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(3))
+        #expect(state.poll?.id == "B")
         #expect(state.poll?.totalVotes == 10)
     }
 
