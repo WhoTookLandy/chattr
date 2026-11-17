@@ -93,17 +93,64 @@ struct OwnChatRestrictionTranscriptTests {
         await model.detach()
     }
 
-    @Test("A known timeout isn't downgraded by a later vague signal")
+    @Test("A known timeout isn't downgraded by a vague send rejection")
     func preciseStateWins() {
         let state = OwnChatRestrictionState()
         let until = Date.now.addingTimeInterval(600)
         state.apply(.timedOut(until: until))
 
-        state.noteOwnMessagesCleared()
         state.apply(.timedOut(until: nil))
 
         #expect(state.current == .timedOut(until: until))
         state.dismiss()
         #expect(state.current == nil)
+    }
+
+    @Test("A fresh self-clear during a known timeout drops the old deadline")
+    func freshClearOverridesKnownTimeout() {
+        let state = OwnChatRestrictionState()
+        state.apply(.timedOut(until: Date.now.addingTimeInterval(600)))
+
+        // Extended, or turned into a ban — the clear doesn't say which.
+        state.noteOwnMessagesCleared()
+
+        #expect(state.current == .removedByModerator)
+        #expect(state.current?.blocksSending() == false)
+        // Refined by the next send rejection.
+        state.apply(.banned)
+        #expect(state.current == .banned)
+    }
+
+    @Test("A remounted page restores the restriction kept on the session")
+    func restoresFromSessionOnAttach() async {
+        let session = makeSession()
+        let until = Date.now.addingTimeInterval(600)
+        await session.recordOwnChatRestriction(.rejected(.timedOut(until: until)))
+
+        let model = makeModel()
+        await model.attach(sessions: [session], currentUserId: "me-1")
+
+        #expect(model.ownRestriction.current == .timedOut(until: until))
+        await model.detach()
+    }
+
+    @Test("Page-only signals are mirrored to the session, in order")
+    func mirrorsToSession() async {
+        let session = makeSession()
+        let model = makeModel()
+        await model.attach(sessions: [session], currentUserId: "me-1")
+
+        model.ownRestriction.apply(.timedOut(until: nil))
+        model.ownRestriction.apply(.banned)
+        await model.ownRestriction.pendingMirror?.value
+
+        #expect(await session.ownChatRestriction().current() == .banned)
+
+        // A new page for the same session sees it.
+        await model.detach()
+        let remounted = makeModel()
+        await remounted.attach(sessions: [session], currentUserId: "me-1")
+        #expect(remounted.ownRestriction.current == .banned)
+        await remounted.detach()
     }
 }

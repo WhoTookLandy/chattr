@@ -26,11 +26,11 @@ extension ChatTranscriptModel {
         try await requireSession().warnUser(userId: userId, reason: reason)
     }
 
-    /// nil when Twitch won't say (older token, transient failure) — the card
-    /// then keeps Unban in its menu rather than hiding it.
+    /// nil when unknown (a moderator rather than the broadcaster, transient
+    /// failure) — the card then keeps Unban in its menu rather than hiding it.
     func banState(of userId: String) async -> UserBanState? {
         guard let session = primarySession else { return nil }
-        return try? await session.banState(of: userId)
+        return await session.banState(of: userId)
     }
 
     private func requireSession() throws -> ChannelSession {

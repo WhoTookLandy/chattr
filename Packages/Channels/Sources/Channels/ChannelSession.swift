@@ -89,6 +89,15 @@ public actor ChannelSession {
     /// `ChatRestrictionsCache`.
     var restrictionsCache = ChatRestrictionsCache()
 
+    /// The signed-in user's own timeout / ban / warning here. Lives on the
+    /// session rather than the chat page because the pager unmounts pages
+    /// two swipes away while the session stays; a remounted page restores
+    /// from this on attach. Self-clears are recorded in `handle(event:)`
+    /// (so they're kept even with no page mounted); the page forwards the
+    /// signals only it sees (send rejections, own echo, dismiss). See
+    /// `ChannelSession+Moderation.swift`.
+    var ownRestriction = OwnChatRestrictionLedger()
+
     /// IDs of active EventSub subscriptions, captured from the records that
     /// `subscribe(...)` returns. We track all of them (chat.message + chat
     /// notification + raid + delete + clear + clear_user_messages) so
@@ -420,6 +429,13 @@ public actor ChannelSession {
         // we arrive (the EventSub state is fresher).
         if case .restrictionsUpdated(let restrictions) = channelEvent {
             restrictionsCache.applyLive(restrictions)
+        }
+
+        // Side-effect: a mod cleared OUR messages (timeout / ban). Recorded
+        // here, once per clear event, so it survives the chat page being
+        // unmounted. Never per message.
+        if case .messagesClearedFromUser(let targetUserId) = channelEvent, targetUserId == accountUserId {
+            ownRestriction.apply(.ownMessagesCleared)
         }
 
         guard let update = normalizer.makeUpdate(for: channelEvent, receivedAt: receivedAt) else { return }

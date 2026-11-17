@@ -8,11 +8,17 @@ import Channels
 /// Self-contained: it reads only `OwnChatRestrictionState` (so nothing else
 /// re-renders when it changes) and renders nothing at all when there's no
 /// restriction, so it can share the top safe-area bar with other banners.
-/// The countdown is a self-updating `Text(timerInterval:)` — no per-second
-/// body re-evaluation.
+/// The countdown is `OwnTimeoutCountdownText`, a leaf that ticks only on the
+/// visible page of an active scene (pre-mounted pager neighbours and a
+/// backgrounded app show the static end time) — no per-second body
+/// re-evaluation anywhere.
 struct OwnChatRestrictionBanner: View {
     let state: OwnChatRestrictionState
     let channelLoginName: String
+    /// The pager tab, handed to the countdown leaf — the only view that reads
+    /// which page is visible. Stable for the page's lifetime (see
+    /// `ChatScreen.tabId`). nil outside the pager.
+    let tabId: UUID?
 
     @Environment(\.openURL) private var openURL
 
@@ -54,7 +60,7 @@ struct OwnChatRestrictionBanner: View {
     private func message(for restriction: OwnChatRestriction) -> some View {
         switch restriction {
         case .timedOut(let until?) where until > .now:
-            Text("You're timed out here. You can chat again in \(Text(timerInterval: Date.now...until, countsDown: true).monospacedDigit().bold()).")
+            OwnTimeoutCountdownText(until: until, tabId: tabId)
         case .timedOut:
             Text("You're timed out in this chat.")
         case .banned:

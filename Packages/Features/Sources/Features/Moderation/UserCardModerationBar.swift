@@ -12,8 +12,9 @@ import Channels
 /// - Ban asks for confirmation with an optional reason; Warn asks for its
 ///   required reason. Both live behind the shield menu.
 /// - Unban sits at the front of the row only when the user is KNOWN to be
-///   banned / timed out (GET /moderation/banned on open); when that's
-///   unknown it stays in the menu instead.
+///   banned / timed out (GET /moderation/banned on open, which Twitch only
+///   answers for the broadcaster's own token); when that's unknown — always
+///   for an ordinary moderator — it stays in the menu instead.
 ///
 /// Only shown when the viewer moderates the channel and the target is
 /// neither themselves nor the broadcaster (decided by the caller).

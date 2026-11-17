@@ -37,4 +37,4 @@ PLEASE TEST
 4. A mature channel: if the native player falls back to the web player, does "Start Watching" appear and work?
 5. Tap back from a chat, several times and across different chats: no freezes?
 6. Swipe in from the left edge to go back while a video is playing.
-7. In a channel you moderate (use an alt account): time it out from its user card, check the countdown banner and disabled message box on the alt, then Unban from the card. Try Ban (confirmation) and Warn (reason required).
+7. In a channel you moderate (use an alt account): time it out from its user card and check the countdown banner and disabled message box on the alt. On the alt, swipe two chats away and back: the banner and countdown should still be there. Then Unban from the card (in the shield menu, unless it is your own channel). Try Ban (confirmation) and Warn (reason required).

@@ -44,10 +44,17 @@ final class UserModerationModel {
         banState?.isRestricted() ?? false
     }
 
-    /// One GET per card open. Failure leaves `banState` nil (unknown).
+    /// Bumped by every action. The opening lookup captures it and drops its
+    /// result if it changed, so a slow GET can't overwrite what a Ban (or
+    /// any later action) just established with stale "not banned".
+    @ObservationIgnored private var generation = 0
+
+    /// At most one GET per card open (only on the broadcaster's own channel —
+    /// see `ChannelSession.banState(of:)`). Unknown leaves `banState` nil.
     func loadBanState() async {
+        let started = generation
         let state = await chatModel.banState(of: targetUserId)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == started else { return }
         banState = state
     }
 
@@ -90,6 +97,9 @@ final class UserModerationModel {
     @discardableResult
     private func perform(_ action: Action, success: String) async -> Bool {
         guard !isWorking else { return false }
+        // Invalidate any lookup still in flight, success or not: after an
+        // attempted action its answer may no longer be true.
+        generation &+= 1
         isWorking = true
         defer { isWorking = false }
         do {

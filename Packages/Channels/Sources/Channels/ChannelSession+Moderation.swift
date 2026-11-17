@@ -63,11 +63,27 @@ extension ChannelSession {
         logger.notice("Warned \(userId, privacy: .public) in #\(self.channelLoginName, privacy: .public)")
     }
 
-    /// Whether `userId` is currently banned / timed out here. Throws when
-    /// Twitch won't say (older token without the read scope, not a mod) —
-    /// callers treat that as "unknown".
-    public func banState(of userId: String) async throws -> UserBanState {
-        try await chatActions.banState(userId: userId)
+    /// Whether `userId` is currently banned / timed out here; nil when
+    /// unknown. Only the broadcaster's own token can ask Twitch (see
+    /// `HelixChatActions.banState`): for a moderator this is always nil and
+    /// makes no request.
+    public func banState(of userId: String) async -> UserBanState? {
+        await chatActions.banState(userId: userId)
+    }
+
+    // MARK: - Own restriction
+
+    /// The signed-in user's own standing here, for a chat page to restore on
+    /// attach (see `ownRestriction`).
+    public func ownChatRestriction() -> OwnChatRestrictionLedger {
+        ownRestriction
+    }
+
+    /// Records a signal only the chat page sees (a send rejection, our own
+    /// echo, the user dismissing the banner). Self-clears arrive through
+    /// `handle(event:)` instead and must not be forwarded here.
+    public func recordOwnChatRestriction(_ event: OwnChatRestrictionLedger.Event) {
+        ownRestriction.apply(event)
     }
 
     /// Translates a Twitch refusal into `ModerationActionError`; anything

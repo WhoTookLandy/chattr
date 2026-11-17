@@ -191,18 +191,28 @@ struct HelixChatActions: Sendable {
 
     /// GET /moderation/banned for one user: whether they're currently banned
     /// or timed out here. nil expiry on a found entry = permanent ban.
-    /// Needs `moderator:read:banned_users` (already requested for the
-    /// `channel.moderate` bundle).
+    ///
+    /// Returns nil ("unknown") WITHOUT a request unless the signed-in account
+    /// is the broadcaster: Twitch requires `broadcaster_id` to match the
+    /// token's user for this endpoint, so for an ordinary moderator it always
+    /// answers 401. Deliberately not routed through `authRetry` either — a
+    /// 401 here says nothing about the token's freshness, and treating it as
+    /// one would run a bridge refresh + retry on every card open. Any failure
+    /// is reported as unknown; the card then keeps Unban in its menu.
     func banState(
         userId: String,
         isolation: isolated (any Actor)? = #isolation
-    ) async throws -> UserBanState {
-        let page = try await authRetry.run("fetchBannedUsers") {
-            try await client.api.fetchBannedUsersPage(broadcasterID: channelId, userIDs: [userId])
+    ) async -> UserBanState? {
+        guard channelId == accountUserId else { return nil }
+        do {
+            let page = try await client.api.fetchBannedUsersPage(broadcasterID: channelId, userIDs: [userId])
+            guard let entry = page.data.first(where: { $0.userId == userId }) else {
+                return .notBanned
+            }
+            return UserBanState(expiresAt: entry.expiresAt)
+        } catch {
+            logger.debug("Banned lookup failed, state unknown: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
-        guard let entry = page.data.first(where: { $0.userId == userId }) else {
-            return .notBanned
-        }
-        return UserBanState(expiresAt: entry.expiresAt)
     }
 }

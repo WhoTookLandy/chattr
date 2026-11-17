@@ -45,14 +45,26 @@ struct HelixModerationActionsTests {
         }
     }
 
-    private func makeActions(status: Int = 200, json: String = "{\"data\":[]}") -> (HelixChatActions, RecordingHTTPClient) {
+    /// Counts bridge refreshes, so tests can prove a call never triggers one.
+    private final class RefreshCounter: Sendable {
+        private let value = OSAllocatedUnfairLock(initialState: 0)
+        var count: Int { value.withLock { $0 } }
+        func increment() { value.withLock { $0 += 1 } }
+    }
+
+    private func makeActions(
+        status: Int = 200,
+        json: String = "{\"data\":[]}",
+        accountUserId: String = "mod-1",
+        refreshes: RefreshCounter = RefreshCounter()
+    ) -> (HelixChatActions, RecordingHTTPClient) {
         let http = RecordingHTTPClient(status: status, json: json)
         let client = TwitchClient(clientId: "test-client", tokenStore: FixedTokenStore(), httpClient: http)
         let actions = HelixChatActions(
             client: client,
             channelId: "chan-1",
-            accountUserId: "mod-1",
-            authRetry: HelixAuthRetry(refreshTokenHandler: {})
+            accountUserId: accountUserId,
+            authRetry: HelixAuthRetry(refreshTokenHandler: { refreshes.increment() })
         )
         return (actions, http)
     }
@@ -170,11 +182,38 @@ struct HelixModerationActionsTests {
 
     // MARK: - Banned lookup
 
-    @Test("Ban state: GET /moderation/banned filtered to the user")
-    func banStateRequest() async throws {
+    @Test("Ban state: a moderator (not the broadcaster) makes no request — unknown")
+    func banStateSkippedForModerators() async {
         let (actions, http) = makeActions(json: #"{"data":[],"pagination":{}}"#)
 
-        let state = try await actions.banState(userId: "target-9")
+        let state = await actions.banState(userId: "target-9")
+
+        #expect(state == nil)
+        #expect(http.requests.isEmpty)
+    }
+
+    @Test("Ban state: a 401 is unknown and never triggers a token refresh")
+    func banStateUnauthorizedNoRefresh() async {
+        let refreshes = RefreshCounter()
+        let (actions, http) = makeActions(
+            status: 401,
+            json: #"{"error":"Unauthorized","status":401,"message":"The ID in broadcaster_id must match the user ID found in the request's OAuth token."}"#,
+            accountUserId: "chan-1",
+            refreshes: refreshes
+        )
+
+        let state = await actions.banState(userId: "target-9")
+
+        #expect(state == nil)
+        #expect(http.requests.count == 1)
+        #expect(refreshes.count == 0)
+    }
+
+    @Test("Ban state: the broadcaster's GET /moderation/banned filtered to the user")
+    func banStateRequest() async throws {
+        let (actions, http) = makeActions(json: #"{"data":[],"pagination":{}}"#, accountUserId: "chan-1")
+
+        let state = await actions.banState(userId: "target-9")
 
         #expect(state == .notBanned)
         let request = try #require(http.requests.first)
@@ -193,13 +232,13 @@ struct HelixModerationActionsTests {
             "moderator_login":"m","moderator_name":"M"}],"pagination":{}}
             """
         }
-        let (banned, _) = makeActions(json: entry(expiresAt: ""))
-        #expect(try await banned.banState(userId: "target-9") == .banned)
+        let (banned, _) = makeActions(json: entry(expiresAt: ""), accountUserId: "chan-1")
+        #expect(await banned.banState(userId: "target-9") == .banned)
 
-        let (timedOut, _) = makeActions(json: entry(expiresAt: "2026-11-17T10:10:00Z"))
-        let state = try await timedOut.banState(userId: "target-9")
-        guard case .timedOut(let until) = state else {
-            Issue.record("Expected .timedOut, got \(state)")
+        let (timedOut, _) = makeActions(json: entry(expiresAt: "2026-11-17T10:10:00Z"), accountUserId: "chan-1")
+        let state = await timedOut.banState(userId: "target-9")
+        guard case .timedOut(let until)? = state else {
+            Issue.record("Expected .timedOut, got \(String(describing: state))")
             return
         }
         #expect(until == Date(timeIntervalSince1970: 1_794_910_200))

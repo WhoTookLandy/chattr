@@ -263,7 +263,8 @@ public struct ChatScreen: View {
         .safeAreaBar(edge: .top) {
             OwnChatRestrictionBanner(
                 state: chatModel.ownRestriction,
-                channelLoginName: channelLoginName
+                channelLoginName: channelLoginName,
+                tabId: tabId
             )
         }
         // Stream context (title, category, live/viewers/uptime, or offline

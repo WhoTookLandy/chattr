@@ -243,6 +243,12 @@ public final class ChatTranscriptModel {
         if let session = sessions.first {
             await room.prime(from: session)
             guard attachment.isCurrent(epoch) else { return epoch }
+            // Our own timeout / ban lives on the session (it outlives this
+            // page); a remounted page picks up the banner and the remaining
+            // countdown from there.
+            let ownLedger = await session.ownChatRestriction()
+            guard attachment.isCurrent(epoch) else { return epoch }
+            ownRestriction.restore(from: session, ledger: ownLedger)
             moderation.seed(from: session, moderatedChannelIds: moderatedChannelIds)
             seedSelfColor(from: session)
         }
@@ -277,6 +283,7 @@ public final class ChatTranscriptModel {
         // whatever channel this model attaches to next.
         outgoing.cancelFallbacks()
         moderation.cancelSeed()
+        ownRestriction.detachSession()
         let removed = await attachment.tearDown()
         if removed > 0 {
             logger.info("ChatTranscriptModel detached \(removed) subscription(s)")
