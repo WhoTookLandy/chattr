@@ -28,7 +28,10 @@ import os
 /// | `.retired`    | no          | no |
 ///
 /// Transitions only move forward: `active → signingOut → retired`, or
-/// straight to `retired`.
+/// straight to `retired`. `TwitchClientCache` makes every transition on the
+/// account's `AccountTokenGate`, the same lock the guarded store checks the
+/// state and writes under, so a write admitted before a transition finishes
+/// before it. Reads (`current`, `isActive`) take no gate.
 final class TwitchClientLifecycle: Sendable {
     enum State: Sendable, Equatable {
         case active

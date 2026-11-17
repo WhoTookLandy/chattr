@@ -20,18 +20,26 @@ import Core
 /// in a `LifecycleGuardedTokenStore`. A client stops being `.active` when it
 /// is evicted or replaced, so a refresh still running on it can no longer
 /// write the account's shared Keychain entry.
+///
+/// Token writes and lifecycle changes for one account are serialized on
+/// that account's `AccountTokenGate`, so an old client's admitted write can
+/// never land after a re-authorization's new credential.
 @MainActor
 final class TwitchClientCache {
     /// A client plus the lifecycle its interceptor and token store check.
     struct Entry {
         let client: TwitchClient
         let lifecycle: TwitchClientLifecycle
+        /// The unguarded store under the client's `LifecycleGuardedTokenStore`.
+        /// Only `replaceClient` writes it directly, while holding the gate.
+        let tokenStore: any TwitchTokenStore
     }
 
     /// Public Twitch client id every client is built with.
     let clientId: String
     private let sessionActivity: SessionActivitySignal
     private var entries: [String: Entry] = [:]
+    private var gates: [String: AccountTokenGate] = [:]
 
     /// The transport under the interceptor. `URLSessionHTTPClient` in
     /// production; tests swap in a stub.
@@ -95,18 +103,20 @@ final class TwitchClientCache {
         return entry.client
     }
 
-    /// Builds a fresh Keychain-backed client WITHOUT caching it. `add`
-    /// seeds its token first and only then `install`s it, so a failed
-    /// `setToken` never leaves a half-initialized client in the cache.
+    /// Builds a fresh Keychain-backed client WITHOUT caching it.
+    /// `replaceClient` seeds its token first and only then caches it, so a
+    /// failed write never leaves a half-initialized client in the cache.
     func makeClient(forUserId userId: String) -> Entry {
         // Capture the Sendable signal (NOT `self`, which is non-Sendable
         // @MainActor) so the @Sendable isLive closure stays isolation-clean.
         let signal = sessionActivity
         let namespace = Self.namespace(for: userId)
         let lifecycle = TwitchClientLifecycle()
+        let baseStore = tokenStoreFactory?(namespace) ?? KeychainTokenStore(clientId: clientId, namespace: namespace)
         let tokenStore = LifecycleGuardedTokenStore(
-            base: tokenStoreFactory?(namespace) ?? KeychainTokenStore(clientId: clientId, namespace: namespace),
-            lifecycle: lifecycle
+            base: baseStore,
+            lifecycle: lifecycle,
+            gate: tokenGate(forUserId: userId)
         )
         // Weak: the cache owns the clients, so a strong capture would be a
         // cycle. A refresh that outlives the cache saves nothing.
@@ -124,7 +134,7 @@ final class TwitchClientCache {
             httpClient: http,
             isLive: { signal.hasActiveSessions }
         )
-        return Entry(client: client, lifecycle: lifecycle)
+        return Entry(client: client, lifecycle: lifecycle, tokenStore: baseStore)
     }
 
     /// A throwaway client over an in-memory store seeded with `token`,
@@ -150,13 +160,36 @@ final class TwitchClientCache {
         return await refreshHandler(userId, lifecycle)
     }
 
-    /// Caches `entry` as `userId`'s client. A different client it replaces
-    /// is retired.
-    func install(_ entry: Entry, forUserId userId: String) {
-        if let old = entries[userId], old.lifecycle !== entry.lifecycle {
-            old.lifecycle.retire()
+    /// Re-authorization: retires `userId`'s current client, writes `token`
+    /// and caches a fresh client for it, all in one critical section on the
+    /// account's `AccountTokenGate`. Every save or delete the old client was
+    /// admitted for has finished before `token` is written, and any it
+    /// attempts later is dropped, so nothing it does can overwrite or delete
+    /// the new credential.
+    ///
+    /// The token goes straight to the new client's base store (the gate is
+    /// already held, and it isn't reentrant). Its TwitchKit provider loads
+    /// it on first use. If the write throws, nothing is cached for `userId`
+    /// and the next `client(forUserId:)` builds a fresh client.
+    func replaceClient(forUserId userId: String, seededWith token: OAuthToken) async throws -> Entry {
+        let replacement = makeClient(forUserId: userId)
+        try await tokenGate(forUserId: userId).withLock {
+            // The old client stays cached (retired) during the write, so
+            // nothing builds another active client in the meantime.
+            entries[userId]?.lifecycle.retire()
+            do {
+                try await replacement.tokenStore.saveToken(token)
+            } catch {
+                entries.removeValue(forKey: userId)?.lifecycle.retire()
+                replacement.lifecycle.retire()
+                throw error
+            }
+            // A client built while the write was in flight (only possible
+            // when the account had none cached) is replaced too.
+            entries[userId]?.lifecycle.retire()
+            entries[userId] = replacement
         }
-        entries[userId] = entry
+        return replacement
     }
 
     /// Deliberately signs `userId`'s client out: TwitchKit's `logout()`
@@ -165,13 +198,30 @@ final class TwitchClientCache {
     /// callers `evict` afterwards.
     func logOut(userId: String) async throws {
         let entry = entry(forUserId: userId)
-        entry.lifecycle.beginSignOut()
+        // Under the gate, so a save admitted while the client was active
+        // finishes first and the delete below comes after it.
+        await tokenGate(forUserId: userId).withLock {
+            entry.lifecycle.beginSignOut()
+        }
         try await entry.client.auth.logout()
     }
 
-    /// Drops and retires `userId`'s cached client (sign-out, removal,
-    /// re-authorization). The next `client(forUserId:)` builds a fresh one.
-    func evict(userId: String) {
-        entries.removeValue(forKey: userId)?.lifecycle.retire()
+    /// Drops and retires `userId`'s cached client (sign-out, removal). The
+    /// next `client(forUserId:)` builds a fresh one. Retiring waits for any
+    /// write the client was already admitted for.
+    func evict(userId: String) async {
+        guard let old = entries.removeValue(forKey: userId) else { return }
+        await tokenGate(forUserId: userId).withLock {
+            old.lifecycle.retire()
+        }
+    }
+
+    /// The account's token gate, shared by every client built for it.
+    /// Never removed: one small object per account seen this launch.
+    func tokenGate(forUserId userId: String) -> AccountTokenGate {
+        if let gate = gates[userId] { return gate }
+        let gate = AccountTokenGate()
+        gates[userId] = gate
+        return gate
     }
 }

@@ -183,8 +183,8 @@ public final class AccountStore {
     // MARK: - Add
 
     /// Persists a new account after a successful OAuth flow, makes it the
-    /// active account, and returns the inserted row. `token` is set on the
-    /// new client's auth before returning so the first Helix call works.
+    /// active account, and returns the inserted row. `token` is stored and
+    /// the new client cached before returning, so the first Helix call works.
     public func add(token: OAuthToken, scopes: [TwitchScope]) async throws -> Account {
         // 1. Learn who the token belongs to via a probe client over an
         //    in-memory store — nothing hits the Keychain until we know the userId.
@@ -192,13 +192,12 @@ public final class AccountStore {
         let user = try await probe.api.fetchUser()
 
         // 2. Retire any client this account already had (re-authorizing),
-        //    so a refresh still running on it can't overwrite or delete the
-        //    token saved below. Then build the persistent (Keychain-backed)
-        //    client, seed it, cache it.
-        clients.evict(userId: user.id)
-        let persistent = clients.makeClient(forUserId: user.id)
-        try await persistent.client.auth.setToken(token)
-        clients.install(persistent, forUserId: user.id)
+        //    write the token, and cache a fresh persistent (Keychain-backed)
+        //    client, as one critical section on the account's token gate.
+        //    A save or delete the old client was already admitted for
+        //    finishes first, and any later one is dropped, so a refresh
+        //    still running on it can't overwrite or delete this token.
+        _ = try await clients.replaceClient(forUserId: user.id, seededWith: token)
 
         // 3. Cache the refresh_token chattr-side so it survives TwitchKit's
         //    defensive `logout()` if a future refresh fails (see
@@ -288,7 +287,7 @@ public final class AccountStore {
             // Still clear the in-memory client cache — it may have
             // outlived the row.
             OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
-            clients.evict(userId: userId)
+            await clients.evict(userId: userId)
             return
         }
 
@@ -302,7 +301,7 @@ public final class AccountStore {
             logger.warning("forceSignOut: TwitchKit logout failed for @\(account.login, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
-        clients.evict(userId: userId)
+        await clients.evict(userId: userId)
         // Mark, don't delete — see the doc comment. Also clear the stored
         // selection if it pointed here, so RootView's fallback picks a
         // healthy account rather than re-resolving this one.
@@ -341,14 +340,14 @@ public final class AccountStore {
         } catch {
             // .warning, not .error: removal proceeds regardless. A leftover
             // Keychain entry under this namespace is harmless — re-adding
-            // the account overwrites it via setToken.
+            // the account overwrites it via replaceClient.
             logger.warning("remove: TwitchKit logout failed for @\(login, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         // Clear our refresh_token cache for this user too — TwitchKit's
         // logout only touches its own store; our fallback cache is separate
         // (intentionally — see OAuthRefreshTokenCache header).
         OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
-        clients.evict(userId: userId)
+        await clients.evict(userId: userId)
         // If we removed the active account, clear the stored selection so
         // RootView's @AppStorage fallback (accounts.first by addedAt) picks
         // the next account — or SignInView if it was the last one.

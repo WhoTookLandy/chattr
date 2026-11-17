@@ -237,6 +237,45 @@ private final class GatedBridgeURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+/// A token store whose first save or delete stalls inside the underlying
+/// store until the test opens `gate`, like a Keychain write still in
+/// flight. Later writes go straight through. Counts land in `base`.
+private final class HeldTokenStore: TwitchTokenStore, Sendable {
+    let base: CountingTokenStore
+    private let gate: BridgeGate
+    private let heldOne = OSAllocatedUnfairLock(initialState: false)
+
+    init(_ base: CountingTokenStore, gate: BridgeGate) {
+        self.base = base
+        self.gate = gate
+    }
+
+    func loadToken() async throws -> OAuthToken? {
+        try await base.loadToken()
+    }
+
+    func saveToken(_ token: OAuthToken) async throws {
+        await holdIfFirstMutation()
+        try await base.saveToken(token)
+    }
+
+    func deleteToken() async throws {
+        await holdIfFirstMutation()
+        try await base.deleteToken()
+    }
+
+    private func holdIfFirstMutation() async {
+        let first = heldOne.withLock { held -> Bool in
+            defer { held = true }
+            return !held
+        }
+        guard first else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            gate.arrive { continuation.resume() }
+        }
+    }
+}
+
 private let staleToken = OAuthToken(
     accessToken: "stale-access",
     refreshToken: "refresh-1",
@@ -295,7 +334,7 @@ struct TwitchKitRefreshInterceptorTests {
         }
         let client = TwitchClient(
             clientId: "test-client",
-            tokenStore: LifecycleGuardedTokenStore(base: store, lifecycle: lifecycle),
+            tokenStore: LifecycleGuardedTokenStore(base: store, lifecycle: lifecycle, gate: AccountTokenGate()),
             httpClient: http
         )
         return (client, helix, store)
@@ -486,12 +525,14 @@ struct AccountStoreTwitchKitRefreshTests {
     }
 
     /// `gate`, when given, holds the bridge's response until the test opens
-    /// it.
+    /// it. `storeGate`, when given, holds the first token-store write
+    /// instead (see `HeldTokenStore`); counts still land in `tokenStore`.
     private func makeHarness(
         bridgeStatus: Int,
         bridgeJSON: String,
         tokenStore: CountingTokenStore = CountingTokenStore(staleToken),
-        gate: BridgeGate? = nil
+        gate: BridgeGate? = nil,
+        storeGate: BridgeGate? = nil
     ) throws -> Harness {
         let container = try ModelContainer(
             for: Account.self,
@@ -512,13 +553,19 @@ struct AccountStoreTwitchKitRefreshTests {
 
         let helix = HelixStub(validAccessToken: freshToken.accessToken)
         let refreshKeychain = InMemoryRefreshTokenKeychain()
+        let backingStore: any TwitchTokenStore
+        if let storeGate {
+            backingStore = HeldTokenStore(tokenStore, gate: storeGate)
+        } else {
+            backingStore = tokenStore
+        }
         let store = AccountStore(
             modelContainer: container,
             clientId: "test-client",
             defaults: defaults,
             bridgeRefresh: BridgeTokenRefresh(endpoint: bridgeURL, session: URLSession(configuration: config)),
             twitchTransport: helix,
-            tokenStoreFactory: { _ in tokenStore },
+            tokenStoreFactory: { _ in backingStore },
             refreshTokenKeychain: refreshKeychain
         )
 
@@ -688,9 +735,9 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.helix.twitchTokenEndpointRequests == 0)
     }
 
-    /// Holds the bridge, re-authorizes the account the way `add(token:)`
-    /// does once it knows the userId, then lets the stale refresh's
-    /// response through.
+    /// Holds the bridge, re-authorizes the account through the same
+    /// `replaceClient` call `add(token:)` makes once it knows the userId,
+    /// then lets the stale refresh's response through.
     private func reauthorizeDuringRefresh(bridgeStatus: Int, bridgeJSON: String) async throws -> (Harness, Result<Void, any Error>) {
         let gate = BridgeGate()
         let h = try makeHarness(bridgeStatus: bridgeStatus, bridgeJSON: bridgeJSON, gate: gate)
@@ -702,10 +749,7 @@ struct AccountStoreTwitchKitRefreshTests {
         }
         await gate.waitForArrival()
 
-        h.store.clients.evict(userId: userId)
-        let reauthorized = h.store.clients.makeClient(forUserId: userId)
-        try await reauthorized.client.auth.setToken(reauthorizedToken)
-        h.store.clients.install(reauthorized, forUserId: userId)
+        _ = try await h.store.clients.replaceClient(forUserId: userId, seededWith: reauthorizedToken)
         OAuthRefreshTokenCache.save(refreshToken: reauthorizedToken.refreshToken, for: userId, in: h.refreshKeychain)
 
         gate.open()
@@ -741,5 +785,88 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.cachedRefreshToken() == "refresh-reauthorized")
         #expect(!h.account.needsReauth)
         #expect(h.defaults.string(forKey: AccountStore.lastSessionExpiredLoginKey) == nil)
+    }
+
+    // MARK: Writes already in the store when the account is re-authorized
+
+    @Test("A save admitted before re-authorization finishes first, so the re-authorized token survives")
+    func heldSaveCannotOverwriteReauthorizedToken() async throws {
+        let storeGate = BridgeGate()
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON, storeGate: storeGate)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let clients = h.store.clients
+        let old = clients.entry(forUserId: userId)
+        let oldAuth = old.client.auth
+
+        // The old client saves while it is still the account's client. The
+        // write passes the lifecycle check and stalls inside the store.
+        let staleSave = Task {
+            try await oldAuth.setToken(freshToken)
+        }
+        await storeGate.waitForArrival()
+
+        // Re-authorize while that write is in flight. It queues behind the
+        // write instead of writing around it.
+        let reauthorization = Task {
+            try await clients.replaceClient(forUserId: userId, seededWith: reauthorizedToken).lifecycle
+        }
+        await clients.tokenGate(forUserId: userId).waitForWaiters(1)
+        #expect(h.tokenStore.saves == 0)
+        #expect(h.tokenStore.token == staleToken)
+
+        storeGate.open()
+        try await staleSave.value
+        let replacement = try await reauthorization.value
+
+        // The stale write landed first; the re-authorization's came after it.
+        #expect(h.tokenStore.saves == 2)
+        #expect(h.tokenStore.deletes == 0)
+        #expect(h.tokenStore.token == reauthorizedToken)
+        #expect(old.lifecycle.current == .retired)
+        let cached = clients.entry(forUserId: userId)
+        #expect(cached.lifecycle === replacement)
+        #expect(replacement.isActive)
+        let current = try await cached.client.auth.tokenProvider.token()
+        #expect(current == reauthorizedToken)
+    }
+
+    @Test("A delete admitted before re-authorization finishes first, so the re-authorized token survives")
+    func heldDeleteCannotDeleteReauthorizedToken() async throws {
+        let storeGate = BridgeGate()
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON, storeGate: storeGate)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let clients = h.store.clients
+        let old = clients.entry(forUserId: userId)
+
+        // A deliberate sign-out of the old client: its delete is allowed
+        // and stalls inside the store.
+        let signOut = Task {
+            try await clients.logOut(userId: userId)
+        }
+        await storeGate.waitForArrival()
+        #expect(old.lifecycle.current == .signingOut)
+
+        let reauthorization = Task {
+            try await clients.replaceClient(forUserId: userId, seededWith: reauthorizedToken).lifecycle
+        }
+        await clients.tokenGate(forUserId: userId).waitForWaiters(1)
+        #expect(h.tokenStore.deletes == 0)
+        #expect(h.tokenStore.saves == 0)
+
+        storeGate.open()
+        try await signOut.value
+        let replacement = try await reauthorization.value
+
+        // The delete landed first; the re-authorized token was written after it.
+        #expect(h.tokenStore.deletes == 1)
+        #expect(h.tokenStore.saves == 1)
+        #expect(h.tokenStore.token == reauthorizedToken)
+        #expect(old.lifecycle.current == .retired)
+        let cached = clients.entry(forUserId: userId)
+        #expect(cached.lifecycle === replacement)
+        let current = try await cached.client.auth.tokenProvider.token()
+        #expect(current == reauthorizedToken)
     }
 }

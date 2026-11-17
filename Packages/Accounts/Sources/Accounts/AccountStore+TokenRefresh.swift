@@ -122,8 +122,8 @@ extension AccountStore {
         }
 
         try Self.checkStillCurrent(entry, login: login)
-        // The guarded token store also drops this save if the client is
-        // retired while it's in flight.
+        // The guarded token store re-checks the lifecycle under the account's
+        // token gate, so this save is dropped if the client was retired first.
         try await twitchClient.auth.setToken(newToken)
         try Self.checkStillCurrent(entry, login: login)
         // Mirror to chattr-side cache so the next failure has somewhere

@@ -18,29 +18,40 @@ private let logger = AppLogger.make("Accounts.LifecycleGuardedTokenStore")
 ///   failure can never wipe a credential. A dead refresh token still signs
 ///   the account out: `AccountStore.forceSignOut` deletes the token itself.
 ///
+/// The lifecycle check and the write it admits are one critical section on
+/// the account's `AccountTokenGate`, which every other client for the
+/// account and the cache's lifecycle transitions share. A write admitted
+/// while the client was active therefore finishes before the client can be
+/// retired, and before a re-authorization writes its new credential.
+///
 /// Dropped writes don't throw: TwitchKit treats a throwing store as one more
 /// refresh failure and calls `logout()` again.
 struct LifecycleGuardedTokenStore: TwitchTokenStore {
     let base: any TwitchTokenStore
     let lifecycle: TwitchClientLifecycle
+    let gate: AccountTokenGate
 
     func loadToken() async throws -> OAuthToken? {
         try await base.loadToken()
     }
 
     func saveToken(_ token: OAuthToken) async throws {
-        guard lifecycle.isActive else {
-            logger.notice("Dropped a token save from a client that is no longer the account's client")
-            return
+        try await gate.withLock {
+            guard lifecycle.isActive else {
+                logger.notice("Dropped a token save from a client that is no longer the account's client")
+                return
+            }
+            try await base.saveToken(token)
         }
-        try await base.saveToken(token)
     }
 
     func deleteToken() async throws {
-        guard lifecycle.current == .signingOut else {
-            logger.notice("Dropped a token delete chattr didn't ask for (TwitchKit gave up on a refresh)")
-            return
+        try await gate.withLock {
+            guard lifecycle.current == .signingOut else {
+                logger.notice("Dropped a token delete chattr didn't ask for (TwitchKit gave up on a refresh)")
+                return
+            }
+            try await base.deleteToken()
         }
-        try await base.deleteToken()
     }
 }
