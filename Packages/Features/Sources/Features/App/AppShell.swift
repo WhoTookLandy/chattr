@@ -75,8 +75,27 @@ public struct AppShell: View {
             && !navigation.chatTabs.tabs.isEmpty
     }
 
+    /// Not while the system PiP window is showing the stream — the mini
+    /// player would just be a black "playing in picture in picture" tile.
     private var showsMiniPlayer: Bool {
-        playback.isPlaying && !chatOnScreen
+        playback.isPlaying && !chatOnScreen && !playback.controller.isPictureInPictureActive
+    }
+
+    private func wirePictureInPicture() {
+        // PiP's "return to app" → back into that stream's chat.
+        // Weak: the center owns the controller that stores these closures.
+        playback.controller.onRestoreFromPictureInPicture = { [weak playback, weak navigation] in
+            if let channel = playback?.channel {
+                navigation?.openChannel(channel)
+            }
+        }
+        // PiP closed with its × while no chat shows the stream: stop it
+        // rather than leaving a paused mini player behind.
+        playback.controller.onPictureInPictureClosed = { [weak playback, weak navigation] in
+            guard let playback, let navigation else { return }
+            let chatShowingIt = navigation.selectedTab == .chats && navigation.chatTabs.isPresented
+            if !chatShowingIt { playback.stop() }
+        }
     }
     #endif
 
@@ -161,6 +180,9 @@ public struct AppShell: View {
         }
         .environment(\.chatTabs, navigation.chatTabs)
         .onAppear {
+            #if os(iOS)
+            wirePictureInPicture()
+            #endif
             guard !didPickLaunchTab else { return }
             didPickLaunchTab = true
             if resumeLastChatOnLaunch, persistedActiveTabId != nil {

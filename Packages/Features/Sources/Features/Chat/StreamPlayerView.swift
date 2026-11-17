@@ -122,14 +122,45 @@ enum TwitchWebPlayer {
         var v = video();
         if (!v) return;
         var pip = !!(v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture'));
-        var state = { type: 'state', paused: v.paused, muted: v.muted, pip: pip, playing: !v.paused && v.readyState > 2 };
+        var pipActive = v.webkitPresentationMode === 'picture-in-picture';
+        var state = { type: 'state', paused: v.paused, muted: v.muted, pip: pip, pipActive: pipActive, playing: !v.paused && v.readyState > 2 };
         var key = JSON.stringify(state);
         if (key !== lastState) { lastState = key; post(state); }
       };
-      ['play', 'playing', 'pause', 'volumechange', 'loadeddata', 'waiting'].forEach(function (n) {
+      ['play', 'playing', 'pause', 'volumechange', 'loadeddata', 'waiting', 'webkitpresentationmodechanged'].forEach(function (n) {
         document.addEventListener(n, report, true);
       });
       setInterval(report, 1000);
+
+      // PiP start / end. WebKit reports "inline" after both a return to the
+      // app and a close, so tell them apart the way the system does it:
+      // closing PiP with its x pauses the video, returning keeps it playing.
+      var lastMode = 'inline';
+      var lastPauseAt = 0;
+      document.addEventListener('pause', function () { lastPauseAt = Date.now(); }, true);
+      document.addEventListener('webkitpresentationmodechanged', function () {
+        var v = video();
+        if (!v) return;
+        var mode = v.webkitPresentationMode;
+        if (mode === 'picture-in-picture' && lastMode !== mode) { post({ type: 'pipStart' }); }
+        if (lastMode === 'picture-in-picture' && mode !== 'picture-in-picture') {
+          // The x can pause the video just before this event fires, so a
+          // pause within the last moment counts as a close. A pause from
+          // earlier (paused inside PiP) tells us nothing: "unknown" (null).
+          var pausedJustNow = v.paused && (Date.now() - lastPauseAt) < 600;
+          if (pausedJustNow) {
+            post({ type: 'pipEnd', restored: false });
+          } else if (v.paused) {
+            post({ type: 'pipEnd', restored: null });
+          } else {
+            setTimeout(function () {
+              var w = video();
+              post({ type: 'pipEnd', restored: !!(w && !w.paused) });
+            }, 250);
+          }
+        }
+        lastMode = mode;
+      }, true);
 
       window.chattrPlayer = {
         togglePlay: function () { var v = video(); if (!v) return; if (v.paused) { v.play(); } else { v.pause(); } },
@@ -169,6 +200,26 @@ enum TwitchWebPlayer {
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
                 if body["playing"] as? Bool == true { controller.update(\.hasStarted, to: true) }
+            case "pipStart":
+                controller.pictureInPictureDidStart()
+            case "pipEnd":
+                // Same contract as the native delegate: a return to the app
+                // restores (reopens the chat), a close just stops.
+                switch body["restored"] as? Bool {
+                case true?:
+                    controller.pictureInPictureWillRestore()
+                    controller.pictureInPictureDidStop()
+                case false?:
+                    controller.pictureInPictureDidStop()
+                case nil:
+                    // Known limitation of the web player: WebKit reports no
+                    // return-vs-close event, only the presentation mode.
+                    // If the video was paused inside PiP before it ended,
+                    // neither is detectable, so neither reopen the chat
+                    // nor stop playback. (The native player has a real
+                    // restore callback and isn't affected.)
+                    controller.pictureInPictureEndedAmbiguously()
+                }
             default:
                 break
             }

@@ -1,6 +1,8 @@
 Watch while you chat
 
 NEW
+• Picture in picture: the video area in chat collapses to a slim bar so chat gets the space; the floating mini player stays out of the way; PiP return button takes you back to the chat.
+• New sign-in screen, plus "just look around": type a channel name to watch its stream and read chat without an account.
 • Replies look cleaner: a thin connector into a one-line quote, no grey box.
 • Video controls are plain icons again. Swipe down on the video for picture in picture.
 • Tap the viewer count on the video for the viewer list (moderators only; sign out and back in once to grant the new permission).

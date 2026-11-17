@@ -19,6 +19,7 @@ struct WhatsNewScreen: View {
             version: "Beta",
             title: "Watch while you chat",
             notes: [
+                "Picture in picture gives chat the space back, and its return button opens the chat.",
                 "New tab bar: Home, Chats, Activity and Search. Settings are behind your avatar on Home.",
                 "Swipe between Live and Following; long-press any channel for a preview.",
                 "Chats: live first, swipe to close, close all offline chats at once.",
