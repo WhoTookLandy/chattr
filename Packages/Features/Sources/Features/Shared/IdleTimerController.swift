@@ -73,6 +73,21 @@ extension View {
     func keepsScreenAwake(_ active: Bool) -> some View {
         modifier(KeepScreenAwakeModifier(active: active))
     }
+
+    /// Same, but `isActive` is evaluated inside the modifier's body, so any
+    /// observable state it reads invalidates only this modifier, not the
+    /// view it's attached to.
+    func keepsScreenAwake(while isActive: @escaping @MainActor () -> Bool) -> some View {
+        modifier(DeferredKeepScreenAwakeModifier(isActive: isActive))
+    }
+}
+
+private struct DeferredKeepScreenAwakeModifier: ViewModifier {
+    let isActive: @MainActor () -> Bool
+
+    func body(content: Content) -> some View {
+        content.keepsScreenAwake(isActive())
+    }
 }
 
 private struct KeepScreenAwakeModifier: ViewModifier {

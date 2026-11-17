@@ -423,6 +423,20 @@ final class FullscreenPictureInPictureForwarder: NSObject, @preconcurrency AVPla
         self.controller = controller
     }
 
+    // Marked active on *will* start too: fullscreen PiP can begin as the app
+    // leaves, and the background handler must see it before it pauses.
+    func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        controller?.pictureInPictureDidStart()
+    }
+
+    // Undo the early "active" from will-start if PiP never came up.
+    func playerViewController(
+        _ playerViewController: AVPlayerViewController,
+        failedToStartPictureInPictureWithError error: any Error
+    ) {
+        controller?.pictureInPictureEndedAmbiguously()
+    }
+
     func playerViewControllerDidStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
         controller?.pictureInPictureDidStart()
     }

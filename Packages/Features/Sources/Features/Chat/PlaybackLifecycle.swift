@@ -30,7 +30,11 @@ extension StreamPlayerController {
     }
 
     /// The native player is going to PiP (or already is) as the app leaves.
+    /// `isPictureInPictureActive` covers PiP started from the fullscreen
+    /// `AVPlayerViewController`, which has its own PiP controller that
+    /// `pictureInPicture` (the inline one) knows nothing about.
     var continuesInPictureInPicture: Bool {
+        if isPictureInPictureActive { return true }
         guard let pip = pictureInPicture else { return false }
         return pip.isPictureInPictureActive
             || (pip.canStartPictureInPictureAutomaticallyFromInline && pip.isPictureInPicturePossible)

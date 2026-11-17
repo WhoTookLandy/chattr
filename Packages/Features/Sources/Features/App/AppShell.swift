@@ -216,7 +216,9 @@ public struct AppShell: View {
         .onDisappear { playback.stop() }
         // Settings → Video & Device → Keep Screen Awake: while a chat or a stream
         // (the mini player) is on screen.
-        .keepsScreenAwake(chatOnScreen || playback.isPlaying)
+        // Evaluated in the modifier's own body, so these reads don't make the
+        // shell itself observe playback / navigation state.
+        .keepsScreenAwake(while: { chatOnScreen || playback.isPlaying })
         // Settings → Video & Device → When a Chat Opens, applied just before the
         // pager presents so the header mounts in the chosen state.
         .onAppear {
