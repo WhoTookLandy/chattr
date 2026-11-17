@@ -74,7 +74,7 @@ struct LandscapeDividerHandle: View {
                     onCommit(clamped(proposedWidth(for: value.translation.width)))
                 }
         )
-        .sensoryFeedback(.impact(weight: .medium), trigger: isPinned) { _, pinned in pinned }
+        .appSensoryFeedback(.impact(weight: .medium), trigger: isPinned) { _, pinned in pinned }
         .animation(.snappy(duration: 0.15), value: dragging)
         .accessibilityElement()
         .accessibilityLabel("Chat width")

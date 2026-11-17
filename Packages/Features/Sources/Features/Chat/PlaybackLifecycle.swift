@@ -85,10 +85,18 @@ final class PlaybackLifecycleObserver: NSObject {
         center?.controller.refreshAutomaticPictureInPicture()
     }
 
-    @objc private func didEnterBackground() {
+    /// Internal (not private) so tests can drive it without posting
+    /// app-wide notifications.
+    @objc func didEnterBackground() {
         guard let center, center.isPlaying else { return }
         let controller = center.controller
-        guard !controller.isPaused else { return }
+        // Decided on intent, not the displayed paused state: a stream
+        // paused only because another hold (a clip) is out still needs
+        // this hold, or releasing the other one in the background would
+        // resume it there. (It inherits that hold's resume decision.)
+        guard controller.wantsPlayback else { return }
+        // Held paused, the stream can't hand itself to PiP on the way out.
+        let heldPaused = controller.isHeld
 
         // The native engine, loaded or still resolving its playlist (no
         // AVPlayer yet, so `controller.isNative` is still false).
@@ -96,8 +104,10 @@ final class PlaybackLifecycleObserver: NSObject {
             // Audio-only: listening with the screen off is the point —
             // unless it's muted, then there's nothing to hear.
             if center.audioOnly, !controller.nativeFailed, !controller.isMuted { return }
-            if controller.continuesInPictureInPicture { return }
-        } else if controller.allowsAutomaticPictureInPicture || controller.isPictureInPictureActive {
+            if controller.isPictureInPictureActive { return }
+            if !heldPaused, controller.continuesInPictureInPicture { return }
+        } else if controller.isPictureInPictureActive
+                    || (!heldPaused && controller.allowsAutomaticPictureInPicture) {
             // Web player with PiP allowed, or already in PiP (started by
             // hand): leave WebKit's own behaviour.
             return
@@ -110,7 +120,7 @@ final class PlaybackLifecycleObserver: NSObject {
         backgroundHold = center.holdPlayback(.background) ?? backgroundHold
     }
 
-    @objc private func willEnterForeground() {
+    @objc func willEnterForeground() {
         guard let hold = backgroundHold else { return }
         backgroundHold = nil
         // Resumes at the live edge, only what this hold paused.

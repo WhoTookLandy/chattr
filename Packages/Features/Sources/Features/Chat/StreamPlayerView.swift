@@ -176,6 +176,10 @@ enum TwitchWebPlayer {
           v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture');
         },
         pause: function () { var v = video(); if (v) { v.pause(); } },
+        // A background hold: leave a video that's in (or entering) PiP alone.
+        pauseUnlessPictureInPicture: function () {
+          var v = video(); if (v && v.webkitPresentationMode !== 'picture-in-picture') { v.pause(); }
+        },
         play: function () { var v = video(); if (v) { v.play(); } }
       };
     })();
@@ -209,7 +213,7 @@ enum TwitchWebPlayer {
                 // PiP): the page's autoplay — the hold began after the page
                 // was built with `autoplay=true` — mustn't start the stream
                 // behind the clip or in the background.
-                if controller.isHeld, !paused { controller.pause() }
+                if controller.isHeld, !paused { controller.pauseForHold() }
                 controller.update(\.isPaused, to: paused)
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)

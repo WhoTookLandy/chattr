@@ -54,7 +54,7 @@ struct CreateClipSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .sensoryFeedback(.success, trigger: phase) { _, new in
+        .appSensoryFeedback(.success, trigger: phase) { _, new in
             if case .created = new { return true }
             return false
         }

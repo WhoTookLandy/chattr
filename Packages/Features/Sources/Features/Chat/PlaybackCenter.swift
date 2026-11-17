@@ -121,7 +121,7 @@ final class PlaybackCenter {
     @ObservationIgnored var startNextStreamMuted = false
     /// Leaving the app → PiP or a `.background` hold (see
     /// `PlaybackLifecycleObserver`).
-    @ObservationIgnored private var lifecycle: PlaybackLifecycleObserver?
+    @ObservationIgnored private(set) var lifecycle: PlaybackLifecycleObserver?
 
     var isPlaying: Bool { channel != nil }
 
@@ -132,6 +132,7 @@ final class PlaybackCenter {
         }
         controller.onPictureInPictureActiveChange = { [weak self] in
             self?.syncPictureInPictureFlags()
+            self?.yieldBackgroundHoldToPictureInPicture()
         }
         lifecycle = PlaybackLifecycleObserver(center: self)
     }
@@ -304,9 +305,9 @@ final class PlaybackCenter {
         engineKey = nil
         channel = nil
         controller.startsMuted = false
+        controller.wantsPlayback = true
         controller.reset()
         controller.nativeFailed = false
-        controller.wantsPlayback = true
         syncPictureInPictureFlags()
         hostRevision += 1
     }
@@ -373,6 +374,17 @@ final class PlaybackCenter {
     /// still loading toward autoplay resumes; one the user paused doesn't.
     static func resumesOnRelease(_ controller: StreamPlayerController) -> Bool {
         controller.wantsPlayback && !(controller.hasStarted && controller.isPaused)
+    }
+
+    /// PiP started while a `.background` hold is out: the app left before
+    /// the web page's `pipStart` arrived (the cached PiP flag lagged), so
+    /// the lifecycle observer took a hold. PiP owns playback now — drop the
+    /// hold without resuming, so a play from the PiP window isn't paused
+    /// again. The observer's copy lapses (`releaseHold` ignores it).
+    private func yieldBackgroundHoldToPictureInPicture() {
+        guard controller.isPictureInPictureActive, currentHolds[.background] != nil else { return }
+        currentHolds[.background] = nil
+        controller.endHold(.background, resume: false)
     }
 
     private func advanceGeneration() {

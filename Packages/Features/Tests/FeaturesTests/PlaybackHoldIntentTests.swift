@@ -1,5 +1,6 @@
 #if os(iOS)
 import Testing
+import Core
 @testable import Features
 
 /// Whether a clip's hold on the live stream resumes it on release
@@ -10,6 +11,11 @@ import Testing
 @MainActor
 @Suite("Playback hold intent")
 struct PlaybackHoldIntentTests {
+    static let channel = ChannelDescriptor(
+        channelId: "1", channelLoginName: "x",
+        channelDisplayName: "x", profileImageURL: nil
+    )
+
     @Test("A stream still loading toward autoplay resumes")
     func loadingResumes() {
         let controller = StreamPlayerController()
@@ -30,11 +36,101 @@ struct PlaybackHoldIntentTests {
     @Test("Playing again after a user pause resumes")
     func pauseThenPlayResumes() {
         let controller = StreamPlayerController()
+        // No engine has reported yet: each tap flips intent and shows it.
         controller.togglePlay()
-        // The engine now reports paused; the control shows "play".
-        controller.update(\.isPaused, to: true)
+        #expect(!controller.wantsPlayback)
+        #expect(controller.isPaused)
         controller.togglePlay()
         #expect(controller.wantsPlayback)
+        #expect(!controller.isPaused)
+    }
+
+    @Test("Native playlist still loading: pause then play updates the control and intent")
+    func pauseThenPlayWhileNativeLoads() {
+        let center = PlaybackCenter()
+        center.play(
+            Self.channel, title: "x", profileImageURL: nil,
+            native: true, audioOnly: false, quality: .auto
+        )
+        defer { center.stop() }
+        let controller = center.controller
+        // Resolving the playlist: no AVPlayer, no web page.
+        #expect(!controller.isNative)
+        #expect(!controller.isAwaitingWebEngine)
+        #expect(!controller.isPaused)
+
+        controller.togglePlay()
+        #expect(!controller.wantsPlayback)
+        #expect(controller.isPaused)
+        #expect(!controller.startsPlaying)
+
+        controller.togglePlay()
+        #expect(controller.wantsPlayback)
+        #expect(!controller.isPaused)
+        #expect(controller.startsPlaying)
+    }
+
+    @Test("Clip, then background, then the clip released in the background: stays paused until the app returns")
+    func clipReleasedWhileBackgroundedStaysPaused() {
+        let center = PlaybackCenter()
+        center.play(
+            Self.channel, title: "x", profileImageURL: nil,
+            native: true, audioOnly: false, quality: .auto
+        )
+        defer { center.stop() }
+        let controller = center.controller
+        let clip = center.holdPlayback(.clip)
+        #expect(clip != nil)
+        // The clip's hold paused the stream (PiP off, so nothing else
+        // keeps it going in the background).
+        controller.update(\.isPaused, to: true)
+
+        center.lifecycle?.didEnterBackground()
+        #expect(controller.holds.contains(.background))
+
+        // The clip goes while the app is still in the background.
+        if let clip { center.releaseHold(clip) }
+        #expect(controller.isHeld)
+        #expect(!controller.startsPlaying)
+
+        // Back in the foreground: the background hold inherited the
+        // clip's resume and hands the stream back.
+        center.lifecycle?.willEnterForeground()
+        #expect(!controller.isHeld)
+        #expect(controller.startsPlaying)
+    }
+
+    @Test("PiP starting after a background hold was taken drops the hold without resuming")
+    func pictureInPictureStartReleasesBackgroundHold() {
+        // The page-side pause a background hold sends skips a video in PiP.
+        #expect(TwitchWebPlayer.bridgeScript.contains("pauseUnlessPictureInPicture"))
+
+        let center = PlaybackCenter()
+        center.play(
+            Self.channel, title: "x", profileImageURL: nil,
+            native: true, audioOnly: false, quality: .auto
+        )
+        defer { center.stop() }
+        let controller = center.controller
+        // The app leaves before PiP has reported starting.
+        center.lifecycle?.didEnterBackground()
+        #expect(controller.holds.contains(.background))
+
+        // `pipStart` arrives: PiP owns playback now.
+        controller.pictureInPictureDidStart()
+        #expect(!controller.isHeld)
+        #expect(controller.startsPlaying)
+        // A play from the PiP window is intent, not paused again.
+        controller.noteDidPlay()
+        #expect(controller.wantsPlayback)
+
+        // The observer's lapsed hold is ignored on return, and a later
+        // background hold can be taken again.
+        center.lifecycle?.willEnterForeground()
+        #expect(!controller.isHeld)
+        controller.pictureInPictureEndedAmbiguously()
+        let again = center.holdPlayback(.background)
+        #expect(again != nil)
     }
 
     @Test("A started stream paused from outside our controls doesn't resume")

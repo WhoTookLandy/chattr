@@ -191,7 +191,7 @@ final class StreamPlayerController {
             didSuppressStartupPlay = true
             pause()
         } else if isHeld {
-            pause()
+            pauseForHold()
         } else {
             wantsPlayback = true
         }
@@ -225,7 +225,20 @@ final class StreamPlayerController {
 
     func beginHold(_ reason: PlaybackHoldReason) {
         holds.insert(reason)
-        pause()
+        pauseForHold()
+    }
+
+    /// Pauses for the holds that are out. With a `.background` hold on the
+    /// web player the page pauses only if the video isn't in (or entering)
+    /// picture in picture: `isPictureInPictureActive` comes from the page's
+    /// async `pipStart` message and can lag the app leaving, and an
+    /// unconditional pause would stop the video WebKit is handing to PiP.
+    /// (`PlaybackCenter` drops the hold once `pipStart` arrives.)
+    func pauseForHold() {
+        guard avPlayer == nil, holds.contains(.background) else { return pause() }
+        // A loading web page gets it from `noteEngineReady`.
+        if isAwaitingWebEngine { return }
+        run("pauseUnlessPictureInPicture")
     }
 
     /// `resume`: this holder paused a stream that was playing (or about
@@ -272,7 +285,9 @@ final class StreamPlayerController {
     func reset() {
         isAwaitingWebEngine = false
         webStartupSettleDeadline = nil
-        update(\.isPaused, to: false)
+        // Until the new engine reports, show the intent its load applies,
+        // so the play/pause control matches what a tap flips (`togglePlay`).
+        update(\.isPaused, to: !wantsPlayback)
         update(\.isMuted, to: startsMuted)
         update(\.canPictureInPicture, to: false)
         update(\.isPictureInPictureActive, to: false)
@@ -298,16 +313,21 @@ final class StreamPlayerController {
     /// (`wantsPlayback`) as well as acting on it.
     func togglePlay() {
         guard let player = avPlayer else {
-            // Web, or native still loading: the control showed "play" when
-            // the engine reported paused, "pause" otherwise.
-            wantsPlayback = isPaused
-            if wantsPlayback { webStartupSettleDeadline = nil }
-            if isAwaitingWebEngine {
-                // Not sent: the page may not take it yet. Show the new
-                // intent; `noteEngineReady` applies it.
+            if isAwaitingWebEngine || webView == nil {
+                // An engine still loading: a web page not ready yet, or the
+                // native playlist still resolving (no AVPlayer, no page).
+                // Nothing reports state yet, so flip the intent and show
+                // it; the load applies it (`noteEngineReady`, or the native
+                // load's `startsPlaying` check).
+                wantsPlayback.toggle()
+                if wantsPlayback { webStartupSettleDeadline = nil }
                 update(\.isPaused, to: !wantsPlayback)
                 return
             }
+            // Web, ready: the control showed "play" when the page reported
+            // paused, "pause" otherwise.
+            wantsPlayback = isPaused
+            if wantsPlayback { webStartupSettleDeadline = nil }
             return run("togglePlay")
         }
         if player.timeControlStatus == .paused {
