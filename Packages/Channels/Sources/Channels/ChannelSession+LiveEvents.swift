@@ -362,7 +362,18 @@ extension ChannelSession {
     /// refresh swapped in is checked again before the retry goes out. Reads
     /// the token without refreshing.
     private func requireLiveEventScope(_ scope: TwitchScope) async throws {
-        let token = try await client.auth.tokenProvider.token()
+        // Loading the token suspends: the app may have backgrounded, or the
+        // session stopped, meanwhile. Re-check on both outcomes, so neither
+        // the GET nor (on a token failure) `authRetry`'s bridge refresh
+        // starts after that.
+        let token: OAuthToken
+        do {
+            token = try await client.auth.tokenProvider.token()
+        } catch {
+            try checkCanFetchLiveEvents()
+            throw error
+        }
+        try checkCanFetchLiveEvents()
         guard HelixChatActions.grants(token, anyOf: [scope]) else {
             throw LiveEventScopeNotGranted(scope: scope.rawValue)
         }
