@@ -187,11 +187,15 @@ final class StreamPlayerController {
     /// then it's paused again and intent is left alone.
     func noteDidPlay() {
         update(\.hasStarted, to: true)
-        if isSettlingWebStartup {
+        // A hold wins over settling: its pause is PiP-aware, so a web video
+        // WebKit is handing to picture in picture as the app leaves isn't
+        // stopped before `pipStart` arrives and releases the background hold.
+        if isHeld {
+            if isSettlingWebStartup { didSuppressStartupPlay = true }
+            pauseForHold()
+        } else if isSettlingWebStartup {
             didSuppressStartupPlay = true
             pause()
-        } else if isHeld {
-            pauseForHold()
         } else {
             wantsPlayback = true
         }
@@ -208,8 +212,16 @@ final class StreamPlayerController {
         if startsPlaying {
             if paused { resume() }
         } else {
-            if webEngineAutoplays { webStartupSettleDeadline = ContinuousClock.now + webStartupSettleWindow }
-            pause()
+            // Startup suppression is only for a USER pause. A hold alone
+            // re-pauses play reports itself (PiP-aware) for as long as it's
+            // out; once it's released — including by `pipStart` handing the
+            // video to PiP — play reports must count as intent again.
+            if webEngineAutoplays, !wantsPlayback {
+                webStartupSettleDeadline = ContinuousClock.now + webStartupSettleWindow
+            }
+            // Held: the hold's pause is PiP-aware, so a video WebKit is
+            // handing to picture in picture as the app leaves isn't stopped.
+            if isHeld { pauseForHold() } else { pause() }
         }
     }
 

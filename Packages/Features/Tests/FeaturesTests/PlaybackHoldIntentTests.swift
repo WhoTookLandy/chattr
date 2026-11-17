@@ -314,16 +314,39 @@ struct PlaybackHoldIntentTests {
         // The page is built meant to play, then the app leaves.
         #expect(controller.beginWebEngineLoad())
         controller.beginHold(.background)
-        // Twitch autoplays: undone, and it isn't the user's intent changing.
+        // Twitch autoplays: the hold re-pauses it, and it isn't the user's
+        // intent changing. No startup suppression: that's only for a user
+        // pause, so it can't outlive the hold.
         controller.noteEngineReady(paused: false)
-        #expect(controller.isSettlingWebStartup)
+        #expect(!controller.isSettlingWebStartup)
         controller.noteWebState(paused: false)
         controller.noteDidPlay()
         #expect(controller.wantsPlayback)
+        #expect(controller.isHeld)
         // Back in the foreground: the hold resumes it.
         controller.endHold(.background, resume: true)
         #expect(controller.startsPlaying)
         #expect(!controller.isSettlingWebStartup)
+    }
+
+    @Test("PiP starting while the web page loads in the background: its play counts once pipStart lands")
+    func pictureInPictureDuringWebLoadInBackground() {
+        let controller = StreamPlayerController()
+        #expect(controller.beginWebEngineLoad())
+        controller.beginHold(.background)
+        // The page's first state arrives before `pipStart`.
+        controller.noteEngineReady(paused: false)
+        controller.noteWebState(paused: false)
+        controller.noteDidPlay()
+        #expect(controller.isHeld)
+        // `pipStart`: PlaybackCenter drops the background hold without
+        // resuming (simulated here); nothing else suppresses play reports.
+        controller.pictureInPictureDidStart()
+        controller.endHold(.background, resume: false)
+        #expect(!controller.isHeld)
+        #expect(!controller.isSettlingWebStartup)
+        controller.noteDidPlay()
+        #expect(controller.wantsPlayback)
     }
 
     @Test("A user pause isn't undone by the background hold's release")
