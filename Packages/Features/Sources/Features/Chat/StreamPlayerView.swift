@@ -136,19 +136,28 @@ enum TwitchWebPlayer {
       // app and a close, so tell them apart the way the system does it:
       // closing PiP with its x pauses the video, returning keeps it playing.
       var lastMode = 'inline';
+      var lastPauseAt = 0;
+      document.addEventListener('pause', function () { lastPauseAt = Date.now(); }, true);
       document.addEventListener('webkitpresentationmodechanged', function () {
         var v = video();
         if (!v) return;
         var mode = v.webkitPresentationMode;
         if (mode === 'picture-in-picture' && lastMode !== mode) { post({ type: 'pipStart' }); }
         if (lastMode === 'picture-in-picture' && mode !== 'picture-in-picture') {
-          // Already paused inside PiP: the pause tells us nothing, so
-          // report "unknown" (null) rather than guessing either way.
-          var wasPlaying = !v.paused;
-          setTimeout(function () {
-            var w = video();
-            post({ type: 'pipEnd', restored: wasPlaying ? !!(w && !w.paused) : null });
-          }, 250);
+          // The x can pause the video just before this event fires, so a
+          // pause within the last moment counts as a close. A pause from
+          // earlier (paused inside PiP) tells us nothing: "unknown" (null).
+          var pausedJustNow = v.paused && (Date.now() - lastPauseAt) < 600;
+          if (pausedJustNow) {
+            post({ type: 'pipEnd', restored: false });
+          } else if (v.paused) {
+            post({ type: 'pipEnd', restored: null });
+          } else {
+            setTimeout(function () {
+              var w = video();
+              post({ type: 'pipEnd', restored: !!(w && !w.paused) });
+            }, 250);
+          }
         }
         lastMode = mode;
       }, true);
@@ -200,8 +209,12 @@ enum TwitchWebPlayer {
                 case false?:
                     controller.pictureInPictureDidStop()
                 case nil:
-                    // Paused before PiP ended: can't tell return from
-                    // close, so neither reopen the chat nor stop playback.
+                    // Known limitation of the web player: WebKit reports no
+                    // return-vs-close event, only the presentation mode.
+                    // If the video was paused inside PiP before it ended,
+                    // neither is detectable, so neither reopen the chat
+                    // nor stop playback. (The native player has a real
+                    // restore callback and isn't affected.)
                     controller.pictureInPictureEndedAmbiguously()
                 }
             default:
