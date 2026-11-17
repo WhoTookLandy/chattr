@@ -265,53 +265,88 @@ public final class AccountStore {
     /// re-renders: to the next healthy account, or to `SignInView` when
     /// none remains. (Deleting is reserved for user-initiated
     /// `remove(account:)`.)
+    ///
+    /// Signs out the client the account has *now*. If the account is
+    /// re-authorized while the sign-out is in flight, the new session wins:
+    /// see `forceSignOut(userId:reason:expecting:)`.
     public func forceSignOut(userId: String, reason: SignOutReason) async {
-        let account = try? repository.account(userId: userId)
+        await forceSignOut(userId: userId, reason: reason, expecting: clients.entry(forUserId: userId))
+    }
 
-        // Stash the reason for SignInView's banner. Only the `.sessionExpired`
-        // case writes — user-initiated sign-out doesn't need to explain itself
-        // — and only when this expiry leaves no healthy signed-in account
-        // (i.e. the user will actually land on SignInView).
-        if case .sessionExpired(let login) = reason {
-            let healthyRemain = repository.hasHealthyAccount(excluding: userId)
-            if !healthyRemain {
-                selection.defaults.set(login, forKey: Self.lastSessionExpiredLoginKey)
-            }
-            // .notice: forced sign-out is a boundary event that drives UI
-            // state transitions — important to see in default log filtering.
-            logger.notice("forceSignOut(.sessionExpired) for @\(login, privacy: .public) (healthy fallback remains: \(healthyRemain))")
-        }
+    /// `forceSignOut(userId:reason:)` for the client `expected` only.
+    ///
+    /// Signing out suspends (TwitchKit's logout, the gate), and the user can
+    /// re-authorize the account meanwhile. Every step after the start is
+    /// therefore conditional on `expected` still being the account's client:
+    /// `logOut` won't start on a replaced client, and the eviction plus all
+    /// session cleanup (refresh-token mirror, banner, `needsReauth`,
+    /// selection) run in one critical section on the account's token gate,
+    /// only if nothing replaced `expected`. A re-authorization that finished
+    /// first keeps its session; one that starts after finds the account
+    /// signed out and replaces it as usual.
+    ///
+    /// A refresh passes the client it started with, so a refresh that
+    /// outlived its client can't sign out the one that replaced it.
+    func forceSignOut(userId: String, reason: SignOutReason, expecting expected: TwitchClientCache.Entry) async {
+        let account = try? repository.account(userId: userId)
 
         guard let account else {
             logger.info("forceSignOut: no Account row for userId \(userId) — likely already gone")
             // Still clear the in-memory client cache — it may have
             // outlived the row.
-            OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
-            await clients.evict(userId: userId)
+            await clients.evict(userId: userId, ifCurrent: expected.lifecycle) {
+                stashExpiryBanner(userId: userId, reason: reason)
+                OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
+            }
             return
         }
+        let login = account.login
 
         // Best-effort cleanup. Each step logs on failure but doesn't throw.
         do {
-            try await clients.logOut(userId: userId)
+            guard try await clients.logOut(expected, userId: userId) else {
+                logger.notice("forceSignOut: @\(login, privacy: .public) was re-authorized before the sign-out began; keeping the new session")
+                return
+            }
         } catch {
             // .warning, not .error: forceSignOut is intentionally best-
             // effort; a TwitchKit logout failure is expected if the
             // token was already invalid. Worth seeing but not "broken."
-            logger.warning("forceSignOut: TwitchKit logout failed for @\(account.login, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("forceSignOut: TwitchKit logout failed for @\(login, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
-        await clients.evict(userId: userId)
-        // Mark, don't delete — see the doc comment. Also clear the stored
-        // selection if it pointed here, so RootView's fallback picks a
-        // healthy account rather than re-resolving this one.
-        account.needsReauth = true
-        selection.clear(ifSelected: userId, on: account.platform)
-        do {
-            try repository.save()
-        } catch {
-            logger.error("forceSignOut: SwiftData save failed: \(error.localizedDescription)")
+
+        let signedOut = await clients.evict(userId: userId, ifCurrent: expected.lifecycle) {
+            stashExpiryBanner(userId: userId, reason: reason)
+            OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
+            // Mark, don't delete — see the doc comment. Also clear the stored
+            // selection if it pointed here, so RootView's fallback picks a
+            // healthy account rather than re-resolving this one.
+            account.needsReauth = true
+            selection.clear(ifSelected: userId, on: account.platform)
+            do {
+                try repository.save()
+            } catch {
+                logger.error("forceSignOut: SwiftData save failed: \(error.localizedDescription)")
+            }
         }
+        if !signedOut {
+            logger.notice("forceSignOut: @\(login, privacy: .public) was re-authorized while signing out; keeping the new session")
+        }
+    }
+
+    /// Stashes the reason for SignInView's banner. Only the `.sessionExpired`
+    /// case writes — user-initiated sign-out doesn't need to explain itself —
+    /// and only when this expiry leaves no healthy signed-in account (i.e.
+    /// the user will actually land on SignInView).
+    private func stashExpiryBanner(userId: String, reason: SignOutReason) {
+        guard case .sessionExpired(let login) = reason else { return }
+        let healthyRemain = repository.hasHealthyAccount(excluding: userId)
+        if !healthyRemain {
+            selection.defaults.set(login, forKey: Self.lastSessionExpiredLoginKey)
+        }
+        // .notice: forced sign-out is a boundary event that drives UI
+        // state transitions — important to see in default log filtering.
+        logger.notice("forceSignOut(.sessionExpired) for @\(login, privacy: .public) (healthy fallback remains: \(healthyRemain))")
     }
 
     // MARK: - Remove
@@ -324,37 +359,59 @@ public final class AccountStore {
     /// revoked, Keychain entry already wiped — and aborting there would
     /// leave an account that can't be removed. Only the SwiftData save throws
     /// (and then `onAccountRemoved` is not called).
+    ///
+    /// Like `forceSignOut`, everything after the start is conditional on the
+    /// client captured at the start still being the account's client. If
+    /// the account is re-authorized while the removal is in flight, the
+    /// removal stops and the re-authorized account stays (row, token,
+    /// selection): deleting the row from under a fresh session would leave
+    /// its token orphaned.
     public func remove(account: Account) async throws {
         // Read the row's fields up front: once deleted, touching the @Model's
         // properties is undefined behavior.
         let userId = account.userId
         let login = account.login
         let platform = account.platform
+        let expected = clients.entry(forUserId: userId)
 
         // TwitchAuth.logout() delegates to tokenProvider.logout() internally.
         // `logOut` marks the client as signing out first, so the guarded
         // token store lets this delete through and drops any save from a
         // refresh still in flight.
         do {
-            try await clients.logOut(userId: userId)
+            guard try await clients.logOut(expected, userId: userId) else {
+                logger.notice("remove: @\(login, privacy: .public) was re-authorized before the removal began; keeping it")
+                return
+            }
         } catch {
             // .warning, not .error: removal proceeds regardless. A leftover
             // Keychain entry under this namespace is harmless — re-adding
             // the account overwrites it via replaceClient.
             logger.warning("remove: TwitchKit logout failed for @\(login, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        // Clear our refresh_token cache for this user too — TwitchKit's
-        // logout only touches its own store; our fallback cache is separate
-        // (intentionally — see OAuthRefreshTokenCache header).
-        OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
-        await clients.evict(userId: userId)
-        // If we removed the active account, clear the stored selection so
-        // RootView's @AppStorage fallback (accounts.first by addedAt) picks
-        // the next account — or SignInView if it was the last one.
-        selection.clear(ifSelected: userId, on: platform)
-        // mainContext — the context RootView's @Query observes — so the
-        // delete propagates and RootView re-renders immediately.
-        try repository.delete(account)
+        var deleteError: (any Error)?
+        let removed = await clients.evict(userId: userId, ifCurrent: expected.lifecycle) {
+            // Clear our refresh_token cache for this user too — TwitchKit's
+            // logout only touches its own store; our fallback cache is
+            // separate (intentionally — see OAuthRefreshTokenCache header).
+            OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
+            // If we removed the active account, clear the stored selection so
+            // RootView's @AppStorage fallback (accounts.first by addedAt)
+            // picks the next account — or SignInView if it was the last one.
+            selection.clear(ifSelected: userId, on: platform)
+            // mainContext — the context RootView's @Query observes — so the
+            // delete propagates and RootView re-renders immediately.
+            do {
+                try repository.delete(account)
+            } catch {
+                deleteError = error
+            }
+        }
+        guard removed else {
+            logger.notice("remove: @\(login, privacy: .public) was re-authorized while being removed; keeping it")
+            return
+        }
+        if let deleteError { throw deleteError }
         logger.notice("Removed account @\(login, privacy: .public)")
         onAccountRemoved?(userId)
     }

@@ -843,7 +843,7 @@ struct AccountStoreTwitchKitRefreshTests {
         // A deliberate sign-out of the old client: its delete is allowed
         // and stalls inside the store.
         let signOut = Task {
-            try await clients.logOut(userId: userId)
+            try await clients.logOut(old, userId: userId)
         }
         await storeGate.waitForArrival()
         #expect(old.lifecycle.current == .signingOut)
@@ -868,5 +868,159 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(cached.lifecycle === replacement)
         let current = try await cached.client.auth.tokenProvider.token()
         #expect(current == reauthorizedToken)
+    }
+
+    // MARK: Sign-out and removal racing re-authorization
+
+    @Test("An eviction queued behind a re-authorization leaves the new client, and the old one can't save in between")
+    func evictionQueuedBehindReauthorizationKeepsNewClient() async throws {
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let clients = h.store.clients
+        let gate = clients.tokenGate(forUserId: userId)
+        let old = clients.entry(forUserId: userId)
+        let oldAuth = old.client.auth
+
+        // Hold the account's gate so the next three line up in a known order.
+        let hold = BridgeGate()
+        let holder = Task {
+            await gate.withLock { await waitUntilOpened(hold) }
+        }
+        await hold.waitForArrival()
+
+        // 1. The user re-authorizes.
+        let reauthorization = Task {
+            try await clients.replaceClient(forUserId: userId, seededWith: reauthorizedToken).lifecycle
+        }
+        await gate.waitForWaiters(1)
+        // 2. A refresh on the old client settles and saves.
+        let staleSave = Task {
+            try await oldAuth.setToken(freshToken)
+        }
+        await gate.waitForWaiters(2)
+        // 3. A sign-out that captured the old client evicts it.
+        let eviction = Task {
+            await clients.evict(userId: userId, ifCurrent: old.lifecycle)
+        }
+        await gate.waitForWaiters(3)
+        // The queued eviction hasn't touched the cache: the old client is
+        // still the cached one, so the re-authorization will retire it.
+        #expect(clients.activeClient(forUserId: userId, lifecycle: old.lifecycle) != nil)
+
+        hold.open()
+        await holder.value
+        let replacement = try await reauthorization.value
+        try await staleSave.value
+        let evicted = await eviction.value
+
+        #expect(!evicted)
+        #expect(old.lifecycle.current == .retired)
+        // The only write is the re-authorization's: the old client was
+        // retired before its save got the gate.
+        #expect(h.tokenStore.saves == 1)
+        #expect(h.tokenStore.deletes == 0)
+        #expect(h.tokenStore.token == reauthorizedToken)
+        #expect(replacement.isActive)
+        #expect(clients.activeClient(forUserId: userId, lifecycle: replacement) != nil)
+    }
+
+    /// Re-authorizes `userId` the way `add(token:)` does once it knows the
+    /// userId: swap the client, then (with no suspension in between) mirror
+    /// the refresh token and select the account.
+    private func reauthorize(_ h: Harness) -> Task<TwitchClientLifecycle, any Error> {
+        let store = h.store
+        let userId = h.userId
+        let refreshKeychain = h.refreshKeychain
+        return Task {
+            let replacement = try await store.clients.replaceClient(forUserId: userId, seededWith: reauthorizedToken).lifecycle
+            OAuthRefreshTokenCache.save(refreshToken: reauthorizedToken.refreshToken, for: userId, in: refreshKeychain)
+            store.selectAccount(userId: userId)
+            return replacement
+        }
+    }
+
+    /// Checks that the session `reauthorize` installed is fully intact.
+    private func expectReauthorizedSessionSurvived(_ h: Harness, replacement: TwitchClientLifecycle) {
+        #expect(h.tokenStore.token == reauthorizedToken)
+        #expect(replacement.isActive)
+        #expect(h.store.clients.activeClient(forUserId: h.userId, lifecycle: replacement) != nil)
+        #expect(h.cachedRefreshToken() == "refresh-reauthorized")
+        #expect(h.defaults.string(forKey: AccountStore.activeAccountUserIdKey) == h.userId)
+        #expect(!h.account.needsReauth)
+    }
+
+    @Test("A forced sign-out whose delete is in flight when the account is re-authorized leaves the new session alone")
+    func forceSignOutRacingReauthorizationKeepsNewSession() async throws {
+        let storeGate = BridgeGate()
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON, storeGate: storeGate)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let store = h.store
+        let userId = h.userId
+        let login = h.account.login
+        let old = store.clients.entry(forUserId: userId)
+
+        // The session expires: the forced sign-out's delete is admitted and
+        // stalls inside the store, holding the account's gate.
+        let signOut = Task {
+            await store.forceSignOut(userId: userId, reason: .sessionExpired(login: login))
+        }
+        await storeGate.waitForArrival()
+        #expect(old.lifecycle.current == .signingOut)
+
+        // The user re-authorizes before the sign-out finishes.
+        let reauthorization = reauthorize(h)
+        await store.clients.tokenGate(forUserId: userId).waitForWaiters(1)
+
+        storeGate.open()
+        let replacement = try await reauthorization.value
+        await signOut.value
+
+        // The old token was deleted, then the new one written; nothing the
+        // sign-out did afterwards touched the new session.
+        #expect(h.tokenStore.deletes == 1)
+        #expect(h.tokenStore.saves == 1)
+        #expect(old.lifecycle.current == .retired)
+        expectReauthorizedSessionSurvived(h, replacement: replacement)
+        #expect(h.defaults.string(forKey: AccountStore.lastSessionExpiredLoginKey) == nil)
+    }
+
+    @Test("A removal whose delete is in flight when the account is re-authorized keeps the re-authorized account")
+    func removalRacingReauthorizationKeepsAccount() async throws {
+        let storeGate = BridgeGate()
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON, storeGate: storeGate)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let store = h.store
+        let account = h.account
+        let userId = h.userId
+        let old = store.clients.entry(forUserId: userId)
+        var removed: [String] = []
+        store.onAccountRemoved = { removed.append($0) }
+
+        let removal = Task {
+            try await store.remove(account: account)
+        }
+        await storeGate.waitForArrival()
+        #expect(old.lifecycle.current == .signingOut)
+
+        let reauthorization = reauthorize(h)
+        await store.clients.tokenGate(forUserId: userId).waitForWaiters(1)
+
+        storeGate.open()
+        let replacement = try await reauthorization.value
+        try await removal.value
+
+        #expect(h.tokenStore.deletes == 1)
+        #expect(old.lifecycle.current == .retired)
+        expectReauthorizedSessionSurvived(h, replacement: replacement)
+        #expect(removed.isEmpty)
+        #expect(try await store.allAccounts().count == 1)
+    }
+}
+
+/// Suspends until `hold` is opened (see `BridgeGate`).
+private func waitUntilOpened(_ hold: BridgeGate) async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        hold.arrive { continuation.resume() }
     }
 }

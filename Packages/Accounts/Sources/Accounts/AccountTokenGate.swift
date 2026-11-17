@@ -13,7 +13,10 @@ import os
 ///   waits for any write admitted before it to finish;
 /// - re-authorization's retire-old → write-new → install swap, so the new
 ///   credential is always written after every write the old client was
-///   admitted for.
+///   admitted for;
+/// - every other change to which client is cached for the account: a
+///   sign-out's check-still-current → evict → session cleanup, so it either
+///   runs wholly before a re-authorization or does nothing after one.
 ///
 /// Needed because production builds a separate `KeychainTokenStore` actor per
 /// client, so writes from an old and a new client for the same key aren't
@@ -21,8 +24,10 @@ import os
 ///
 /// ## Why it can't deadlock
 ///
-/// - It is held only around one token-store operation or one lifecycle flip.
-///   Never across a bridge or Helix request.
+/// - It is held only around one token-store operation, one lifecycle flip,
+///   or an eviction with its synchronous cleanup (which includes one
+///   synchronous Keychain delete of the refresh-token mirror). Never across
+///   a bridge or Helix request.
 /// - Nothing that runs while it's held acquires it again (it's not
 ///   reentrant): the guarded store calls the *base* store, and the cache's
 ///   critical sections call the base store or flip a lifecycle directly.
@@ -32,6 +37,11 @@ import os
 /// Waiting isn't cancellable. That's deliberate: the holder only ever does
 /// one Keychain operation, and a mutation that gave up its place in line
 /// could no longer be ordered against a re-authorization.
+///
+/// Known limit: there is no timeout. A Keychain operation that never
+/// returns stalls that one account's gate (its token writes, sign-out and
+/// re-authorization) until relaunch. Reads and other accounts are
+/// unaffected.
 ///
 /// Not on any read path: `loadToken` and request handling never touch it.
 final class AccountTokenGate: Sendable {

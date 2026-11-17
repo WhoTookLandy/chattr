@@ -102,7 +102,7 @@ extension AccountStore {
         // EventSub aggressively while a channel is open.
         let entry = clients.entry(forUserId: userId)
         let twitchClient = entry.client
-        let refreshToken = try await currentRefreshToken(userId: userId, login: login, client: twitchClient)
+        let refreshToken = try await currentRefreshToken(userId: userId, login: login, entry: entry)
 
         let newToken: OAuthToken
         do {
@@ -117,7 +117,7 @@ extension AccountStore {
             // expired and show the session-expired banner on the next render.
             // (5xx / transport errors propagate untouched: transient, and the
             // user's credentials are probably still good.)
-            await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
+            await forceSignOut(userId: userId, reason: .sessionExpired(login: login), expecting: entry)
             throw AppError.sessionExpired(login: login)
         }
 
@@ -156,13 +156,13 @@ extension AccountStore {
     /// out (so RootView re-renders SignInView with a "session expired"
     /// banner instead of leaving the user on a broken signed-in screen) and
     /// `AppError.sessionExpired` is thrown.
-    private func currentRefreshToken(userId: String, login: String, client: TwitchClient) async throws -> String {
+    private func currentRefreshToken(userId: String, login: String, entry: TwitchClientCache.Entry) async throws -> String {
         // `tokenProvider.token()` throws `HelixError.notAuthenticated` when
         // its store is empty. We catch that specific case rather than
         // letting it bubble — the cache is exactly the recovery path it
         // wants.
         do {
-            let currentToken = try await client.auth.tokenProvider.token()
+            let currentToken = try await entry.client.auth.tokenProvider.token()
             if let token = currentToken.refreshToken, !token.isEmpty {
                 return token
             }
@@ -174,7 +174,7 @@ extension AccountStore {
                 return cached
             }
             // Terminal: no refresh_token anywhere.
-            await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
+            await forceSignOut(userId: userId, reason: .sessionExpired(login: login), expecting: entry)
             throw AppError.sessionExpired(login: login)
         } catch HelixError.notAuthenticated {
             // TwitchKit's store is empty (most likely because its own
@@ -183,7 +183,7 @@ extension AccountStore {
             guard let cached = OAuthRefreshTokenCache.load(for: userId, in: refreshTokenKeychain) else {
                 logger.error("TwitchKit store empty AND chattr cache empty for @\(login) — must re-sign-in")
                 // Terminal: drive the auth-state transition (see above).
-                await forceSignOut(userId: userId, reason: .sessionExpired(login: login))
+                await forceSignOut(userId: userId, reason: .sessionExpired(login: login), expecting: entry)
                 throw AppError.sessionExpired(login: login)
             }
             // .warning: TwitchKit lost its store; we're saved by chattr's

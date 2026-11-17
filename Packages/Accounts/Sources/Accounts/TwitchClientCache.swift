@@ -21,9 +21,14 @@ import Core
 /// is evicted or replaced, so a refresh still running on it can no longer
 /// write the account's shared Keychain entry.
 ///
-/// Token writes and lifecycle changes for one account are serialized on
-/// that account's `AccountTokenGate`, so an old client's admitted write can
-/// never land after a re-authorization's new credential.
+/// Token writes, lifecycle changes, and every change to which client is
+/// cached for an account are serialized on that account's
+/// `AccountTokenGate`, so an old client's admitted write can never land
+/// after a re-authorization's new credential, and a sign-out that started
+/// before a re-authorization can't tear the new session down. The one
+/// unguarded cache write is `entry(forUserId:)` filling an *empty* slot on
+/// first use: it is on the request path (so it can't wait on the gate), and
+/// it never displaces or retires a client.
 @MainActor
 final class TwitchClientCache {
     /// A client plus the lifecycle its interceptor and token store check.
@@ -192,27 +197,63 @@ final class TwitchClientCache {
         return replacement
     }
 
-    /// Deliberately signs `userId`'s client out: TwitchKit's `logout()`
-    /// clears its in-memory token and deletes the stored one. This is the
-    /// only delete the guarded store lets through. The client stays cached;
-    /// callers `evict` afterwards.
-    func logOut(userId: String) async throws {
-        let entry = entry(forUserId: userId)
-        // Under the gate, so a save admitted while the client was active
-        // finishes first and the delete below comes after it.
-        await tokenGate(forUserId: userId).withLock {
-            entry.lifecycle.beginSignOut()
-        }
-        try await entry.client.auth.logout()
+    /// Whether `lifecycle` is still `userId`'s cached client and hasn't been
+    /// retired. Callers that captured a client before suspending check this
+    /// under the account's gate, to tell whether a re-authorization (or
+    /// another sign-out) replaced it meanwhile.
+    private func isCurrent(_ lifecycle: TwitchClientLifecycle, forUserId userId: String) -> Bool {
+        entries[userId]?.lifecycle === lifecycle && lifecycle.current != .retired
     }
 
-    /// Drops and retires `userId`'s cached client (sign-out, removal). The
-    /// next `client(forUserId:)` builds a fresh one. Retiring waits for any
-    /// write the client was already admitted for.
-    func evict(userId: String) async {
-        guard let old = entries.removeValue(forKey: userId) else { return }
-        await tokenGate(forUserId: userId).withLock {
-            old.lifecycle.retire()
+    /// Deliberately signs `entry`'s client out: TwitchKit's `logout()`
+    /// clears its in-memory token and deletes the stored one. This is the
+    /// only delete the guarded store lets through. The client stays cached;
+    /// callers `evict` it afterwards.
+    ///
+    /// Returns `false` without touching anything when `entry` is no longer
+    /// `userId`'s client (re-authorized or evicted since the caller captured
+    /// it), so a sign-out never starts on the client that replaced it.
+    @discardableResult
+    func logOut(_ entry: Entry, userId: String) async throws -> Bool {
+        // Under the gate, so a save admitted while the client was active
+        // finishes first and the delete below comes after it.
+        let signingOut = await tokenGate(forUserId: userId).withLock { () -> Bool in
+            guard isCurrent(entry.lifecycle, forUserId: userId) else { return false }
+            entry.lifecycle.beginSignOut()
+            return true
+        }
+        guard signingOut else { return false }
+        try await entry.client.auth.logout()
+        return true
+    }
+
+    /// Drops and retires `userId`'s cached client if it is still the one
+    /// with `lifecycle`, then runs `cleanup`, all in one critical section on
+    /// the account's gate. Retiring waits for any write the client was
+    /// already admitted for. The next `client(forUserId:)` builds a fresh
+    /// client.
+    ///
+    /// Returns `false` (nothing evicted, `cleanup` not run) when the client
+    /// was replaced or evicted since the caller captured it. Checking and
+    /// removing under the gate means a re-authorization either finishes
+    /// first (and this does nothing) or starts after (and finds the slot
+    /// empty). Neither can leave the old client cached-out but still active.
+    ///
+    /// `cleanup` must be synchronous: it is how a sign-out drops the rest of
+    /// the account's session state (refresh-token mirror, selection,
+    /// `needsReauth`) atomically with the eviction.
+    @discardableResult
+    func evict(
+        userId: String,
+        ifCurrent lifecycle: TwitchClientLifecycle,
+        cleanup: () -> Void = {}
+    ) async -> Bool {
+        await tokenGate(forUserId: userId).withLock { () -> Bool in
+            guard isCurrent(lifecycle, forUserId: userId) else { return false }
+            entries.removeValue(forKey: userId)
+            lifecycle.retire()
+            cleanup()
+            return true
         }
     }
 
