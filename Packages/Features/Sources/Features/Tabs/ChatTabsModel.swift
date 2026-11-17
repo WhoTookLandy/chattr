@@ -149,6 +149,10 @@ public final class ChatTabsModel {
     // event handler off the main actor.
     public nonisolated static func containsMention(of login: String, in text: String) -> Bool {
         guard !login.isEmpty else { return false }
+        // Most messages contain no "@" at all, and lowercasing can never
+        // produce one: skip the whole-message lowercase copy and search.
+        // Runs per message, per channel, for every open tab.
+        guard text.utf8.contains(UInt8(ascii: "@")) else { return false }
         let haystack = text.lowercased()
         let needle = "@\(login.lowercased())"
         var searchRange = haystack.startIndex..<haystack.endIndex

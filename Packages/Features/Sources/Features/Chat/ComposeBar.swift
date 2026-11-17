@@ -138,6 +138,10 @@ struct ComposeBar: View {
     }
 
     var body: some View {
+        // Computed once per body: the strip, its visibility check and the
+        // animation value all read it, and each evaluation lowercases and
+        // scans the whole chatter pool.
+        let suggestions = mentionSuggestions
         VStack(spacing: 6) {
             // Active restrictions (followers-only, slow mode…) ride in the
             // field's placeholder instead of a strip that cost a row.
@@ -146,8 +150,8 @@ struct ComposeBar: View {
                 replyChip(reply)
             }
 
-            if !mentionSuggestions.isEmpty {
-                mentionStrip
+            if !suggestions.isEmpty {
+                mentionStrip(suggestions)
             }
 
             inputRow
@@ -170,7 +174,7 @@ struct ComposeBar: View {
         // the chip to animate when the target changes. Not chosen
         // today — feels jumpier.
         .animation(.snappy(duration: 0.2), value: replyContext != nil)
-        .animation(.snappy(duration: 0.2), value: mentionSuggestions.isEmpty)
+        .animation(.snappy(duration: 0.2), value: suggestions.isEmpty)
         // Emote picker. Stays open while you tap (so you can stack
         // several emotes); inserts each emote's name into the composer.
         .sheet(isPresented: $showingEmotePicker) {
@@ -555,10 +559,10 @@ struct ComposeBar: View {
 
     /// A row of name chips above the field, newest chatters first. Tapping
     /// one swaps the half-typed "@que" for "@Name ".
-    private var mentionStrip: some View {
+    private func mentionStrip(_ suggestions: [MentionAutocomplete.Candidate]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(mentionSuggestions, id: \.login) { candidate in
+                ForEach(suggestions, id: \.login) { candidate in
                     Button {
                         composeText = MentionAutocomplete.complete(composeText, with: candidate)
                     } label: {
