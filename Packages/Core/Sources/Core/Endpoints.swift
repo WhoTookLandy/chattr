@@ -43,6 +43,22 @@ public enum Endpoints {
         public static let refresh = URL(string: "https://chattr-auth.vercel.app/oauth/refresh")!
     }
 
+    // MARK: - Twitch identity (Device Code Grant)
+    //
+    // Called directly from the device with only the client_id. Twitch documents
+    // these requests without a client_secret even for confidential clients,
+    // but that's unverified for this client: if Twitch rejects the client,
+    // sign-in falls back to the browser flow. Refreshes of the resulting
+    // tokens still go through `ChattrAuth.refresh`.
+
+    public enum TwitchID {
+        /// POST client_id + scopes → device_code / user_code / verification_uri.
+        public static let device = URL(string: "https://id.twitch.tv/oauth2/device")!
+
+        /// POST the device_code (grant_type=device_code) to poll for tokens.
+        public static let token = URL(string: "https://id.twitch.tv/oauth2/token")!
+    }
+
     // MARK: - Twitch native emote CDN
     //
     // Twitch's static-cdn serves emote images by id + format + theme + scale.
