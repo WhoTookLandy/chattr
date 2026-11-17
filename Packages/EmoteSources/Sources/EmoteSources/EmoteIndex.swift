@@ -74,6 +74,14 @@ public actor EmoteIndex {
 
     private let providers: [any EmoteProvider]
 
+    /// Each provider's most recent SUCCESSFUL channel result this session
+    /// (keyed by provider index, empty results included), for the
+    /// broadcaster it was fetched for. After a partial load the disk copy
+    /// isn't rewritten, so a provider that succeeded then and fails on the
+    /// retry must fall back to THIS, not to the older disk data — and a
+    /// successful empty result must keep removed emotes removed.
+    private var lastChannelResults: (broadcasterId: String, byProvider: [Int: [Emote]])?
+
     /// Shared source of global emotes.
     private let globalCatalog: GlobalEmoteCatalog
 
@@ -301,13 +309,22 @@ public actor EmoteIndex {
             }
         }
 
-        let channelSets = fetchChannel
-            ? Self.channelSetsWithFallback(
+        var channelSets = diskChannelSets
+        if fetchChannel {
+            var remembered = lastChannelResults?.broadcasterId == broadcasterId
+                ? lastChannelResults?.byProvider ?? [:]
+                : [:]
+            channelSets = Self.channelSetsWithFallback(
                 fetched: channelByProvider,
                 failed: failedChannelProviders,
                 providers: fetchProviders,
+                remembered: remembered,
                 stale: diskChannel)
-            : diskChannelSets
+            for index in channelByProvider.indices where !failedChannelProviders.contains(index) {
+                remembered[index] = channelByProvider[index]
+            }
+            lastChannelResults = (broadcasterId: broadcasterId, byProvider: remembered)
+        }
         let finalSnapshot = Self.compose(globals: globalsByProvider, channel: channelSets)
 
         // All providers failed or returned nothing. Don't clobber a
@@ -343,23 +360,31 @@ public actor EmoteIndex {
 
     /// The channel sets to publish after a network pass: each provider's
     /// fresh result, except that a provider whose fetch FAILED contributes
-    /// its own entries from the stale disk copy instead of nothing. Without
-    /// this, a stale cache + one provider's outage published a snapshot
-    /// missing that provider's channel emotes entirely (the snapshot is
-    /// non-empty as long as anything else loaded, so it replaced the
-    /// disk-restored one). Providers with an unknown `emoteSource` keep the
-    /// old behavior: nothing to attribute stale entries to.
+    /// its last good set instead of nothing — preferably its most recent
+    /// successful result this session (`remembered`), else its own entries
+    /// from the stale disk copy. Without this, a stale cache + one provider's
+    /// outage published a snapshot missing that provider's channel emotes
+    /// entirely (the snapshot is non-empty as long as anything else loaded,
+    /// so it replaced the disk-restored one). For the disk fallback,
+    /// providers with an unknown `emoteSource` keep the old behavior:
+    /// nothing to attribute stale entries to.
     static func channelSetsWithFallback(
         fetched: [[Emote]],
         failed: Set<Int>,
         providers: [any EmoteProvider],
+        remembered: [Int: [Emote]] = [:],
         stale: [String: Emote]?
     ) -> [[Emote]] {
-        guard let stale, !failed.isEmpty else { return fetched }
+        guard !failed.isEmpty else { return fetched }
         var sets = fetched
-        for index in failed where sets.indices.contains(index) && providers.indices.contains(index) {
-            guard let source = providers[index].emoteSource else { continue }
-            sets[index] = stale.values.filter { $0.source == source }
+        for index in failed where sets.indices.contains(index) {
+            if let last = remembered[index] {
+                sets[index] = last
+            } else if let stale,
+                      providers.indices.contains(index),
+                      let source = providers[index].emoteSource {
+                sets[index] = stale.values.filter { $0.source == source }
+            }
         }
         return sets
     }

@@ -148,7 +148,7 @@ struct ThreadView: View {
                             text: draft,
                             replyOverride: threadReplyTarget,
                             repinsTranscript: false,
-                            clearsComposerDraft: false
+                            fromMainComposer: false
                         )
                     }
                 )

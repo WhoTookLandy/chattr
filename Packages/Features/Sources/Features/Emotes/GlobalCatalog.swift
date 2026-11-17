@@ -122,6 +122,14 @@ public final class GlobalCatalog {
         globalEmotes = mergedEmotes
         hasLoaded = badges != nil && emotes != nil
 
+        // Persist only a complete result. The disk entry has ONE freshness
+        // stamp for both halves, so saving after a partial failure would let
+        // the next launch (within the TTL) restore the stale half as fresh
+        // and skip refetching it.
+        guard hasLoaded else {
+            logger.warning("GlobalCatalog partial load (badges ok: \(badges != nil), emotes ok: \(emotes != nil)); not caching, will retry on the next load")
+            return
+        }
         await cache.save(
             key: Self.cacheKey,
             value: GlobalsCachePayload(badges: mergedBadges, emotes: mergedEmotes),

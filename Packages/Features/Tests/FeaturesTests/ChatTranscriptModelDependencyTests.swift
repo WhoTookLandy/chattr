@@ -188,12 +188,36 @@ struct ChatTranscriptModelDependencyTests {
         await model.attach(sessions: [makeSession()], currentUserId: "me-1", draftKey: "twitch/chan-1")
 
         // Offline: each send fails at once and leaves a retryable row.
-        await model.send(text: "in thread", repinsTranscript: false, clearsComposerDraft: false)
+        await model.send(text: "in thread", repinsTranscript: false, fromMainComposer: false)
         #expect(recorder.clearedDrafts.isEmpty)
 
         let failed = try #require(model.lines.last)
         await model.retry(failedLineId: failed.id)
         #expect(recorder.clearedDrafts.isEmpty)
+        await model.detach()
+    }
+
+    @Test("Retrying a non-reply ignores (and keeps) the main composer's reply chip")
+    func retryDoesNotTakeComposerReply() async throws {
+        let model = makeModel(Recorder())
+        await model.attach(sessions: [makeSession()], currentUserId: "me-1")
+
+        // Offline: the plain send fails at once and leaves a retryable row.
+        await model.send(text: "plain")
+        let failed = try #require(model.lines.last)
+        #expect(failed.replyParent == nil)
+
+        // The user then picks Reply on another message in the main bar.
+        model.apply(message(chatMessage(id: "m1")))
+        let target = try #require(model.lines.first { $0.id == "m1" })
+        model.beginReply(to: target)
+        #expect(model.replyContext != nil)
+
+        await model.retry(failedLineId: failed.id)
+
+        let retried = try #require(model.lines.last)
+        #expect(retried.replyParent == nil, "the retry must stay a non-reply")
+        #expect(model.replyContext != nil, "the chip belongs to the main bar's next send")
         await model.detach()
     }
 

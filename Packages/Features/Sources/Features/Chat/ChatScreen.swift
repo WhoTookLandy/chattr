@@ -371,6 +371,11 @@ public struct ChatScreen: View {
             // model (the "I see chat but it says Not connected" bug). The
             // chatModel reference survives because @State storage persists
             // until the task fully exits.
+            // Close the lease FIRST (synchronously, before any suspension):
+            // an out-of-band start still in flight will then detach its own
+            // attachment when it lands instead of recording it into a lease
+            // nobody will tear down. Cancel it too, so it stops early.
+            lease.close()
             await chatModel.detach(ifEpoch: lease.epoch)
         }
         .task {
@@ -535,7 +540,8 @@ public struct ChatScreen: View {
             // same channel — the only escape was closing the tab.
             Button("Retry") {
                 let lease = attachLease
-                Task { await startSession(recordingInto: lease) }
+                guard !lease.isClosed else { return }
+                lease.track(Task { await startSession(recordingInto: lease) })
             }
             .buttonStyle(.borderedProminent)
         }
@@ -615,12 +621,17 @@ public struct ChatScreen: View {
     /// to `detach(ifEpoch:)` on teardown. A failed, cancelled or missing-
     /// registry start records nothing, leaving the lease's previous epoch
     /// (or the `0` pre-attach sentinel, whose teardown no-ops unless nothing
-    /// ever attached).
+    /// ever attached). If the lease closed while the start was in flight,
+    /// its teardown has already run, so this start detaches its own
+    /// attachment rather than leaving it orphaned.
     @MainActor
     private func startSession(recordingInto lease: AttachLease) async {
         let epoch = await attachSession()
-        if epoch != 0 {
-            lease.epoch = epoch
+        guard epoch != 0 else { return }
+        if lease.isClosed {
+            await chatModel.detach(ifEpoch: epoch)
+        } else {
+            lease.record(epoch)
         }
     }
 
@@ -753,5 +764,28 @@ public struct ChatScreen: View {
 /// that is live when they fire.
 @MainActor
 final class AttachLease {
-    var epoch = 0
+    /// The NEWEST epoch any start under this lease established. Epochs only
+    /// grow, so keeping the max means a superseded start that finishes late
+    /// can't overwrite a newer one with its stale epoch (whose
+    /// `detach(ifEpoch:)` would then no-op).
+    private(set) var epoch = 0
+    /// Set by the lifecycle task's teardown; after that, starts detach what
+    /// they establish instead of recording it.
+    private(set) var isClosed = false
+    /// Out-of-band starts (Retry) in flight, cancelled on close.
+    private var pending: [Task<Void, Never>] = []
+
+    func record(_ newEpoch: Int) {
+        epoch = max(epoch, newEpoch)
+    }
+
+    func track(_ task: Task<Void, Never>) {
+        pending.append(task)
+    }
+
+    func close() {
+        isClosed = true
+        for task in pending { task.cancel() }
+        pending.removeAll()
+    }
 }

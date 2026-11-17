@@ -93,14 +93,20 @@ struct chattrApp: App {
 
         // A default `ModelConfiguration` resolves to the same store URL the
         // configuration-less initializer above uses.
-        let backedUp = moveStoreFilesAside(at: ModelConfiguration().url)
-
-        do {
-            let container = try ModelContainer(for: schema, migrationPlan: AppMigrationPlan.self)
-            logger.notice("Opened a fresh SwiftData store after open failure (previous store \(backedUp ? "backed up" : "not backed up", privacy: .public))")
-            return container
-        } catch {
-            logger.fault("Fresh SwiftData store failed to open: \(String(describing: error), privacy: .public). Falling back to an in-memory store for this launch.")
+        // Only reuse the disk location when the WHOLE store (database + WAL +
+        // SHM) moved together. A partial move would split the database from
+        // its WAL — SQLite can lose committed transactions that way — so the
+        // move is rolled back and this launch runs in memory instead.
+        if moveStoreFilesAside(at: ModelConfiguration().url) {
+            do {
+                let container = try ModelContainer(for: schema, migrationPlan: AppMigrationPlan.self)
+                logger.notice("Opened a fresh SwiftData store after open failure (previous store backed up)")
+                return container
+            } catch {
+                logger.fault("Fresh SwiftData store failed to open: \(String(describing: error), privacy: .public). Falling back to an in-memory store for this launch.")
+            }
+        } else {
+            logger.fault("Couldn't back up the SwiftData store intact; leaving it in place and using an in-memory store for this launch.")
         }
 
         do {
@@ -117,9 +123,9 @@ struct chattrApp: App {
     /// Moves a SQLite-backed store and its WAL/SHM sidecars into
     /// `<store dir>/StoreBackups/<timestamp>/`, so a fresh store can be
     /// created without destroying the old data. Missing files are fine.
-    /// Returns true when every existing file was moved; on a move failure the
-    /// remaining files are left in place and the caller's fresh open proceeds
-    /// anyway (and will fail again if the store is still unusable).
+    /// All-or-nothing: returns true only when every existing file was moved.
+    /// If any move fails, the files already moved are put back, so the
+    /// database is never separated from its WAL, and false is returned.
     private static func moveStoreFilesAside(at storeURL: URL) -> Bool {
         let fileManager = FileManager.default
         let stamp = ISO8601DateFormatter().string(from: Date())
@@ -128,24 +134,32 @@ struct chattrApp: App {
             .appendingPathComponent("StoreBackups", isDirectory: true)
             .appendingPathComponent(stamp, isDirectory: true)
         let paths = [storeURL.path, storeURL.path + "-shm", storeURL.path + "-wal"]
-        var allMoved = true
         do {
             try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: true)
         } catch {
             logger.error("Couldn't create store backup folder: \(error.localizedDescription, privacy: .public)")
             return false
         }
+        var moved: [(from: String, to: String)] = []
         for path in paths where fileManager.fileExists(atPath: path) {
-            let destination = backupDir.appendingPathComponent((path as NSString).lastPathComponent)
+            let destination = backupDir.appendingPathComponent((path as NSString).lastPathComponent).path
             do {
-                try fileManager.moveItem(atPath: path, toPath: destination.path)
-                logger.notice("Moved store file \(path, privacy: .public) to \(destination.path, privacy: .public)")
+                try fileManager.moveItem(atPath: path, toPath: destination)
+                moved.append((from: path, to: destination))
+                logger.notice("Moved store file \(path, privacy: .public) to \(destination, privacy: .public)")
             } catch {
-                allMoved = false
-                logger.error("Couldn't move store file \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error("Couldn't move store file \(path, privacy: .public): \(error.localizedDescription, privacy: .public). Restoring the files already moved.")
+                for item in moved.reversed() {
+                    do {
+                        try fileManager.moveItem(atPath: item.to, toPath: item.from)
+                    } catch {
+                        logger.fault("Couldn't restore store file \(item.from, privacy: .public) from \(item.to, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+                return false
             }
         }
-        return allMoved
+        return true
     }
 
     /// Observed by `@AppStorage`; SettingsScreen writes through the same key
