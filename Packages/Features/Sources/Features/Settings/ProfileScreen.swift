@@ -216,7 +216,7 @@ public struct ProfileScreen: View {
             } header: {
                 Text("Video")
             } footer: {
-                Text("The native player uses Apple's video player for smoother picture-in-picture and quality control. It's experimental: it relies on an unofficial Twitch interface, and if it can't load a stream chattr switches back to Twitch's web player.")
+                Text("The native player uses Apple's video player for smoother picture-in-picture and quality control. It's experimental: it relies on an unofficial Twitch interface, and if it can't load a stream chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video.")
             }
 
             // App — preferences about chattr itself rather than chat
