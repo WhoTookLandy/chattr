@@ -24,6 +24,10 @@ struct ChatTranscript: View {
     /// Observed HERE, not in ChatScreen — see the doc comment above.
     let chatModel: ChatTranscriptModel
     let channelLoginName: String
+    /// The pager tab this transcript belongs to; nil outside the pager.
+    /// Off-screen pager neighbours stay mounted (see `PagerWindow`) and
+    /// throttle their list updates — see `isVisible`.
+    let tabId: UUID?
     /// Registry-owned per-account connection store; drives the
     /// "Reconnecting… / Live again" pill.
     let connectionStatus: ConnectionStatusStore?
@@ -48,6 +52,16 @@ struct ChatTranscript: View {
     /// `chatModel.blockedIds` reactively by the onChange/task in
     /// `chatScrollView`.
     @Environment(\.blockStore) private var blockStore
+
+    @Environment(\.chatTabs) private var chatTabs
+
+    /// False for a mounted pager neighbour that isn't the visible page. Read
+    /// here (this body already re-runs per flush), so a swipe re-evaluates
+    /// the transcripts rather than the chat pages around them.
+    private var isVisible: Bool {
+        guard let tabId else { return true }
+        return chatTabs?.activeTabId == tabId
+    }
 
     /// Currently-scrolled message id. Used by the legacy list's
     /// auto-scroll-to-bottom via `.scrollPosition(id:)`. Writing to this
@@ -190,6 +204,7 @@ struct ChatTranscript: View {
                 unreadCount: $unreadWhileScrolledUp,
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge,
+                isVisible: isVisible,
                 onLineTapped: onLineTapped
             )
             .ignoresSafeArea(edges: appearance.edgeToEdge ? .top : [])

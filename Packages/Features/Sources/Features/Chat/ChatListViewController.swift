@@ -127,6 +127,44 @@ final class ChatListViewController: UIViewController {
     /// reconfigure-all on resume.
     private var pendingReconfigureAll = false
 
+    /// False while this list is a mounted pager neighbour rather than the
+    /// visible page (see `PagerWindow`). Off-screen, every flush would still
+    /// apply a snapshot and force-lay-out cells nobody sees; instead updates
+    /// coalesce into one refresh per `offscreenRefreshInterval`, keeping the
+    /// neighbour close enough to current that swiping to it shows live chat.
+    /// Becoming visible catches up immediately.
+    var isVisible = true {
+        didSet {
+            guard isViewLoaded, isVisible != oldValue else { return }
+            if isVisible {
+                throttledRefresh?.cancel()
+                throttledRefresh = nil
+                guard !isSuspended else { return }
+                refresh()
+                pinToBottomIfNeeded()
+            }
+        }
+    }
+
+    /// How often an off-screen neighbour applies what has arrived.
+    private static let offscreenRefreshInterval: Duration = .milliseconds(750)
+
+    /// The pending off-screen refresh, if one is scheduled.
+    private var throttledRefresh: Task<Void, Never>?
+
+    /// One coalesced refresh `offscreenRefreshInterval` from now — later
+    /// updates inside the interval ride along.
+    private func scheduleThrottledRefresh() {
+        guard throttledRefresh == nil else { return }
+        throttledRefresh = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.offscreenRefreshInterval)
+            guard let self, !Task.isCancelled else { return }
+            self.throttledRefresh = nil
+            guard !self.isSuspended else { return }
+            self.refresh()
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         configureCollectionView()
@@ -331,7 +369,8 @@ final class ChatListViewController: UIViewController {
         // reconfigure every row already in the list, in the same apply as
         // whatever data arrived. Not on the first update — every row is
         // fresh then.
-        let inputsChanged = self.rowInputs != nil && self.rowInputs != rowInputs
+        let isFirstUpdate = self.rowInputs == nil
+        let inputsChanged = !isFirstUpdate && self.rowInputs != rowInputs
         self.rowInputs = rowInputs
 
         var jumpRequested = scrollToBottomToken != lastScrollToBottomToken
@@ -358,6 +397,16 @@ final class ChatListViewController: UIViewController {
             if inputsChanged { pendingReconfigureAll = true }
             return
         }
+        // Off-screen pager neighbour (see `isVisible`): coalesce plain data
+        // updates. The first update (priming the list, so the page is ready
+        // before it's swiped in) and the rare row-input / re-pin changes
+        // still apply at once.
+        if !isVisible, !isFirstUpdate, !inputsChanged, !jumpRequested {
+            scheduleThrottledRefresh()
+            return
+        }
+        throttledRefresh?.cancel()
+        throttledRefresh = nil
         refresh(reconfigureAll: inputsChanged)
         if jumpRequested { pinToBottomIfNeeded() }
     }
