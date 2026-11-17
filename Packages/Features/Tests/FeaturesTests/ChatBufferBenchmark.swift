@@ -65,11 +65,20 @@ struct ChatBufferBenchmark {
         let newCount = newApproach(messageCount: messageCount, cap: cap, blocked: blocked)
         #expect(oldCount == newCount)
 
-        let oldTime = clock.measure { _ = oldApproach(messageCount: messageCount, cap: cap, blocked: blocked) }
-        let newTime = clock.measure { _ = newApproach(messageCount: messageCount, cap: cap, blocked: blocked) }
+        // Best of several interleaved runs: CI runs suites in parallel on a
+        // shared simulator, so a single sample is dominated by whatever else
+        // is running. The fastest run of each is the least-disturbed one.
+        var oldTime = Duration.seconds(3600)
+        var newTime = Duration.seconds(3600)
+        for _ in 0..<5 {
+            oldTime = min(oldTime, clock.measure { _ = oldApproach(messageCount: messageCount, cap: cap, blocked: blocked) })
+            newTime = min(newTime, clock.measure { _ = newApproach(messageCount: messageCount, cap: cap, blocked: blocked) })
+        }
 
-        let oldMs = Double(oldTime.components.attoseconds) / 1e15
-        let newMs = Double(newTime.components.attoseconds) / 1e15
+        // `Duration / Duration` keeps the seconds component, which reading
+        // `components.attoseconds` alone dropped for runs over a second.
+        let oldMs = (oldTime / .milliseconds(1))
+        let newMs = (newTime / .milliseconds(1))
         let speedup = oldMs / max(newMs, 0.0001)
         Comment.record("raid \(messageCount) msgs @ cap \(cap), 1 blocked author")
         Comment.record(String(format: "old (full rescan/msg): %.1f ms", oldMs))
