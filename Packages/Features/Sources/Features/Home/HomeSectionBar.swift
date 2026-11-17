@@ -1,15 +1,11 @@
 import SwiftUI
 
-/// Twitch-style text tabs across the top of Home: "Live  Following  Chats",
-/// the selected one bold with an underline. Chats carries a red count of
-/// open chats with unseen @-mentions.
-///
-/// Reads `chatTabs.mentionedTabIds` here (not in `HomeScreen`) so a
-/// background ping redraws the bar, not the whole Home body.
+/// Twitch-style text tabs across the top of Home: "Live  Following", the
+/// selected one bold with an underline. The sections also page with a
+/// horizontal swipe (`HomeScreen`); the underline follows either way.
 struct HomeSectionBar: View {
     @Binding var selection: HomeSection
 
-    @Environment(\.chatTabs) private var chatTabs
     @Namespace private var underline
 
     var body: some View {
@@ -32,35 +28,20 @@ struct HomeSectionBar: View {
 
     private func label(for section: HomeSection) -> some View {
         let isSelected = selection == section
-        return HStack(spacing: 4) {
-            Text(section.title)
-                .font(.title3.weight(isSelected ? .bold : .semibold))
-                .foregroundStyle(isSelected ? .primary : .secondary)
-            if section == .chats, mentionCount > 0 {
-                Text("\(mentionCount)")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(.red, in: Capsule())
-                    .accessibilityLabel("\(mentionCount) with mentions")
+        return Text(section.title)
+            .font(.title3.weight(isSelected ? .bold : .semibold))
+            .foregroundStyle(isSelected ? .primary : .secondary)
+            .padding(.bottom, 9)
+            // Underline as an overlay so it's exactly the label's width; the
+            // matched geometry slides it between sections on selection.
+            .overlay(alignment: .bottom) {
+                if isSelected {
+                    Capsule()
+                        .fill(.primary)
+                        .frame(height: 3)
+                        .matchedGeometryEffect(id: "underline", in: underline)
+                }
             }
-        }
-        .padding(.bottom, 9)
-        // Underline as an overlay so it's exactly the label's width; the
-        // matched geometry slides it between sections on selection.
-        .overlay(alignment: .bottom) {
-            if isSelected {
-                Capsule()
-                    .fill(.primary)
-                    .frame(height: 3)
-                    .matchedGeometryEffect(id: "underline", in: underline)
-            }
-        }
-        .contentShape(Rectangle())
-    }
-
-    private var mentionCount: Int {
-        chatTabs?.mentionedTabIds.count ?? 0
+            .contentShape(Rectangle())
     }
 }

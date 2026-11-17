@@ -5,72 +5,55 @@ import DesignSystem
 import Nuke
 import NukeUI
 
-/// The Home tab — the app's landing surface, Twitch-style: three text tabs
-/// across the top (`HomeSectionBar`) instead of separate bottom-bar tabs,
-/// which leaves the tab bar for app-wide destinations (Activity, You,
-/// Search).
+/// The Home tab — the app's landing surface. Two Twitch-style text tabs
+/// across the top (`HomeSectionBar`), which also page with a horizontal
+/// swipe, and the account avatar in the corner (→ You: settings, accounts).
 ///
 ///   - **Live** — who you follow that's on now (`HomeContent`): category
 ///     chips, two featured cards, then every other live channel as rows.
-///   - **Following** — every followed channel, live first, offline ones with
-///     "Streamed 2 days ago" (`FollowingList`).
-///   - **Chats** — your open chats (`OpenChatsList`); tapping one pushes the
-///     full-screen `ChatPagerScreen`.
+///   - **Following** — every followed channel in Live / Offline sections
+///     (`FollowingList`).
 ///
-/// The chat push is *derived from* `ChatTabsModel.activeTabId` (non-nil = a
-/// chat is open): opening a channel from anywhere sets it (and AppNavigation
-/// flips this tab to Home → Chats), popping back clears it.
-///
-/// Owns the open channels' status polling (one batched call a minute while
-/// Home is on screen, chat pushed or not) — it feeds the chat stream header,
-/// the pill's live dot and the Chats rows.
+/// Open chats live in their own tab (`ChatsScreen`); tapping a channel here
+/// opens it there.
 public struct HomeScreen: View {
     private let account: Account
     private let accountStore: AccountStore
-    /// Which section is showing. Owned by AppNavigation so cross-app
-    /// intents ("open this channel") can land on Chats.
+    /// Threaded to ProfileScreen → the account switcher ("Add Account").
+    private let clientId: String
+    /// Which section is showing. Owned by AppNavigation.
     @Binding private var section: HomeSection
 
     @Environment(\.followsStore) private var followsStore
-    @Environment(\.channelStatus) private var channelStatus
-    @Environment(\.chatTabs) private var chatTabs
     @Environment(\.openChannel) private var openChannel
 
-    /// Scene-scoped restoration of the active chat tab id (round-tripped
-    /// through `uuidString`; `@SceneStorage` only takes primitives). Not
-    /// account-scoped: after an account switch the saved id simply won't
-    /// match any of the new account's tabs, and the restore skips it.
-    @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
-
-    /// You → App → Resume Last Chat. When off, launch lands on Home without
-    /// pushing a chat; the saved id is still recorded so turning the toggle
-    /// back on resumes again.
-    @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
+    @State private var path: [HomeRoute] = []
 
     public init(
         account: Account,
         accountStore: AccountStore,
+        clientId: String,
         section: Binding<HomeSection>
     ) {
         self.account = account
         self.accountStore = accountStore
+        self.clientId = clientId
         self._section = section
     }
 
-    private var openChannelIds: [String] {
-        (chatTabs?.tabs ?? []).flatMap { $0.channels.map(\.channelId) }
-    }
-
     public var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 HomeSectionBar(selection: $section)
-                sectionContent
+                    .overlay(alignment: .trailing) {
+                        profileButton
+                            .padding(.trailing, 16)
+                    }
+                sectionPager
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(Color.chatSurface.ignoresSafeArea())
             // The section bar IS the header; no nav-bar title above it.
-            // (Pushed screens — the chat pager, See all — keep their bars.)
             #if os(iOS)
             .toolbar(.hidden, for: .navigationBar)
             #endif
@@ -82,35 +65,9 @@ public struct HomeScreen: View {
                         accountStore: accountStore,
                         initialMode: .live
                     )
+                case .profile:
+                    ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
                 }
-            }
-            .navigationDestination(isPresented: chatIsPresented) {
-                ChatPagerScreen(account: account, accountStore: accountStore)
-            }
-            .onAppear {
-                // Scene restoration: resume the chat that was open when the
-                // scene was last torn down. Setting `activeTabId` both
-                // selects the page and (via `chatIsPresented`) pushes it.
-                if resumeLastChatOnLaunch,
-                   let chatTabs,
-                   chatTabs.activeTabId == nil,
-                   let savedId = persistedActiveTabId,
-                   let uuid = UUID(uuidString: savedId),
-                   chatTabs.tabs.contains(where: { $0.id == uuid }) {
-                    chatTabs.activeTabId = uuid
-                    chatTabs.isPresented = true
-                    section = .chats
-                }
-            }
-            // Persist the chat that's open on screen (nil once popped), so
-            // "resume last chat" restores what the user was actually in.
-            .onChange(of: chatTabs?.activeTabId) { _, newValue in
-                if chatTabs?.isPresented == true {
-                    persistedActiveTabId = newValue?.uuidString
-                }
-            }
-            .onChange(of: chatTabs?.isPresented) { _, presented in
-                persistedActiveTabId = presented == true ? chatTabs?.activeTabId?.uuidString : nil
             }
         }
         // Live data whenever Home appears (tab switches included).
@@ -119,24 +76,53 @@ public struct HomeScreen: View {
         .task {
             await followsStore?.refreshLive(account: account, accountStore: accountStore)
         }
-        // Open channels' status, once a minute while Home (or a chat pushed
-        // from it) is on screen. On the NavigationStack, not its root, so the
-        // push doesn't cancel it. Restarts when the open set changes.
-        .task(id: openChannelIds) {
-            guard let channelStatus else { return }
-            while !Task.isCancelled {
-                await channelStatus.refresh(
-                    channelIds: openChannelIds,
-                    account: account,
-                    accountStore: accountStore
-                )
-                try? await Task.sleep(for: .seconds(60))
+    }
+
+    /// You → settings, accounts, appearance. The avatar in the corner is
+    /// where iOS apps keep the account.
+    private var profileButton: some View {
+        Button {
+            path.append(.profile)
+        } label: {
+            LazyImage(request: ImageRequest.avatar(url: URL(string: account.profileImageURL), side: 32)) { state in
+                if let image = state.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    Image(systemName: "person.crop.circle.fill")
+                        .resizable()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 32, height: 32)
+            .clipShape(Circle())
+            .overlay(Circle().strokeBorder(.secondary.opacity(0.3), lineWidth: 0.5))
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("You")
+        .accessibilityHint("Settings and accounts")
+    }
+
+    /// Live / Following, swipeable side to side (iOS); the bar's tabs and
+    /// the swipe drive the same `section`.
+    @ViewBuilder
+    private var sectionPager: some View {
+        #if os(iOS)
+        TabView(selection: $section) {
+            ForEach(HomeSection.allCases, id: \.self) { section in
+                sectionContent(section)
+                    .tag(section)
             }
         }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        #else
+        sectionContent(section)
+        #endif
     }
 
     @ViewBuilder
-    private var sectionContent: some View {
+    private func sectionContent(_ section: HomeSection) -> some View {
         switch section {
         case .live:
             HomeContent(
@@ -154,40 +140,14 @@ public struct HomeScreen: View {
             }
         case .following:
             FollowingList(account: account, accountStore: accountStore)
-        case .chats:
-            OpenChatsList(onShowLive: { section = .live })
-                .refreshable {
-                    await channelStatus?.refresh(
-                        channelIds: openChannelIds, account: account, accountStore: accountStore, force: true
-                    )
-                }
         }
-    }
-
-    /// Push state, derived from the model: a chat is presented exactly when
-    /// a tab is active. Popping (interactive swipe-back included) writes
-    /// `false`, which clears the selection.
-    private var chatIsPresented: Binding<Bool> {
-        Binding(
-            get: {
-                guard let chatTabs else { return false }
-                return chatTabs.isPresented && chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
-            },
-            set: { presented in
-                // Only the flag — never touch activeTabId here (see
-                // ChatTabsModel.isPresented for the freeze this caused).
-                chatTabs?.isPresented = presented
-            }
-        )
     }
 }
 
-
-/// Navigation routes Home can push. An enum (not a bare Bool) so future
-/// destinations (a category page, a channel profile) slot in without
-/// re-plumbing the `navigationDestination`.
+/// Navigation routes Home can push.
 enum HomeRoute: Hashable {
     case allFollows
+    case profile
 }
 
 /// Home → Live. Presentational: everything arrives as plain values — no
@@ -298,6 +258,12 @@ struct HomeContent: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .channelPreviewMenu(
+                        name: stream.userName,
+                        profileImageURL: profileImageURLs[stream.userId],
+                        stream: stream,
+                        open: { onStreamTap(stream) }
+                    )
                     .listRowBackground(Color.clear)
                     .listRowSeparator(index < Self.featuredCount ? .hidden : .automatic)
                 }

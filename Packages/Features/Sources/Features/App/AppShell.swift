@@ -51,20 +51,26 @@ public struct AppShell: View {
 
     /// The app's top-level destinations.
     enum AppTab: Hashable {
-        case home, activity, you, search
+        case home, chats, activity, search
     }
 
     @State private var navigation = AppNavigation()
+
+    /// Same keys `ChatsScreen` restores from: if a chat was open when the
+    /// scene was last torn down, launch on the Chats tab so it can resume.
+    @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
+    @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
+    @State private var didPickLaunchTab = false
 
     #if os(iOS)
     /// The single stream player: chat headers drive it; when its chat is
     /// left it keeps playing in `MiniPlayerOverlay`.
     @State private var playback = PlaybackCenter()
 
-    /// A chat is on screen (Home tab with the pager pushed) — the stream
+    /// A chat is on screen (Chats tab with the pager pushed) — the stream
     /// shows in its header there, so no mini player.
     private var chatOnScreen: Bool {
-        navigation.selectedTab == .home
+        navigation.selectedTab == .chats
             && navigation.chatTabs.isPresented
             && !navigation.chatTabs.tabs.isEmpty
     }
@@ -79,19 +85,6 @@ public struct AppShell: View {
     /// a reference type (not view `@State` value) so the long-stored
     /// `onOpen`/`onClose` closures can mutate it.
     @State private var mentionWatchTokens = MentionWatchTokens()
-
-    #if canImport(UIKit)
-    /// The account avatar rendered for the You tab (see `ProfileTabIcon`).
-    @State private var profileIcon: UIImage?
-    #endif
-
-    /// The You tab's icon: the avatar once loaded, else the symbol.
-    private var profileTabImage: Image {
-        #if canImport(UIKit)
-        if let profileIcon { return Image(uiImage: profileIcon) }
-        #endif
-        return ProfileTabIcon.fallback
-    }
 
     @Environment(\.channelSessionRegistry) private var channelSessionRegistry
 
@@ -115,18 +108,31 @@ public struct AppShell: View {
             // SF Symbol (no caption), with `.accessibilityLabel` preserving the
             // VoiceOver name the visible title used to carry. The `.search` tab
             // keeps its role-driven treatment below.
-            // Home carries Live / Following / Chats as top tabs (see
-            // `HomeScreen`), leaving this bar for app-wide destinations.
+            // Home: Live / Following (swipeable top tabs), with You behind
+            // the avatar in its corner. Chats is its own tab — it's the
+            // heart of the app, one tap from anywhere.
             Tab(value: AppTab.home) {
                 HomeScreen(
                     account: account,
                     accountStore: accountStore,
+                    clientId: clientId,
                     section: $navigation.homeSection
                 )
             } label: {
                 Image(systemName: "house")
             }
             .accessibilityLabel("Home")
+            Tab(value: AppTab.chats) {
+                ChatsScreen(account: account, accountStore: accountStore) {
+                    navigation.homeSection = .live
+                    navigation.selectedTab = .home
+                }
+            } label: {
+                Image(systemName: "bubble.left.and.bubble.right")
+            }
+            // Open chats with an unseen @-mention. 0 hides the badge.
+            .badge(navigation.chatTabs.mentionedTabIds.count)
+            .accessibilityLabel("Chats")
             Tab(value: AppTab.activity) {
                 ActivityScreen(
                     store: navigation.activity,
@@ -139,14 +145,6 @@ public struct AppShell: View {
             // 0 hides the badge.
             .badge(navigation.activity.unreadCount)
             .accessibilityLabel("Activity")
-            Tab(value: AppTab.you) {
-                NavigationStack {
-                    ProfileScreen(account: account, accountStore: accountStore, clientId: clientId)
-                }
-            } label: {
-                profileTabImage
-            }
-            .accessibilityLabel("You")
             // `role: .search` separates the tab on the trailing edge and
             // morphs it into the search field on activation (iOS 26). Custom
             // icon-only label so it matches the other tabs (no caption).
@@ -162,6 +160,13 @@ public struct AppShell: View {
             .accessibilityLabel("Search")
         }
         .environment(\.chatTabs, navigation.chatTabs)
+        .onAppear {
+            guard !didPickLaunchTab else { return }
+            didPickLaunchTab = true
+            if resumeLastChatOnLaunch, persistedActiveTabId != nil {
+                navigation.selectedTab = .chats
+            }
+        }
         // Injected by identity: `OpenChannelAction` stores the stable
         // `navigation` reference (not a per-body closure), so this env value
         // compares equal across body passes and doesn't churn its readers.
@@ -180,11 +185,6 @@ public struct AppShell: View {
         .animation(.snappy(duration: 0.3), value: showsMiniPlayer)
         // Sign-out / account switch: nothing keeps playing for the old account.
         .onDisappear { playback.stop() }
-        #endif
-        #if canImport(UIKit)
-        .task(id: account.profileImageURL) {
-            profileIcon = await ProfileTabIcon.load(urlString: account.profileImageURL)
-        }
         #endif
         // Single appearance task that does, in this exact order:
         //
@@ -414,19 +414,18 @@ final class AppNavigation {
     /// via `\.chatTabs` for the chat header's switcher.
     let chatTabs = ChatTabsModel()
 
-    /// Which Home top tab is showing (Live / Following / Chats).
+    /// Which Home top tab is showing (Live / Following).
     var homeSection: HomeSection = .live
 
     /// Mentions + keyword hits across open chats (the Activity tab).
     let activity = ActivityStore()
 
-    /// Open `channel` as a chat tab and land the user in its chat — Home →
-    /// Chats with the chat pushed — "tap a channel anywhere → land in its
-    /// chat," from any tab. (`open` makes the tab active, which pushes it.)
+    /// Open `channel` as a chat tab and land the user in its chat — the
+    /// Chats tab with the chat pushed — "tap a channel anywhere → land in
+    /// its chat," from any tab. (`open` presents the tab, which pushes it.)
     func openChannel(_ channel: ChannelDescriptor) {
         chatTabs.open(channel: channel)
-        homeSection = .chats
-        selectedTab = .home
+        selectedTab = .chats
     }
 }
 

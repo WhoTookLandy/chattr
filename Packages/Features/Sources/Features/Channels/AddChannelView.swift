@@ -26,6 +26,10 @@ struct AddChannelView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openChannel) private var openChannel
+    @Environment(\.followsStore) private var followsStore
+
+    /// Before typing: filters the "Live from your follows" list.
+    @State private var browseCategory: String?
 
     @State private var query: String = ""
     @State private var results: [SearchChannel] = []
@@ -54,6 +58,14 @@ struct AddChannelView: View {
     var body: some View {
         NavigationStack {
             List {
+                // Nothing typed yet: something useful instead of a blank
+                // page — who you follow that's live, by category.
+                if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    browseSection
+                } else {
+                    followingMatchesSection
+                }
+
                 // Manual-entry affordance: open the exact typed channel.
                 // Shows when the query is a plausible login AND isn't
                 // already the first search result (avoid a redundant row).
@@ -117,7 +129,7 @@ struct AddChannelView: View {
                     }
                 }
             }
-            .navigationTitle("Add Channel")
+            .navigationTitle(showsCancelButton ? "Add Channel" : "Search")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -141,6 +153,125 @@ struct AddChannelView: View {
             // we only hit Helix once the user pauses.
             .task(id: query) {
                 await runSearch()
+            }
+        }
+    }
+
+    // MARK: - Browse (empty query)
+
+    private var liveFollows: [TwitchStream] {
+        followsStore?.liveStreamsOrdered ?? []
+    }
+
+    /// Categories your live follows are in, busiest first.
+    private var browseCategories: [String] {
+        var totals: [String: Int] = [:]
+        for stream in liveFollows where !stream.gameName.isEmpty {
+            totals[stream.gameName, default: 0] += stream.viewerCount
+        }
+        return totals.sorted { $0.value > $1.value }.map(\.key)
+    }
+
+    @ViewBuilder
+    private var browseSection: some View {
+        if !liveFollows.isEmpty {
+            Section {
+                if browseCategories.count > 1 {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
+                            categoryChip(nil, title: "All")
+                            ForEach(browseCategories, id: \.self) { category in
+                                categoryChip(category, title: category)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .scrollIndicators(.hidden)
+                    .listRowSeparator(.hidden)
+                }
+                ForEach(liveFollows.filter { browseCategory == nil || $0.gameName == browseCategory }, id: \.userId) { stream in
+                    let profileURL = followsStore?.profileImageURLs[stream.userId]
+                    Button {
+                        openChannel?(stream: stream, profileImageURL: profileURL)
+                        dismiss()
+                    } label: {
+                        FollowingRow(
+                            displayName: stream.userName,
+                            login: stream.userLogin,
+                            profileImageURL: profileURL,
+                            stream: stream,
+                            lastLiveAt: nil
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .channelPreviewMenu(
+                        name: stream.userName,
+                        profileImageURL: profileURL,
+                        stream: stream,
+                        open: {
+                            openChannel?(stream: stream, profileImageURL: profileURL)
+                            dismiss()
+                        }
+                    )
+                }
+            } header: {
+                Text("Live from your follows")
+            }
+        }
+    }
+
+    private func categoryChip(_ category: String?, title: String) -> some View {
+        let selected = browseCategory == category
+        return Button {
+            withAnimation(.snappy(duration: 0.2)) { browseCategory = category }
+        } label: {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// While typing: followed channels that match, ahead of the network
+    /// search (instant, and usually what you meant).
+    @ViewBuilder
+    private var followingMatchesSection: some View {
+        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let matches: [FollowedChannel] = {
+            guard let followsStore, !needle.isEmpty else { return [] }
+            let channels = followsStore.sortedAllChannels
+            let keys = followsStore.sortedAllChannelSearchKeys
+            var found: [FollowedChannel] = []
+            for (index, key) in keys.enumerated() where index < channels.count && key.contains(needle) {
+                found.append(channels[index])
+                if found.count == 6 { break }
+            }
+            return found
+        }()
+        if !matches.isEmpty {
+            Section {
+                ForEach(matches, id: \.broadcasterId) { channel in
+                    let profileURL = followsStore?.profileImageURLs[channel.broadcasterId]
+                    Button {
+                        openChannel?(channel: channel, profileImageURL: profileURL)
+                        dismiss()
+                    } label: {
+                        FollowingRow(
+                            displayName: channel.broadcasterName,
+                            login: channel.broadcasterLogin,
+                            profileImageURL: profileURL,
+                            stream: followsStore?.liveStreams[channel.broadcasterId],
+                            lastLiveAt: nil
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            } header: {
+                Text("Following")
             }
         }
     }

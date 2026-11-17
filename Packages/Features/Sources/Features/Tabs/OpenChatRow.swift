@@ -50,9 +50,6 @@ struct OpenChatRow: View {
                     .frame(width: 8, height: 8)
                     .accessibilityLabel("Mentioned you")
             }
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
