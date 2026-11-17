@@ -6,6 +6,7 @@ NEW
 • Audio only (🎧 on the video, or ⋯ → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
 • Native video player (You → Video, experimental): Apple's player with picture-in-picture, fullscreen and a max-quality setting. If it can't load a stream, chattr switches to Twitch's web player.
 • Jump between open chats from the "1 / N" chip on the video. Close a chat from the ⋯ menu.
+• Home → Live now lists every live channel you follow (no more "See all").
 • Followers-only, slow mode and other chat restrictions now show in the message box.
 
 FIXED
