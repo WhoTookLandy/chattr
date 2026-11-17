@@ -354,11 +354,33 @@ struct DeviceCodeGrantTests {
         let start = Date(timeIntervalSince1970: 1_000_000)
         let schedule = DeviceCodePollSchedule(prompt: Self.prompt(interval: 5), issuedAt: start)
         schedule.recordPoll(at: start)
-        // Clock jumps back an hour: the raw gap to nextPollAt is 3605 s.
-        #expect(schedule.delay(at: start.addingTimeInterval(-3600)) == 5)
         // The normal case is unchanged.
         #expect(schedule.delay(at: start.addingTimeInterval(2)) == 3)
-        #expect(schedule.delay(at: start.addingTimeInterval(9)) == 0)
+        // Clock jumps back an hour: the raw gap to nextPollAt is 3605 s.
+        let rolledBack = start.addingTimeInterval(-3600)
+        #expect(schedule.delay(at: rolledBack) == 5)
+        // The deadline is re-anchored, so the loop's re-check after sleeping
+        // one interval finds the poll due instead of sleeping for an hour.
+        #expect(schedule.nextPollAt == rolledBack.addingTimeInterval(5))
+        #expect(schedule.delay(at: rolledBack.addingTimeInterval(5)) == 0)
+    }
+
+    @Test("A clock moved back mid-wait costs at most one extra interval")
+    func pollingAfterClockMovedBack() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let schedule = DeviceCodePollSchedule(prompt: prompt, issuedAt: start)
+        schedule.recordPoll(at: start)
+        let rolledBack = start.addingTimeInterval(-3600)
+        // Simulates the loop: sleep the returned delay, then re-check.
+        var now = rolledBack
+        var sleeps = 0
+        while schedule.delay(at: now) > 0 {
+            now = now.addingTimeInterval(schedule.delay(at: now))
+            sleeps += 1
+            #expect(sleeps < 3)
+            if sleeps >= 3 { break }
+        }
+        #expect(sleeps == 1)
     }
 
     @Test("Server-reported expiry ends polling with .expired")

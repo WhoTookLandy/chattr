@@ -77,12 +77,20 @@ public final class DeviceCodePollSchedule: Sendable {
     ///
     /// Never more than one `interval`. `nextPollAt` is wall-clock time, so if
     /// the device clock is set back the raw gap could be hours and polling
-    /// would stall until the code expired; capping keeps pacing correct. A
+    /// would stall until the code expired; the deadline is re-anchored to
+    /// one interval from `now` instead, so pacing stays correct. A
     /// clock moved forward can at worst allow one early poll, which Twitch
     /// answers with `slow_down` — handled, and it only makes pacing stricter.
     func delay(at now: Date) -> TimeInterval {
         state.withLock { state in
-            min(TimeInterval(state.interval), max(0, state.nextPollAt.timeIntervalSince(now)))
+            let interval = TimeInterval(state.interval)
+            // The clock went back: re-anchor the deadline one interval from
+            // the new "now" so every later check agrees with it, instead of
+            // waiting out the hour the clock was moved.
+            if state.nextPollAt.timeIntervalSince(now) > interval {
+                state.nextPollAt = now.addingTimeInterval(interval)
+            }
+            return max(0, state.nextPollAt.timeIntervalSince(now))
         }
     }
 
