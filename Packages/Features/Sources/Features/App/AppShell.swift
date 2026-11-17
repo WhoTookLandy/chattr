@@ -214,6 +214,19 @@ public struct AppShell: View {
         }
         // Sign-out / account switch: nothing keeps playing for the old account.
         .onDisappear { playback.stop() }
+        // Settings → App → Keep Screen Awake: while a chat or a stream
+        // (the mini player) is on screen.
+        .keepsScreenAwake(chatOnScreen || playback.isPlaying)
+        // Settings → Video → When a Chat Opens, applied just before the
+        // pager presents so the header mounts in the chosen state.
+        .onAppear {
+            if PlaybackPreferences.videoOnOpen == .autoplayOnWiFi {
+                NetworkReachability.warmUp()
+            }
+            navigation.chatTabs.onWillPresent = { [weak playback] in
+                ChatOpenVideoPolicy.apply(playback: playback)
+            }
+        }
         #endif
         // Single appearance task that does, in this exact order:
         //

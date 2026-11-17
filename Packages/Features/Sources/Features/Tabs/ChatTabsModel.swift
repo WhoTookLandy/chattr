@@ -77,6 +77,7 @@ public final class ChatTabsModel {
         get { storedIsPresented }
         set {
             guard newValue != storedIsPresented else { return }
+            if newValue { onWillPresent?() }
             storedIsPresented = newValue
             // Coming back to a chat acknowledges its ping, like switching to it.
             if newValue, let activeTabId { clearMention(activeTabId) }
@@ -85,6 +86,11 @@ public final class ChatTabsModel {
 
     /// Observed backing storage for `isPresented`.
     private var storedIsPresented = false
+
+    /// Runs just before a chat comes on screen — the pager being presented,
+    /// or a channel opened while it already is. AppShell applies the
+    /// "when a chat opens" video preference here, before the header mounts.
+    @ObservationIgnored public var onWillPresent: (@MainActor () -> Void)?
 
     /// Tabs holding an unseen @-mention of the signed-in user — drives the
     /// red dots in the quick-switcher popover and the channel pill.
@@ -323,6 +329,8 @@ public final class ChatTabsModel {
     /// idempotent re-focus path (same `id` already present) skips it to
     /// keep the refcount honest — re-focusing isn't a new acquisition.
     public func open(_ tab: ChatTab) {
+        // Already on screen, `isPresented` won't change — announce here.
+        if isPresented { onWillPresent?() }
         let isNew = !tabs.contains(where: { $0.id == tab.id })
         if isNew {
             tabs.append(tab)
@@ -344,6 +352,8 @@ public final class ChatTabsModel {
     /// tab) skips it for the same refcount-honesty reason as `open(_:)`.
     @discardableResult
     public func open(channel: ChannelDescriptor) -> UUID {
+        // Already on screen, `isPresented` won't change — announce here.
+        if isPresented { onWillPresent?() }
         // If an existing tab has just this channel, re-open it rather than
         // creating a duplicate (idempotent open-from-follows).
         if let existing = tabs.first(where: { $0.channels.count == 1 && $0.channels[0] == channel }) {

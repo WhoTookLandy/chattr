@@ -29,7 +29,7 @@ final class WebStreamEngine: StreamEngine {
 
     init(login: String, controller: StreamPlayerController) {
         coordinator = TwitchWebPlayer.Coordinator(controller: controller)
-        webView = TwitchWebPlayer.makeWebView(login: login, coordinator: coordinator)
+        webView = TwitchWebPlayer.makeWebView(login: login, muted: controller.startsMuted, coordinator: coordinator)
         view = webView
         controller.webView = webView
     }
@@ -100,6 +100,12 @@ final class PlaybackCenter {
 
     @ObservationIgnored private var lastQuality: PlayerQuality = .auto
 
+    /// Set when a chat opens under "Autoplay on Wi-Fi": the next new
+    /// stream starts muted. Consumed by the next engine build.
+    @ObservationIgnored var startNextStreamMuted = false
+    /// Leaving the app → PiP or pause (see `PlaybackLifecycleObserver`).
+    @ObservationIgnored private var lifecycle: PlaybackLifecycleObserver?
+
     var isPlaying: Bool { channel != nil }
 
     init() {
@@ -107,6 +113,7 @@ final class PlaybackCenter {
             guard let self else { return }
             self.fallBackToWeb(quality: self.lastQuality)
         }
+        lifecycle = PlaybackLifecycleObserver(center: self)
     }
 
     /// Play `channel` (or keep playing it if it already is). Rebuilds the
@@ -138,6 +145,10 @@ final class PlaybackCenter {
 
         engine?.teardown()
         if !sameChannel { controller.nativeFailed = false }
+        // A rebuild of the same stream (engine fallback, audio-only switch)
+        // keeps its mute state; a new stream starts muted only for autoplay.
+        controller.startsMuted = sameChannel ? controller.isMuted : startNextStreamMuted
+        startNextStreamMuted = false
         controller.reset()
         self.channel = channel
         engineKey = key

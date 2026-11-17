@@ -70,7 +70,7 @@ struct AboutSettingsScreen: View {
             }
         }
         // Subtle confirmation when the 7th tap lands (either direction).
-        .sensoryFeedback(.success, trigger: devToolsUnlocked)
+        .appSensoryFeedback(.success, trigger: devToolsUnlocked)
         .navigationTitle("About")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)

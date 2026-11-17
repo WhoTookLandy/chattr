@@ -71,10 +71,15 @@ final class StreamPlayerController {
     /// The native player couldn't get a playlist / failed to play — the
     /// header falls back to the web player for this channel.
     var nativeFailed = false
+    /// The next engine starts muted (Wi-Fi autoplay, or a rebuild of a
+    /// muted stream). Set by `PlaybackCenter` before it builds an engine.
+    @ObservationIgnored var startsMuted = false
 
     @ObservationIgnored weak var webView: WKWebView?
     @ObservationIgnored var avPlayer: AVPlayer?
-    @ObservationIgnored var pictureInPicture: AVPictureInPictureController?
+    @ObservationIgnored var pictureInPicture: AVPictureInPictureController? {
+        didSet { refreshAutomaticPictureInPicture() }
+    }
     @ObservationIgnored weak var hostView: UIView?
 
     @ObservationIgnored var onTap: (() -> Void)?
@@ -130,6 +135,8 @@ final class StreamPlayerController {
     ) {
         guard self[keyPath: keyPath] != value else { return }
         self[keyPath: keyPath] = value
+        // Mute / pause decide whether leaving the app may open PiP.
+        refreshAutomaticPictureInPicture()
     }
 
     func togglePlay() {
@@ -332,6 +339,10 @@ enum NativePlayer {
             let item = AVPlayerItem(url: url)
             item.preferredMaximumResolution = controller.preferredQuality.maximumResolution
             let player = AVPlayer(playerItem: item)
+            if controller.startsMuted {
+                player.isMuted = true
+                controller.update(\.isMuted, to: true)
+            }
             view.playerLayer.player = player
             controller.avPlayer = player
 

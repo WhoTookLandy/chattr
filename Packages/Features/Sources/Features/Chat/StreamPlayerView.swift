@@ -20,7 +20,7 @@ enum TwitchWebPlayer {
     /// Builds the player web view for `login`. Owned by `WebStreamEngine`
     /// (and through it `PlaybackCenter`), so it survives leaving the chat.
     @MainActor
-    static func makeWebView(login: String, coordinator: Coordinator) -> WKWebView {
+    static func makeWebView(login: String, muted: Bool = false, coordinator: Coordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = true
@@ -46,7 +46,7 @@ enum TwitchWebPlayer {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
         webView.navigationDelegate = coordinator
-        webView.load(URLRequest(url: playerURL(login)))
+        webView.load(URLRequest(url: playerURL(login, muted: muted)))
         return webView
     }
 
@@ -66,13 +66,13 @@ enum TwitchWebPlayer {
 
     /// `parent` is required by Twitch's player; it's only enforced against
     /// framing ancestors, so any stable domain works for a top-level load.
-    static func playerURL(_ login: String) -> URL {
+    static func playerURL(_ login: String, muted: Bool = false) -> URL {
         var components = URLComponents(string: "https://player.twitch.tv/")!
         components.queryItems = [
             URLQueryItem(name: "channel", value: login),
             URLQueryItem(name: "parent", value: "chattr.app"),
             URLQueryItem(name: "autoplay", value: "true"),
-            URLQueryItem(name: "muted", value: "false"),
+            URLQueryItem(name: "muted", value: muted ? "true" : "false"),
             URLQueryItem(name: "playsinline", value: "true"),
         ]
         return components.url!
