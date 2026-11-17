@@ -263,8 +263,12 @@ public struct ProfileScreen: View {
         // touching a deleted SwiftData model's properties traps.
         let login = account.login
         do {
-            try await accountStore.remove(account: account)
-            logger.notice("Signed out @\(login, privacy: .public) from Settings")
+            switch try await accountStore.remove(account: account) {
+            case .removed:
+                logger.notice("Signed out @\(login, privacy: .public) from Settings")
+            case .superseded:
+                logger.notice("Sign-out of @\(login, privacy: .public) yielded to a re-authorization; still signed in")
+            }
         } catch {
             logger.error("Sign out had an error: \(error.localizedDescription, privacy: .public)")
             errorMessage = "Sign out: \(error.localizedDescription)"

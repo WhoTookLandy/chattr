@@ -524,9 +524,16 @@ public struct ChannelListScreen: View {
     private func signOut() async {
         isSigningOut = true
         defer { isSigningOut = false }
+        // Read before removal: the row is deleted once `remove` returns, and
+        // touching a deleted SwiftData model's properties traps.
+        let login = account.login
         do {
-            try await accountStore.remove(account: account)
-            logger.info("Signed out @\(account.login)")
+            switch try await accountStore.remove(account: account) {
+            case .removed:
+                logger.info("Signed out @\(login, privacy: .public)")
+            case .superseded:
+                logger.notice("Sign-out of @\(login, privacy: .public) yielded to a re-authorization; still signed in")
+            }
         } catch {
             logger.error("Sign out had an error: \(error.localizedDescription)")
             errorMessage = "Sign out: \(error.localizedDescription)"

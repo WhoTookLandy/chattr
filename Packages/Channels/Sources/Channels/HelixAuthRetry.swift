@@ -9,17 +9,19 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 /// error, refreshes tokens via `refreshTokenHandler` and retries ONCE. A
 /// second failure (or a refresh failure) propagates to the caller.
 ///
-/// A stale access token reaches us in one of THREE shapes — not just
-/// `.unauthorized`. In practice `.oauth` is the common one:
-///   - .unauthorized      — the 401 surfaced to us directly.
-///   - .oauth(...)        — TwitchKit's HelixClient intercepted the 401,
-///                          tried its own `/oauth2/token` refresh, and
-///                          Twitch rejected it ("missing client secret" —
-///                          we ship no secret; it lives on the Vercel
-///                          bridge). TwitchKit then wiped its own token
-///                          store as it threw.
-///   - .notAuthenticated  — that store-wipe already happened on an earlier
-///                          call, so the token is simply gone.
+/// TwitchKit's own 401 refresh already goes through the bridge (Accounts'
+/// `TwitchKitRefreshInterceptor`), so this is the second line of defence.
+/// A stale access token reaches us in one of THREE shapes:
+///   - .unauthorized      — the 401 survived TwitchKit's bridge refresh
+///                          (bridge briefly unavailable, or a missing scope).
+///   - .oauth(...)        — TwitchKit's refresh was answered with a
+///                          rejection: the refresh token is dead and the
+///                          account is already force-signed-out, so the
+///                          refresh below throws `.sessionExpired`.
+///   - .notAuthenticated  — TwitchKit holds no token: its in-memory copy was
+///                          dropped after a refresh it couldn't complete, or
+///                          the store was wiped by TwitchKit's
+///                          logout in builds before the interceptor.
 /// All three mean "refresh via the bridge and retry once." This mirrors
 /// `AccountStore.withTokenRefresh`, which nets the same three cases around
 /// the Helix call sites outside `ChannelSession`. (Previously only the chat
