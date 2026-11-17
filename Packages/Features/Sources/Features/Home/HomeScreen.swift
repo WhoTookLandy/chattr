@@ -235,6 +235,9 @@ struct HomeContent: View {
     @ViewBuilder
     private var liveSection: some View {
         Section {
+            // A regular row, not a Section header — plain-list headers pin
+            // to the top as a translucent bar that never goes away.
+            liveHeaderRow
             if liveStreams.isEmpty {
                 liveEmptyContent
             } else {
@@ -268,23 +271,27 @@ struct HomeContent: View {
                     .listRowSeparator(index < Self.featuredCount ? .hidden : .automatic)
                 }
             }
-        } header: {
-            HStack(alignment: .firstTextBaseline) {
-                sectionHeader("Live now")
-                Spacer()
-                // How many are live. The whole list is right here, so a
-                // count replaces the old "See all" link.
-                if !liveStreams.isEmpty {
-                    Text(displayedStreams.count == liveStreams.count
-                         ? "\(liveStreams.count) live"
-                         : "\(displayedStreams.count) of \(liveStreams.count)")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .textCase(nil)
-                }
+        }
+    }
+
+    private var liveHeaderRow: some View {
+        HStack(alignment: .firstTextBaseline) {
+            sectionHeader("Live now")
+            Spacer()
+            // How many are live. The whole list is right here, so a
+            // count replaces the old "See all" link.
+            if !liveStreams.isEmpty {
+                Text(displayedStreams.count == liveStreams.count
+                     ? "\(liveStreams.count) live"
+                     : "\(displayedStreams.count) of \(liveStreams.count)")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .textCase(nil)
             }
         }
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
     }
 
     /// All / per-category filter chips (Twitch Home's "All · Just Chatting

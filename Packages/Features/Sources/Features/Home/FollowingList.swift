@@ -29,12 +29,14 @@ struct FollowingList: View {
                 let offline = followsStore.sortedAllChannels.filter { followsStore.liveStreams[$0.broadcasterId] == nil }
                 List {
                     if !live.isEmpty {
-                        Section("Live") {
+                        Section {
+                            ListSectionTitle("Live")
                             rows(live, followsStore: followsStore)
                         }
                     }
                     if !offline.isEmpty {
-                        Section("Offline") {
+                        Section {
+                            ListSectionTitle("Offline")
                             rows(offline, followsStore: followsStore)
                         }
                     }

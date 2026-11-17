@@ -1,6 +1,10 @@
 Watch while you chat
 
 NEW
+• Replies look cleaner: a thin connector into a one-line quote, no grey box.
+• Video controls are plain icons again. Swipe down on the video for picture in picture.
+• Tap the viewer count on the video for the viewer list (moderators only; sign out and back in once to grant the new permission).
+• A compact Subscribe button next to the stream info (hold it for Gift a Sub).
 • New tab bar: Home, Chats, Activity, Search. Chats has its own tab (with a red badge when someone mentions you). Settings live behind your avatar on Home.
 • Home: swipe between Live and Following. Following is split into Live and Offline.
 • Chats: live chats first, swipe left to close, and the top-right menu closes all offline chats at once.
@@ -18,6 +22,7 @@ NEW
 • Followers-only, slow mode and other chat restrictions now show in the message box.
 
 FIXED
+• The Live / Offline bar no longer sticks to the top of lists.
 • The app freezing after tapping back from a chat (for real this time).
 
 PLEASE TEST

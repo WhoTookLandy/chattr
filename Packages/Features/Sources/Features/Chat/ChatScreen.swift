@@ -128,6 +128,8 @@ public struct ChatScreen: View {
     @State private var viewingThreadRootId: ThreadRootID?
     /// Tapped message whose author's card is showing.
     @State private var userCardTarget: UserCardTarget?
+    /// Viewer list sheet (from the viewer count on the video).
+    @State private var showViewerList = false
 
     /// True while the in-chat settings sheet (chat modes + preferences)
     /// is presented. Opened from the compose bar's gear button.
@@ -254,7 +256,9 @@ public struct ChatScreen: View {
         // + last live) pinned above the transcript. Its own view reading
         // its own stores, so status refreshes never re-run this body.
         .safeAreaBar(edge: .top) {
-            StreamHeaderView(channel: channel, isActive: isActiveTab)
+            StreamHeaderView(channel: channel, isActive: isActiveTab) {
+                showViewerList = true
+            }
         }
         .safeAreaBar(edge: .bottom) {
             composeBarView
@@ -336,6 +340,9 @@ public struct ChatScreen: View {
                     }
                 }
             )
+        }
+        .sheet(isPresented: $showViewerList) {
+            ViewerListSheet(channel: channel, account: account, accountStore: accountStore)
         }
         .sheet(item: $viewingThreadRootId) { root in
             ThreadView(
