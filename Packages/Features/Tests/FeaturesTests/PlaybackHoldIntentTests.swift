@@ -112,6 +112,34 @@ struct PlaybackHoldIntentTests {
         #expect(controller.wantsPlayback)
     }
 
+    @Test("Paused first report: a late autoplay is still undone, a later genuine play counts")
+    func pausedFirstReportDoesNotSwallowLaterPlay() {
+        let controller = StreamPlayerController()
+        #expect(controller.beginWebEngineLoad())
+        controller.togglePlay()
+        #expect(!controller.wantsPlayback)
+
+        // The first report is already paused: Twitch hasn't autoplayed yet.
+        controller.noteEngineReady(paused: true)
+        controller.noteWebState(paused: true)
+        #expect(controller.isSettlingWebStartup)
+        // Twitch's autoplay arrives late, inside the window: undone.
+        controller.noteDidPlay()
+        #expect(!controller.wantsPlayback)
+
+        // Twitch never autoplays this time; the window runs out. A play
+        // from the PiP window or lock screen afterwards is the user's.
+        let other = StreamPlayerController()
+        other.webStartupSettleWindow = .zero
+        #expect(other.beginWebEngineLoad())
+        other.togglePlay()
+        other.noteEngineReady(paused: true)
+        other.noteWebState(paused: true)
+        #expect(!other.isSettlingWebStartup)
+        other.noteDidPlay()
+        #expect(other.wantsPlayback)
+    }
+
     @Test("Play pressed again before the web page is ready plays once it is")
     func pauseThenPlayBeforeWebReadyPlays() {
         let controller = StreamPlayerController()

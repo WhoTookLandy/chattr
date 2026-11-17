@@ -155,9 +155,19 @@ final class StreamPlayerController {
     /// intent turned to paused while it loaded. Until that pause has
     /// visibly landed, play reports are the page's own autoplay, not the
     /// user: they're paused again and leave intent alone. Ends at the first
-    /// paused report after such a play (`noteWebState`), or when the user
-    /// or a hold release asks to play (`togglePlay`, `resume`).
-    @ObservationIgnored private(set) var isSettlingWebStartup = false
+    /// paused report after such a play (`noteWebState`), when the user or a
+    /// hold release asks to play (`togglePlay`, `resume`), or after
+    /// `webStartupSettleWindow` at the latest. The time bound matters when
+    /// the page's first report is already paused: Twitch may never autoplay
+    /// at all, and without it a later genuine play (PiP window, lock
+    /// screen) would be swallowed forever.
+    var isSettlingWebStartup: Bool {
+        guard let deadline = webStartupSettleDeadline else { return false }
+        return ContinuousClock.now < deadline
+    }
+    /// How long a page's startup autoplay can still arrive after it's ready.
+    @ObservationIgnored var webStartupSettleWindow: Duration = .seconds(5)
+    @ObservationIgnored private var webStartupSettleDeadline: ContinuousClock.Instant?
     @ObservationIgnored private var didSuppressStartupPlay = false
 
     /// A web page is about to be built. Returns its `autoplay` — the
@@ -165,7 +175,7 @@ final class StreamPlayerController {
     /// the page reports ready.
     func beginWebEngineLoad() -> Bool {
         isAwaitingWebEngine = true
-        isSettlingWebStartup = false
+        webStartupSettleDeadline = nil
         didSuppressStartupPlay = false
         webEngineAutoplays = startsPlaying
         return webEngineAutoplays
@@ -200,7 +210,7 @@ final class StreamPlayerController {
         if startsPlaying {
             if paused { resume() }
         } else {
-            if webEngineAutoplays { isSettlingWebStartup = true }
+            if webEngineAutoplays { webStartupSettleDeadline = ContinuousClock.now + webStartupSettleWindow }
             pause()
         }
     }
@@ -211,7 +221,7 @@ final class StreamPlayerController {
     /// counts as intent again.
     func noteWebState(paused: Bool) {
         if paused, isSettlingWebStartup, didSuppressStartupPlay {
-            isSettlingWebStartup = false
+            webStartupSettleDeadline = nil
         }
     }
 
@@ -254,7 +264,7 @@ final class StreamPlayerController {
 
     func reset() {
         isAwaitingWebEngine = false
-        isSettlingWebStartup = false
+        webStartupSettleDeadline = nil
         update(\.isPaused, to: false)
         update(\.isMuted, to: startsMuted)
         update(\.canPictureInPicture, to: false)
@@ -284,7 +294,7 @@ final class StreamPlayerController {
             // Web, or native still loading: the control showed "play" when
             // the engine reported paused, "pause" otherwise.
             wantsPlayback = isPaused
-            if wantsPlayback { isSettlingWebStartup = false }
+            if wantsPlayback { webStartupSettleDeadline = nil }
             if isAwaitingWebEngine {
                 // Not sent: the page may not take it yet. Show the new
                 // intent; `noteEngineReady` applies it.
@@ -315,7 +325,7 @@ final class StreamPlayerController {
 
     func resume() {
         guard let player = avPlayer else {
-            isSettlingWebStartup = false
+            webStartupSettleDeadline = nil
             // A loading web page gets it from `noteEngineReady`.
             if isAwaitingWebEngine { return }
             return run("play")
