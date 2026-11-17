@@ -17,8 +17,8 @@ struct ClipPlayerSheet: View {
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @Environment(\.playback) private var playback
-    /// True when this sheet paused the live stream (so it resumes it).
-    @State private var pausedLiveStream = false
+    /// Set when this sheet paused the live stream (so it resumes it).
+    @State private var liveStreamHold: PlaybackHold?
     #endif
 
     private static let systemOpenURL = OpenURLAction { _ in .systemAction }
@@ -98,19 +98,20 @@ struct ClipPlayerSheet: View {
     }
 
     #if os(iOS)
+    /// An explicit hold, not `togglePlay()`: if the live stream is still
+    /// loading (no `AVPlayer` yet) a toggle does nothing and the stream
+    /// would start behind the clip; a hold keeps it from starting.
     private func pauseLiveStream() {
-        guard let controller = playback?.controller,
-              playback?.isPlaying == true,
-              !controller.isPaused
-        else { return }
-        controller.togglePlay()
-        pausedLiveStream = true
+        guard liveStreamHold == nil else { return }
+        liveStreamHold = playback?.holdPlayback()
     }
 
+    /// Resumes only what this sheet paused, and only if it's still the
+    /// same stream (see `PlaybackCenter.holdPlayback`).
     private func resumeLiveStream() {
-        guard pausedLiveStream, let controller = playback?.controller else { return }
-        pausedLiveStream = false
-        if controller.isPaused { controller.togglePlay() }
+        guard let hold = liveStreamHold else { return }
+        liveStreamHold = nil
+        playback?.releaseHold(hold)
     }
     #endif
 }

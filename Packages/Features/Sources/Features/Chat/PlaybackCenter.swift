@@ -100,11 +100,12 @@ final class PlaybackCenter {
 
     @ObservationIgnored private var lastQuality: PlayerQuality = .auto
 
-    /// Set when a chat opens under "Autoplay on Wi-Fi": the next new
-    /// stream starts muted. Consumed by the next engine build.
-    @ObservationIgnored var startNextStreamMuted = false
-    /// Leaving the app → PiP or pause (see `PlaybackLifecycleObserver`).
-    @ObservationIgnored private var lifecycle: PlaybackLifecycleObserver?
+    /// Bumped when WHAT plays changes: a different channel, or stop.
+    /// Rebuilding the same channel's engine (native → web fallback, an
+    /// engine or audio-only setting) keeps it, so a hold survives that.
+    @ObservationIgnored private var generation = 0
+    /// The outstanding `holdPlayback`, if any.
+    @ObservationIgnored private var currentHold: PlaybackHold?
 
     var isPlaying: Bool { channel != nil }
 
@@ -147,17 +148,11 @@ final class PlaybackCenter {
         }
 
         engine?.teardown()
-        if !sameChannel { controller.nativeFailed = false }
-        // A rebuild of the same stream (engine fallback) keeps its mute
-        // state — `isMuted` carries the requested mute even if the old
-        // engine never got as far as an AVPlayer (see `reset()`). Switching
-        // to audio-only unmutes. A new stream starts muted only for autoplay.
-        if sameChannel {
-            controller.startsMuted = controller.isMuted && !entersAudioOnly
-        } else {
-            controller.startsMuted = startNextStreamMuted
+        if !sameChannel {
+            controller.nativeFailed = false
+            // A new stream isn't the one that was held.
+            advanceGeneration()
         }
-        startNextStreamMuted = false
         controller.reset()
         self.channel = channel
         engineKey = key
@@ -178,6 +173,7 @@ final class PlaybackCenter {
     }
 
     func stop() {
+        advanceGeneration()
         engine?.teardown()
         engine = nil
         engineKey = nil
@@ -191,6 +187,45 @@ final class PlaybackCenter {
 
     func isPlaying(_ channelId: String) -> Bool {
         channel?.channelId == channelId
+    }
+
+    // MARK: Holds
+
+    /// Pause the stream for something playing over it (a clip) and hand
+    /// it back later with `releaseHold`. Explicit intent, not a toggle:
+    ///
+    /// - It works while the engine is still loading (no `AVPlayer` yet, or
+    ///   the web page not ready): the load won't start playback while
+    ///   held, so the stream can't come up behind the clip.
+    /// - Returns nil — and the caller has nothing to resume — when nothing
+    ///   is playing, another hold is out, or the user had already paused
+    ///   the stream (we resume only what we paused).
+    /// - It's tied to the playback generation: if the stream stops or
+    ///   another channel starts meanwhile, the hold lapses and releasing it
+    ///   does nothing.
+    func holdPlayback() -> PlaybackHold? {
+        guard isPlaying, currentHold == nil else { return nil }
+        // Started and paused = the user paused it. Not started yet = still
+        // loading, about to autoplay: hold that.
+        guard !(controller.hasStarted && controller.isPaused) else { return nil }
+        let hold = PlaybackHold(id: UUID(), generation: generation)
+        currentHold = hold
+        controller.beginHold()
+        return hold
+    }
+
+    func releaseHold(_ hold: PlaybackHold) {
+        guard currentHold == hold, hold.generation == generation else { return }
+        currentHold = nil
+        controller.endHold(resume: true)
+    }
+
+    private func advanceGeneration() {
+        generation += 1
+        if currentHold != nil {
+            currentHold = nil
+            controller.endHold(resume: false)
+        }
     }
 
     // MARK: Hosts
@@ -208,6 +243,12 @@ final class PlaybackCenter {
         hostStack.removeAll { $0 == hostID }
         if activeHostID == hostID { activeHostID = hostStack.last }
     }
+}
+
+/// A pause taken with `PlaybackCenter.holdPlayback`.
+struct PlaybackHold: Equatable {
+    fileprivate let id: UUID
+    fileprivate let generation: Int
 }
 
 private struct PlaybackCenterKey: EnvironmentKey {

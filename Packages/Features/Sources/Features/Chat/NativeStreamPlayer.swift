@@ -100,6 +100,27 @@ final class StreamPlayerController {
     @ObservationIgnored var onPictureInPictureClosed: (() -> Void)?
     @ObservationIgnored private var isRestoringFromPictureInPicture = false
 
+    /// Something asked the stream to stay paused and will hand it back —
+    /// a clip playing over it (`PlaybackCenter.holdPlayback`). Unlike a
+    /// one-shot pause it outlives engine loading: a native load finishing
+    /// while held doesn't start playing, and the web player is paused again
+    /// if its autoplay kicks in (including after a native → web fallback,
+    /// which reuses this controller). Not cleared by `reset()`.
+    @ObservationIgnored private(set) var isHeld = false
+
+    func beginHold() {
+        isHeld = true
+        pause()
+    }
+
+    /// `resume`: the holder paused a stream that was playing (or about to).
+    /// If the engine is still loading there's nothing to resume yet — the
+    /// load starts playback itself now that the hold is gone.
+    func endHold(resume: Bool) {
+        isHeld = false
+        if resume { self.resume() }
+    }
+
     func pictureInPictureDidStart() {
         isPictureInPictureActive = true
     }
@@ -150,14 +171,24 @@ final class StreamPlayerController {
     func togglePlay() {
         guard let player = avPlayer else { return run("togglePlay") }
         if player.timeControlStatus == .paused {
-            // Live: resume at the live edge, not where we paused.
-            if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
-                player.seek(to: CMTimeRangeGetEnd(range))
-            }
-            player.play()
+            resume()
         } else {
             player.pause()
         }
+    }
+
+    func pause() {
+        guard let player = avPlayer else { return run("pause") }
+        player.pause()
+    }
+
+    func resume() {
+        guard let player = avPlayer else { return run("play") }
+        // Live: resume at the live edge, not where we paused.
+        if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+            player.seek(to: CMTimeRangeGetEnd(range))
+        }
+        player.play()
     }
 
     func toggleMute() {
@@ -387,14 +418,9 @@ enum NativePlayer {
                 }
                 .store(in: &subscriptions)
 
-            if controller.holdsForBackground {
-                // The app left while the playlist resolved and this stream
-                // may not play in the background: stay paused until it comes
-                // back (`PlaybackLifecycleObserver` resumes at the live edge).
-                controller.update(\.isPaused, to: true)
-            } else {
-                player.play()
-            }
+            // Held (a clip is playing over the stream): stay paused until
+            // the holder releases — `endHold(resume:)` starts it then.
+            if !controller.isHeld { player.play() }
         }
 
         func teardown() {

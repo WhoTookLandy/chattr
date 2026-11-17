@@ -170,7 +170,8 @@ enum TwitchWebPlayer {
           var v = video(); if (!v || !v.webkitSetPresentationMode) return;
           v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture');
         },
-        pause: function () { var v = video(); if (v) { v.pause(); } }
+        pause: function () { var v = video(); if (v) { v.pause(); } },
+        play: function () { var v = video(); if (v) { v.play(); } }
       };
     })();
     """
@@ -196,7 +197,12 @@ enum TwitchWebPlayer {
                 // `update` skips unchanged values: one changed field (say,
                 // `paused`) would otherwise re-notify all four, re-running
                 // every view that reads any of them.
-                controller.update(\.isPaused, to: body["paused"] as? Bool ?? false)
+                let paused = body["paused"] as? Bool ?? false
+                // Held (a clip is playing over the stream): the page's
+                // autoplay — e.g. it finished loading after the hold began
+                // — mustn't start the stream behind the clip.
+                if controller.isHeld, !paused { controller.pause() }
+                controller.update(\.isPaused, to: paused)
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
                 if body["playing"] as? Bool == true { controller.update(\.hasStarted, to: true) }

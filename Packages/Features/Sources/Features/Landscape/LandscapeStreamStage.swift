@@ -118,6 +118,9 @@ struct LandscapeStreamStage: View {
     #if os(iOS)
     private var player: StreamPlayerController? { playback?.controller }
 
+    /// The stage owns the callbacks while it's shown — the hidden header's
+    /// `wirePlayerCallbacks` stands down whenever `landscapeStage.isActive`,
+    /// and takes them back when the stage goes away.
     private func wirePlayerCallbacks() {
         guard let player else { return }
         player.onTap = { toggleChrome() }

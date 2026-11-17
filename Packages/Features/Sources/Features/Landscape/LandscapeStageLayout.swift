@@ -63,16 +63,21 @@ struct LandscapeStageLayout: ViewModifier {
     @AppStorage(LandscapeSettings.chatWidthKey) private var storedChatWidth = LandscapeSettings.defaultChatWidth
     @AppStorage(LandscapeSettings.overlayOpacityKey) private var overlayOpacity = LandscapeSettings.defaultOverlayOpacity
 
-    /// Wider than tall. Tracked as a Bool so keyboard / safe-area height
-    /// changes don't re-run this body unless the orientation flips.
-    @State private var isLandscape = false
-    /// The page's width — only changes on rotation / window resize.
-    @State private var containerWidth: CGFloat = 0
+    /// The page's size class for this layout, measured BEFORE keyboard
+    /// avoidance (see `body`) so a tall keyboard in portrait can't make
+    /// the page look "wider than tall". One Equatable value, written only
+    /// when it actually changes — rotation or a window resize, never a
+    /// keyboard, safe-area or per-frame layout pass.
+    @State private var geometry = LandscapePageGeometry.zero
+
+    private var isLandscape: Bool { geometry.isLandscape }
+    private var containerWidth: CGFloat { geometry.width }
 
     /// The stage shows when the header would otherwise be playing video:
-    /// "show video" on, the channel live, and not listening audio-only.
+    /// "show video" on, the channel live, not listening audio-only, and
+    /// not in picture in picture.
     private var stageActive: Bool {
-        guard isLandscape, isExpanded, !isAudioOnlyActive else { return false }
+        guard isLandscape, isExpanded, !isAudioOnlyActive, !isPictureInPictureActive else { return false }
         return ChannelStatusStore.liveStream(
             for: channel.channelId,
             status: channelStatus,
@@ -85,6 +90,20 @@ struct LandscapeStageLayout: ViewModifier {
     private var isAudioOnlyActive: Bool {
         #if os(iOS)
         audioOnly && !(playback?.controller.nativeFailed ?? false)
+        #else
+        false
+        #endif
+    }
+
+    /// This channel's stream is in the system PiP window. The stage would
+    /// only show a placeholder, so it gives way: chat goes full width and
+    /// the header shows #40's compact PiP bar, which keeps the engine in
+    /// its hidden host. Read only in landscape (`stageActive` checks
+    /// `isLandscape` first), so portrait pages don't observe PiP state here.
+    private var isPictureInPictureActive: Bool {
+        #if os(iOS)
+        guard let playback else { return false }
+        return playback.controller.isPictureInPictureActive && playback.isPlaying(channel.channelId)
         #else
         false
         #endif
@@ -141,15 +160,22 @@ struct LandscapeStageLayout: ViewModifier {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onGeometryChange(for: Bool.self) { proxy in
-            proxy.size.width > proxy.size.height
-        } action: { landscape in
-            isLandscape = landscape
-        }
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.width.rounded()
-        } action: { width in
-            containerWidth = width
+        // Measured on a backdrop that ignores the keyboard safe area, so
+        // the size is the page's full, pre-avoidance size: the keyboard
+        // shrinks the page's height, and in portrait a tall one (or an
+        // emoji keyboard plus the compose bar) could otherwise flip the
+        // page into "landscape". `onGeometryChange` only calls `action`
+        // when the Equatable value changes.
+        .background {
+            Color.clear
+                .onGeometryChange(for: LandscapePageGeometry.self) { proxy in
+                    LandscapePageGeometry(size: proxy.size)
+                } action: { newValue in
+                    geometry = newValue
+                }
+                .ignoresSafeArea(.keyboard)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
     }
 
@@ -159,5 +185,24 @@ struct LandscapeStageLayout: ViewModifier {
         let rounded = Double(width.rounded())
         guard rounded != storedChatWidth else { return }
         storedChatWidth = rounded
+    }
+}
+
+/// What `LandscapeStageLayout` needs from the page's size: orientation and
+/// (rounded) width. Equatable so geometry callbacks fire only on a real
+/// change.
+struct LandscapePageGeometry: Equatable {
+    var isLandscape: Bool
+    var width: CGFloat
+
+    static let zero = LandscapePageGeometry(isLandscape: false, width: 0)
+
+    init(isLandscape: Bool, width: CGFloat) {
+        self.isLandscape = isLandscape
+        self.width = width
+    }
+
+    init(size: CGSize) {
+        self.init(isLandscape: size.width > size.height, width: size.width.rounded())
     }
 }

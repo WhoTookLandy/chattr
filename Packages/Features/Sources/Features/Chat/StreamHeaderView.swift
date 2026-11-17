@@ -136,7 +136,10 @@ struct StreamHeaderView: View {
         .onChange(of: isActive) { _, active in
             if active { wirePlayerCallbacks() }
         }
-        // Back from the landscape stage, which had taken the callbacks.
+        // Callback ownership follows `landscapeStage.isActive`: while the
+        // stage shows, it alone wires them (see `wirePlayerCallbacks`);
+        // when it goes (portrait, PiP, video hidden) the header takes them
+        // back.
         .onChange(of: landscapeStage.isActive) { _, staged in
             if !staged, isActive { wirePlayerCallbacks() }
         }
@@ -172,7 +175,13 @@ struct StreamHeaderView: View {
         }
     }
 
+    /// Single owner: while the landscape stage shows, the stage owns the
+    /// player's tap / swipe callbacks and this (hidden) header must not
+    /// overwrite them — e.g. opening a chat already in landscape, or a
+    /// pre-mounted neighbour becoming the visible page, fires this header's
+    /// `onAppear` / `onChange(isActive)` alongside the stage's.
     private func wirePlayerCallbacks() {
+        guard !landscapeStage.isActive else { return }
         player.onTap = { toggleChrome() }
         // Swipe down on the video → picture in picture (keeps watching
         // while you scroll chat or leave the app). Without PiP support,

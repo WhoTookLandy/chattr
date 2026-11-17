@@ -239,6 +239,7 @@ public struct ChatScreen: View {
                     connectionStatus: connectionStatus,
                     rowContent: { line in chatRow(for: line) },
                     rowInputs: rowInputs,
+                    openURL: clipLinks.openURLAction,
                     onLineTapped: { line in
                         // Only real chat messages have an author to show.
                         guard line.kind == .message, !line.authorUserId.isEmpty else { return }
@@ -542,8 +543,10 @@ public struct ChatScreen: View {
         // unstructured Task needed. See the doc-comment on that .task
         // for why.
         //
-        // Clip links in chat rows (and the sheets above) open in-app. A
-        // stable value — see `clipLinks`.
+        // Clip links in the sheets above open in-app. A stable value — see
+        // `clipLinks`. The transcript's cells are separate hosting roots
+        // that don't inherit this, so `ChatTranscript` hands the same
+        // action to each row explicitly.
         .environment(\.openURL, clipLinks.openURLAction)
         // Landscape with the stream showing: video beside / under this
         // whole chat column. Applied last so everything above (transcript,

@@ -36,6 +36,12 @@ struct ChatListView: UIViewControllerRepresentable {
     /// reconfigured — otherwise rows built before badges loaded or mod
     /// status arrived stay stale until recycled.
     let rowInputs: ChatRowInputs
+    /// Link handler installed in every row. Cells are hosted by
+    /// `UIHostingConfiguration` — separate SwiftUI roots that don't inherit
+    /// the `openURL` the chat screen sets above this representable. Taken
+    /// once, in `makeUIViewController`: the caller passes a stable action
+    /// (`ClipLinkRouter.openURLAction`), so there is nothing to refresh.
+    let openURL: OpenURLAction
     /// UIKit → SwiftUI: true when tailing the live edge. Drives the pill.
     @Binding var isAtBottom: Bool
     /// UIKit → SwiftUI: messages that arrived while the list was unpinned and
@@ -60,6 +66,7 @@ struct ChatListView: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> ChatListViewController {
         let vc = ChatListViewController()
         vc.rowContent = rowContent
+        vc.openURLAction = openURL
         vc.onLineTapped = onLineTapped
         vc.onAtBottomChanged = { atBottom in
             // Avoid mutating SwiftUI state during the UIKit layout pass.
