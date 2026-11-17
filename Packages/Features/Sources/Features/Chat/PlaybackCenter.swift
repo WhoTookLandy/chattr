@@ -119,9 +119,12 @@ final class PlaybackCenter {
         audioOnly: Bool,
         quality: PlayerQuality
     ) {
-        self.title = title
-        self.profileImageURL = profileImageURL
-        self.audioOnly = audioOnly
+        // Guarded: the header calls `play` for the already-playing stream
+        // whenever its playback key changes, and an unconditional write
+        // re-notifies every reader (the mini player) with identical values.
+        if self.title != title { self.title = title }
+        if self.profileImageURL != profileImageURL { self.profileImageURL = profileImageURL }
+        if self.audioOnly != audioOnly { self.audioOnly = audioOnly }
         lastQuality = quality
 
         // A native failure for this channel sticks — fall back to web.
@@ -176,7 +179,7 @@ final class PlaybackCenter {
     func claim(_ hostID: UUID) {
         hostStack.removeAll { $0 == hostID }
         hostStack.append(hostID)
-        activeHostID = hostID
+        if activeHostID != hostID { activeHostID = hostID }
     }
 
     func release(_ hostID: UUID) {

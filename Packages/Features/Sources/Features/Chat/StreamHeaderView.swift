@@ -31,9 +31,8 @@ import Nuke
 /// Refresh polling lives in `HomeScreen`, batched across open tabs.
 struct StreamHeaderView: View {
     let channel: ChannelDescriptor
-    /// Only the page centered in the pager mounts the player — neighbours
-    /// stay as posters so swiping never plays two streams at once.
-    let isActive: Bool
+    /// The pager tab this header belongs to; nil outside the pager.
+    let tabId: UUID?
     /// Tap on the viewer count → the viewer list (mods only; the sheet
     /// explains otherwise).
     var onShowViewers: () -> Void = {}
@@ -59,15 +58,27 @@ struct StreamHeaderView: View {
     /// Bumped on every interaction so the auto-hide timer restarts.
     @State private var chromeInteraction = 0
 
+    /// Only the page centered in the pager mounts the player — neighbours
+    /// stay as posters so swiping never plays two streams at once. Derived
+    /// here (not passed in by `ChatScreen`) so a swipe re-runs this header,
+    /// not the whole chat page; see `ChatScreen.tabId`.
+    private var isActive: Bool {
+        guard let tabId else { return true }
+        return chatTabs?.activeTabId == tabId
+    }
+
     #if os(iOS)
     /// App-wide player (survives leaving the chat → mini player).
     @Environment(\.playback) private var playback
+
     /// Stand-in so overlay bindings have something to read in previews /
-    /// before the center is injected.
-    @State private var fallbackPlayer = StreamPlayerController()
+    /// before the center is injected. Shared and static: as `@State` its
+    /// initial value was constructed (and thrown away) on every init of this
+    /// struct, i.e. every time a parent body re-ran.
+    @MainActor private static let fallbackPlayer = StreamPlayerController()
 
     private var player: StreamPlayerController {
-        playback?.controller ?? fallbackPlayer
+        playback?.controller ?? Self.fallbackPlayer
     }
     #endif
 

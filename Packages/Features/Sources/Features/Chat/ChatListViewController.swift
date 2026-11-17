@@ -113,6 +113,20 @@ final class ChatListViewController: UIViewController {
     /// every row when they change. Nil before the first update.
     private var rowInputs: ChatRowInputs?
 
+    /// True while the app is in the background — typically the stream
+    /// playing on in Picture in Picture. Nothing here is visible then, yet
+    /// every model flush would still apply a snapshot and force-lay-out
+    /// self-sizing SwiftUI cells at message rate, competing with the video
+    /// for the CPU (and the battery). While suspended, updates only record
+    /// what they'd need; the model's change log keeps every change, and
+    /// returning to the foreground catches up in one apply (or one reset,
+    /// if the log no longer reaches back that far).
+    private var isSuspended = false
+
+    /// A row-inputs change that arrived while suspended — applied as a
+    /// reconfigure-all on resume.
+    private var pendingReconfigureAll = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
         configureCollectionView()
@@ -153,10 +167,31 @@ final class ChatListViewController: UIViewController {
             self, selector: #selector(keyboardWillHide),
             name: UIResponder.keyboardWillHideNotification, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification, object: nil
+        )
     }
 
     @objc private func keyboardWillShow() { keyboardVisible = true }
     @objc private func keyboardWillHide() { keyboardVisible = false }
+
+    @objc private func appDidEnterBackground() { isSuspended = true }
+
+    /// Catch up before the first foreground frame, so the transcript is
+    /// already current when the app (or the PiP restore) comes back.
+    @objc private func appWillEnterForeground() {
+        guard isSuspended else { return }
+        isSuspended = false
+        let reconfigureAll = pendingReconfigureAll
+        pendingReconfigureAll = false
+        refresh(reconfigureAll: reconfigureAll)
+        pinToBottomIfNeeded()
+    }
 
     @objc private func transcriptTapped(_ gesture: UITapGestureRecognizer) {
         // Row taps are handled in shouldSelectItemAt; this covers the gaps.
@@ -316,6 +351,12 @@ final class ChatListViewController: UIViewController {
                 // resumeTailing.
                 isPinnedToBottom = true
             }
+        }
+        // Backgrounded (see `isSuspended`): the accessors, row inputs and any
+        // re-pin request are recorded above; the data waits for the resume.
+        if isSuspended {
+            if inputsChanged { pendingReconfigureAll = true }
+            return
         }
         refresh(reconfigureAll: inputsChanged)
         if jumpRequested { pinToBottomIfNeeded() }

@@ -1,11 +1,54 @@
 import SwiftUI
+import Core
+
+/// Hosts the join greeting over a chat page: shows `ChatWelcomePill` for 5s
+/// the first time the page is the visible one this session.
+///
+/// A view of its own (not state on `ChatScreen`) so the active-page read,
+/// the visibility state and the animation are all scoped here. The page's
+/// own body never depends on which page is visible, so swiping doesn't
+/// re-run it.
+struct ChatWelcomeOverlay: View {
+    let channel: ChannelDescriptor
+    /// The pager tab; nil outside the pager (always the visible page).
+    let tabId: UUID?
+
+    @Environment(\.chatTabs) private var chatTabs
+    @State private var showWelcome = false
+
+    private var isActive: Bool {
+        guard let tabId else { return true }
+        return chatTabs?.activeTabId == tabId
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            // Zero-size anchor so the container always has a child to
+            // appear (and run the task) before the pill exists.
+            Color.clear.frame(width: 0, height: 0)
+            if showWelcome {
+                ChatWelcomePill(channelDisplayName: channel.channelDisplayName)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: showWelcome)
+        .task(id: isActive) {
+            guard isActive, ChatWelcomePill.claimGreeting(for: channel.id) else { return }
+            showWelcome = true
+            try? await Task.sleep(for: .seconds(5))
+            showWelcome = false
+        }
+    }
+}
 
 /// "Welcome to soochu's chat room!" — Twitch's join greeting, shown as a
 /// transient pinned pill at the top of the transcript instead of a line
 /// mixed into (and scrolled away with) the messages.
 ///
 /// Shown once per channel per app session: swiping back to a page you've
-/// already seen shouldn't greet you again. `ChatScreen` drives visibility.
+/// already seen shouldn't greet you again. `ChatWelcomeOverlay` drives
+/// visibility.
 struct ChatWelcomePill: View {
     let channelDisplayName: String
 
