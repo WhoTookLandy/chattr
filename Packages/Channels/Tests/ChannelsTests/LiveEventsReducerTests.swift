@@ -351,9 +351,11 @@ struct LiveEventsReducerTests {
         #expect(state.poll?.endsAt == nil)
 
         let deadline = t0.addingTimeInterval(90)
-        #expect(state.apply(.pollDeadline(pollId: "poll-1", endsAt: deadline), at: t0))
+        let result354 = state.apply(.pollDeadline(pollId: "poll-1", endsAt: deadline), at: t0)
+        #expect(result354)
         // For another poll: no-op.
-        #expect(!state.apply(.pollDeadline(pollId: "nope", endsAt: t0), at: t0))
+        let result356 = state.apply(.pollDeadline(pollId: "nope", endsAt: t0), at: t0)
+        #expect(!result356)
 
         state.apply(try update(.pollProgress(poll(votes: [1, 0]))), at: t0.addingTimeInterval(3))
         #expect(state.poll?.endsAt == deadline)
@@ -418,12 +420,15 @@ struct LiveEventsReducerTests {
         let trainGone = trainExpiry.addingTimeInterval(LiveEventsState.overdueGrace)
         #expect(state.nextPruneDate() == min(pollGone, trainGone))
 
-        #expect(!state.prune(now: endedAt.addingTimeInterval(1)))
-        #expect(state.prune(now: pollGone))
+        let result421 = state.prune(now: endedAt.addingTimeInterval(1))
+        #expect(!result421)
+        let result422 = state.prune(now: pollGone)
+        #expect(result422)
         #expect(state.poll == nil)
         #expect(state.hypeTrain != nil)
 
-        #expect(state.prune(now: trainGone))
+        let result426 = state.prune(now: trainGone)
+        #expect(result426)
         #expect(state.hypeTrain == nil)
         #expect(state.nextPruneDate() == nil)
         #expect(state.isEmpty)
@@ -482,7 +487,8 @@ struct LiveEventsReducerTests {
         var state = LiveEventsState()
         let endedAt = t0.addingTimeInterval(60)
         state.apply(try update(.pollEnd(poll(id: "A", votes: [2, 1], status: "completed"))), at: endedAt)
-        #expect(state.prune(now: endedAt.addingTimeInterval(LiveEventsState.resultLinger)))
+        let result485 = state.prune(now: endedAt.addingTimeInterval(LiveEventsState.resultLinger))
+        #expect(result485)
         #expect(state.poll == nil)
 
         let later = endedAt.addingTimeInterval(30)
@@ -581,9 +587,11 @@ struct LiveEventsReducerTests {
         let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(id: "pred-1", status: "LOCKED")))
         state.reconcile(.prediction, snapshot: snapshot, fetchedAt: checkedAt, now: checkedAt)
         #expect(state.prediction?.status == .locked)
-        #expect(!state.prune(now: lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry)))
+        let result584 = state.prune(now: lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry))
+        #expect(!result584)
 
-        #expect(state.prune(now: checkedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry)))
+        let result586 = state.prune(now: checkedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry))
+        #expect(result586)
         #expect(state.prediction == nil)
         // And it can't come back on a late duplicate.
         #expect(!state.apply(try update(.predictionLock(prediction(points: [10, 20]))), at: checkedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry + 1)))
@@ -598,7 +606,8 @@ struct LiveEventsReducerTests {
         // Nothing confirmed it for 30+ minutes (a long background): expired,
         // but not known to be over.
         let late = lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry + 60)
-        #expect(state.prune(now: late))
+        let result601 = state.prune(now: late)
+        #expect(result601)
         #expect(state.prediction == nil)
         #expect(state.expired.contains("pred-1", kind: .prediction))
         #expect(!state.tombstones.contains("pred-1", kind: .prediction))
@@ -609,7 +618,8 @@ struct LiveEventsReducerTests {
 
         // Helix says it is still locked: authoritative, so it comes back.
         let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(id: "pred-1", status: "LOCKED")))
-        #expect(state.reconcile(.prediction, snapshot: snapshot, fetchedAt: late, now: late))
+        let result612 = state.reconcile(.prediction, snapshot: snapshot, fetchedAt: late, now: late)
+        #expect(result612)
         #expect(state.prediction?.id == "pred-1")
         #expect(state.prediction?.status == .locked)
         #expect(state.prediction?.confirmedAt == late)
@@ -641,7 +651,8 @@ struct LiveEventsReducerTests {
         viaHelix.apply(try update(.predictionLock(prediction(id: "pred-9", points: [500, 100]))), at: lockedAt)
         viaHelix.prune(now: late)
         let resolved = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "RESOLVED", winner: "y")))
-        #expect(viaHelix.reconcile(.prediction, snapshot: resolved, fetchedAt: late, now: late))
+        let result644 = viaHelix.reconcile(.prediction, snapshot: resolved, fetchedAt: late, now: late)
+        #expect(result644)
         #expect(viaHelix.prediction?.status == .resolved)
         #expect(viaHelix.prediction?.winningOutcomeId == "y")
     }
@@ -656,8 +667,10 @@ struct LiveEventsReducerTests {
 
         // The session's order: reconcile, then prune.
         let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "LOCKED")))
-        #expect(state.reconcile(.prediction, snapshot: snapshot, fetchedAt: back, now: back))
-        #expect(!state.prune(now: back))
+        let result659 = state.reconcile(.prediction, snapshot: snapshot, fetchedAt: back, now: back)
+        #expect(result659)
+        let result660 = state.prune(now: back)
+        #expect(!result660)
         #expect(state.prediction?.status == .locked)
         #expect(state.prediction?.totalPoints == 6000)
         #expect(state.prediction?.confirmedAt == back)
@@ -670,8 +683,10 @@ struct LiveEventsReducerTests {
         let expires = t0.addingTimeInterval(300)
         state.apply(try update(.hypeTrainProgress(hypeTrain(expiresAt: expires))), at: t0)
         #expect(state.nextPruneDate() == expires.addingTimeInterval(LiveEventsState.overdueGrace))
-        #expect(!state.prune(now: expires))
-        #expect(state.prune(now: expires.addingTimeInterval(LiveEventsState.overdueGrace)))
+        let result673 = state.prune(now: expires)
+        #expect(!result673)
+        let result674 = state.prune(now: expires.addingTimeInterval(LiveEventsState.overdueGrace))
+        #expect(result674)
         #expect(state.hypeTrain == nil)
     }
 
@@ -683,7 +698,8 @@ struct LiveEventsReducerTests {
         state.apply(try update(.predictionLock(prediction(id: "pred-9", points: [500, 100]))), at: t0)
         let now = t0.addingTimeInterval(900)
         let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "RESOLVED", winner: "y")))
-        #expect(state.reconcile(.prediction, snapshot: snapshot, fetchedAt: now, now: now))
+        let result686 = state.reconcile(.prediction, snapshot: snapshot, fetchedAt: now, now: now)
+        #expect(result686)
         #expect(state.prediction?.status == .resolved)
         #expect(state.prediction?.winningOutcomeId == "y")
         #expect(state.prediction?.concludedAt == now)
@@ -694,14 +710,16 @@ struct LiveEventsReducerTests {
         var state = LiveEventsState()
         state.apply(try update(.pollBegin(poll(id: "A"))), at: t0)
         let now = t0.addingTimeInterval(600)
-        #expect(state.reconcile(.poll, snapshot: nil, fetchedAt: now, now: now))
+        let result697 = state.reconcile(.poll, snapshot: nil, fetchedAt: now, now: now)
+        #expect(result697)
         #expect(state.poll == nil)
         // The cleared id stays dead.
         #expect(!state.apply(try update(.pollProgress(poll(id: "A", votes: [1, 0]))), at: now))
 
         state.apply(try update(.predictionLock(prediction(id: "old"))), at: t0)
         let newer = LiveEventUpdate(helixPrediction: try helixPrediction(id: "new", status: "ACTIVE", startedAt: t0.addingTimeInterval(300)))
-        #expect(state.reconcile(.prediction, snapshot: newer, fetchedAt: now, now: now))
+        let result704 = state.reconcile(.prediction, snapshot: newer, fetchedAt: now, now: now)
+        #expect(result704)
         #expect(state.prediction?.id == "new")
         #expect(state.prediction?.status == .active)
     }
@@ -715,17 +733,20 @@ struct LiveEventsReducerTests {
         let bStart = t0.addingTimeInterval(1)
         state.apply(try update(.pollBegin(poll(id: "B", startedAt: bStart))), at: bStart)
         let stale = LiveEventUpdate(helixPoll: try helixPoll(id: "A", status: "COMPLETED", startedAt: t0.addingTimeInterval(-300)))
-        #expect(!state.reconcile(.poll, snapshot: stale, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(1)))
+        let result718 = state.reconcile(.poll, snapshot: stale, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(1))
+        #expect(!result718)
         #expect(state.poll?.id == "B")
 
         // Same for "Helix says nothing is running".
-        #expect(!state.reconcile(.poll, snapshot: nil, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(1)))
+        let result722 = state.reconcile(.poll, snapshot: nil, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(1))
+        #expect(!result722)
         #expect(state.poll?.id == "B")
 
         // And an older same-id snapshot can't roll the tally back.
         state.apply(try update(.pollProgress(poll(id: "B", votes: [5, 5], startedAt: bStart))), at: bStart.addingTimeInterval(2))
         let older = LiveEventUpdate(helixPoll: try helixPoll(id: "B", status: "ACTIVE", votes: 4, startedAt: bStart))
-        #expect(!state.reconcile(.poll, snapshot: older, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(3)))
+        let result728 = state.reconcile(.poll, snapshot: older, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(3))
+        #expect(!result728)
         #expect(state.poll?.totalVotes == 10)
     }
 
@@ -733,11 +754,13 @@ struct LiveEventsReducerTests {
     func reconcileSeed() throws {
         var state = LiveEventsState()
         let finished = LiveEventUpdate(helixPoll: try helixPoll(status: "COMPLETED"))
-        #expect(!state.reconcile(.poll, snapshot: finished, fetchedAt: t0, now: t0))
+        let result736 = state.reconcile(.poll, snapshot: finished, fetchedAt: t0, now: t0)
+        #expect(!result736)
         #expect(state.poll == nil)
 
         let running = LiveEventUpdate(helixHypeTrain: try helixHypeTrain(expiresAt: t0.addingTimeInterval(200)))
-        #expect(state.reconcile(.hypeTrain, snapshot: running, fetchedAt: t0, now: t0))
+        let result740 = state.reconcile(.hypeTrain, snapshot: running, fetchedAt: t0, now: t0)
+        #expect(result740)
         #expect(state.hypeTrain?.id == "train-9")
         #expect(state.hasUnconcludedEvent)
     }
