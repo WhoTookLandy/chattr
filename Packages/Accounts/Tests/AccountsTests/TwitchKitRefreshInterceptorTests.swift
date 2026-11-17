@@ -310,7 +310,7 @@ private let thirdBridgeJSON = #"""
 {"access_token":"third-access","refresh_token":"refresh-4","expires_in":14400,"scope":["user:manage:chat_color"],"token_type":"bearer"}
 """#
 
-private let invalidGrantJSON =#"{"status":400,"message":"Invalid refresh token","error":"invalid_grant"}"#
+private let invalidGrantJSON = #"{"status":400,"message":"Invalid refresh token","error":"invalid_grant"}"#
 
 /// Whether `error` is the `HelixError.networkError` TwitchKit wraps a thrown
 /// transport error in.

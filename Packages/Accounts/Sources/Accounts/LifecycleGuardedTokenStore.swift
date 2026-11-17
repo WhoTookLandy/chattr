@@ -71,6 +71,18 @@ struct LifecycleGuardedTokenStore: TwitchTokenStore {
             case .write:
                 try await base.saveToken(token)
                 gate.didPersist(token)
+                // Re-seed the provider with what was just persisted, too.
+                // TwitchKit assigns memory BEFORE calling the store, so a
+                // late, stale `setToken(T1)` can have landed in memory
+                // while this save of T2 waited at the gate (and got
+                // `.alreadyStored` itself, since T1 was still the newest
+                // persisted). Re-asserting T2 here leaves memory matching
+                // the Keychain. The re-seed comes back as `.alreadyStored`,
+                // which never re-seeds, so it can't loop. Only for a
+                // bridge-issued token that is now the newest: a save made
+                // before any bridge token (newest unset) would be admitted
+                // as `.write` again and loop.
+                if case .alreadyStored = gate.admitSave(token) { return token }
                 return nil
             case .alreadyStored:
                 return nil
