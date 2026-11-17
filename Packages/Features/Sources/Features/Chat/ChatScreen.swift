@@ -246,8 +246,21 @@ public struct ChatScreen: View {
         // scoped to the pill: the `.animation(value:)` used to sit on this
         // whole chain, animating anything in the transcript that changed in
         // the same transaction.
+        //
+        // Below it, the live poll / prediction / Hype Train banners — one
+        // self-contained view owning its own model and feed, so their ticks
+        // never re-run this body or the transcript. Mounted only on the
+        // account's own channel: Twitch authorizes those events for the
+        // broadcaster alone (see `ChannelSession+LiveEvents.swift`), so
+        // anywhere else there is nothing to show and nothing to subscribe.
         .overlay(alignment: .top) {
-            ChatWelcomeOverlay(channel: channel, tabId: tabId)
+            VStack(spacing: 0) {
+                ChatWelcomeOverlay(channel: channel, tabId: tabId)
+                if channelId == account.userId {
+                    LiveEventsBannerArea(chatModel: chatModel)
+                        .padding(.top, 8)
+                }
+            }
         }
         // Chat surface color — slightly lifted off pure black/white in
         // both schemes (see DesignSystem.Color.chatSurface). Applied here

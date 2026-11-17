@@ -13,6 +13,10 @@ struct ChatFiltersScreen: View {
     @AppStorage(ChatFilterSettings.hideCommandsKey) private var hideCommands = false
     @AppStorage(ChatFilterSettings.hideBotsKey) private var hideBots = false
     @AppStorage(ChatAppearance.compactBotsKey) private var compactBots = false
+    // Default true — matches `LiveEventsSettings.isEnabled(_:)`.
+    @AppStorage(LiveEventsSettings.pollsKey) private var showPolls = true
+    @AppStorage(LiveEventsSettings.predictionsKey) private var showPredictions = true
+    @AppStorage(LiveEventsSettings.hypeTrainKey) private var showHypeTrain = true
 
     var body: some View {
         Form {
@@ -43,6 +47,24 @@ struct ChatFiltersScreen: View {
                 .disabled(hideBots)
             } footer: {
                 Text("Shows bot messages smaller and dimmed, capped at three lines, with decorative banner lines removed. Applies instantly.")
+            }
+
+            // Live-event banners. TODO(settings registry): register these
+            // rows once the searchable settings registry lands.
+            Section {
+                Toggle(isOn: $showPolls) {
+                    Label("Polls", systemImage: "chart.bar.fill")
+                }
+                Toggle(isOn: $showPredictions) {
+                    Label("Predictions", systemImage: "sparkles")
+                }
+                Toggle(isOn: $showHypeTrain) {
+                    Label("Hype Train", systemImage: "train.side.front.car")
+                }
+            } header: {
+                Text("Live Event Banners")
+            } footer: {
+                Text("Shows live polls, predictions and Hype Trains as banners at the top of chat. Twitch only shares these with the broadcaster, so they appear in your own channel. Applies instantly.")
             }
         }
         .navigationTitle("Filters")

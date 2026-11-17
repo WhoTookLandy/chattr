@@ -121,6 +121,46 @@ struct EventSubTopics: Sendable {
         return nil
     }
 
+    /// The live-event banner topics (polls, predictions, Hype Train). Twitch
+    /// authorizes all of them only with the BROADCASTER's own token
+    /// (`channel:read:polls` / `:predictions` / `:hype_train`), so the
+    /// session only asks for them on the signed-in account's own channel —
+    /// see `ChannelSession.startLiveEvents()`.
+    static func liveEventSubscriptions(broadcasterID: String) -> [(label: String, subscription: EventSubSubscription)] {
+        [
+            ("channel.poll.begin", EventSubSubscription.Channel.pollBegin(broadcasterID: broadcasterID)),
+            ("channel.poll.progress", EventSubSubscription.Channel.pollProgress(broadcasterID: broadcasterID)),
+            ("channel.poll.end", EventSubSubscription.Channel.pollEnd(broadcasterID: broadcasterID)),
+            ("channel.prediction.begin", EventSubSubscription.Channel.predictionBegin(broadcasterID: broadcasterID)),
+            ("channel.prediction.progress", EventSubSubscription.Channel.predictionProgress(broadcasterID: broadcasterID)),
+            ("channel.prediction.lock", EventSubSubscription.Channel.predictionLock(broadcasterID: broadcasterID)),
+            ("channel.prediction.end", EventSubSubscription.Channel.predictionEnd(broadcasterID: broadcasterID)),
+            ("channel.hype_train.begin", EventSubSubscription.Channel.hypeTrainBegin(broadcasterID: broadcasterID)),
+            ("channel.hype_train.progress", EventSubSubscription.Channel.hypeTrainProgress(broadcasterID: broadcasterID)),
+            ("channel.hype_train.end", EventSubSubscription.Channel.hypeTrainEnd(broadcasterID: broadcasterID)),
+        ]
+    }
+
+    /// Subscribes to one live-event topic. Never throws; nil when no id was
+    /// captured (409 or failure). A 403 (token predates the scopes) is the
+    /// expected degrade path and logs at info, not warning.
+    func subscribeToLiveEventTopic(
+        _ subscription: EventSubSubscription,
+        label: String,
+        isolation: isolated (any Actor)? = #isolation
+    ) async -> String? {
+        do {
+            let record = try await client.eventSub.subscribe(subscription)
+            logger.info("Subscribed to \(label, privacy: .public) for #\(self.channelLoginName, privacy: .public)")
+            return record.id
+        } catch HelixError.conflict {
+            logger.info("Already subscribed to \(label, privacy: .public) for #\(self.channelLoginName, privacy: .public)")
+        } catch {
+            logger.info("Couldn't subscribe to \(label, privacy: .public) for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public) — live banner stays off")
+        }
+        return nil
+    }
+
     /// Subscribes to `channel.moderate` v2 with our account as the
     /// moderator. See `ChannelSession.enableModerationEvents()` for when and
     /// why.

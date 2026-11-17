@@ -62,7 +62,9 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 /// `private`); it is still actor-isolated.
 public actor ChannelSession {
 
-    private let client: TwitchClient
+    /// Internal (not private): `ChannelSession+LiveEvents.swift` seeds from
+    /// Helix with it.
+    let client: TwitchClient
     /// Public + `nonisolated` because it's set once at init and never
     /// changes. Callers outside the actor (e.g. `ChatTranscriptModel` reading
     /// it to key `DraftStorage` lookups) can read without hopping the
@@ -108,7 +110,10 @@ public actor ChannelSession {
     /// don't get a record back, but Twitch keeps the subscription alive on
     /// our WebSocket. Twitch will garbage-collect it when the WebSocket
     /// disconnects.
-    private var activeSubscriptionIds: [String] = []
+    ///
+    /// Internal (not private) so `ChannelSession+LiveEvents.swift` can record
+    /// the live-event topic ids too.
+    var activeSubscriptionIds: [String] = []
 
     /// The non-blocking chat-restrictions fetch kicked off by `start()`. Stored
     /// so `stop()` can cancel it — otherwise the fire-and-forget Task strongly
@@ -118,7 +123,7 @@ public actor ChannelSession {
 
     /// The EventSub topics this session subscribes to. Stateless: the ids it
     /// returns land in `activeSubscriptionIds`. See `EventSubTopics`.
-    private let topics: EventSubTopics
+    let topics: EventSubTopics
 
     /// Send / delete / chat-settings / chat-colour Helix calls. See
     /// `HelixChatActions`.
@@ -165,6 +170,23 @@ public actor ChannelSession {
     /// `handle(event:)` on a `.moderationStatusChanged(false)` so a
     /// re-promotion after an unmod/revocation can re-subscribe.
     private var moderationEventsEnabled = false
+
+    // Live events (polls / predictions / Hype Train) — see
+    // `ChannelSession+LiveEvents.swift`.
+
+    /// Current live events, reduced off-main from EventSub + the Helix seed.
+    var liveEvents = LiveEventsState()
+    /// Latest-value mailboxes of the banner consumers.
+    var liveEventSubscribers: [UUID: LiveEventsSubscription] = [:]
+    /// The non-blocking live-topic subscribe + Helix seed kicked off by
+    /// `start()` on the account's own channel. Cancelled by `stop()`.
+    var liveEventsTask: Task<Void, Never>?
+    /// Set first thing in `stop()`. A live-topic subscribe that lands after
+    /// it deletes its own subscription instead of recording it.
+    var isStopped = false
+    /// The poll whose deadline we already asked Helix for (EventSub's poll
+    /// payload in TwitchKit carries no `ends_at`). One fetch per poll.
+    var pollDeadlineRequestedFor: String?
 
     public init(
         client: TwitchClient,
@@ -285,6 +307,13 @@ public actor ChannelSession {
         // read picks up the seeded cache instead; either ordering is correct.
         chatRestrictionsTask = Task { [weak self] in await self?.refreshChatRestrictions() }
 
+        // Poll / prediction / Hype Train banners — own channel only (Twitch
+        // authorizes those topics for the broadcaster's token alone), and
+        // off the critical path like the restrictions fetch above.
+        if channelId == accountUserId {
+            liveEventsTask = Task { [weak self] in await self?.startLiveEvents() }
+        }
+
         // NOTE: We deliberately do NOT iterate `client.eventSub.events` here.
         // That AsyncStream is single-consumer — if every ChannelSession had
         // its own iterator, the events would get split unpredictably between
@@ -365,6 +394,11 @@ public actor ChannelSession {
     /// garbage-collect each subscription when the WebSocket disconnects.
     public func stop() async {
         logger.info("Stopping session for #\(self.channelLoginName, privacy: .public)")
+        isStopped = true
+
+        liveEventsTask?.cancel()
+        liveEventsTask = nil
+        finishLiveEventSubscribers()
 
         // Cancel the in-flight restrictions fetch so it stops retaining the
         // actor past teardown (and skips its now-pointless subscriber fan-out).
@@ -400,6 +434,13 @@ public actor ChannelSession {
     /// `ChannelUpdate`, and emitted: ring append + post to every subscriber
     /// mailbox. Synchronous, and it never waits on a subscriber.
     func handle(event: EventSubEvent) {
+        // Live events (polls / predictions / Hype Train) never touch the
+        // ring: reduced here and posted to their own latest-value mailboxes,
+        // so their every-few-seconds ticks never wake a transcript.
+        if let liveUpdate = LiveEventUpdate(event: event, channelId: channelId) {
+            applyLiveEvent(liveUpdate)
+            return
+        }
         guard let channelEvent = Self.translate(
             event: event,
             expectedChannelId: channelId,

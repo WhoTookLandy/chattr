@@ -19,6 +19,9 @@ moderation tools, and iPad split-view — all deliverable later without rework.
   `recent-messages.robotty.de` (degrades gracefully when unavailable).
 - **Rich events** — sub / resub / gift-sub and raid bubbles, plus message
   deletion and chat-clear handling.
+- **Live event banners** — your own channel's polls, predictions and Hype
+  Trains as collapsible banners at the top of chat (Twitch only shares these
+  with the broadcaster; toggles in You → Chat → Filters).
 - **Highlights** — a sound and visual treatment when you're @-mentioned or a
   keyword you chose appears.
 - **Native feel** — Liquid Glass design language, Dynamic Type, light/dark/system
