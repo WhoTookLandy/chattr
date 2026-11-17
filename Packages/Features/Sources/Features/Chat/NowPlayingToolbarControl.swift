@@ -158,10 +158,13 @@ struct NowPlayingToolbarControl: View {
         withAnimation(.snappy(duration: 0.25)) { audioOnly = false }
     }
 
-    /// Same as hiding the video from the header: the header collapses to its
-    /// card and its `syncPlayback` stops the stream.
+    /// Hides the stream like the header does, and stops it here too: the
+    /// header's `syncPlayback` only stops once the channel has a status entry,
+    /// and this control can show on a live stream known only from follows.
+    /// With `isExpanded` off, nothing restarts it.
     private func stop() {
         withAnimation(.snappy(duration: 0.25)) { isExpanded = false }
+        playback?.stop()
     }
 }
 
