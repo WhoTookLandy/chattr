@@ -20,7 +20,7 @@ enum TwitchWebPlayer {
     /// Builds the player web view for `login`. Owned by `WebStreamEngine`
     /// (and through it `PlaybackCenter`), so it survives leaving the chat.
     @MainActor
-    static func makeWebView(login: String, muted: Bool = false, coordinator: Coordinator) -> WKWebView {
+    static func makeWebView(login: String, autoplay: Bool, coordinator: Coordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = true
@@ -46,7 +46,7 @@ enum TwitchWebPlayer {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
         webView.navigationDelegate = coordinator
-        webView.load(URLRequest(url: playerURL(login, muted: muted)))
+        webView.load(URLRequest(url: playerURL(login, autoplay: autoplay)))
         return webView
     }
 
@@ -66,13 +66,16 @@ enum TwitchWebPlayer {
 
     /// `parent` is required by Twitch's player; it's only enforced against
     /// framing ancestors, so any stable domain works for a top-level load.
-    static func playerURL(_ login: String, muted: Bool = false) -> URL {
+    /// `autoplay` is the controller's `startsPlaying` when the page is
+    /// built: a stream the user paused (or a clip holds) loads paused, so
+    /// the page never plays on its own against their intent.
+    static func playerURL(_ login: String, autoplay: Bool) -> URL {
         var components = URLComponents(string: "https://player.twitch.tv/")!
         components.queryItems = [
             URLQueryItem(name: "channel", value: login),
             URLQueryItem(name: "parent", value: "chattr.app"),
-            URLQueryItem(name: "autoplay", value: "true"),
-            URLQueryItem(name: "muted", value: muted ? "true" : "false"),
+            URLQueryItem(name: "autoplay", value: autoplay ? "true" : "false"),
+            URLQueryItem(name: "muted", value: "false"),
             URLQueryItem(name: "playsinline", value: "true"),
         ]
         return components.url!
@@ -181,6 +184,8 @@ enum TwitchWebPlayer {
     @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let controller: StreamPlayerController
+        /// The page has posted its first state (one coordinator per page).
+        private var didReportState = false
 
         init(controller: StreamPlayerController) {
             self.controller = controller
@@ -199,17 +204,18 @@ enum TwitchWebPlayer {
                 // every view that reads any of them.
                 let paused = body["paused"] as? Bool ?? false
                 // Held (a clip is playing over the stream): the page's
-                // autoplay — e.g. it finished loading after the hold began
-                // — mustn't start the stream behind the clip.
+                // autoplay — the hold began after the page was built with
+                // `autoplay=true` — mustn't start the stream behind the clip.
                 if controller.isHeld, !paused { controller.pause() }
                 controller.update(\.isPaused, to: paused)
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
-                // First play of the page is its autoplay: `noteDidPlay`
-                // pauses it again if the user had paused (say, while native
-                // was buffering before this fallback), and it never counts
-                // as the user resuming.
-                if paused { controller.noteDidPause() }
+                if !didReportState {
+                    didReportState = true
+                    controller.noteEngineReady(paused: paused)
+                }
+                // The page only autoplays when it was built meant to play
+                // (`startsPlaying`), so any play is the user's intent.
                 if body["playing"] as? Bool == true { controller.noteDidPlay() }
             case "pipStart":
                 controller.pictureInPictureDidStart()

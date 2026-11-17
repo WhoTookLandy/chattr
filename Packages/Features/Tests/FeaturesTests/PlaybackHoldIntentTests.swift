@@ -45,14 +45,13 @@ struct PlaybackHoldIntentTests {
         #expect(!PlaybackCenter.resumesOnRelease(controller))
     }
 
-    @Test("Seen playing again after starting restores intent, unless it's autoplay under a hold")
+    @Test("Seen playing restores intent, unless held — then it's paused again")
     func playingRestoresIntent() {
         let controller = StreamPlayerController()
         controller.noteDidPlay()
         controller.togglePlay()
         #expect(!controller.wantsPlayback)
         controller.update(\.isPaused, to: true)
-        controller.noteDidPause()
         // Resumed from outside our controls (PiP window, lock screen).
         controller.noteDidPlay()
         #expect(controller.wantsPlayback)
@@ -65,40 +64,55 @@ struct PlaybackHoldIntentTests {
         controller.endHold(resume: false)
     }
 
+    @Test("Paused before the first frame, then resumed from outside our controls, plays")
+    func pauseBeforeStartThenExternalResumePlays() {
+        let controller = StreamPlayerController()
+        // Buffering, no frames yet: the user pauses. An engine built or
+        // finishing its load now starts paused.
+        controller.togglePlay()
+        #expect(!controller.startsPlaying)
+        // Native fullscreen / PiP / lock screen plays it: that's intent.
+        controller.noteDidPlay()
+        #expect(controller.hasStarted)
+        #expect(controller.wantsPlayback)
+        #expect(PlaybackCenter.resumesOnRelease(controller))
+    }
+
     @Test("A buffering pause survives native → web fallback and a clip dismissed before the web player loads")
-    func pauseSurvivesFallbackAutoplay() {
+    func pauseSurvivesFallback() {
         let controller = StreamPlayerController()
         // Native buffering, no frames yet: the user pauses.
         controller.togglePlay()
         // A clip opens: the hold won't resume on release.
         #expect(!PlaybackCenter.resumesOnRelease(controller))
         controller.beginHold()
-        // Native fails; `PlaybackCenter` rebuilds on the web engine.
+        // Native fails; `PlaybackCenter` rebuilds on the web engine, which
+        // loads without autoplay.
         controller.reset()
+        #expect(!controller.startsPlaying)
+        let url = TwitchWebPlayer.playerURL("x", autoplay: controller.startsPlaying)
+        #expect(url.absoluteString.contains("autoplay=false"))
         // The clip is dismissed before the web page has loaded.
         controller.endHold(resume: false)
+        #expect(!controller.startsPlaying)
 
-        // The page autoplays: paused again, intent untouched — including a
-        // repeat report before the pause lands.
-        controller.noteDidPlay()
+        // The page comes up paused and stays so.
+        controller.noteEngineReady(paused: true)
+        controller.update(\.isPaused, to: true)
         #expect(!controller.wantsPlayback)
-        #expect(controller.isPausingAutoplay)
-        controller.noteDidPlay()
-        #expect(!controller.wantsPlayback)
-
-        // Paused. A later play is a real resume.
-        controller.noteDidPause()
-        #expect(!controller.isPausingAutoplay)
-        controller.noteDidPlay()
-        #expect(controller.wantsPlayback)
+        #expect(!PlaybackCenter.resumesOnRelease(controller))
     }
 
-    @Test("Autoplay of a stream meant to play leaves intent alone")
-    func autoplayWhenWantedKeepsPlaying() {
+    @Test("A stream meant to play starts playing; its play report keeps intent")
+    func startsPlayingWhenWanted() {
         let controller = StreamPlayerController()
+        #expect(controller.startsPlaying)
+        controller.beginHold()
+        #expect(!controller.startsPlaying)
+        controller.endHold(resume: true)
+        #expect(controller.startsPlaying)
         controller.noteDidPlay()
         #expect(controller.wantsPlayback)
-        #expect(!controller.isPausingAutoplay)
     }
 }
 
@@ -106,24 +120,24 @@ struct PlaybackHoldIntentTests {
 @Suite("Per-channel PiP flag lifetime")
 struct PictureInPictureFlagLifetimeTests {
     @Test("A flag keeps its identity while mounted and goes once unowned")
-    func flagEvictedWhenUnowned() async {
+    func flagEvictedWhenUnowned() {
         let center = PlaybackCenter()
         // body read, then appear.
         let flag = center.pictureInPictureFlag(for: "1")
         center.retainPictureInPictureFlag(for: "1")
         center.retainPictureInPictureFlag(for: "1")
         center.releasePictureInPictureFlag(for: "1")
-        await Task.yield()
+        center.drainPendingEvictions()
         #expect(center.pictureInPictureFlag(for: "1") === flag)
 
         // Remount: the new view reads and appears before the drop runs.
         center.releasePictureInPictureFlag(for: "1")
         center.retainPictureInPictureFlag(for: "1")
-        await Task.yield()
+        center.drainPendingEvictions()
         #expect(center.pictureInPictureFlag(for: "1") === flag)
 
         center.releasePictureInPictureFlag(for: "1")
-        for _ in 0..<5 { await Task.yield() }
+        center.drainPendingEvictions()
         #expect(center.pictureInPictureFlagCount == 0)
     }
 }

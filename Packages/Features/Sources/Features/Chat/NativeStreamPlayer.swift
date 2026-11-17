@@ -115,10 +115,10 @@ final class StreamPlayerController {
 
     /// Something asked the stream to stay paused and will hand it back —
     /// a clip playing over it (`PlaybackCenter.holdPlayback`). Unlike a
-    /// one-shot pause it outlives engine loading: a native load finishing
-    /// while held doesn't start playing, and the web player is paused again
-    /// if its autoplay kicks in (including after a native → web fallback,
-    /// which reuses this controller). Not cleared by `reset()`.
+    /// one-shot pause it outlives engine loading: an engine built or
+    /// finishing its load while held starts paused (`startsPlaying`), and a
+    /// play reported while held is paused again (`noteDidPlay`). Not
+    /// cleared by `reset()`.
     @ObservationIgnored private(set) var isHeld = false
 
     /// What the user wants the stream doing: true = playing, false = they
@@ -128,40 +128,42 @@ final class StreamPlayerController {
     /// "about to autoplay" to `PlaybackCenter.holdPlayback`.
     ///
     /// Set by `togglePlay` (the user's play/pause control), and back to
-    /// true whenever the stream is seen playing again after it started
-    /// (`noteDidPlay`), so a resume from outside our controls (PiP window,
-    /// lock screen) counts too — an engine's own autoplay doesn't. Our own `pause()`/`resume()` (holds) never touch it.
-    /// Reset per stream by `PlaybackCenter`. Not observed: nothing renders
-    /// from it, so changing it invalidates no view.
+    /// true whenever the engine reports playing (`noteDidPlay`), so a
+    /// resume from outside our controls (native fullscreen, PiP window,
+    /// lock screen) counts too. That's sound because no engine starts
+    /// playing on its own: each starts paused unless `startsPlaying`. Our
+    /// own `pause()`/`resume()` (holds) never touch it. Reset per stream by
+    /// `PlaybackCenter`. Not observed: nothing renders from it, so changing
+    /// it invalidates no view.
     @ObservationIgnored var wantsPlayback = true
 
-    /// We paused the engine's autoplay because the user had paused
-    /// (`wantsPlayback == false`); play reports until the engine reports
-    /// paused are that same autoplay, not a resume.
-    @ObservationIgnored private(set) var isPausingAutoplay = false
+    /// Whether an engine starting now should start playing: the user wants
+    /// it (`wantsPlayback`) and nothing holds it. The native engine checks
+    /// it when its load finishes; the web engine bakes it into the page's
+    /// `autoplay` parameter, and `noteEngineReady` catches up if it has
+    /// become true while the page loaded.
+    var startsPlaying: Bool { wantsPlayback && !isHeld }
 
-    /// The engine reports real frames playing. Only a play after the stream
-    /// has started counts as the user resuming (PiP window, lock screen —
-    /// our own control already set `wantsPlayback`). The first play of an
-    /// engine is its autoplay: it says nothing about intent, and if the
-    /// user had paused — e.g. while native was buffering, before a fallback
-    /// rebuilt on the web engine, which autoplays — it's paused again.
-    /// While held, the hold re-pauses it instead.
+    /// The engine reports real frames playing. Engines start playing only
+    /// when `startsPlaying`, so every play report is the user's doing — our
+    /// control, or one outside it (native fullscreen, PiP window, lock
+    /// screen) — and restores intent. Except while held: then it's paused
+    /// again and intent is left alone; the hold's release decides.
     func noteDidPlay() {
-        let isAutoplay = !hasStarted || isPausingAutoplay
         update(\.hasStarted, to: true)
-        if isHeld { return }
-        if !isAutoplay {
-            wantsPlayback = true
-        } else if !wantsPlayback {
-            isPausingAutoplay = true
+        if isHeld {
             pause()
+        } else {
+            wantsPlayback = true
         }
     }
 
-    /// The engine reports paused.
-    func noteDidPause() {
-        isPausingAutoplay = false
+    /// The web page's first state report: it now takes commands. It was
+    /// built with `autoplay` = `startsPlaying` at the time; if that has
+    /// since become true (a hold released before the page loaded, whose
+    /// resume had nothing to reach), start it now. Never pauses.
+    func noteEngineReady(paused: Bool) {
+        if paused, startsPlaying { resume() }
     }
 
     func beginHold() {
@@ -207,7 +209,6 @@ final class StreamPlayerController {
         update(\.canPictureInPicture, to: false)
         update(\.isPictureInPictureActive, to: false)
         update(\.hasStarted, to: false)
-        isPausingAutoplay = false
     }
 
     /// Writes `value` only when it differs. Observation notifies on every
@@ -228,7 +229,6 @@ final class StreamPlayerController {
     /// The user's play/pause control — records their intent
     /// (`wantsPlayback`) as well as acting on it.
     func togglePlay() {
-        isPausingAutoplay = false
         guard let player = avPlayer else {
             // Web, or native still loading: the control showed "play" when
             // the engine reported paused, "pause" otherwise.
@@ -477,7 +477,6 @@ enum NativePlayer {
                     guard let self else { return }
                     self.controller.update(\.isPaused, to: status == .paused)
                     if status == .playing { self.controller.noteDidPlay() }
-                    if status == .paused { self.controller.noteDidPause() }
                 }
                 .store(in: &subscriptions)
 
@@ -491,7 +490,7 @@ enum NativePlayer {
             // Held (a clip is playing over the stream): stay paused until
             // the holder releases — `endHold(resume:)` starts it then. Paused
             // by the user while the playlist loaded: leave it paused.
-            if !controller.isHeld, controller.wantsPlayback { player.play() }
+            if controller.startsPlaying { player.play() }
         }
 
         func teardown() {

@@ -29,7 +29,11 @@ final class WebStreamEngine: StreamEngine {
 
     init(login: String, controller: StreamPlayerController) {
         coordinator = TwitchWebPlayer.Coordinator(controller: controller)
-        webView = TwitchWebPlayer.makeWebView(login: login, muted: controller.startsMuted, coordinator: coordinator)
+        // Loads paused when the user paused or a clip holds it — the page
+        // never autoplays against intent (`StreamPlayerController.noteDidPlay`).
+        webView = TwitchWebPlayer.makeWebView(
+            login: login, autoplay: controller.startsPlaying, coordinator: coordinator
+        )
         view = webView
         controller.webView = webView
     }
@@ -159,11 +163,12 @@ final class PlaybackCenter {
     }
 
     /// A view reading `channelId`'s flag unmounted. With no holder left the
-    /// flag is dropped on the next main-actor turn, not here: a remount (or
-    /// a pager window shift) runs the new view's `body` — reading the
-    /// existing flag — before the old view's disappear and the new one's
-    /// appear. Dropping it in between would leave the new view observing a
-    /// flag that's no longer written.
+    /// flag is queued for dropping on the next main-actor turn
+    /// (`drainPendingEvictions`), not here: a remount (or a pager window
+    /// shift) runs the new view's `body` — reading the existing flag —
+    /// before the old view's disappear and the new one's appear. Dropping
+    /// it in between would leave the new view observing a flag that's no
+    /// longer written.
     func releasePictureInPictureFlag(for channelId: String) {
         guard let owners = pictureInPictureFlagOwners[channelId] else { return }
         guard owners <= 1 else {
@@ -171,14 +176,29 @@ final class PlaybackCenter {
             return
         }
         pictureInPictureFlagOwners[channelId] = nil
+        let wasIdle = pendingFlagEvictions.isEmpty
+        pendingFlagEvictions.insert(channelId)
+        // One drain per turn, however many flags were released in it.
+        guard wasIdle else { return }
         Task { @MainActor [weak self] in
-            self?.dropUnownedPictureInPictureFlag(channelId)
+            self?.drainPendingEvictions()
         }
     }
 
-    private func dropUnownedPictureInPictureFlag(_ channelId: String) {
-        guard pictureInPictureFlagOwners[channelId] == nil else { return }
-        pictureInPictureFlags[channelId] = nil
+    /// Channels whose flag lost its last holder, awaiting
+    /// `drainPendingEvictions`.
+    @ObservationIgnored private var pendingFlagEvictions: Set<String> = []
+
+    /// Drops each queued flag that's still unowned; a flag retained again
+    /// since its release (a remount) stays. Scheduled by
+    /// `releasePictureInPictureFlag`; tests call it directly instead of
+    /// relying on task timing.
+    func drainPendingEvictions() {
+        let pending = pendingFlagEvictions
+        pendingFlagEvictions.removeAll()
+        for channelId in pending where pictureInPictureFlagOwners[channelId] == nil {
+            pictureInPictureFlags[channelId] = nil
+        }
     }
 
     /// Flags held by mounted views — for tests.
