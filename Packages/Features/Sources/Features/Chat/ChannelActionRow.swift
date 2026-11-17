@@ -14,6 +14,12 @@ import Core
 struct ChannelActionRow: View {
     let channel: ChannelDescriptor
     let isFollowing: Bool
+    /// `.full`: heart + share + Gift + Subscribe across the width (compact
+    /// card). `.compact`: just Gift / Subscribe, right-aligned — the
+    /// watching layout, where share lives on the video.
+    var style: Style = .full
+
+    enum Style { case full, compact }
 
     @Environment(\.openURL) private var openURL
 
@@ -31,6 +37,21 @@ struct ChannelActionRow: View {
     }
 
     var body: some View {
+        switch style {
+        case .full: fullRow
+        case .compact: compactRow
+        }
+    }
+
+    private var compactRow: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            giftButton(expands: false)
+            subscribeButton(expands: false)
+        }
+    }
+
+    private var fullRow: some View {
         HStack(spacing: 8) {
             Image(systemName: isFollowing ? "heart.fill" : "heart")
                 .font(.body)
@@ -53,29 +74,38 @@ struct ChannelActionRow: View {
                 .accessibilityLabel("Share channel")
             }
 
-            Button {
-                if let subsURL { openURL(subsURL) }
-            } label: {
-                Text("Gift a Sub")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, minHeight: Self.height)
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: Capsule())
-
-            Button {
-                if let subsURL { openURL(subsURL) }
-            } label: {
-                Text("Subscribe")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: Self.height)
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.tint(Self.twitchPurple).interactive(), in: Capsule())
+            giftButton(expands: true)
+            subscribeButton(expands: true)
         }
+    }
+
+    private func giftButton(expands: Bool) -> some View {
+        Button {
+            if let subsURL { openURL(subsURL) }
+        } label: {
+            Text("Gift a Sub")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .padding(.horizontal, expands ? 0 : 16)
+                .frame(maxWidth: expands ? .infinity : nil, minHeight: Self.height)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: Capsule())
+    }
+
+    private func subscribeButton(expands: Bool) -> some View {
+        Button {
+            if let subsURL { openURL(subsURL) }
+        } label: {
+            Text("Subscribe")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, expands ? 0 : 16)
+                .frame(maxWidth: expands ? .infinity : nil, minHeight: Self.height)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.tint(Self.twitchPurple).interactive(), in: Capsule())
     }
 }

@@ -110,10 +110,23 @@ struct StreamPlayerView: UIViewRepresentable {
       ['touchstart', 'touchend', 'pointerdown', 'pointerup', 'pointermove', 'mousemove', 'mousedown', 'mouseup'].forEach(function (n) {
         document.addEventListener(n, swallow, true);
       });
+      // Swipe down on the video → hide it (native collapses the header).
+      var startX = null, startY = null, swiped = false;
+      document.addEventListener('touchstart', function (e) {
+        var t = e.touches[0]; startX = t.clientX; startY = t.clientY; swiped = false;
+      }, true);
+      document.addEventListener('touchend', function (e) {
+        if (startY === null) return;
+        var t = e.changedTouches[0];
+        var dy = t.clientY - startY, dx = Math.abs(t.clientX - startX);
+        startY = null;
+        if (dy > 50 && dx < dy) { swiped = true; post({ type: 'swipeDown' }); }
+      }, true);
       document.addEventListener('click', function (e) {
         if (passThrough(e.target)) return;
         e.stopPropagation();
         e.preventDefault();
+        if (swiped) { swiped = false; return; }
         post({ type: 'tap' });
       }, true);
 
@@ -160,6 +173,8 @@ struct StreamPlayerView: UIViewRepresentable {
             switch type {
             case "tap":
                 controller.onTap?()
+            case "swipeDown":
+                controller.onSwipeDown?()
             case "state":
                 controller.isPaused = body["paused"] as? Bool ?? false
                 controller.isMuted = body["muted"] as? Bool ?? false
@@ -183,36 +198,6 @@ struct StreamPlayerView: UIViewRepresentable {
             _ = await UIApplication.shared.open(url)
             return .cancel
         }
-    }
-}
-
-/// Native-side state + commands for one `StreamPlayerView`.
-@MainActor
-@Observable
-final class StreamPlayerController {
-    var isPaused = false
-    var isMuted = false
-    var canPictureInPicture = false
-    /// Flips once real frames are playing — the thumbnail poster hides then.
-    var hasStarted = false
-
-    @ObservationIgnored weak var webView: WKWebView?
-    @ObservationIgnored var onTap: (() -> Void)?
-
-    func reset() {
-        isPaused = false
-        isMuted = false
-        canPictureInPicture = false
-        hasStarted = false
-    }
-
-    func togglePlay() { run("togglePlay") }
-    func toggleMute() { run("toggleMute") }
-    func enterFullscreen() { run("fullscreen") }
-    func togglePictureInPicture() { run("pip") }
-
-    private func run(_ command: String) {
-        webView?.evaluateJavaScript("window.chattrPlayer && window.chattrPlayer.\(command)()")
     }
 }
 

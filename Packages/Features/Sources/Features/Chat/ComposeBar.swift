@@ -55,6 +55,9 @@ struct ComposeBar: View {
     let onOpenSettings: (() -> Void)?
 
     @Environment(\.openURL) private var openURL
+    /// Same preference the stream header reads — the ⋯ menu's Show/Hide
+    /// Video flips it.
+    @AppStorage(StreamHeaderView.expandedKey) private var videoVisible = false
 
     @State private var composeText: String
     @State private var isSending: Bool = false
@@ -97,9 +100,8 @@ struct ComposeBar: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            if let restrictions = chatRestrictions, restrictions.hasAny {
-                restrictionsStrip(restrictions)
-            }
+            // Active restrictions (followers-only, slow mode…) ride in the
+            // field's placeholder instead of a strip that cost a row.
 
             if let reply = replyContext {
                 replyChip(reply)
@@ -149,37 +151,6 @@ struct ComposeBar: View {
         // onChange(of: composeText) fires from the mutation above, so
         // the draft persists automatically — no explicit onDraftChange
         // call needed here.
-    }
-
-    /// Inline informational strip above the input, listing chat
-    /// restrictions that affect what the user can send (slow mode,
-    /// followers-only, etc.). Non-blocking — the send button stays
-    /// enabled, and if the user fails the restriction (e.g. not yet
-    /// following), Twitch's `dropReason` surfaces on the failed row.
-    ///
-    /// Why informational not blocking: pre-flighting "is the user
-    /// following / subscribed" requires per-user API calls and produces
-    /// the same outcome as letting Twitch tell us via dropReason. The
-    /// strip is just a heads-up so users don't get a surprise rejection.
-    @ViewBuilder
-    private func restrictionsStrip(_ r: ChatRestrictions) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "info.circle.fill")
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
-                .imageScale(.small)
-            Text(restrictionsLabel(r))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            Spacer(minLength: 4)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.secondary.opacity(0.10))
-        )
     }
 
     /// Build a human-readable comma-joined label of the active
@@ -276,6 +247,9 @@ struct ComposeBar: View {
     private var textFieldPrompt: String {
         if let reply = replyContext {
             return "Reply to \(reply.parentAuthorDisplayName)"
+        }
+        if let restrictions = chatRestrictions, restrictions.hasAny {
+            return "\(restrictionsLabel(restrictions)) · Send a message"
         }
         return "Send a message in #\(channelLoginName)"
     }
@@ -422,12 +396,18 @@ struct ComposeBar: View {
                     Label("Clear Draft", systemImage: "xmark.circle")
                 }
             }
+            Button {
+                withAnimation(.snappy(duration: 0.25)) { videoVisible.toggle() }
+            } label: {
+                Label(videoVisible ? "Hide Video" : "Show Video",
+                      systemImage: videoVisible ? "rectangle.slash" : "play.rectangle")
+            }
             Divider()
             if let channelURL {
                 Button {
                     openURL(channelURL)
                 } label: {
-                    Label("Watch on Twitch", systemImage: "play.tv")
+                    Label("Open in Twitch App", systemImage: "arrow.up.forward.app")
                 }
                 ShareLink(item: channelURL) {
                     Label("Share Channel", systemImage: "square.and.arrow.up")

@@ -120,8 +120,14 @@ public final class HighlightSoundPlayer {
             // Ambient category: mixes with other audio (music, a stream
             // playing elsewhere), doesn't interrupt or duck. Matches the
             // spec's intent for a non-intrusive ping.
-            try AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default)
-            try AVAudioSession.sharedInstance().setActive(true)
+            // …unless the in-chat stream player already holds a playback
+            // session: downgrading it to ambient would mute the stream with
+            // the silent switch and stop background audio / PiP.
+            let session = AVAudioSession.sharedInstance()
+            if session.category != .playback {
+                try session.setCategory(.ambient, mode: .default)
+                try session.setActive(true)
+            }
             let player = try AVAudioPlayer(contentsOf: url)
             player.prepareToPlay()
             audioPlayer = player
