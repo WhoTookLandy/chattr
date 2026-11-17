@@ -101,6 +101,14 @@ public enum TwitchSignIn {
         // Viewer list (GET /chat/chatters) for channels you moderate.
         .moderatorReadChatters,
         .clipsEdit, // Create Clip (POST /clips); pre-scope tokens get 401 → CreateClipSheet asks to sign in again.
+        // Live poll / prediction / Hype Train banners on your OWN channel —
+        // Twitch authorizes those EventSub topics for the broadcaster only.
+        // Harmless for viewers (they never stream polls); same re-sign-in
+        // caveat as the scopes above: older tokens get a swallowed 403 and
+        // the banners just never appear.
+        .channelReadPolls,
+        .channelReadPredictions,
+        .channelReadHypeTrain,
     ]
 
     /// The redirect URI the Vercel bridge 302-redirects back to. Must

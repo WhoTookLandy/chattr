@@ -114,6 +114,12 @@ public final class ChatTranscriptModel {
 
     public var attachState: AttachState { attachment.state }
 
+    /// The attached session, for consumers with their own feed from it — the
+    /// live-event banners (`LiveEventsBannerArea`) subscribe here once
+    /// `attachState` reaches `.attached`. Not observed: read it when
+    /// `attachState` changes.
+    var liveEventsSession: ChannelSession? { attachment.primarySession }
+
     /// Blocked user ids, pushed in by the view (which observes `BlockStore`).
     /// Changing it re-filters the visible lines immediately.
     public var blockedIds: Set<String> {
