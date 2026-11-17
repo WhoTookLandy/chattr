@@ -83,14 +83,16 @@ public struct AppShell: View {
 
     private func wirePictureInPicture() {
         // PiP's "return to app" → back into that stream's chat.
-        playback.controller.onRestoreFromPictureInPicture = { [playback, navigation] in
-            if let channel = playback.channel {
-                navigation.openChannel(channel)
+        // Weak: the center owns the controller that stores these closures.
+        playback.controller.onRestoreFromPictureInPicture = { [weak playback, weak navigation] in
+            if let channel = playback?.channel {
+                navigation?.openChannel(channel)
             }
         }
         // PiP closed with its × while no chat shows the stream: stop it
         // rather than leaving a paused mini player behind.
-        playback.controller.onPictureInPictureClosed = { [playback, navigation] in
+        playback.controller.onPictureInPictureClosed = { [weak playback, weak navigation] in
+            guard let playback, let navigation else { return }
             let chatShowingIt = navigation.selectedTab == .chats && navigation.chatTabs.isPresented
             if !chatShowingIt { playback.stop() }
         }

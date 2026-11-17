@@ -82,10 +82,6 @@ struct GuestChannelView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.top, 12)
-                case .failed where chat.messages.isEmpty:
-                    Text("Couldn't connect to chat.")
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 12)
                 default:
                     EmptyView()
                 }
@@ -99,6 +95,20 @@ struct GuestChannelView: View {
         }
         // Stick to the newest message, like a real chat.
         .defaultScrollAnchor(.bottom)
+        // Connection dropped: say so even when old messages are showing
+        // (the reader retries on its own with backoff).
+        .overlay(alignment: .top) {
+            if chat.status == .reconnecting {
+                Label("Reconnecting to chat…", systemImage: "wifi.exclamationmark")
+                    .font(.footnote.weight(.medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 8)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.snappy, value: chat.status)
         .scrollDismissesKeyboard(.interactively)
     }
 

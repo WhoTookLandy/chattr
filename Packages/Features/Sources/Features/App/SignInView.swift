@@ -236,6 +236,8 @@ struct SignInView: View {
                     .multilineTextAlignment(.center)
             }
 
+            // Guest mode is iOS-only (its player is UIKit-hosted).
+            #if os(iOS)
             HStack(spacing: 10) {
                 Rectangle().fill(.quaternary).frame(height: 1)
                 Text("or just look around")
@@ -246,6 +248,7 @@ struct SignInView: View {
             }
 
             guestField
+            #endif
 
             Text("You sign in on Twitch; chattr never sees your password.")
                 .font(.caption)

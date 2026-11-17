@@ -31,6 +31,27 @@ struct AnonymousChatReaderTests {
         #expect(message.text == "waves")
     }
 
+    @Test("Parses moderation commands' tags and target")
+    func moderationLines() throws {
+        let clearMsg = try #require(IRCLine("@login=someone;target-msg-id=abc-123 :tmi.twitch.tv CLEARMSG #channel :bad words"))
+        #expect(clearMsg.command == "CLEARMSG")
+        #expect(clearMsg.tags["target-msg-id"] == "abc-123")
+
+        let timeout = try #require(IRCLine("@ban-duration=600;target-user-id=42 :tmi.twitch.tv CLEARCHAT #channel :someone"))
+        #expect(timeout.command == "CLEARCHAT")
+        #expect(timeout.tags["target-user-id"] == "42")
+
+        let clearAll = try #require(IRCLine(":tmi.twitch.tv CLEARCHAT #channel"))
+        #expect(clearAll.tags["target-user-id"] == nil)
+        #expect(clearAll.params == ["#channel"])
+    }
+
+    @Test("Keeps the sender's user id for user-wide removal")
+    func userId() throws {
+        let line = "@display-name=A;user-id=42;id=m1 :a!a@a.tmi.twitch.tv PRIVMSG #channel :hi"
+        #expect(try #require(AnonymousChatReader.parsePrivmsg(line)).userId == "42")
+    }
+
     @Test("Ignores non-PRIVMSG lines")
     func ignoresOthers() {
         #expect(AnonymousChatReader.parsePrivmsg(":tmi.twitch.tv 001 justinfan123 :Welcome, GLHF!") == nil)

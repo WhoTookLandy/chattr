@@ -148,8 +148,18 @@ final class StreamPlayerController {
         let fullscreen = AVPlayerViewController()
         fullscreen.player = player
         fullscreen.modalPresentationStyle = .fullScreen
+        // PiP started from the fullscreen player reports through its own
+        // delegate — forward it so PiP state, return-to-chat and close all
+        // behave the same as PiP from the inline player.
+        let forwarder = FullscreenPictureInPictureForwarder(controller: self)
+        fullscreenPictureInPictureForwarder = forwarder
+        fullscreen.delegate = forwarder
         presenter.present(fullscreen, animated: true)
     }
+
+    /// Kept alive while a fullscreen player may be presented
+    /// (`AVPlayerViewController.delegate` is weak).
+    @ObservationIgnored private var fullscreenPictureInPictureForwarder: FullscreenPictureInPictureForwarder?
 
     /// Latest requested cap — read when a pending native load finishes, so
     /// a change made while the playlist was loading isn't lost.
@@ -347,6 +357,33 @@ enum NativePlayer {
     }
 }
 // MARK: - Picture in picture state
+
+/// Forwards PiP events from the fullscreen `AVPlayerViewController` to the
+/// same controller hooks the inline player's PiP uses.
+@MainActor
+final class FullscreenPictureInPictureForwarder: NSObject, @preconcurrency AVPlayerViewControllerDelegate {
+    private weak var controller: StreamPlayerController?
+
+    init(controller: StreamPlayerController) {
+        self.controller = controller
+    }
+
+    func playerViewControllerDidStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        controller?.pictureInPictureDidStart()
+    }
+
+    func playerViewControllerDidStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        controller?.pictureInPictureDidStop()
+    }
+
+    func playerViewController(
+        _ playerViewController: AVPlayerViewController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+    ) {
+        controller?.pictureInPictureWillRestore()
+        completionHandler(true)
+    }
+}
 
 extension NativePlayer.Coordinator: @preconcurrency AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {

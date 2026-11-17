@@ -132,6 +132,24 @@ enum TwitchWebPlayer {
       });
       setInterval(report, 1000);
 
+      // PiP start / end. WebKit reports "inline" after both a return to the
+      // app and a close, so tell them apart the way the system does it:
+      // closing PiP with its x pauses the video, returning keeps it playing.
+      var lastMode = 'inline';
+      document.addEventListener('webkitpresentationmodechanged', function () {
+        var v = video();
+        if (!v) return;
+        var mode = v.webkitPresentationMode;
+        if (mode === 'picture-in-picture' && lastMode !== mode) { post({ type: 'pipStart' }); }
+        if (lastMode === 'picture-in-picture' && mode !== 'picture-in-picture') {
+          setTimeout(function () {
+            var w = video();
+            post({ type: 'pipEnd', restored: !!(w && !w.paused) });
+          }, 250);
+        }
+        lastMode = mode;
+      }, true);
+
       window.chattrPlayer = {
         togglePlay: function () { var v = video(); if (!v) return; if (v.paused) { v.play(); } else { v.pause(); } },
         toggleMute: function () { var v = video(); if (!v) return; v.muted = !v.muted; if (!v.muted && v.volume === 0) { v.volume = 1; } },
@@ -166,13 +184,16 @@ enum TwitchWebPlayer {
                 controller.isPaused = body["paused"] as? Bool ?? false
                 controller.isMuted = body["muted"] as? Bool ?? false
                 controller.canPictureInPicture = body["pip"] as? Bool ?? false
-                // The web player can't tell "returned to app" from "closed",
-                // so it only mirrors whether PiP is showing.
-                let pipActive = body["pipActive"] as? Bool ?? false
-                if pipActive != controller.isPictureInPictureActive {
-                    controller.isPictureInPictureActive = pipActive
-                }
                 if body["playing"] as? Bool == true { controller.hasStarted = true }
+            case "pipStart":
+                controller.pictureInPictureDidStart()
+            case "pipEnd":
+                // Same contract as the native delegate: a return to the app
+                // restores (reopens the chat), a close just stops.
+                if body["restored"] as? Bool == true {
+                    controller.pictureInPictureWillRestore()
+                }
+                controller.pictureInPictureDidStop()
             default:
                 break
             }
