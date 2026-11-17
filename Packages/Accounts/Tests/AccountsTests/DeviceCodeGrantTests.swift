@@ -368,7 +368,7 @@ struct DeviceCodeGrantTests {
     @Test("A clock moved back mid-wait costs at most one extra interval")
     func pollingAfterClockMovedBack() {
         let start = Date(timeIntervalSince1970: 1_000_000)
-        let schedule = DeviceCodePollSchedule(prompt: prompt, issuedAt: start)
+        let schedule = DeviceCodePollSchedule(prompt: Self.prompt(interval: 5), issuedAt: start)
         schedule.recordPoll(at: start)
         let rolledBack = start.addingTimeInterval(-3600)
         // Simulates the loop: sleep the returned delay, then re-check.
