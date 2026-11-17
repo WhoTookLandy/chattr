@@ -95,6 +95,22 @@ struct VideoDeviceSettingsScreen: View {
             } header: {
                 Text("Device")
             }
+
+            Section {
+                NavigationLink {
+                    LandscapeSettingsScreen()
+                } label: {
+                    SettingLabel(
+                        "Landscape Layout",
+                        systemImage: "rectangle.split.2x1",
+                        subtitle: "Chat beside or over the video when sideways"
+                    )
+                }
+            } header: {
+                Text("Landscape")
+            } footer: {
+                Text("Applies when you turn your phone sideways while a stream is showing.")
+            }
         }
         .navigationTitle("Video & Device")
         #if os(iOS)

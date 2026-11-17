@@ -75,10 +75,10 @@ enum SettingsRegistry {
         SettingsEntry("nativePlayer", "Native Video Player", keywords: ["picture in picture", "pip", "avplayer", "fullscreen"], in: .videoAndDevice),
         SettingsEntry("videoOnOpen", "When a Chat Opens", keywords: ["autoplay", "auto play", "wifi", "wi-fi", "cellular", "start", "closed"], in: .videoAndDevice),
         SettingsEntry("maxQuality", "Max Quality", keywords: ["resolution", "1080p", "720p", "data", "bandwidth"], in: .videoAndDevice),
-        SettingsEntry("pictureInPicture", "Picture in Picture", keywords: ["pip", "background", "floating", "leave", "sound"], in: .videoAndDevice),
-
-        SettingsEntry("keepScreenAwake", "Keep Screen Awake", keywords: ["sleep", "lock", "auto-lock", "idle", "display", "dim", "battery"], in: .videoAndDevice),
-        SettingsEntry("haptics", "Haptic Feedback", keywords: ["vibration", "vibrate", "haptics", "taptic"], in: .videoAndDevice),
+        SettingsEntry("landscapeLayout", "Landscape Layout", keywords: ["landscape", "sideways", "rotate", "horizontal", "chat beside video", "chat over video", "overlay"], in: .videoAndDevice, to: .landscape),
+        SettingsEntry("landscapeChatSide", "Chat Side", keywords: ["landscape", "left", "right", "sideways"], in: .videoAndDevice, to: .landscape),
+        SettingsEntry("landscapeChatOpacity", "Chat Background", keywords: ["landscape", "opacity", "transparency", "translucent", "overlay"], in: .videoAndDevice, to: .landscape),
+        SettingsEntry("landscapeResetWidth", "Reset Chat Width", keywords: ["landscape", "divider", "resize", "chat width"], in: .videoAndDevice, to: .landscape),
 
         // Accounts & Data — AccountsDataSettingsScreen and the screens it links to
         SettingsEntry("accounts", "Accounts", keywords: ["switch account", "add account", "sign in", "log in", "login", "re-authorize"], in: .accountsAndData),
@@ -145,7 +145,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .appearance: "Theme, text size, timestamps, edge-to-edge"
         case .chat: "Highlights, filters, emotes, history"
-        case .videoAndDevice: "Video in chat, picture in picture, screen awake"
+        case .videoAndDevice: "Video in chat, landscape, native player"
         case .accountsAndData: "Accounts, blocked users, storage"
         case .about: "What's new, version"
         }
@@ -162,6 +162,7 @@ enum SettingsDestination: Hashable, Sendable {
     case highlights
     case filters
     case emotes
+    case landscape
     case blockedUsers
     case storage
     case whatsNew
@@ -172,6 +173,7 @@ enum SettingsDestination: Hashable, Sendable {
         case .highlights: "Highlights"
         case .filters: "Filters"
         case .emotes: "Emotes"
+        case .landscape: "Landscape Layout"
         case .blockedUsers: "Blocked Users"
         case .storage: "Storage"
         case .whatsNew: "What's New"

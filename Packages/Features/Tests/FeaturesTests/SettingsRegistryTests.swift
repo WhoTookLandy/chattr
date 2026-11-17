@@ -66,5 +66,17 @@ struct SettingsRegistryTests {
         #expect(byId["hideBots"]?.breadcrumb == "Chat › Filters")
         #expect(byId["filters"]?.breadcrumb == "Chat")
         #expect(byId["theme"]?.breadcrumb == "Appearance")
+        #expect(byId["landscapeLayout"]?.breadcrumb == "Video & Device")
+        #expect(byId["landscapeChatSide"]?.breadcrumb == "Video & Device › Landscape Layout")
+    }
+
+    @Test("Landscape settings are found from Video & Device")
+    func landscapeEntries() {
+        let ids = SettingsRegistry.search("landscape").map(\.id)
+        #expect(ids.contains("landscapeLayout"))
+        #expect(ids.contains("landscapeChatSide"))
+        #expect(ids.contains("landscapeChatOpacity"))
+        #expect(ids.contains("landscapeResetWidth"))
+        #expect(SettingsRegistry.search("opacity").map(\.id).contains("landscapeChatOpacity"))
     }
 }

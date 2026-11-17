@@ -3,8 +3,8 @@ import SwiftUI
 /// Preferences for watching a stream with chat in landscape. Stored with
 /// `@AppStorage` under these keys, like `PlayerSettings`.
 ///
-/// Settings rows: `LandscapeSettingsScreen` (linked from You → Video). When
-/// the Features/Settings registry lands, register that screen there.
+/// Settings rows: `LandscapeSettingsScreen` (Settings → Video & Device →
+/// Landscape Layout; searchable through `SettingsRegistry`).
 enum LandscapeSettings {
     /// Which side of the video the chat column sits on.
     static let chatSideKey = "chattr.landscape.chatSide"

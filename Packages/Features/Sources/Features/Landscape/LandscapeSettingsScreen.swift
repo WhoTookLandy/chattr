@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// You → Video → Landscape Layout: how chat and the stream share the screen
+/// Settings → Video & Device → Landscape Layout: how chat and the stream share the screen
 /// when the phone is turned sideways.
 ///
-/// Rows read/write `LandscapeSettings` keys via `@AppStorage`. When the
-/// Features/Settings registry lands, register this screen (or its rows)
-/// there instead of the direct `NavigationLink` in `ProfileScreen`.
+/// Rows read/write `LandscapeSettings` keys via `@AppStorage`. Reached as
+/// `SettingsDestination.landscape`; each row has a `SettingsRegistry` entry
+/// (`to: .landscape`) — keep titles in step.
 struct LandscapeSettingsScreen: View {
     @AppStorage(LandscapeSettings.layoutKey) private var layoutMode: LandscapeLayoutMode = .beside
     @AppStorage(LandscapeSettings.chatSideKey) private var chatSide: LandscapeChatSide = .right
