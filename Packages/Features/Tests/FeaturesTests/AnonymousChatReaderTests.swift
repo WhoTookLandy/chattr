@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import ChatModel
 import TwitchKit
 @testable import Features
@@ -46,6 +47,14 @@ struct AnonymousChatReaderTests {
         let clearAll = try #require(IRCLine(":tmi.twitch.tv CLEARCHAT #channel"))
         #expect(clearAll.tags["target-user-id"] == nil)
         #expect(clearAll.params == ["#channel"])
+    }
+
+    @Test("Uses Twitch's send time as a stable timestamp")
+    func sentTimestamp() throws {
+        let line = "@id=m1;tmi-sent-ts=1700000000123 :a!a@a.tmi.twitch.tv PRIVMSG #channel :hi"
+        let message = try #require(AnonymousChatReader.parsePrivmsg(line))
+        #expect(message.timestamp == Date(timeIntervalSince1970: 1_700_000_000.123))
+        #expect(message == AnonymousChatReader.parsePrivmsg(line))
     }
 
     @Test("Keeps the sender's user id for user-wide removal")

@@ -31,6 +31,9 @@ final class AnonymousChatReader {
         var login: String = ""
         /// Twitch emotes from the `emotes` tag: unicode-scalar ranges.
         var twitchEmotes: [TwitchEmoteSpan] = []
+        /// When Twitch sent it (`tmi-sent-ts`), else when it arrived. Fixed
+        /// per message so re-renders don't move the row's timestamp.
+        var timestamp: Date = .now
     }
 
     /// `emotes=25:0-4,12-16/1902:6-10` → one span per occurrence.
@@ -223,7 +226,9 @@ final class AnonymousChatReader {
             login: login,
             // A /me body is offset by the ACTION wrapper in the raw text;
             // positions are only reliable for plain messages.
-            twitchEmotes: isAction ? [] : Self.parseEmoteSpans(irc.tags["emotes"] ?? "")
+            twitchEmotes: isAction ? [] : Self.parseEmoteSpans(irc.tags["emotes"] ?? ""),
+            timestamp: irc.tags["tmi-sent-ts"].flatMap(Double.init)
+                .map { Date(timeIntervalSince1970: $0 / 1000) } ?? .now
         )
     }
 
@@ -264,7 +269,8 @@ final class AnonymousChatReader {
             authorDisplayName: message.author,
             authorUserLogin: message.login,
             authorColor: message.color ?? "",
-            runs: Self.runs(text: message.text, spans: message.twitchEmotes, emotes: thirdPartyEmotes)
+            runs: Self.runs(text: message.text, spans: message.twitchEmotes, emotes: thirdPartyEmotes),
+            timestamp: message.timestamp
         )
     }
 
