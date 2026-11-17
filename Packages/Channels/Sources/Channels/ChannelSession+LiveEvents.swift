@@ -168,11 +168,13 @@ extension ChannelSession {
     /// The app moved between foreground and background: the registry
     /// updated the shared `appForeground` flag and nudges every session.
     /// Re-reads the flag (so a stale or repeated nudge is a no-op).
-    /// Backgrounded: the periodic check stops and no live-event Helix
-    /// request starts. Foregrounded: one reconcile catches up on whatever
-    /// changed meanwhile (and confirms a locked prediction that sat past
-    /// `unconfirmedExpiry` unchecked), then the check re-arms if something
-    /// is still unfinished.
+    /// Backgrounded: the periodic check stops, an in-flight reconcile pass
+    /// is cancelled, and no live-event Helix request starts. Foregrounded:
+    /// one reconcile catches up on whatever changed meanwhile (and confirms
+    /// a locked prediction that sat past `unconfirmedExpiry` unchecked),
+    /// then the check re-arms if something is still unfinished. If the
+    /// cancelled pass hasn't exited yet, the request is queued behind it
+    /// rather than dropped (`liveEventsReconcilePending`).
     public func appForegroundDidChange() async {
         let inForeground = isAppInForeground
         guard inForeground != lastSeenAppForeground else { return }
@@ -180,6 +182,8 @@ extension ChannelSession {
         updateLiveEventsVerification()
         if inForeground {
             await reconcileLiveEvents()
+        } else {
+            liveEventsReconcileTask?.cancel()
         }
     }
 
@@ -202,39 +206,125 @@ extension ChannelSession {
     /// latest poll, prediction and Hype Train. Runs at start (the seed),
     /// after an EventSub reconnect (anything that began, ended or resolved
     /// while the socket was down) and periodically while an event is
-    /// unfinished. Own channel only; a no-op elsewhere, after `stop()`,
+    /// unfinished. Own channel only; a no-op elsewhere, after `stop()` and
     /// while the app is in the background (returning to the foreground
-    /// reconciles), or while another reconcile is in flight.
+    /// reconciles).
+    ///
+    /// Exactly one pass runs at a time, in its own task
+    /// (`liveEventsReconcileTask`), so backgrounding and `stop()` can cancel
+    /// it whoever asked for it. A request that arrives while a pass is in
+    /// flight isn't dropped: it marks `liveEventsReconcilePending` and the
+    /// running pass, on exit, starts one more. Returns once no pass is in
+    /// flight (so the request has been served).
     ///
     /// Each kind goes through `LiveEventsState.reconcile`, which can replace
     /// or clear a stored event but never undoes an EventSub update that
     /// landed while the request was in flight. A failed request leaves that
     /// kind alone: no answer is not the same as "nothing running".
     public func reconcileLiveEvents() async {
-        guard channelId == accountUserId, !isStopped, isAppInForeground, !liveEventsReconcileInFlight else { return }
-        liveEventsReconcileInFlight = true
-        defer {
-            liveEventsReconcileInFlight = false
-            // Arm or cancel the periodic check once the whole pass is in,
-            // never per kind: cancelling the check task mid-pass (it may be
-            // the one running this) would cancel the remaining fetches.
-            updateLiveEventsVerification()
+        guard canFetchLiveEvents else { return }
+        if liveEventsReconcileTask == nil {
+            startLiveEventsReconcilePass()
+        } else {
+            liveEventsReconcilePending = true
+        }
+        await waitForLiveEventsReconcile()
+    }
+
+    /// Waits until no reconcile pass is in flight, including a follow-up
+    /// a finishing pass started. Internal for tests.
+    func waitForLiveEventsReconcile() async {
+        while let running = liveEventsReconcileTask {
+            await running.value
+        }
+    }
+
+    /// Whether a reconcile is queued behind the running pass. Internal for
+    /// tests.
+    var isLiveEventsReconcilePending: Bool { liveEventsReconcilePending }
+
+    /// Own channel, not stopped, app in the foreground: the conditions for
+    /// starting ANY live-event Helix request. Re-checked before every fetch,
+    /// because each one suspends and any of them can change meanwhile.
+    var canFetchLiveEvents: Bool {
+        channelId == accountUserId && !isStopped && isAppInForeground
+    }
+
+    /// Starts a pass in a fresh, uncancelled task. The handle is set before
+    /// the task can run (it needs this actor), and only the pass clears it.
+    private func startLiveEventsReconcilePass() {
+        liveEventsReconcilePending = false
+        liveEventsReconcileTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runLiveEventsReconcilePass()
+        }
+    }
+
+    private func runLiveEventsReconcilePass() async {
+        do {
+            try await reconcileLiveEventsOnce()
+        } catch {
+            // Only `CancellationError` reaches here: backgrounded or stopped
+            // mid-pass. The kinds already reconciled stay applied.
+            logger.debug("Live-event reconcile for #\(self.channelLoginName, privacy: .public) stopped early")
+        }
+        liveEventsReconcileTask = nil
+        if liveEventsReconcilePending, canFetchLiveEvents {
+            startLiveEventsReconcilePass()
+        } else {
+            liveEventsReconcilePending = false
+        }
+        // Arm or cancel the periodic check once the whole pass is in, never
+        // per kind.
+        updateLiveEventsVerification()
+    }
+
+    /// One pass over the three kinds. Throws `CancellationError` — and
+    /// starts no further request — as soon as the task is cancelled or the
+    /// session can no longer fetch.
+    private func reconcileLiveEventsOnce() async throws {
+        try checkCanFetchLiveEvents()
+        let pollFetchedAt = Date()
+        do {
+            let page = try await client.api.fetchPollsPage(broadcasterID: channelId, first: 1)
+            reconcileLiveEvent(.poll, snapshot: page.data.first.map(LiveEventUpdate.init(helixPoll:)), fetchedAt: pollFetchedAt)
+        } catch {
+            try rethrowIfCancelled(error)
+            logger.info("Poll fetch failed for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
 
-        let pollFetchedAt = Date()
-        if let page = try? await client.api.fetchPollsPage(broadcasterID: channelId, first: 1) {
-            reconcileLiveEvent(.poll, snapshot: page.data.first.map(LiveEventUpdate.init(helixPoll:)), fetchedAt: pollFetchedAt)
-        }
+        try checkCanFetchLiveEvents()
         let predictionFetchedAt = Date()
-        if let page = try? await client.api.fetchPredictionsPage(broadcasterID: channelId, first: 1) {
+        do {
+            let page = try await client.api.fetchPredictionsPage(broadcasterID: channelId, first: 1)
             reconcileLiveEvent(.prediction, snapshot: page.data.first.flatMap(LiveEventUpdate.init(helixPrediction:)), fetchedAt: predictionFetchedAt)
+        } catch {
+            try rethrowIfCancelled(error)
+            logger.info("Prediction fetch failed for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+
+        try checkCanFetchLiveEvents()
         let trainFetchedAt = Date()
         do {
             let status = try await client.api.fetchHypeTrainStatus(forBroadcasterID: channelId)
             reconcileLiveEvent(.hypeTrain, snapshot: status?.current.map(LiveEventUpdate.init(helixHypeTrain:)), fetchedAt: trainFetchedAt)
         } catch {
+            try rethrowIfCancelled(error)
             logger.info("Hype Train status fetch failed for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func checkCanFetchLiveEvents() throws {
+        try Task.checkCancellation()
+        guard canFetchLiveEvents else { throw CancellationError() }
+    }
+
+    /// A cancelled fetch can surface as `CancellationError` or as a
+    /// transport error thrown while the task was cancelled; both end the
+    /// pass instead of being logged as a failed kind.
+    private func rethrowIfCancelled(_ error: any Error) throws {
+        if error is CancellationError || Task.isCancelled {
+            throw CancellationError()
         }
     }
 
@@ -275,7 +365,16 @@ extension ChannelSession {
         }
     }
 
-    private func fetchPollDeadline(pollId: String) async {
+    /// Internal for tests.
+    func fetchPollDeadline(pollId: String) async {
+        // Queued while in the foreground, but it may run after the app was
+        // backgrounded or the session stopped: re-check at execution time.
+        // Un-mark the poll so the next foreground pass can ask again (its
+        // poll snapshot usually brings the deadline anyway).
+        guard canFetchLiveEvents, !Task.isCancelled else {
+            if pollDeadlineRequestedFor == pollId { pollDeadlineRequestedFor = nil }
+            return
+        }
         do {
             let page = try await client.api.fetchPollsPage(broadcasterID: channelId, ids: [pollId])
             guard let poll = page.data.first, !isStopped else { return }

@@ -196,9 +196,15 @@ public actor ChannelSession {
     /// out-of-order nudge is a no-op.
     var lastSeenAppForeground: Bool
     var isAppInForeground: Bool { appForeground.isInForeground }
-    /// One Helix reconcile at a time (start, reconnect and the periodic
-    /// check can overlap).
-    var liveEventsReconcileInFlight = false
+    /// The one Helix reconcile pass in flight, if any (start, reconnect,
+    /// foreground and the periodic check can overlap; they never stack).
+    /// Only the pass clears it, when it exits, so non-nil ⇔ a pass is
+    /// running. Backgrounding and `stop()` cancel it.
+    var liveEventsReconcileTask: Task<Void, Never>?
+    /// A reconcile was requested while a pass was in flight: when that pass
+    /// exits (finished or cancelled), one more runs in a fresh task if the
+    /// session can still reconcile. Coalesces any number of requests.
+    var liveEventsReconcilePending = false
     /// Set first thing in `stop()`. A live-topic subscribe that lands after
     /// it deletes its own subscription instead of recording it.
     var isStopped = false
@@ -423,6 +429,7 @@ public actor ChannelSession {
 
         liveEventsTask?.cancel()
         liveEventsTask = nil
+        liveEventsReconcileTask?.cancel()   // the pass clears its own handle
         updateLiveEventsVerification()   // isStopped: cancels the check
         finishLiveEventSubscribers()
 
