@@ -126,7 +126,12 @@ final class StreamPlayerController {
         presenter.present(fullscreen, animated: true)
     }
 
+    /// Latest requested cap — read when a pending native load finishes, so
+    /// a change made while the playlist was loading isn't lost.
+    @ObservationIgnored var preferredQuality: PlayerQuality = .auto
+
     func applyQuality(_ quality: PlayerQuality) {
+        preferredQuality = quality
         avPlayer?.currentItem?.preferredMaximumResolution = quality.maximumResolution
     }
 
@@ -249,13 +254,14 @@ enum NativePlayer {
         func load(login: String, audioOnly: Bool, quality: PlayerQuality, into view: PlayerLayerView) {
             teardown()
             loadedKey = Self.key(login, audioOnly)
+            controller.preferredQuality = quality
             controller.reset()
 
             loadTask = Task { [weak self, weak view] in
                 do {
                     let url = try await TwitchHLS.playlistURL(login: login, audioOnly: audioOnly)
                     guard !Task.isCancelled, let self, let view else { return }
-                    self.start(url: url, quality: quality, in: view)
+                    self.start(url: url, in: view)
                 } catch {
                     guard !Task.isCancelled else { return }
                     self?.controller.onNativeFailure?()
@@ -263,13 +269,13 @@ enum NativePlayer {
             }
         }
 
-        private func start(url: URL, quality: PlayerQuality, in view: PlayerLayerView) {
+        private func start(url: URL, in view: PlayerLayerView) {
             let session = AVAudioSession.sharedInstance()
             try? session.setCategory(.playback, mode: .moviePlayback)
             try? session.setActive(true)
 
             let item = AVPlayerItem(url: url)
-            item.preferredMaximumResolution = quality.maximumResolution
+            item.preferredMaximumResolution = controller.preferredQuality.maximumResolution
             let player = AVPlayer(playerItem: item)
             view.playerLayer.player = player
             controller.avPlayer = player

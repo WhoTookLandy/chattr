@@ -417,6 +417,7 @@ struct ComposeBar: View {
                     Label("Show Video", systemImage: "play.rectangle")
                 }
             }
+            #if os(iOS)
             if !audioOnly {
                 Button {
                     withAnimation(.snappy(duration: 0.25)) {
@@ -427,6 +428,7 @@ struct ComposeBar: View {
                     Label("Audio Only", systemImage: "headphones")
                 }
             }
+            #endif
             if videoVisible {
                 Button {
                     withAnimation(.snappy(duration: 0.25)) {

@@ -91,7 +91,7 @@ struct StreamHeaderView: View {
     var body: some View {
         Group {
             if isExpanded, let stream {
-                if audioOnly {
+                if isAudioOnlyActive {
                     audioBar(stream)
                 } else {
                     watchingLayout(stream)
@@ -136,7 +136,8 @@ struct StreamHeaderView: View {
                 channel,
                 title: stream.title,
                 profileImageURL: profileImageURL,
-                native: useNativePlayer,
+                // Audio-only needs the native engine (see isAudioOnlyActive).
+                native: useNativePlayer || audioOnly,
                 audioOnly: audioOnly,
                 quality: maxQuality
             )
@@ -158,6 +159,19 @@ struct StreamHeaderView: View {
     private var isPlayerPaused: Bool {
         #if os(iOS)
         player.isPaused
+        #else
+        false
+        #endif
+    }
+
+    /// Audio-only needs the native engine (Twitch's audio-only rendition);
+    /// the web player can't play hidden — it needs a visible, full-size
+    /// surface to autoplay and to show its "Start Watching" gate. So if the
+    /// native engine fails, audio-only falls back to the normal video
+    /// layout. Not available off iOS (no player there).
+    private var isAudioOnlyActive: Bool {
+        #if os(iOS)
+        audioOnly && !player.nativeFailed
         #else
         false
         #endif
@@ -413,10 +427,12 @@ struct StreamHeaderView: View {
                     glyphButton("chevron.left", label: "Back") { dismiss() }
                     Spacer()
                     pageIndicator
+                    #if os(iOS)
                     glyphButton("headphones", label: "Audio only") {
                         chromeVisible = false
                         withAnimation(.snappy(duration: 0.25)) { audioOnly = true }
                     }
+                    #endif
                     if let channelURL {
                         ShareLink(item: channelURL) { glyph("square.and.arrow.up") }
                             .buttonStyle(.plain)

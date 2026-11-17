@@ -254,7 +254,9 @@ struct MiniPlayerOverlay: View {
     var body: some View {
         if let channel = center.channel {
             Group {
-                if center.audioOnly {
+                // Native failed → web engine, which can't play hidden:
+                // show the video tile instead of the audio pill.
+                if center.audioOnly, !center.controller.nativeFailed {
                     audioPill(channel)
                 } else {
                     videoTile(channel)
