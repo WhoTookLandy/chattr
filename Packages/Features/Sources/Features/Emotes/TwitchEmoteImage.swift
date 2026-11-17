@@ -21,10 +21,14 @@ struct TwitchEmoteImage: View {
     /// Whether this Twitch emote has an animated variant — drives the
     /// ImageIO-based animated renderer vs the cheap static LazyImage.
     private let isAnimated: Bool
+    /// From `ChatAppearance.animatedEmotes`. Off → animated emotes show their
+    /// poster frame, matching `ThirdPartyEmoteImage`.
+    let allowAnimation: Bool
 
-    init(emote: EmoteReference, displayName: String) {
+    init(emote: EmoteReference, displayName: String, allowAnimation: Bool = true) {
         self.emote = emote
         self.displayName = displayName
+        self.allowAnimation = allowAnimation
         // Twitch CDN auto-falls-back to static when an emote has no animated
         // variant, so requesting "animated" is always safe; sticking with
         // "static" avoids the (small) extra processing for emotes we know
@@ -47,7 +51,8 @@ struct TwitchEmoteImage: View {
             isAnimated: isAnimated,
             width: Self.box.width, height: Self.box.height,
             accessibilityLabel: displayName,
-            boxSize: Self.box
+            boxSize: Self.box,
+            animate: allowAnimation
         ) { image in
             image.resizable().interpolation(.high).scaledToFit()
         } placeholder: { failed in

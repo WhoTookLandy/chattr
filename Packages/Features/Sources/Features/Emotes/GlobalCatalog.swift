@@ -34,9 +34,17 @@ public final class GlobalCatalog {
     /// picker / name-to-ID resolution when sending messages.
     public private(set) var globalEmotes: [String: TwitchEmote] = [:]
 
-    /// True once a load attempt has *completed* (success or failure). Subsequent
-    /// triggers from `.task(id:)` no-op so we don't refetch on every account swap.
+    /// True once BOTH globals are current — fetched from the network, or
+    /// restored fresh from disk. Subsequent triggers from `.task(id:)` no-op so
+    /// we don't refetch on every account swap. A failed (or half-failed) load
+    /// leaves it false, so the next trigger retries instead of the catalog
+    /// staying empty for the rest of the process.
     public private(set) var hasLoaded: Bool = false
+
+    /// Network attempts per `load` before giving up until the next trigger,
+    /// and the base backoff between them (doubled each retry).
+    private static let maxAttempts = 3
+    private static let retryBaseDelay: Duration = .seconds(2)
 
     /// Disk cache for the single global metadata blob.
     private let cache: JSONDiskCache
@@ -75,30 +83,53 @@ public final class GlobalCatalog {
 
         // Sequential is fine — Account is non-Sendable so async let trips
         // Swift 6's sending check, and the total cost is sub-second on a
-        // background load that doesn't block first paint.
-        let badges = await fetchBadges(client: client, accountStore: accountStore, account: account)
-        let emotes = await fetchEmotes(client: client, accountStore: accountStore, account: account)
+        // background load that doesn't block first paint. `nil` = that fetch
+        // FAILED (distinct from a successful empty result); only failed
+        // halves are retried, with a short backoff.
+        var badges: [ChatBadgeKey: ChatBadgeEntry]?
+        var emotes: [String: TwitchEmote]?
+        for attempt in 0..<Self.maxAttempts {
+            if attempt > 0 {
+                try? await Task.sleep(for: Self.retryBaseDelay * (1 << (attempt - 1)))
+                if Task.isCancelled { break }
+            }
+            if badges == nil {
+                badges = await fetchBadges(client: client, accountStore: accountStore, account: account)
+            }
+            if emotes == nil {
+                emotes = await fetchEmotes(client: client, accountStore: accountStore, account: account)
+            }
+            if badges != nil, emotes != nil { break }
+        }
 
         // Both fetches failed (network down / unauthorized). Keep whatever we
-        // restored from disk rather than overwriting memory + cache with empties.
-        guard !badges.isEmpty || !emotes.isEmpty else {
-            hasLoaded = true
-            logger.info("GlobalCatalog fetch returned nothing; keeping existing globals")
+        // restored from disk rather than overwriting memory + cache with
+        // empties, and leave `hasLoaded` false so the next trigger retries.
+        guard badges != nil || emotes != nil else {
+            logger.info("GlobalCatalog fetch failed; keeping existing globals and retrying on the next load")
             return
         }
 
-        // Badges and emotes are independent fetches: on a revalidation pass one
-        // can succeed while the other transiently fails (returns empty). Carry
-        // forward the existing value (disk-restored or previously-loaded) for any
-        // empty result so a partial failure never clobbers good data — in memory
-        // or on disk.
-        let mergedBadges = badges.isEmpty ? globalBadges : badges
-        let mergedEmotes = emotes.isEmpty ? globalEmotes : emotes
+        // Badges and emotes are independent fetches: one can succeed while the
+        // other fails. Carry forward the existing value (disk-restored or
+        // previously-loaded) for the failed half so a partial failure never
+        // clobbers good data — in memory or on disk — and only call the
+        // catalog loaded once both halves are current.
+        let mergedBadges = badges ?? globalBadges
+        let mergedEmotes = emotes ?? globalEmotes
 
         globalBadges = mergedBadges
         globalEmotes = mergedEmotes
-        hasLoaded = true
+        hasLoaded = badges != nil && emotes != nil
 
+        // Persist only a complete result. The disk entry has ONE freshness
+        // stamp for both halves, so saving after a partial failure would let
+        // the next launch (within the TTL) restore the stale half as fresh
+        // and skip refetching it.
+        guard hasLoaded else {
+            logger.warning("GlobalCatalog partial load (badges ok: \(badges != nil), emotes ok: \(emotes != nil)); not caching, will retry on the next load")
+            return
+        }
         await cache.save(
             key: Self.cacheKey,
             value: GlobalsCachePayload(badges: mergedBadges, emotes: mergedEmotes),
@@ -113,7 +144,7 @@ public final class GlobalCatalog {
         client: TwitchClient,
         accountStore: AccountStore,
         account: Account
-    ) async -> [ChatBadgeKey: ChatBadgeEntry] {
+    ) async -> [ChatBadgeKey: ChatBadgeEntry]? {
         do {
             let sets = try await accountStore.withTokenRefresh(for: account) {
                 try await client.api.fetchGlobalBadges()
@@ -121,7 +152,7 @@ public final class GlobalCatalog {
             return ChatBadgeStore.flatten(sets: sets)
         } catch {
             logger.error("GlobalCatalog badge fetch failed: \(error.localizedDescription)")
-            return [:]
+            return nil
         }
     }
 
@@ -129,7 +160,7 @@ public final class GlobalCatalog {
         client: TwitchClient,
         accountStore: AccountStore,
         account: Account
-    ) async -> [String: TwitchEmote] {
+    ) async -> [String: TwitchEmote]? {
         do {
             let list = try await accountStore.withTokenRefresh(for: account) {
                 try await client.api.fetchGlobalEmotes()
@@ -142,7 +173,7 @@ public final class GlobalCatalog {
             return list.reduce(into: [:]) { $0[$1.id] = $1 }
         } catch {
             logger.error("GlobalCatalog emote fetch failed: \(error.localizedDescription)")
-            return [:]
+            return nil
         }
     }
 }

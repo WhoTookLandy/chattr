@@ -50,9 +50,19 @@ public protocol EmoteProvider: Sendable {
     /// conformances that override it are honored through `any EmoteProvider`.
     /// Defaults to the concrete type name — see the extension below.
     var globalCatalogKey: String { get }
+
+    /// The `Emote.Source` this provider's emotes carry, if it issues a single
+    /// one. `EmoteIndex` uses it to fall back to the cached channel emotes
+    /// of exactly this provider when its channel fetch fails. A requirement
+    /// (with a `nil` default) so conformances are honored through
+    /// `any EmoteProvider`; `nil` means "unknown" and disables that fallback.
+    var emoteSource: Emote.Source? { get }
 }
 
 extension EmoteProvider {
+    /// Default `emoteSource`: unknown. The three real providers override it.
+    public var emoteSource: Emote.Source? { nil }
+
     /// Default `globalCatalogKey`. Global sets are a property of the
     /// provider *kind*, not the instance — every channel's 7TV provider sees
     /// the same global set — so the default keys by concrete type. Test

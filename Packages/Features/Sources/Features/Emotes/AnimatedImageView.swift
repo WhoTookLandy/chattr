@@ -63,18 +63,23 @@ struct AnimatedImageView<Placeholder: View>: View {
     @State private var decoded: DecodedAnimation?
     @State private var failed = false
 
-    /// Re-decode when the URL or the target pixel size changes (text-size
-    /// setting, display scale).
+    /// Re-decode when the URL, the target pixel size (text-size setting,
+    /// display scale) or the playback mode changes.
     private struct LoadKey: Equatable {
         let url: URL?
         let maxPixelSize: Int
+        /// Only the poster will ever be shown (animations off / Reduce
+        /// Motion), so decode just that frame instead of the whole
+        /// animation — see `DecodedAnimation.init(data:maxPixelSize:posterOnly:)`.
+        let posterOnly: Bool
     }
 
     var body: some View {
         let key = LoadKey(
             url: url,
             maxPixelSize: AnimatedEmoteDecoder.maxPixelSize(
-                for: CGSize(width: width, height: height), scale: displayScale))
+                for: CGSize(width: width, height: height), scale: displayScale),
+            posterOnly: !animate || reduceMotion)
         content
             .frame(width: width, height: height)
             .task(id: key) { await load(key) }
@@ -137,7 +142,10 @@ struct AnimatedImageView<Placeholder: View>: View {
         // Re-scrolling to a previously-seen animated emote is instant
         // instead of re-running CGImageSource frame extraction on every
         // appearance (the decoded CGImages are immutable + safe to share).
-        if let cached = DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: key.maxPixelSize) {
+        // A poster-only view can also use an already-decoded full animation
+        // (its poster frame is the same one).
+        if let cached = DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: key.maxPixelSize, posterOnly: key.posterOnly)
+            ?? (key.posterOnly ? DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: key.maxPixelSize, posterOnly: false) : nil) {
             decoded = cached
             return
         }
@@ -146,7 +154,7 @@ struct AnimatedImageView<Placeholder: View>: View {
             // Shared, de-duplicated fetch + off-main decode: every row
             // showing this emote awaits the same task.
             let result = try await AnimatedEmoteDecoder.shared.animation(
-                for: url, maxPixelSize: key.maxPixelSize)
+                for: url, maxPixelSize: key.maxPixelSize, posterOnly: key.posterOnly)
             guard !Task.isCancelled else { return }
             if let result {
                 decoded = result
@@ -252,7 +260,13 @@ struct DecodedAnimation: @unchecked Sendable {
     ///     display box × screen scale) instead of at full resolution — a
     ///     4x 7TV emote decoded for a 24pt row is ~10× fewer bytes per
     ///     frame. `nil` decodes at native size.
-    init?(data: Data, maxPixelSize: Int? = nil) {
+    ///   - posterOnly: Decode ONLY the poster frame (the first visible one —
+    ///     see `posterIndex`), stopping as soon as it's found, and keep it as
+    ///     a single-frame result. For views that will never animate
+    ///     (Animated Emotes off, Reduce Motion): they show just the poster,
+    ///     so decoding and retaining up to `maxFrameCount` frames for them
+    ///     is wasted CPU and memory.
+    init?(data: Data, maxPixelSize: Int? = nil, posterOnly: Bool = false) {
         // Don't let the source keep its own decoded copy of every frame —
         // we hold the (downsampled) CGImages ourselves.
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
@@ -279,17 +293,42 @@ struct DecodedAnimation: @unchecked Sendable {
         // Keep every `step`-th frame so at most `maxFrameCount` survive.
         let step = max(1, (count + Self.maxFrameCount - 1) / Self.maxFrameCount)
 
+        func decodeFrame(at index: Int) -> CGImage? {
+            if maxPixelSize != nil {
+                CGImageSourceCreateThumbnailAtIndex(source, index, frameOptions)
+            } else {
+                CGImageSourceCreateImageAtIndex(source, index, frameOptions)
+            }
+        }
+
+        if posterOnly {
+            // Walk the same sampled frames, within the same window, that
+            // `findPosterIndex` scans — so the poster matches the full
+            // decode's — but stop at the first visible one.
+            var fallback: CGImage?
+            var poster: CGImage?
+            for start in stride(from: 0, to: count, by: step).prefix(Self.posterScanWindow) {
+                guard let image = decodeFrame(at: start) else { continue }
+                if fallback == nil { fallback = image }
+                if Self.alphaCoverage(of: image) >= Self.posterMinCoverage {
+                    poster = image
+                    break
+                }
+            }
+            guard let chosen = poster ?? fallback else { return nil }
+            self.frames = [chosen]
+            self.durations = [0]
+            self.totalDuration = 0
+            self.posterIndex = 0
+            return
+        }
+
         var frames: [CGImage] = []
         var durations: [Double] = []
         frames.reserveCapacity(min(count, Self.maxFrameCount))
         durations.reserveCapacity(min(count, Self.maxFrameCount))
         for start in stride(from: 0, to: count, by: step) {
-            let image: CGImage? = if maxPixelSize != nil {
-                CGImageSourceCreateThumbnailAtIndex(source, start, frameOptions)
-            } else {
-                CGImageSourceCreateImageAtIndex(source, start, frameOptions)
-            }
-            guard let image else { continue }
+            guard let image = decodeFrame(at: start) else { continue }
             // The kept frame is held for the skipped frames' time too, so
             // the total loop duration is unchanged.
             var duration = 0.0
@@ -316,11 +355,17 @@ struct DecodedAnimation: @unchecked Sendable {
     /// Runs at init time, which `AnimatedEmoteDecoder` keeps off the main
     /// thread, and the result is cached with the decoded frames.
     private static func findPosterIndex(in frames: [CGImage]) -> Int {
-        for (index, frame) in frames.prefix(10).enumerated() {
-            if alphaCoverage(of: frame) >= 0.05 { return index }
+        for (index, frame) in frames.prefix(posterScanWindow).enumerated() {
+            if alphaCoverage(of: frame) >= posterMinCoverage { return index }
         }
         return 0
     }
+
+    /// How many (sampled) frames the poster search looks at, and the alpha
+    /// coverage a frame needs to count as visible. Shared by the full decode
+    /// and the poster-only decode so both pick the same frame.
+    private static let posterScanWindow = 10
+    private static let posterMinCoverage = 0.05
 
     /// Fraction of pixels with non-negligible alpha, via a downsampled
     /// render: drawing into a 16×16 context samples the frame uniformly,
@@ -410,18 +455,21 @@ final class DecodedAnimationCache: @unchecked Sendable {
         cache.totalCostLimit = 64 * 1024 * 1024
     }
 
-    static func key(url: URL, maxPixelSize: Int) -> String {
-        "\(maxPixelSize)|\(url.absoluteString)"
+    /// Poster-only decodes are a separate entry from full ones: the same URL
+    /// and size would otherwise hand a single-frame result to a view that
+    /// wants to animate.
+    static func key(url: URL, maxPixelSize: Int, posterOnly: Bool = false) -> String {
+        "\(maxPixelSize)|\(posterOnly ? "poster" : "full")|\(url.absoluteString)"
     }
 
-    func decoded(for url: URL, maxPixelSize: Int) -> DecodedAnimation? {
-        cache.object(forKey: Self.key(url: url, maxPixelSize: maxPixelSize) as NSString)?.value
+    func decoded(for url: URL, maxPixelSize: Int, posterOnly: Bool = false) -> DecodedAnimation? {
+        cache.object(forKey: Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) as NSString)?.value
     }
 
-    func store(_ animation: DecodedAnimation, for url: URL, maxPixelSize: Int) {
+    func store(_ animation: DecodedAnimation, for url: URL, maxPixelSize: Int, posterOnly: Bool = false) {
         cache.setObject(
             Entry(animation),
-            forKey: Self.key(url: url, maxPixelSize: maxPixelSize) as NSString,
+            forKey: Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) as NSString,
             cost: animation.byteCost)
     }
 }
@@ -471,11 +519,11 @@ actor AnimatedEmoteDecoder {
 
     /// The decoded animation for `url` at `maxPixelSize`, from cache or a
     /// shared fetch + decode. `nil` when the bytes aren't decodable.
-    func animation(for url: URL, maxPixelSize: Int) async throws -> DecodedAnimation? {
-        if let cached = DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: maxPixelSize) {
+    func animation(for url: URL, maxPixelSize: Int, posterOnly: Bool = false) async throws -> DecodedAnimation? {
+        if let cached = DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) {
             return cached
         }
-        let key = DecodedAnimationCache.key(url: url, maxPixelSize: maxPixelSize)
+        let key = DecodedAnimationCache.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
         let task: Task<DecodedAnimation?, any Error>
         if var existing = inFlight[key] {
             existing.waiters += 1
@@ -487,10 +535,10 @@ actor AnimatedEmoteDecoder {
                 try Task.checkCancellation()
                 // CPU-bound frame extraction, off the main thread and off
                 // this actor.
-                guard let decoded = DecodedAnimation(data: data, maxPixelSize: maxPixelSize) else {
+                guard let decoded = DecodedAnimation(data: data, maxPixelSize: maxPixelSize, posterOnly: posterOnly) else {
                     return nil
                 }
-                DecodedAnimationCache.shared.store(decoded, for: url, maxPixelSize: maxPixelSize)
+                DecodedAnimationCache.shared.store(decoded, for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
                 return decoded
             }
             inFlight[key] = InFlight(task: task, waiters: 1)

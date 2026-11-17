@@ -124,4 +124,22 @@ struct BridgeTokenRefreshTests {
             try await bridge.refresh(using: "old-refresh", login: "landy")
         }
     }
+
+    @Test("Credential rejections are terminal", arguments: [401, 403])
+    func credentialRejectionsAreTerminal(statusCode: Int) async throws {
+        let (bridge, _) = Self.refresher(json: #"{"error":"unauthorized"}"#, statusCode: statusCode)
+
+        await #expect(throws: BridgeTokenRefresh.Rejected(status: statusCode)) {
+            try await bridge.refresh(using: "old-refresh", login: "landy")
+        }
+    }
+
+    @Test("Rate limits and timeouts are transient, not a sign-out", arguments: [408, 429])
+    func transientClientErrorsAreNotRejected(statusCode: Int) async throws {
+        let (bridge, _) = Self.refresher(json: #"{"error":"try again"}"#, statusCode: statusCode)
+
+        await #expect(throws: AppError.bridgeRefreshFailed(status: statusCode)) {
+            try await bridge.refresh(using: "old-refresh", login: "landy")
+        }
+    }
 }

@@ -167,3 +167,69 @@ struct EmoteIndexComposeTests {
         }
     }
 }
+
+@Suite("EmoteIndex channel fallback on provider failure")
+struct EmoteIndexChannelFallbackTests {
+
+    private func emote(_ name: String, source: Emote.Source) -> Emote {
+        Emote(
+            id: "\(source):\(name)",
+            name: name,
+            urls: [.x1: URL(string: "https://cdn/\(name)")!],
+            isAnimated: false, isZeroWidth: false,
+            source: source, ownerChannelId: "123")
+    }
+
+    @Test("A failed provider keeps its own stale channel emotes; others use fresh results")
+    func failedProviderFallsBackToItsStaleEntries() {
+        let providers: [any EmoteProvider] = [SevenTVProvider(), BTTVProvider(), FFZProvider()]
+        let stale: [String: Emote] = [
+            "OldSeven": emote("OldSeven", source: .sevenTV),
+            "OldBttv": emote("OldBttv", source: .bttv),
+            "OldFfz": emote("OldFfz", source: .ffz),
+        ]
+        // 7TV answered, BTTV failed, FFZ answered with nothing.
+        let fetched: [[Emote]] = [[emote("NewSeven", source: .sevenTV)], [], []]
+
+        let sets = EmoteIndex.channelSetsWithFallback(
+            fetched: fetched, failed: [1], providers: providers, stale: stale)
+        let merged = EmoteIndex.compose(globals: [], channel: sets)
+
+        #expect(merged["NewSeven"] != nil)
+        #expect(merged["OldSeven"] == nil, "a successful provider's fresh set replaces its stale one")
+        #expect(merged["OldBttv"] != nil, "the failed provider keeps its cached channel emotes")
+        #expect(merged["OldFfz"] == nil, "a successful empty result is authoritative")
+    }
+
+    @Test("A provider's last successful result this session beats the older disk copy")
+    func rememberedResultBeatsStaleDisk() {
+        let providers: [any EmoteProvider] = [BTTVProvider(), FFZProvider()]
+        let stale: [String: Emote] = [
+            "OldBttv": emote("OldBttv", source: .bttv),
+            "OldFfz": emote("OldFfz", source: .ffz),
+        ]
+        // Earlier pass this session: BTTV returned NewBttv, FFZ returned
+        // nothing (its emotes were removed). Now both fail.
+        let remembered: [Int: [Emote]] = [0: [emote("NewBttv", source: .bttv)], 1: []]
+
+        let sets = EmoteIndex.channelSetsWithFallback(
+            fetched: [[], []], failed: [0, 1], providers: providers,
+            remembered: remembered, stale: stale)
+        let merged = EmoteIndex.compose(globals: [], channel: sets)
+
+        #expect(merged["NewBttv"] != nil)
+        #expect(merged["OldBttv"] == nil)
+        #expect(merged["OldFfz"] == nil, "a remembered empty result keeps removals removed")
+    }
+
+    @Test("No failures or no stale copy leaves the fetched sets untouched")
+    func noFallbackWhenNotNeeded() {
+        let providers: [any EmoteProvider] = [SevenTVProvider()]
+        let fetched: [[Emote]] = [[emote("A", source: .sevenTV)]]
+        #expect(EmoteIndex.channelSetsWithFallback(
+            fetched: fetched, failed: [], providers: providers,
+            stale: ["B": emote("B", source: .sevenTV)]) == fetched)
+        #expect(EmoteIndex.channelSetsWithFallback(
+            fetched: [[]], failed: [0], providers: providers, stale: nil) == [[]])
+    }
+}
