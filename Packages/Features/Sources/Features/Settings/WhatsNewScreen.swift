@@ -16,6 +16,19 @@ struct WhatsNewScreen: View {
     /// build; stamp it with the marketing version when cutting a release.
     static let releases: [Release] = [
         Release(
+            version: "Beta",
+            title: "Watch while you chat",
+            notes: [
+                "Streams play right inside chat. Tap the video for controls, the title and Subscribe; swipe down to hide it.",
+                "Leave a chat and the stream keeps playing in a floating mini player. Tap it to go back, or × to stop.",
+                "Audio only: listen to the stream while chat takes the whole screen.",
+                "Native video player (You → Video): picture-in-picture, fullscreen and a quality setting.",
+                "Jump between open chats from the chip on the video, and close a chat from the ⋯ menu.",
+                "Chat restrictions like followers-only now show in the message box.",
+                "Fixed: the app freezing after tapping back from a chat.",
+            ]
+        ),
+        Release(
             version: "1.0",
             title: "A real home",
             notes: [

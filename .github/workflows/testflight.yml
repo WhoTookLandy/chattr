@@ -99,6 +99,21 @@ jobs:
             | xcbeautify --renderer github-actions
           echo "Uploaded build $BUILD_NUMBER — it appears in TestFlight once App Store Connect finishes processing." >> "$GITHUB_STEP_SUMMARY"
 
+      # TestFlight "What to Test" notes from ci/WhatToTest.txt. Waits for the
+      # build to appear in App Store Connect, then sets the notes. Doesn't
+      # fail the run: the build is already uploaded either way.
+      - name: Set TestFlight notes
+        continue-on-error: true
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_PATH: ${{ env.KEY_PATH }}
+        run: |
+          python3 -m venv "$RUNNER_TEMP/asc-venv"
+          "$RUNNER_TEMP/asc-venv/bin/pip" install --quiet pyjwt cryptography
+          "$RUNNER_TEMP/asc-venv/bin/python" ci/set_whats_new.py com.landy.chattr "$BUILD_NUMBER" ci/WhatToTest.txt
+          echo "What to Test notes set from ci/WhatToTest.txt." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Keep dSYMs
         uses: actions/upload-artifact@v5
         with:
