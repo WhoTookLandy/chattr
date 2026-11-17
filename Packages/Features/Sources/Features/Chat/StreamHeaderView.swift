@@ -107,10 +107,12 @@ struct StreamHeaderView: View {
     var body: some View {
         Group {
             if isExpanded, let stream {
-                if isAudioOnlyActive {
-                    audioBar(stream)
-                } else if isPictureInPictureActive {
-                    pictureInPictureBar(stream)
+                // Audio-only / PiP: no inline video, so the header gives
+                // chat the whole screen; the stream's controls sit in the
+                // nav bar (`NowPlayingToolbarControl`) and the channel pill
+                // shows the mode.
+                if isAudioOnlyActive || isPictureInPictureActive {
+                    hiddenEngine
                 } else {
                     watchingLayout(stream)
                 }
@@ -358,104 +360,24 @@ struct StreamHeaderView: View {
         #endif
     }
 
-    // MARK: - Audio-only bar
+    // MARK: - Condensed (audio-only / picture in picture)
 
-    /// Listen-only mode: the video is gone and chat gets the whole screen;
-    /// a slim glass bar keeps the stream identity, play/pause and a way
-    /// back to video. The player stays mounted but invisible (the native
-    /// engine switches to Twitch's audio-only rendition to save data).
-    private func audioBar(_ stream: TwitchStream) -> some View {
-        HStack(spacing: 10) {
-            avatar(ring: true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(channel.channelDisplayName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Image(systemName: "headphones")
-                    Text("Audio only")
-                    Text("·")
-                    Circle().fill(.red).frame(width: 6, height: 6)
-                    Text(StreamFormatting.viewers(stream.viewerCount))
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+    /// Listen-only, or the stream is in the system PiP window: nothing to
+    /// show inline, so chat takes the whole screen. The engine stays mounted
+    /// (the native engine plays Twitch's audio-only rendition; PiP is
+    /// driven from its layer / video element), just out of sight. The
+    /// controls are in the nav bar — `NowPlayingToolbarControl`.
+    private var hiddenEngine: some View {
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: 0)
+            .background(alignment: .topLeading) {
+                playerEngine(audioOnly: isAudioOnlyActive)
+                    .frame(width: 2, height: 2)
+                    .opacity(0.01)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
-            Spacer(minLength: 4)
-            #if os(iOS)
-            barButton(player.isPaused ? "play.fill" : "pause.fill",
-                      label: player.isPaused ? "Play" : "Pause") {
-                player.togglePlay()
-            }
-            #endif
-            barButton("video.fill", label: "Show video") {
-                withAnimation(.snappy(duration: 0.25)) { audioOnly = false }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18, style: .continuous))
-        .padding(.horizontal, 8)
-        .padding(.top, 4)
-        .background(alignment: .topLeading) {
-            playerEngine(audioOnly: true)
-                .frame(width: 2, height: 2)
-                .opacity(0.01)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
-    }
-
-    // MARK: - Picture-in-picture bar
-
-    /// The stream is in the system PiP window, so the inline video area
-    /// would only show a "playing in picture in picture" placeholder. Give
-    /// that space to chat: a slim bar with the stream identity and a way to
-    /// bring the video back here.
-    private func pictureInPictureBar(_ stream: TwitchStream) -> some View {
-        HStack(spacing: 10) {
-            avatar(ring: true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(channel.channelDisplayName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Image(systemName: "pip")
-                    Text("Picture in picture")
-                    Text("·")
-                    Circle().fill(.red).frame(width: 6, height: 6)
-                    Text(StreamFormatting.viewers(stream.viewerCount))
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-            Spacer(minLength: 4)
-            #if os(iOS)
-            barButton("pip.exit", label: "Show video here") {
-                player.togglePictureInPicture()
-            }
-            #endif
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18, style: .continuous))
-        .padding(.horizontal, 8)
-        .padding(.top, 4)
-        // The engine stays mounted (PiP is driven from its layer / video
-        // element), just out of sight.
-        .background(alignment: .topLeading) {
-            playerEngine(audioOnly: false)
-                .frame(width: 2, height: 2)
-                .opacity(0.01)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
     }
 
     /// This page's stream is the one in the PiP window. Per-channel flag
@@ -467,19 +389,6 @@ struct StreamHeaderView: View {
         #else
         false
         #endif
-    }
-
-    private func barButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.body)
-                .foregroundStyle(.primary)
-                .frame(width: 36, height: 36)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Circle())
-        .accessibilityLabel(label)
     }
 
     /// Stream thumbnail: what neighbouring pages show, and what sits under

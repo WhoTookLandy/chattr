@@ -125,6 +125,18 @@ struct ChatPagerScreen: View {
         // iOS-only; macOS has no tab bar to hide.)
         #if os(iOS)
         .toolbar(.hidden, for: .tabBar)
+        // Audio-only / PiP controls, opposite the back button. Always
+        // present (the control renders nothing when there's no condensed
+        // stream) so the bar never gains or loses an item — see
+        // `headerToolbar`.
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if let chatTabs {
+                    NowPlayingToolbarControl(chatTabs: chatTabs)
+                }
+            }
+            .sharedBackgroundVisibility(.hidden)
+        }
         #endif
         // Open-chats management sheet (reorder, close, browse).
         .sheet(isPresented: $showSwitcher) {
@@ -377,17 +389,33 @@ private struct ChannelPillLabel: View {
 
     @Environment(\.followsStore) private var followsStore
     @Environment(\.channelStatus) private var channelStatus
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    @AppStorage(StreamHeaderView.expandedKey) private var isExpanded = false
+    @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
+    #endif
 
     /// Viewer count when the visible channel is live; nil when offline or
     /// unknown. Read here (not in ChatPagerScreen) for the same isolation
     /// reason as the mention dot.
     private var liveViewers: Int? {
-        guard let chatTabs,
-              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
-              let channelId = chatTabs.tabs.first(where: { $0.id == visibleId })?.channels.first?.channelId
-        else { return nil }
+        guard let channelId = chatTabs?.visibleChannelId else { return nil }
         return ChannelStatusStore.liveStream(for: channelId, status: channelStatus, follows: followsStore)?.viewerCount
     }
+
+    #if os(iOS)
+    /// Audio-only / PiP: the header has collapsed, so the pill carries the
+    /// mode as a glyph next to the viewer count.
+    private var condensedMode: CondensedStreamMode? {
+        CondensedStreamMode.resolve(
+            channelId: chatTabs?.visibleChannelId,
+            isLive: liveViewers != nil,
+            isExpanded: isExpanded,
+            audioOnly: audioOnly,
+            playback: playback
+        )
+    }
+    #endif
 
     var body: some View {
         VStack(spacing: 3) {
@@ -407,6 +435,15 @@ private struct ChannelPillLabel: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Live, \(liveViewers) viewers")
                 }
+                #if os(iOS)
+                if let condensedMode {
+                    Image(systemName: condensedMode.systemImage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tint)
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+                        .accessibilityLabel(condensedMode.accessibilityLabel)
+                }
+                #endif
                 Image(systemName: "chevron.down")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -424,6 +461,9 @@ private struct ChannelPillLabel: View {
             }
             pageDots
         }
+        #if os(iOS)
+        .animation(.snappy(duration: 0.25), value: condensedMode)
+        #endif
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
         // The pill's own glass — `.interactive()` so it responds to the
