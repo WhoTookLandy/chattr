@@ -129,9 +129,9 @@ public struct HomeScreen: View {
                 liveStreams: followsStore?.liveStreamsOrdered ?? [],
                 profileImageURLs: followsStore?.profileImageURLs ?? [:],
                 liveLoadState: followsStore?.liveLoadState ?? .idle,
-                onStreamTap: { stream in
+                onStreamTap: { stream, intent in
                     let profileURL = followsStore?.profileImageURLs[stream.userId]
-                    openChannel?(stream: stream, profileImageURL: profileURL)
+                    openChannel?(stream: stream, profileImageURL: profileURL, intent: intent)
                 }
             )
             .refreshable {
@@ -158,7 +158,9 @@ struct HomeContent: View {
     let liveStreams: [TwitchStream]
     let profileImageURLs: [String: URL]
     let liveLoadState: FollowsStore.LoadState
-    let onStreamTap: (TwitchStream) -> Void
+    /// The stream row was tapped (`.implicit`) or a preview-menu action
+    /// chose how to watch (`.explicit`).
+    let onStreamTap: (TwitchStream, ChatOpenIntent) -> Void
 
     /// Category chip selection; nil = All.
     @State private var selectedCategory: String?
@@ -246,7 +248,7 @@ struct HomeContent: View {
                 }
                 ForEach(Array(displayedStreams.enumerated()), id: \.element.userId) { index, stream in
                     Button {
-                        onStreamTap(stream)
+                        onStreamTap(stream, .implicit)
                     } label: {
                         if index < Self.featuredCount {
                             LiveStreamCard(
@@ -265,7 +267,7 @@ struct HomeContent: View {
                         name: stream.userName,
                         profileImageURL: profileImageURLs[stream.userId],
                         stream: stream,
-                        open: { onStreamTap(stream) }
+                        open: { intent in onStreamTap(stream, intent) }
                     )
                     .listRowBackground(Color.clear)
                     .listRowSeparator(index < Self.featuredCount ? .hidden : .automatic)

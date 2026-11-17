@@ -214,6 +214,22 @@ public struct AppShell: View {
         }
         // Sign-out / account switch: nothing keeps playing for the old account.
         .onDisappear { playback.stop() }
+        // Settings → Video & Device → Keep Screen Awake: while a chat or a stream
+        // (the mini player) is on screen.
+        // Evaluated in the modifier's own body, so these reads don't make the
+        // shell itself observe playback / navigation state.
+        .keepsScreenAwake(while: { chatOnScreen || playback.isPlaying })
+        // Settings → Video & Device → When a Chat Opens, applied just before the
+        // pager presents so the header mounts in the chosen state.
+        .onAppear {
+            if PlaybackPreferences.videoOnOpen == .autoplayOnWiFi {
+                NetworkReachability.warmUp()
+            }
+            let chatTabs = navigation.chatTabs
+            chatTabs.onWillPresent = { [weak playback, weak chatTabs] tab, intent in
+                ChatOpenVideoPolicy.apply(opening: tab, intent: intent, chatTabs: chatTabs, playback: playback)
+            }
+        }
         #endif
         // Single appearance task that does, in this exact order:
         //
@@ -452,8 +468,8 @@ final class AppNavigation {
     /// Open `channel` as a chat tab and land the user in its chat — the
     /// Chats tab with the chat pushed — "tap a channel anywhere → land in
     /// its chat," from any tab. (`open` presents the tab, which pushes it.)
-    func openChannel(_ channel: ChannelDescriptor) {
-        chatTabs.open(channel: channel)
+    func openChannel(_ channel: ChannelDescriptor, intent: ChatOpenIntent = .implicit) {
+        chatTabs.open(channel: channel, intent: intent)
         selectedTab = .chats
     }
 }

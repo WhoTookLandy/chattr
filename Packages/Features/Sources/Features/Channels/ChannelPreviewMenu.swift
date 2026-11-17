@@ -8,11 +8,15 @@ extension View {
     /// category, viewers) with quick actions: Watch / Listen / Chat only,
     /// and Close Chat where it applies. A plain tap keeps doing `open`
     /// with the current video preference.
+    ///
+    /// `open` receives the intent: `.explicit` from Watch / Listen / Chat
+    /// Only (they set the video state themselves, so Settings → When a Chat
+    /// Opens must not override it), `.implicit` from Open Chat.
     func channelPreviewMenu(
         name: String,
         profileImageURL: URL?,
         stream: TwitchStream?,
-        open: @escaping () -> Void,
+        open: @escaping (ChatOpenIntent) -> Void,
         close: (() -> Void)? = nil
     ) -> some View {
         modifier(ChannelPreviewMenu(
@@ -29,7 +33,7 @@ private struct ChannelPreviewMenu: ViewModifier {
     let name: String
     let profileImageURL: URL?
     let stream: TwitchStream?
-    let open: () -> Void
+    let open: (ChatOpenIntent) -> Void
     let close: (() -> Void)?
 
     // The same preferences the chat header and its More menu use.
@@ -42,7 +46,7 @@ private struct ChannelPreviewMenu: ViewModifier {
                 Button {
                     videoVisible = true
                     audioOnly = false
-                    open()
+                    open(.explicit)
                 } label: {
                     Label("Watch", systemImage: "play.rectangle")
                 }
@@ -50,7 +54,7 @@ private struct ChannelPreviewMenu: ViewModifier {
                 Button {
                     videoVisible = true
                     audioOnly = true
-                    open()
+                    open(.explicit)
                 } label: {
                     Label("Listen (Audio Only)", systemImage: "headphones")
                 }
@@ -58,12 +62,12 @@ private struct ChannelPreviewMenu: ViewModifier {
                 Button {
                     videoVisible = false
                     audioOnly = false
-                    open()
+                    open(.explicit)
                 } label: {
                     Label("Chat Only", systemImage: "bubble.left.and.bubble.right")
                 }
             } else {
-                Button(action: open) {
+                Button { open(.implicit) } label: {
                     Label("Open Chat", systemImage: "bubble.left.and.bubble.right")
                 }
             }

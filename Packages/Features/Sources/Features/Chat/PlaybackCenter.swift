@@ -29,7 +29,7 @@ final class WebStreamEngine: StreamEngine {
 
     init(login: String, controller: StreamPlayerController) {
         coordinator = TwitchWebPlayer.Coordinator(controller: controller)
-        webView = TwitchWebPlayer.makeWebView(login: login, coordinator: coordinator)
+        webView = TwitchWebPlayer.makeWebView(login: login, muted: controller.startsMuted, coordinator: coordinator)
         view = webView
         controller.webView = webView
     }
@@ -100,6 +100,12 @@ final class PlaybackCenter {
 
     @ObservationIgnored private var lastQuality: PlayerQuality = .auto
 
+    /// Set when a chat opens under "Autoplay on Wi-Fi": the next new
+    /// stream starts muted. Consumed by the next engine build.
+    @ObservationIgnored var startNextStreamMuted = false
+    /// Leaving the app → PiP or pause (see `PlaybackLifecycleObserver`).
+    @ObservationIgnored private var lifecycle: PlaybackLifecycleObserver?
+
     var isPlaying: Bool { channel != nil }
 
     init() {
@@ -107,6 +113,7 @@ final class PlaybackCenter {
             guard let self else { return }
             self.fallBackToWeb(quality: self.lastQuality)
         }
+        lifecycle = PlaybackLifecycleObserver(center: self)
     }
 
     /// Play `channel` (or keep playing it if it already is). Rebuilds the
@@ -124,6 +131,9 @@ final class PlaybackCenter {
         // re-notifies every reader (the mini player) with identical values.
         if self.title != title { self.title = title }
         if self.profileImageURL != profileImageURL { self.profileImageURL = profileImageURL }
+        // The user just asked to listen: audio-only surfaces have no mute
+        // control, so a muted video (Wi-Fi autoplay) must not stay muted.
+        let entersAudioOnly = audioOnly && !self.audioOnly
         if self.audioOnly != audioOnly { self.audioOnly = audioOnly }
         lastQuality = quality
 
@@ -138,6 +148,16 @@ final class PlaybackCenter {
 
         engine?.teardown()
         if !sameChannel { controller.nativeFailed = false }
+        // A rebuild of the same stream (engine fallback) keeps its mute
+        // state — `isMuted` carries the requested mute even if the old
+        // engine never got as far as an AVPlayer (see `reset()`). Switching
+        // to audio-only unmutes. A new stream starts muted only for autoplay.
+        if sameChannel {
+            controller.startsMuted = controller.isMuted && !entersAudioOnly
+        } else {
+            controller.startsMuted = startNextStreamMuted
+        }
+        startNextStreamMuted = false
         controller.reset()
         self.channel = channel
         engineKey = key
@@ -162,6 +182,8 @@ final class PlaybackCenter {
         engine = nil
         engineKey = nil
         channel = nil
+        controller.startsMuted = false
+        controller.holdsForBackground = false
         controller.reset()
         controller.nativeFailed = false
         hostRevision += 1
