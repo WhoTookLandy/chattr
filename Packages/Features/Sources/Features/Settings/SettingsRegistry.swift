@@ -79,6 +79,7 @@ enum SettingsRegistry {
         SettingsEntry("videoOnOpen", "When a Chat Opens", keywords: ["autoplay", "auto play", "wifi", "wi-fi", "cellular", "start", "closed"], in: .videoAndDevice),
         SettingsEntry("maxQuality", "Max Quality", keywords: ["resolution", "1080p", "720p", "data", "bandwidth"], in: .videoAndDevice),
         SettingsEntry("pictureInPicture", "Picture in Picture", keywords: ["pip", "background", "floating", "leave", "sound"], in: .videoAndDevice),
+        SettingsEntry("pipLeavingChat", "PiP When Leaving Chat", keywords: ["picture in picture", "mini player", "floating", "back", "resize", "drag"], in: .videoAndDevice),
 
         SettingsEntry("keepScreenAwake", "Keep Screen Awake", keywords: ["sleep", "lock", "auto-lock", "idle", "display", "dim", "battery"], in: .videoAndDevice),
         SettingsEntry("haptics", "Haptic Feedback", keywords: ["vibration", "vibrate", "haptics", "taptic"], in: .videoAndDevice),

@@ -2,6 +2,11 @@ Watch while you chat
 
 NEW
 • Signed-out "just look around" chat now shows emotes: Twitch, 7TV, BTTV and FFZ, with name colors, using the same chat rows as when signed in.
+• @ mentions: type @ in the message box and pick a name from the suggestions (recent chatters and the streamer).
+• The keyboard now goes away after you send.
+• The button left of the message box is now ⋯ (More) instead of +.
+• Mini player: drag it anywhere and let go, it settles in the nearest corner. Pinch it to make it bigger or smaller.
+• New setting, Settings → Video & Device → PiP When Leaving Chat: backing out of a playing chat uses Apple’s floating PiP window (drag, resize, works outside the app) instead of the mini player.
 • Picture in picture: the video area in chat collapses to a slim bar so chat gets the space; the floating mini player stays out of the way; PiP return button takes you back to the chat.
 • New sign-in screen, plus "just look around": type a channel name to watch its stream and read chat without an account.
 • Replies look cleaner: a thin connector into a one-line quote, no grey box.
@@ -17,20 +22,24 @@ NEW
 • Mini player: back out of a chat and the stream keeps playing in a floating player across the app. Tap it to return, × or fling it down to stop, drag it to another corner.
 • Audio only (headphones button on the video, or More → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
 • Native video player (You → Video, experimental): Apple's player with picture-in-picture, fullscreen and a max-quality setting. If it can't load a stream, chattr switches to Twitch's web player.
-• Jump between open chats from the "1 / N" chip on the video. Close a chat from the + menu next to the message box.
+• Jump between open chats from the "1 / N" chip on the video. Close a chat from the ⋯ menu next to the message box.
 • Home → Live now lists every live channel you follow (no more "See all").
 • Tap any chat message to see that user's card: badges, join date, bio and their recent messages (drag it up). Reply, block or report from there.
-• Message bar: press Return to send, and tap the + for more options. Tap the chat to put the keyboard away.
+• Message bar: press Return to send, and tap ⋯ for more options. Tap the chat to put the keyboard away.
 • Bots look like everyone else again (no more greyed-out messages). Compact bots is still an option in Filters.
 • Followers-only, slow mode and other chat restrictions now show in the message box.
 • Moderators: tap someone's message for one-tap timeouts (1m, 10m, 1h, 1d; edit the list from the shield menu), plus Ban, Warn and Unban. Sign out and back in once to grant the new permissions.
 • If you're timed out, banned or warned in a chat, a notice at the top says so (with a countdown for timeouts) and the message box explains why you can't send.
 
 FIXED
+• Tapping the "Latest" pill sometimes tapped the message underneath it instead.
 • The Live / Offline bar no longer sticks to the top of lists.
 • The app freezing after tapping back from a chat (for real this time).
 
 PLEASE TEST
+A. Type @ and a few letters: do the right names show? Tap one, keep typing.
+B. Drag and pinch the mini player, with the web player and with the native player.
+C. Turn on PiP When Leaving Chat and back out of a playing chat.
 0. The new tabs: open a channel from Home or Search (it should land in Chats), and relaunch the app with a chat open (it should reopen that chat).
 1. Back out of a playing chat: does the mini player appear without the stream restarting?
 2. Tap the mini player, then back out again a few times.

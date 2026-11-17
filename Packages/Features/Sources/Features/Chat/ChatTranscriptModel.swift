@@ -106,6 +106,10 @@ public final class ChatTranscriptModel {
     /// instead.
     public var lines: [ChatLine] { store.lines }
 
+    /// The signed-in user's login ("" when anonymous) — so @-mention
+    /// suggestions can leave you out.
+    var selfLogin: String { selfChatter.login }
+
     /// True when no line is visible. Invalidates only when it flips.
     var isEmpty: Bool { store.isEmpty }
 
