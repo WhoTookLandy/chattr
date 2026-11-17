@@ -70,6 +70,14 @@ public enum TwitchSignIn {
     ///   caveat: older tokens keep the locally cached block list, and
     ///   block/unblock roll back with an unauthorized error until the
     ///   account signs in again.
+    /// - `moderatorManageBannedUsers` / `moderatorManageWarnings`: the user
+    ///   card's moderation row — timeout / ban / unban (POST + DELETE
+    ///   `/moderation/bans`) and warn (POST `/moderation/warnings`). Same
+    ///   harmless-for-non-mods rationale as the other manage scopes, and the
+    ///   same re-sign-in caveat: on an older token the action still fails
+    ///   unauthorized after the bridge refresh, which
+    ///   `ModerationActionError.needsSignInAgain` turns into a "sign out and
+    ///   back in" message on the card instead of a raw 401.
     public static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,
@@ -79,6 +87,8 @@ public enum TwitchSignIn {
         .userReadModeratedChannels,
         .moderatorManageChatMessages,
         .moderatorManageChatSettings,
+        .moderatorManageBannedUsers,
+        .moderatorManageWarnings,
         .moderatorReadBlockedTerms,
         .moderatorReadUnbanRequests,
         .moderatorReadBannedUsers,

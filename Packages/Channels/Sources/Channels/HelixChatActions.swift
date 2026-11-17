@@ -114,4 +114,95 @@ struct HelixChatActions: Sendable {
             )
         }
     }
+
+    // MARK: - Bans, timeouts, warnings
+
+    /// POST /moderation/bans as the signed-in account. `durationSeconds`
+    /// nil = permanent ban; otherwise a timeout (Twitch accepts 1…1_209_600).
+    ///
+    /// The response body is deliberately ignored: Twitch answers with
+    /// `{broadcaster_id, moderator_id, user_id, created_at, end_time}`, which
+    /// TwitchKit 0.3.4's `BannedUser` (shaped for GET /moderation/banned,
+    /// with logins and a reason) can't decode. `decodingFailed` is only
+    /// thrown AFTER the 2xx status was validated, so it means the ban
+    /// landed — treat it as success rather than reporting a failure for an
+    /// action that happened.
+    func banUser(
+        userId: String,
+        durationSeconds: Int?,
+        reason: String?,
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws {
+        let trimmedReason = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            _ = try await authRetry.run(durationSeconds == nil ? "banUser" : "timeoutUser") {
+                try await client.api.banUser(
+                    broadcasterID: channelId,
+                    moderatorID: accountUserId,
+                    userID: userId,
+                    duration: durationSeconds,
+                    reason: (trimmedReason?.isEmpty == false) ? trimmedReason : nil
+                )
+            }
+        } catch HelixError.decodingFailed {
+            logger.debug("banUser: 2xx with an undecodable body — treating as success")
+        }
+    }
+
+    /// DELETE /moderation/bans — lifts a ban or an active timeout.
+    func unbanUser(
+        userId: String,
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws {
+        try await authRetry.run("unbanUser") {
+            try await client.api.unbanUser(
+                broadcasterID: channelId,
+                moderatorID: accountUserId,
+                userID: userId
+            )
+        }
+    }
+
+    /// POST /moderation/warnings. Twitch requires a non-empty reason (the
+    /// warned user sees it and must acknowledge it before chatting again).
+    func warnUser(
+        userId: String,
+        reason: String,
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws {
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw AppError(message: "A warning needs a reason.")
+        }
+        do {
+            _ = try await authRetry.run("warnChatUser") {
+                try await client.api.warnChatUser(
+                    broadcasterID: channelId,
+                    moderatorID: accountUserId,
+                    userID: userId,
+                    reason: trimmed
+                )
+            }
+        } catch HelixError.decodingFailed {
+            // Same rationale as banUser: past the 2xx check, so it landed.
+            logger.debug("warnUser: 2xx with an undecodable body — treating as success")
+        }
+    }
+
+    /// GET /moderation/banned for one user: whether they're currently banned
+    /// or timed out here. nil expiry on a found entry = permanent ban.
+    /// Needs `moderator:read:banned_users` (already requested for the
+    /// `channel.moderate` bundle).
+    func banState(
+        userId: String,
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws -> UserBanState {
+        let page = try await authRetry.run("fetchBannedUsers") {
+            try await client.api.fetchBannedUsersPage(broadcasterID: channelId, userIDs: [userId])
+        }
+        guard let entry = page.data.first(where: { $0.userId == userId }) else {
+            return .notBanned
+        }
+        return UserBanState(expiresAt: entry.expiresAt)
+    }
 }

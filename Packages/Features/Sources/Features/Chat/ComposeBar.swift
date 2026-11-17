@@ -37,6 +37,10 @@ struct ComposeBar: View {
     /// completes — same visual as a channel with no restrictions, which
     /// is the common case.
     let chatRestrictions: ChatRestrictions?
+    /// The signed-in user's own standing here (timed out / banned / warned).
+    /// Read only in this body, so a change re-renders the bar and nothing
+    /// else. nil (previews, tests) = never restricted.
+    let ownRestriction: OwnChatRestrictionState?
     /// Tapped on the chip's X — dismisses the reply attachment without
     /// sending. The parent (`ChatScreen`) calls `chatModel.cancelReply()`.
     let onCancelReply: () -> Void
@@ -89,6 +93,7 @@ struct ComposeBar: View {
         channelDisplayName: String,
         replyContext: ChatTranscriptModel.ReplyContext?,
         chatRestrictions: ChatRestrictions?,
+        ownRestriction: OwnChatRestrictionState? = nil,
         seedDraft: String,
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
@@ -101,6 +106,7 @@ struct ComposeBar: View {
         self.channelDisplayName = channelDisplayName
         self.replyContext = replyContext
         self.chatRestrictions = chatRestrictions
+        self.ownRestriction = ownRestriction
         self.onCancelReply = onCancelReply
         self.onDraftChange = onDraftChange
         self.emoteSectionsProvider = emoteSectionsProvider
@@ -255,6 +261,22 @@ struct ComposeBar: View {
     /// is attached so the user has a second visual cue (beyond the
     /// chip) that their next send will be threaded.
     private var textFieldPrompt: String {
+        // Our own timeout / ban / warning outranks everything else: it's
+        // why the field is disabled (or why sends will be dropped).
+        if let restriction = ownRestriction?.current {
+            switch restriction {
+            case .timedOut(let until?) where until > .now:
+                return "You're timed out until \(until.formatted(date: .omitted, time: .shortened))"
+            case .timedOut:
+                return "You may be timed out here"
+            case .banned:
+                return "You're banned from this chat"
+            case .warned:
+                return "Acknowledge your warning on Twitch to chat"
+            case .removedByModerator:
+                return "A moderator removed your messages"
+            }
+        }
         if let reply = replyContext {
             return "Reply to \(reply.parentAuthorDisplayName)"
         }
@@ -262,6 +284,11 @@ struct ComposeBar: View {
             return "\(restrictionsLabel(restrictions)) · Send a message"
         }
         return "Send a message in #\(channelLoginName)"
+    }
+
+    /// True while our own timeout / ban means Twitch would drop any send.
+    private var isSendBlocked: Bool {
+        ownRestriction?.current?.blocksSending() ?? false
     }
 
     /// True when the draft has at least one non-whitespace character.
@@ -316,6 +343,9 @@ struct ComposeBar: View {
                     }
                     .padding(.leading, 2)
                     .padding(.vertical, 9)
+                    // Twitch would drop the message anyway; the prompt
+                    // says why. A timeout re-enables itself when it ends.
+                    .disabled(isSendBlocked)
                     .accessibilityLabel("Message input")
                     .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
 
