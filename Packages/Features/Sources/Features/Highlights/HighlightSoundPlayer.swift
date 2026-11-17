@@ -33,6 +33,11 @@ private let logger = AppLogger.make("Features.HighlightSound")
 /// the `lastPlayedAt` throttle state is single-threaded by construction.
 /// The actual audio playback is async inside the audio framework — we
 /// just kick it.
+///
+/// The one-time setup is the exception: the first `play()` only starts
+/// it and returns, and the sound follows when it finishes. Configuring the
+/// audio session and decoding the asset are blocking calls, and `play()`
+/// is called while a batch of messages is being applied.
 @MainActor
 public final class HighlightSoundPlayer {
 
@@ -52,10 +57,16 @@ public final class HighlightSoundPlayer {
     private var audioPlayer: AVAudioPlayer?
     #endif
 
-    /// Whether we've already attempted asset setup. Setup runs once
-    /// lazily on first `play()` so we don't touch AVAudioSession at
-    /// app launch (it has a non-trivial activation cost).
-    private var didSetup = false
+    /// Asset setup runs once, started lazily by the first `play()` so we
+    /// don't touch AVAudioSession at app launch (it has a non-trivial
+    /// activation cost).
+    private enum Setup {
+        case notStarted
+        case running
+        case done
+    }
+
+    private var setup = Setup.notStarted
 
     private init() {}
 
@@ -70,8 +81,24 @@ public final class HighlightSoundPlayer {
         }
         lastPlayedAt = now
 
-        setupIfNeeded()
+        switch setup {
+        case .done:
+            playNow()
+        case .running:
+            // The play that started setup sounds when it finishes; this one
+            // would only stack on top of it.
+            break
+        case .notStarted:
+            setup = .running
+            Task {
+                await self.runSetup()
+                self.setup = .done
+                self.playNow()
+            }
+        }
+    }
 
+    private func playNow() {
         #if os(iOS)
         if let player = audioPlayer {
             // Custom bundled sound via AVAudioPlayer (ambient category
@@ -93,10 +120,7 @@ public final class HighlightSoundPlayer {
 
     // MARK: - Setup
 
-    private func setupIfNeeded() {
-        guard !didSetup else { return }
-        didSetup = true
-
+    private func runSetup() async {
         #if os(iOS)
         // Look for a bundled custom sound. Multiple extensions so a
         // future asset can be any common format.
@@ -123,14 +147,20 @@ public final class HighlightSoundPlayer {
             // …unless the in-chat stream player already holds a playback
             // session: downgrading it to ambient would mute the stream with
             // the silent switch and stop background audio / PiP.
+            // Checked and set on the main actor, in one step, so it can't
+            // interleave with the stream player taking the session.
             let session = AVAudioSession.sharedInstance()
             if session.category != .playback {
                 try session.setCategory(.ambient, mode: .default)
                 try session.setActive(true)
             }
-            let player = try AVAudioPlayer(contentsOf: url)
-            player.prepareToPlay()
-            audioPlayer = player
+            // Reading and decoding the file doesn't need the main actor.
+            let prepared = try await Task.detached(priority: .userInitiated) {
+                let player = try AVAudioPlayer(contentsOf: url)
+                player.prepareToPlay()
+                return PreparedPlayer(player: player)
+            }.value
+            audioPlayer = prepared.player
             logger.info("Loaded bundled highlight sound: \(url.lastPathComponent, privacy: .public)")
         } catch {
             // Asset existed but failed to load/configure — fall back to
@@ -141,3 +171,11 @@ public final class HighlightSoundPlayer {
         #endif
     }
 }
+
+#if os(iOS)
+/// Carries the player built off the main actor back to it. `@unchecked`:
+/// the setup task creates it, hands it over once and never touches it again.
+private struct PreparedPlayer: @unchecked Sendable {
+    let player: AVAudioPlayer
+}
+#endif

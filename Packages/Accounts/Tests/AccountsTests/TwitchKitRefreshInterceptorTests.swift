@@ -101,6 +101,17 @@ private final class HelixStub: HTTPClient, Sendable {
     }
 }
 
+/// The clock a harness's `TokenRefresher` reads, moved by hand so a test can
+/// step past the reuse window and the backoff without sleeping.
+@MainActor
+private final class HarnessClock {
+    var now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    func advance(by seconds: TimeInterval) {
+        now = now.addingTimeInterval(seconds)
+    }
+}
+
 /// Counts how many times the interceptor asked for a refresh.
 private final class Counter: Sendable {
     private let value = OSAllocatedUnfairLock(initialState: 0)
@@ -523,6 +534,7 @@ struct AccountStoreTwitchKitRefreshTests {
         let bridgeURL: URL
         let defaults: UserDefaults
         let suite: String
+        let clock: HarnessClock
         // Keeps the in-memory SwiftData store alive for the test.
         let container: ModelContainer
 
@@ -569,6 +581,7 @@ struct AccountStoreTwitchKitRefreshTests {
         } else {
             backingStore = tokenStore
         }
+        let clock = HarnessClock()
         let store = AccountStore(
             modelContainer: container,
             clientId: "test-client",
@@ -576,7 +589,8 @@ struct AccountStoreTwitchKitRefreshTests {
             bridgeRefresh: BridgeTokenRefresh(endpoint: bridgeURL, session: URLSession(configuration: config)),
             twitchTransport: helix,
             tokenStoreFactory: { _ in backingStore },
-            refreshTokenKeychain: refreshKeychain
+            refreshTokenKeychain: refreshKeychain,
+            tokenRefresher: TokenRefresher(now: { clock.now })
         )
 
         let userId = "refresh-\(UUID().uuidString)"
@@ -601,6 +615,7 @@ struct AccountStoreTwitchKitRefreshTests {
             bridgeURL: bridgeURL,
             defaults: defaults,
             suite: suite,
+            clock: clock,
             container: container
         )
     }
@@ -695,6 +710,103 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.defaults.string(forKey: AccountStore.lastSessionExpiredLoginKey) == login)
     }
 
+    @Test("A bridge 403 that doesn't name the refresh token keeps the account signed in")
+    func bridgeClientSecretErrorKeepsAccount() async throws {
+        let h = try makeHarness(bridgeStatus: 403, bridgeJSON: #"{"status":403,"message":"invalid client secret"}"#)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let login = h.account.login
+
+        await #expect(throws: AppError.bridgeRefreshFailed(status: 403)) {
+            try await h.store.refreshTokens(userId: userId, login: login)
+        }
+
+        #expect(!h.account.needsReauth)
+        #expect(h.tokenStore.deletes == 0)
+        #expect(h.tokenStore.token == staleToken)
+        #expect(h.cachedRefreshToken() == "refresh-1")
+        #expect(h.defaults.string(forKey: AccountStore.lastSessionExpiredLoginKey) == nil)
+    }
+
+    @Test("A 401 that never clears costs one bridge refresh: the wrapper's refresh reuses TwitchKit's")
+    func unclearable401RefreshesOnce() async throws {
+        // Helix rejects every token, like a call the token has no scope for.
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON, validAccessToken: "never-valid")
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let client = h.store.client(forUserId: userId)
+
+        do {
+            try await h.store.withTokenRefresh(for: h.account) {
+                try await client.api.updateUserChatColor(userID: userId, color: "blue")
+            }
+            Issue.record("Expected HelixError.unauthorized")
+        } catch HelixError.unauthorized {
+            // Expected.
+        } catch {
+            Issue.record("Expected HelixError.unauthorized, got \(error)")
+        }
+
+        #expect(BridgeStubURLProtocol.bodies(for: h.bridgeURL).count == 1)
+        #expect(h.tokenStore.token?.accessToken == "fresh-access")
+        #expect(!h.account.needsReauth)
+    }
+
+    @Test("While the bridge is failing, refreshes fail fast instead of calling it again")
+    func bridgeOutageBacksOff() async throws {
+        let h = try makeHarness(bridgeStatus: 503, bridgeJSON: #"{"error":"upstream"}"#)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let login = h.account.login
+
+        for _ in 0..<3 {
+            await #expect(throws: AppError.bridgeRefreshFailed(status: 503)) {
+                try await h.store.refreshTokens(userId: userId, login: login)
+            }
+        }
+        #expect(BridgeStubURLProtocol.bodies(for: h.bridgeURL).count == 1)
+
+        // Past the first backoff the bridge is tried again, and a success
+        // goes through.
+        h.clock.advance(by: 10)
+        BridgeStubURLProtocol.register(h.bridgeURL, json: freshBridgeJSON, statusCode: 200)
+        let token = try await h.store.refreshTokens(userId: userId, login: login)
+        #expect(token.accessToken == "fresh-access")
+        #expect(BridgeStubURLProtocol.bodies(for: h.bridgeURL).count == 2)
+    }
+
+    @Test("A token close to expiry is refreshed ahead of use; a fresh one, or one of unknown age, is left alone")
+    func proactiveRefreshNearExpiry() async throws {
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let login = h.account.login
+
+        // Nothing recorded yet: the expiry is unknown, so nothing happens.
+        await h.store.refreshTokensIfExpiringSoon(for: h.account)
+        #expect(BridgeStubURLProtocol.bodies(for: h.bridgeURL).isEmpty)
+
+        // A refresh records the expiry (4 hours out).
+        try await h.store.refreshTokens(userId: userId, login: login)
+        #expect(h.store.tokenExpiry(forUserId: userId) == h.clock.now.addingTimeInterval(14_400))
+
+        h.clock.advance(by: 3_600)
+        await h.store.refreshTokensIfExpiringSoon(for: h.account)
+        #expect(BridgeStubURLProtocol.bodies(for: h.bridgeURL).count == 1)
+
+        // Nine minutes left: refreshed, and the expiry moves out again.
+        h.clock.advance(by: 14_400 - 3_600 - 9 * 60)
+        BridgeStubURLProtocol.register(h.bridgeURL, json: newestBridgeJSON, statusCode: 200)
+        await h.store.refreshTokensIfExpiringSoon(for: h.account)
+        #expect(BridgeStubURLProtocol.bodies(for: h.bridgeURL).count == 2)
+        #expect(h.tokenStore.token?.accessToken == "newest-access")
+        #expect(h.store.tokenExpiry(forUserId: userId) == h.clock.now.addingTimeInterval(14_400))
+
+        // Signing out forgets the expiry.
+        await h.store.forceSignOut(userId: userId, reason: .userInitiated)
+        #expect(h.store.tokenExpiry(forUserId: userId) == nil)
+    }
+
     @Test("A deliberate sign-out still deletes the token")
     func deliberateSignOutDeletes() async throws {
         let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON)
@@ -778,7 +890,9 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.tokenStore.token?.accessToken == "fresh-access")
         #expect(h.cachedRefreshToken() == "refresh-2")
 
-        // Refresh B completes while A's response is still held.
+        // Refresh B completes while A's response is still held. Later than
+        // the reuse window, or B would be answered with A's token.
+        h.clock.advance(by: 30)
         BridgeStubURLProtocol.register(h.bridgeURL, json: newestBridgeJSON, statusCode: 200)
         let refreshedB = try await h.store.refreshTokens(userId: userId, login: login)
         #expect(refreshedB.accessToken == "newest-access")
@@ -802,6 +916,7 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.helix.helixRequests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer newest-access")
 
         // The next refresh spends B's refresh token, not A's.
+        h.clock.advance(by: 30)
         BridgeStubURLProtocol.register(h.bridgeURL, json: thirdBridgeJSON, statusCode: 200)
         try await h.store.refreshTokens(userId: userId, login: login)
         let sent = try BridgeStubURLProtocol.bodies(for: h.bridgeURL).map {
@@ -830,6 +945,7 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(reseeded.accessToken == "fresh-access")
         #expect(h.tokenStore.token?.accessToken == "fresh-access")
 
+        h.clock.advance(by: 30)
         BridgeStubURLProtocol.register(h.bridgeURL, json: newestBridgeJSON, statusCode: 200)
         try await h.store.refreshTokens(userId: userId, login: login)
         let sent = try BridgeStubURLProtocol.bodies(for: h.bridgeURL).map {

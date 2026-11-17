@@ -26,13 +26,78 @@ extension AccountStore {
     /// **Single-flight per userId** (via `TokenRefresher`): callers that
     /// arrive while a refresh for the same account is already running await
     /// that one and get the same token or error, instead of each POSTing the
-    /// same refresh_token to the bridge (where all but the first could get a
-    /// 4xx and force a sign-out).
+    /// same refresh_token to the bridge (where all but the first could be
+    /// told it is invalid and force a sign-out).
+    ///
+    /// Not every call reaches the bridge: a token issued in the last few
+    /// seconds is returned as is, and after a transient failure calls fail
+    /// fast with that error while the refresher backs off. Both are scoped
+    /// to the account's current client, so they end with a sign-out or
+    /// re-authorization.
     @discardableResult
     public func refreshTokens(userId: String, login: String) async throws -> OAuthToken {
-        try await tokenRefresher.refresh(userId: userId) {
+        let scope = clients.entry(forUserId: userId).lifecycle
+        return try await tokenRefresher.refresh(userId: userId, scope: scope) {
             try await self.performRefresh(userId: userId, login: login)
         }
+    }
+
+    // MARK: Proactive refresh
+
+    /// How long before expiry `refreshTokensIfExpiringSoon` refreshes.
+    public static let proactiveRefreshLeeway: TimeInterval = 10 * 60
+
+    /// Refreshes `account`'s tokens now if its access token expires within
+    /// `proactiveRefreshLeeway` (or already has), so the requests that
+    /// follow don't each pay a 401 first. Call before the launch fan-out and
+    /// when the app returns to the foreground.
+    ///
+    /// Does nothing for an account that needs re-authorization or whose
+    /// expiry isn't known (signed in before expiry was recorded; the first
+    /// refresh records it). Never throws: a failure here is the same one the
+    /// next request's own refresh would report, and a dead refresh token has
+    /// already signed the account out.
+    public func refreshTokensIfExpiringSoon(for account: Account) async {
+        guard !account.needsReauth else { return }
+        let userId = account.userId
+        let login = account.login
+        guard let expiry = tokenExpiry(forUserId: userId) else { return }
+        let remaining = expiry.timeIntervalSince(tokenRefresher.now())
+        guard remaining < Self.proactiveRefreshLeeway else { return }
+        logger.info("Access token for @\(login, privacy: .public) expires in \(Int(remaining))s; refreshing ahead of use")
+        do {
+            try await refreshTokens(userId: userId, login: login)
+        } catch {
+            logger.warning("Proactive refresh failed for @\(login, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// UserDefaults key for the absolute expiry of `userId`'s access token
+    /// (seconds since 1970). A timestamp, not a credential, so it lives
+    /// beside the account selection rather than in the Keychain.
+    static func tokenExpiryKey(for userId: String) -> String {
+        "chattr.tokenExpiry.\(userId)"
+    }
+
+    /// When `userId`'s current access token expires, if known.
+    func tokenExpiry(forUserId userId: String) -> Date? {
+        let seconds = selection.defaults.double(forKey: Self.tokenExpiryKey(for: userId))
+        return seconds > 0 ? Date(timeIntervalSince1970: seconds) : nil
+    }
+
+    /// Records the expiry of a token issued just now. A token without
+    /// `expires_in` clears the record: the old expiry isn't this token's.
+    func recordTokenExpiry(of token: OAuthToken, forUserId userId: String) {
+        guard let expiresIn = token.expiresIn, expiresIn > 0 else {
+            clearTokenExpiry(forUserId: userId)
+            return
+        }
+        let expiry = tokenRefresher.now().addingTimeInterval(TimeInterval(expiresIn))
+        selection.defaults.set(expiry.timeIntervalSince1970, forKey: Self.tokenExpiryKey(for: userId))
+    }
+
+    func clearTokenExpiry(forUserId userId: String) {
+        selection.defaults.removeObject(forKey: Self.tokenExpiryKey(for: userId))
     }
 
     /// Answers a refresh that TwitchKit's `HelixClient` started after a 401
@@ -48,9 +113,10 @@ extension AccountStore {
     /// - `AppError.sessionExpired` → `.rejected`: the refresh token is dead
     ///   and `performRefresh` has already called `forceSignOut`, so the
     ///   account is `needsReauth` and its token is deleted.
-    /// - anything else (bridge 5xx / 408 / 429, network) → `.unavailable`
-    ///   with the token the asking client holds in memory: transient, so
-    ///   that credential must survive.
+    /// - anything else (a bridge error that doesn't name the refresh token,
+    ///   network, a refresh that is backing off) → `.unavailable` with the
+    ///   token the asking client holds in memory: transient, so that
+    ///   credential must survive.
     func answerTwitchKitRefresh(userId: String, lifecycle: TwitchClientLifecycle) async -> TwitchKitRefreshAnswer {
         let login = repository.login(forUserId: userId) ?? userId
         guard clients.activeClient(forUserId: userId, lifecycle: lifecycle) != nil else {
@@ -111,11 +177,11 @@ extension AccountStore {
             // A rejection of a credential that is no longer the account's
             // says nothing about the current one: don't sign that out.
             try Self.checkStillCurrent(entry, login: login)
-            // 4xx → Twitch rejected the refresh_token (revoked, expired, or
-            // associated with a different client_id). Terminal — the refresh
-            // credential we have can never work again, so mark the account
-            // expired and show the session-expired banner on the next render.
-            // (5xx / transport errors propagate untouched: transient, and the
+            // Twitch said the refresh_token itself is invalid (revoked or
+            // expired). Terminal — the refresh credential we have can never
+            // work again, so mark the account expired and show the
+            // session-expired banner on the next render. (Every other bridge
+            // or transport error propagates untouched: transient, and the
             // user's credentials are probably still good.)
             await forceSignOut(userId: userId, reason: .sessionExpired(login: login), expecting: entry)
             throw AppError.sessionExpired(login: login)
@@ -134,6 +200,7 @@ extension AccountStore {
         // to recover from even if TwitchKit clears its store again. No
         // suspension between the check above and this write.
         OAuthRefreshTokenCache.save(refreshToken: newToken.refreshToken, for: userId, in: refreshTokenKeychain)
+        recordTokenExpiry(of: newToken, forUserId: userId)
         logger.info("Refreshed tokens for @\(login, privacy: .public)")
         return newToken
     }
@@ -215,7 +282,9 @@ extension AccountStore {
     ///
     ///   - `HelixError.unauthorized` — the 401 survived TwitchKit's refresh:
     ///     the bridge was briefly unavailable, or the token lacks a scope.
-    ///     Refresh + retry once.
+    ///     Refresh + retry once. When TwitchKit's refresh did succeed moments
+    ///     ago, this one is answered with that same token (no second bridge
+    ///     call), so a 401 that can't clear costs one refresh, not three.
     ///
     ///   - `HelixError.oauth(_)` — TwitchKit's refresh was answered with a
     ///     rejection, so the account has already been force-signed-out. The
@@ -230,9 +299,9 @@ extension AccountStore {
     ///     chattr-side `OAuthRefreshTokenCache` still holds the refresh_token,
     ///     and `refreshTokens(userId:login:)` recovers from it.
     ///
-    /// In all three cases, `refreshTokens(userId:login:)` POSTs to the bridge with the
-    /// refresh_token and persists the new OAuthToken. Subsequent operation()
-    /// retry uses the fresh access token.
+    /// In all three cases, `refreshTokens(userId:login:)` gets a fresh
+    /// OAuthToken (from the bridge, or the one it issued seconds ago) and the
+    /// operation() retry uses its access token.
     ///
     /// Any throw from the refresh OR the second operation attempt bubbles to
     /// the caller (no infinite loops — only one retry).
@@ -240,28 +309,37 @@ extension AccountStore {
         for account: Account,
         _ operation: @Sendable () async throws -> T
     ) async throws -> T {
-        try await withTokenRefresh(userId: account.userId, login: account.login, operation)
+        // Read now: the row can be deleted while the operation runs.
+        let login = account.login
+        return try await withTokenRefresh(userId: account.userId, login: { login }, operation)
     }
 
     /// `withTokenRefresh(for:)` for call sites that hold only a stable userId
     /// (e.g. `BlockStore`). The login — used for logs and the session-expired
-    /// banner — is looked up from the Account row, falling back to the userId
-    /// if the row is gone.
+    /// banner — is looked up from the Account row only once a refresh is
+    /// needed, falling back to the userId if the row is gone.
     public func withTokenRefresh<T: Sendable>(
         forUserId userId: String,
         _ operation: @Sendable () async throws -> T
     ) async throws -> T {
-        try await withTokenRefresh(userId: userId, login: repository.login(forUserId: userId) ?? userId, operation)
+        try await withTokenRefresh(
+            userId: userId,
+            login: { self.repository.login(forUserId: userId) ?? userId },
+            operation
+        )
     }
 
+    /// `resolveLogin` is only called on an error path, so the success path
+    /// never pays for it.
     private func withTokenRefresh<T: Sendable>(
         userId: String,
-        login: String,
+        login resolveLogin: () -> String,
         _ operation: @Sendable () async throws -> T
     ) async throws -> T {
         do {
             return try await operation()
         } catch HelixError.unauthorized {
+            let login = resolveLogin()
             logger.info("Helix call returned unauthorized for @\(login); refreshing via bridge and retrying")
             try await refreshTokens(userId: userId, login: login)
             return try await operation()
@@ -269,6 +347,7 @@ extension AccountStore {
             // TwitchKit's internal refresh was answered with a rejection
             // (see TwitchKitRefreshInterceptor). The refresh below confirms
             // the session is gone and throws `.sessionExpired`.
+            let login = resolveLogin()
             logger.info("TwitchKit auto-refresh failed for @\(login) (\(oauthError.message)); refreshing via bridge and retrying")
             try await refreshTokens(userId: userId, login: login)
             return try await operation()
@@ -277,6 +356,7 @@ extension AccountStore {
             // refresh attempt failed and called logout() on its store.
             // Our chattr-side cache should still hold the refresh_token;
             // refreshTokens(userId:login:) will read from there.
+            let login = resolveLogin()
             logger.info("TwitchKit store empty for @\(login); attempting recovery via chattr-side cache")
             try await refreshTokens(userId: userId, login: login)
             return try await operation()

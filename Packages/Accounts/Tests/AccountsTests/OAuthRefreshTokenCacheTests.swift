@@ -13,6 +13,7 @@ final class InMemoryRefreshTokenKeychain: RefreshTokenKeychain {
     func save(key: String, data: Data) throws { storage.withLock { $0[key] = data } }
     func load(key: String) -> Data? { storage.withLock { $0[key] } }
     func delete(key: String) { storage.withLock { _ = $0.removeValue(forKey: key) } }
+    func allKeys() -> [String]? { storage.withLock { Array($0.keys) } }
 
     /// Test-only: did anything get written under this exact key?
     func contains(key: String) -> Bool { storage.withLock { $0[key] != nil } }

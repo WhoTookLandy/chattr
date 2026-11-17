@@ -179,4 +179,53 @@ public enum Endpoints {
             return components?.url
         }
     }
+
+    // MARK: - Twitch web pages
+    //
+    // Pages chattr hands to the system (Open in Twitch, Share, Subscribe).
+
+    public enum TwitchWeb {
+        /// A channel's (or user's) page on twitch.tv.
+        public static func channel(login: String) -> URL? {
+            URL(string: "https://www.twitch.tv/\(login)")
+        }
+
+        /// The channel's subscribe page.
+        public static func subscribe(login: String) -> URL? {
+            URL(string: "https://www.twitch.tv/subs/\(login)")
+        }
+    }
+
+    // MARK: - Twitch stream playback
+
+    public enum TwitchPlayer {
+        /// Twitch's embeddable live player, loaded top-level by the web
+        /// engine. Callers add the `channel` / `parent` / `autoplay` items.
+        public static let embed = URL(string: "https://player.twitch.tv/")!
+
+        /// Where the native player gets a playback access token. Not an
+        /// official third-party API: it can change or be blocked at any time.
+        public static let playbackAccessToken = URL(string: "https://gql.twitch.tv/gql")!
+
+        /// A live channel's HLS master playlist. Callers add the signed
+        /// token and player options as query items.
+        public static func livePlaylist(login: String) -> URL? {
+            URL(string: "https://usher.ttvnw.net/api/channel/hls/\(login.lowercased()).m3u8")
+        }
+    }
+
+    // MARK: - Twitch chat over IRC (guest mode)
+
+    public enum TwitchIRC {
+        /// Twitch's IRC-over-WebSocket endpoint, which guest mode reads
+        /// anonymously. Signed-in chat uses EventSub, not this.
+        public static let webSocket = URL(string: "wss://irc-ws.chat.twitch.tv:443")!
+    }
+
+    // MARK: - Helix (requests TwitchKit has no wrapper for)
+
+    public enum Helix {
+        /// `GET /moderation/banned`: one user's ban state in a channel.
+        public static let bannedUsers = URL(string: "https://api.twitch.tv/helix/moderation/banned")!
+    }
 }

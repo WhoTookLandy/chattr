@@ -107,11 +107,57 @@ struct BridgeTokenRefreshTests {
         #expect(token.refreshToken == "old-refresh")
     }
 
-    @Test("4xx is a terminal rejection")
-    func clientErrorIsRejected() async throws {
-        let (bridge, _) = Self.refresher(json: #"{"error":"invalid refresh token"}"#, statusCode: 400)
+    @Test("A 400 that names the refresh token is a terminal rejection", arguments: [
+        #"{"status":400,"message":"Invalid refresh token"}"#,
+        #"{"status":400,"message":"invalid refresh token"}"#,
+        #"{"error":"invalid_grant","error_description":"Token has been revoked"}"#,
+        #"{"status":400,"message":"Invalid refresh token","error":"invalid_grant"}"#,
+        #"{"error":{"status":400,"message":"Invalid refresh token"}}"#,
+    ])
+    func invalidRefreshTokenIsRejected(json: String) async throws {
+        let (bridge, _) = Self.refresher(json: json, statusCode: 400)
 
         await #expect(throws: BridgeTokenRefresh.Rejected(status: 400)) {
+            try await bridge.refresh(using: "old-refresh", login: "landy")
+        }
+    }
+
+    @Test("A 400 with an unparseable body is transient, not a sign-out", arguments: [
+        "<html><body>Bad Request</body></html>",
+        "",
+        #"["Invalid refresh token"]"#,
+    ])
+    func unparseableBadRequestIsTransient(body: String) async throws {
+        let (bridge, _) = Self.refresher(json: body, statusCode: 400)
+
+        await #expect(throws: AppError.bridgeRefreshFailed(status: 400)) {
+            try await bridge.refresh(using: "old-refresh", login: "landy")
+        }
+    }
+
+    @Test("A 400 about something other than the refresh token is transient")
+    func otherBadRequestIsTransient() async throws {
+        let (bridge, _) = Self.refresher(json: #"{"status":400,"message":"missing client id"}"#, statusCode: 400)
+
+        await #expect(throws: AppError.bridgeRefreshFailed(status: 400)) {
+            try await bridge.refresh(using: "old-refresh", login: "landy")
+        }
+    }
+
+    @Test("A 403 about the client secret is transient, not a sign-out")
+    func invalidClientSecretIsTransient() async throws {
+        let (bridge, _) = Self.refresher(json: #"{"status":403,"message":"invalid client secret"}"#, statusCode: 403)
+
+        await #expect(throws: AppError.bridgeRefreshFailed(status: 403)) {
+            try await bridge.refresh(using: "old-refresh", login: "landy")
+        }
+    }
+
+    @Test("A 5xx is transient even if its body names the refresh token")
+    func serverErrorNamingTheTokenIsTransient() async throws {
+        let (bridge, _) = Self.refresher(json: #"{"status":502,"message":"Invalid refresh token"}"#, statusCode: 502)
+
+        await #expect(throws: AppError.bridgeRefreshFailed(status: 502)) {
             try await bridge.refresh(using: "old-refresh", login: "landy")
         }
     }
@@ -125,11 +171,11 @@ struct BridgeTokenRefreshTests {
         }
     }
 
-    @Test("Credential rejections are terminal", arguments: [401, 403])
-    func credentialRejectionsAreTerminal(statusCode: Int) async throws {
+    @Test("A 401 or 403 that doesn't name the refresh token is transient", arguments: [401, 403])
+    func credentialStatusAloneIsTransient(statusCode: Int) async throws {
         let (bridge, _) = Self.refresher(json: #"{"error":"unauthorized"}"#, statusCode: statusCode)
 
-        await #expect(throws: BridgeTokenRefresh.Rejected(status: statusCode)) {
+        await #expect(throws: AppError.bridgeRefreshFailed(status: statusCode)) {
             try await bridge.refresh(using: "old-refresh", login: "landy")
         }
     }

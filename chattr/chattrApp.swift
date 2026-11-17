@@ -16,14 +16,12 @@ private let logger = AppLogger.make("App.Bootstrap")
 
 @main
 struct chattrApp: App {
-    // ────────────────────────────────────────────────────────────────────────
-    // ⚠️ REPLACE `TWITCH_CLIENT_ID_HERE` with the Client ID from dev.twitch.tv
-    // for the chattr application Andrew registered. Note: this is the public
-    // client ID, not the client secret — that's fine to commit. For Twitch's
-    // authorization-code flow with a mobile/installed app, the client secret
-    // is NOT required when using PKCE. (TwitchKit's TwitchOAuthClient handles
-    // the flow.)
-    // ────────────────────────────────────────────────────────────────────────
+    /// The public Client ID of chattr's registered Twitch application (not
+    /// a secret, so it is fine to commit). The client secret never ships:
+    /// sign-in uses the Device Code Grant, and the browser flow's code
+    /// exchange and every token refresh go through the chattr-auth bridge,
+    /// which holds the secret. To build against your own Twitch app,
+    /// replace this value.
     static let clientId = "b3lzm4vxuqw81u2gb478deff8o3tmh"
 
     let modelContainer: ModelContainer
@@ -53,7 +51,7 @@ struct chattrApp: App {
         // old bare schema; V1 stores migrate to the latest version via
         // `AppMigrationPlan`'s stages.
         let schema = Schema(versionedSchema: AppSchemaLatest.self)
-        let container = Self.makeModelContainer(schema: schema)
+        let (container, openedExistingStore) = Self.makeModelContainer(schema: schema)
         self.modelContainer = container
         let store = AccountStore(modelContainer: container, clientId: Self.clientId)
         // Removing an account also drops what Features persists for it
@@ -63,7 +61,22 @@ struct chattrApp: App {
             AccountLocalData.remove(forAccountUserId: userId, modelContainer: container)
         }
         self.accountStore = store
-        self.channelSessionRegistry = ChannelSessionRegistry(accountStore: store)
+        let registry = ChannelSessionRegistry(accountStore: store)
+        self.channelSessionRegistry = registry
+        // Re-authorizing an account swaps its TwitchClient; open sessions
+        // still hold the old one. Wired here because Accounts can't import
+        // Channels. Weak: the store would otherwise retain the registry,
+        // which retains the store.
+        store.onClientReplaced = { [weak registry] userId in
+            guard let registry else { return }
+            Task { await registry.clientReplaced(forAccountUserId: userId) }
+        }
+        // Keychain items outlive an uninstall; the account rows don't. Only
+        // when the store on disk opened normally: after a fallback there are
+        // no rows, and every signed-in account would look orphaned.
+        if openedExistingStore {
+            Task { await store.sweepOrphanedCredentials() }
+        }
     }
 
     /// Opens the on-disk SwiftData store, escalating only as far as needed:
@@ -82,10 +95,13 @@ struct chattrApp: App {
     /// Losing the local store is survivable — it holds account rows and
     /// persisted tabs; OAuth tokens live in the Keychain, and the user can
     /// sign in again — whereas failing here is a crash on every launch.
-    private static func makeModelContainer(schema: Schema) -> ModelContainer {
+    ///
+    /// `openedExisting` is true only for steps 1–2: the container holds
+    /// whatever account rows were on disk, not a fresh or in-memory store.
+    private static func makeModelContainer(schema: Schema) -> (container: ModelContainer, openedExisting: Bool) {
         for attempt in 1...2 {
             do {
-                return try ModelContainer(for: schema, migrationPlan: AppMigrationPlan.self)
+                return (try ModelContainer(for: schema, migrationPlan: AppMigrationPlan.self), true)
             } catch {
                 logger.fault("Failed to open SwiftData store (attempt \(attempt)): \(String(describing: error), privacy: .public)")
             }
@@ -101,7 +117,7 @@ struct chattrApp: App {
             do {
                 let container = try ModelContainer(for: schema, migrationPlan: AppMigrationPlan.self)
                 logger.notice("Opened a fresh SwiftData store after open failure (previous store backed up)")
-                return container
+                return (container, false)
             } catch {
                 logger.fault("Fresh SwiftData store failed to open: \(String(describing: error), privacy: .public). Falling back to an in-memory store for this launch.")
             }
@@ -110,11 +126,12 @@ struct chattrApp: App {
         }
 
         do {
-            return try ModelContainer(
+            let container = try ModelContainer(
                 for: schema,
                 migrationPlan: AppMigrationPlan.self,
                 configurations: ModelConfiguration(isStoredInMemoryOnly: true)
             )
+            return (container, false)
         } catch {
             fatalError("Failed to initialize SwiftData, even in memory: \(error)")
         }

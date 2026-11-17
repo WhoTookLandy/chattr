@@ -27,9 +27,11 @@ private let logger = AppLogger.make("Accounts.AccountStore")
 /// are `async`-and-awaited, so suspending on main doesn't block the thread.
 @MainActor
 public final class AccountStore {
-    /// Shared "any channel open?" flag. The registry increments/decrements it;
-    /// the persistent EventSub clients read it via their `isLive` closure so
-    /// reconnect stays aggressive while a channel is open. (See SessionActivitySignal.)
+    /// Shared "which accounts have a channel open?" signal. The registry
+    /// increments/decrements it per account; each persistent EventSub client
+    /// reads its own account's count via its `isLive` closure so reconnect
+    /// stays aggressive while that account has a channel open. (See
+    /// SessionActivitySignal.)
     public let sessionActivity: SessionActivitySignal
 
     /// Public Twitch client id (not a secret) — what the OAuth sign-in flow
@@ -44,13 +46,21 @@ public final class AccountStore {
     /// keeps its tabs) until the user re-authorizes or removes it.
     public var onAccountRemoved: (@MainActor (_ userId: String) -> Void)?
 
+    /// Called after `add(token:scopes:)` replaced the `TwitchClient` of an
+    /// account that already had one (or already had a row), with that
+    /// account's `userId`. Anything still holding the old client (open chat
+    /// sessions) is on a retired one whose token will never refresh. The
+    /// composition root wires this to the session registry. Not called for
+    /// an account's first sign-in.
+    public var onClientReplaced: (@MainActor (_ userId: String) -> Void)?
+
     let repository: AccountRepository
     let clients: TwitchClientCache
     let selection: ActiveAccountSelection
     let bridgeRefresh: BridgeTokenRefresh
 
     /// Single-flight gate for bridge refreshes — see `TokenRefresher`.
-    let tokenRefresher = TokenRefresher()
+    let tokenRefresher: TokenRefresher
 
     /// Test override for the `OAuthRefreshTokenCache` backend; `nil` (always,
     /// in the app) uses the cache's process-wide seam.
@@ -72,7 +82,8 @@ public final class AccountStore {
 
     /// Designated init with the seams tests swap out. `twitchTransport`,
     /// `tokenStoreFactory` and `refreshTokenKeychain` default to the real
-    /// network and Keychain (see `TwitchClientCache`).
+    /// network and Keychain (see `TwitchClientCache`); `tokenRefresher`
+    /// defaults to one on the system clock.
     init(
         modelContainer: ModelContainer,
         clientId: String,
@@ -80,8 +91,10 @@ public final class AccountStore {
         bridgeRefresh: BridgeTokenRefresh,
         twitchTransport: any HTTPClient = URLSessionHTTPClient(),
         tokenStoreFactory: (@Sendable (_ namespace: String) -> any TwitchTokenStore)? = nil,
-        refreshTokenKeychain: (any RefreshTokenKeychain)? = nil
+        refreshTokenKeychain: (any RefreshTokenKeychain)? = nil,
+        tokenRefresher: TokenRefresher? = nil
     ) {
+        self.tokenRefresher = tokenRefresher ?? TokenRefresher()
         self.refreshTokenKeychainOverride = refreshTokenKeychain
         let activity = SessionActivitySignal()
         self.sessionActivity = activity
@@ -197,12 +210,19 @@ public final class AccountStore {
         //    A save or delete the old client was already admitted for
         //    finishes first, and any later one is dropped, so a refresh
         //    still running on it can't overwrite or delete this token.
+        let reauthorized = clients.hasCachedClient(forUserId: user.id)
+            || repository.login(forUserId: user.id) != nil
         _ = try await clients.replaceClient(forUserId: user.id, seededWith: token)
 
         // 3. Cache the refresh_token chattr-side so it survives TwitchKit's
         //    defensive `logout()` if a future refresh fails (see
         //    OAuthRefreshTokenCache header for the full rationale).
         OAuthRefreshTokenCache.save(refreshToken: token.refreshToken, for: user.id, in: refreshTokenKeychain)
+        recordTokenExpiry(of: token, forUserId: user.id)
+        // The swap is done whether or not the row write below succeeds.
+        if reauthorized {
+            onClientReplaced?(user.id)
+        }
 
         // 4. Persist the Account row.
         // Note: TwitchUser.profileImageUrl uses lowercase 'url' (Codable from snake_case).
@@ -297,6 +317,7 @@ public final class AccountStore {
             await clients.evict(userId: userId, ifCurrent: expected.lifecycle) {
                 stashExpiryBanner(userId: userId, reason: reason)
                 OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
+                clearTokenExpiry(forUserId: userId)
             }
             return
         }
@@ -318,6 +339,7 @@ public final class AccountStore {
         let signedOut = await clients.evict(userId: userId, ifCurrent: expected.lifecycle) {
             stashExpiryBanner(userId: userId, reason: reason)
             OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
+            clearTokenExpiry(forUserId: userId)
             // Mark, don't delete — see the doc comment. Also clear the stored
             // selection if it pointed here, so RootView's fallback picks a
             // healthy account rather than re-resolving this one.
@@ -329,9 +351,13 @@ public final class AccountStore {
                 logger.error("forceSignOut: SwiftData save failed: \(error.localizedDescription)")
             }
         }
-        if !signedOut {
+        guard signedOut else {
             logger.notice("forceSignOut: @\(login, privacy: .public) was re-authorized while signing out; keeping the new session")
+            return
         }
+        // The evicted client is never used again, but its EventSub tasks
+        // retain it and would keep the socket open until the process exits.
+        await expected.client.eventSub.disconnect()
     }
 
     /// Stashes the reason for SignInView's banner. Only the `.sessionExpired`
@@ -397,6 +423,7 @@ public final class AccountStore {
             // logout only touches its own store; our fallback cache is
             // separate (intentionally — see OAuthRefreshTokenCache header).
             OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
+            clearTokenExpiry(forUserId: userId)
             // If we removed the active account, clear the stored selection so
             // RootView's @AppStorage fallback (accounts.first by addedAt)
             // picks the next account — or SignInView if it was the last one.
@@ -416,6 +443,9 @@ public final class AccountStore {
         if let deleteError { throw deleteError }
         logger.notice("Removed account @\(login, privacy: .public)")
         onAccountRemoved?(userId)
+        // Same as a forced sign-out: close the evicted client's EventSub
+        // socket rather than leave it open for the rest of the launch.
+        await expected.client.eventSub.disconnect()
         return .removed
     }
 
@@ -443,25 +473,85 @@ public final class AccountStore {
     /// this warm-up, the first refresh failure post-upgrade would still
     /// strand them at "Session expired — please sign in again." Mirroring
     /// at launch protects them for the cost of one Keychain read + write.
+    ///
+    /// The every-launch read runs off the main actor (a blocking `SecItem`
+    /// call). Only the rare backfill touches the Keychain on main, where it
+    /// re-reads and writes with no suspension in between, so it can't land
+    /// after a sign-out's delete or over a refresh's newer token.
     public func warmRefreshTokenCacheIfNeeded(for account: Account) async {
-        if OAuthRefreshTokenCache.load(for: account.userId, in: refreshTokenKeychain) != nil {
+        // Read up front: the row can be deleted while this is suspended.
+        let userId = account.userId
+        let login = account.login
+        let keychain = refreshTokenKeychain
+        let entry = clients.entry(forUserId: userId)
+        let cached = await Task.detached {
+            OAuthRefreshTokenCache.load(for: userId, in: keychain)
+        }.value
+        if cached != nil {
             return  // Already populated; nothing to do.
         }
-        let client = client(for: account)
         do {
-            let token = try await client.auth.tokenProvider.token()
+            let token = try await entry.client.auth.tokenProvider.token()
             guard let refreshToken = token.refreshToken, !refreshToken.isEmpty else {
-                logger.info("warmRefreshTokenCache: TwitchKit token has no refresh_token for @\(account.login)")
+                logger.info("warmRefreshTokenCache: TwitchKit token has no refresh_token for @\(login)")
                 return
             }
-            OAuthRefreshTokenCache.save(refreshToken: refreshToken, for: account.userId, in: refreshTokenKeychain)
-            logger.info("warmRefreshTokenCache: mirrored refresh_token for @\(account.login)")
+            guard entry.lifecycle.isActive,
+                  OAuthRefreshTokenCache.load(for: userId, in: keychain) == nil
+            else { return }
+            OAuthRefreshTokenCache.save(refreshToken: refreshToken, for: userId, in: keychain)
+            logger.info("warmRefreshTokenCache: mirrored refresh_token for @\(login)")
         } catch {
             // TwitchKit's store is empty (or unreadable). We can't backfill
             // — the user is already in the broken state and needs to
             // re-sign-in. Don't surface as an error; the next Helix call
             // will throw `.notAuthenticated` which is the right signal.
-            logger.info("warmRefreshTokenCache: TwitchKit store empty for @\(account.login) — backfill skipped")
+            logger.info("warmRefreshTokenCache: TwitchKit store empty for @\(login) — backfill skipped")
         }
+    }
+
+    // MARK: - Orphaned credentials
+
+    /// Deletes Keychain credentials (TwitchKit token entries and their
+    /// `chattr.refresh.*` mirrors) that belong to no account row. Keychain
+    /// items survive an uninstall while the SwiftData rows don't, so a
+    /// reinstall would otherwise keep live refresh tokens nothing can reach
+    /// or remove.
+    ///
+    /// Conservative: does nothing when the rows can't be fetched or the
+    /// Keychain can't be listed, and never touches an entry whose account
+    /// has a row (signed in or `needsReauth`) or was seen this launch (a
+    /// sign-in writes its token before its row). Call once at launch, and
+    /// only when the account store opened normally: a fresh store after a
+    /// failed open has no rows, and would orphan everything.
+    public func sweepOrphanedCredentials() async {
+        guard fetchAccountUserIds() != nil else {
+            logger.warning("Skipped the credential sweep: couldn't fetch accounts")
+            return
+        }
+        let keychain = refreshTokenKeychain
+        let clientId = self.clientId
+        // The listing is a blocking `SecItem` call: keep it off main.
+        let listed = await Task.detached(priority: .utility) {
+            keychain.allKeys()
+        }.value
+        guard let listed else { return }
+        // Rows are re-read after the hop, and everything from here to the
+        // last delete runs without suspending, so an account added
+        // meanwhile is seen.
+        guard let known = fetchAccountUserIds() else { return }
+        let orphans = OrphanedCredentials.keys(among: listed, clientId: clientId) { userId in
+            !known.contains(userId) && !clients.hasSeen(userId: userId)
+        }
+        guard !orphans.isEmpty else { return }
+        for key in orphans {
+            keychain.delete(key: key)
+        }
+        logger.notice("Deleted \(orphans.count) Keychain credential(s) with no account row")
+    }
+
+    private func fetchAccountUserIds() -> Set<String>? {
+        guard let accounts = try? repository.all() else { return nil }
+        return Set(accounts.map(\.userId))
     }
 }

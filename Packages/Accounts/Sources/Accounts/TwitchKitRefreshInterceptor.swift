@@ -9,13 +9,14 @@ private let logger = AppLogger.make("Accounts.TwitchKitRefreshInterceptor")
 enum TwitchKitRefreshAnswer: Sendable, Equatable {
     /// The bridge issued fresh tokens. TwitchKit stores them and retries.
     case refreshed(OAuthToken)
-    /// The bridge confirmed the refresh token is dead (it answered 400 /
-    /// 401 / 403, e.g. `invalid_grant`), or there is no refresh token
-    /// anywhere. chattr has already force-signed the account out, which
-    /// deleted the token and retired the client.
+    /// The bridge confirmed the refresh token is dead (its response said
+    /// "Invalid refresh token" / `invalid_grant`), or there is no refresh
+    /// token anywhere. chattr has already force-signed the account out,
+    /// which deleted the token and retired the client.
     case rejected
-    /// The refresh couldn't finish this time (bridge 5xx, network, rate
-    /// limit). The credential is probably still good. `current` is the
+    /// The refresh couldn't finish this time (any other bridge error,
+    /// network, a refresh backing off). The credential is probably still
+    /// good. `current` is the
     /// token the requesting client holds in memory, handed back so TwitchKit
     /// has nothing to fail over; `nil` only if even that is gone.
     case unavailable(current: OAuthToken?)
@@ -61,8 +62,8 @@ enum TwitchKitRefreshAnswer: Sendable, Equatable {
 /// - `.unavailable(current:)`, client still active → 200 with the token the
 ///   client already holds. TwitchKit re-saves that same token; its retry
 ///   gets the same 401, and the caller sees `HelixError.unauthorized`, which
-///   `withTokenRefresh` / `HelixAuthRetry` retry once more through the
-///   bridge.
+///   `withTokenRefresh` / `HelixAuthRetry` answer with one more refresh
+///   (which fails fast while the bridge refresh is backing off).
 /// - `.rejected` → 400. TwitchKit throws `HelixError.oauth`, which
 ///   `withTokenRefresh` turns into `AppError.sessionExpired`. Its `logout()`
 ///   delete is dropped: `forceSignOut` already deleted the token.

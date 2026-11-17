@@ -124,6 +124,14 @@ protocol RefreshTokenKeychain: Sendable {
     func save(key: String, data: Data) throws
     func load(key: String) -> Data?
     func delete(key: String)
+    /// Every key the backend holds, or `nil` when it can't be listed (the
+    /// default). Used only by the orphaned-credential sweep, which does
+    /// nothing on `nil`.
+    func allKeys() -> [String]?
+}
+
+extension RefreshTokenKeychain {
+    func allKeys() -> [String]? { nil }
 }
 
 /// Production `RefreshTokenKeychain` backed by the system Keychain.
@@ -201,6 +209,66 @@ struct SystemRefreshTokenKeychain: RefreshTokenKeychain {
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             logger.warning("Keychain delete OSStatus \(status) for \(key, privacy: .public)")
+        }
+    }
+
+    /// The account name of every generic-password item this app can see.
+    /// That covers TwitchKit's token entries as well as the mirrors: both
+    /// are generic passwords keyed only by `kSecAttrAccount`.
+    func allKeys() -> [String]? {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        #if os(macOS)
+        query[kSecUseDataProtectionKeychain as String] = true
+        #endif
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
+            logger.error("Keychain listing returned OSStatus \(status)")
+            return nil
+        }
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
+    }
+}
+
+/// Picks out the Keychain entries that hold an account's credentials: the
+/// refresh-token mirror (`OAuthRefreshTokenCache.key(for:)`) and TwitchKit's
+/// token entry for the account's namespace (`KeychainTokenStore`'s key,
+/// `com.twitchkit.<clientId>.<namespace>.oauthToken`). Any other key is left
+/// alone.
+enum OrphanedCredentials {
+
+    /// The userId a credential key belongs to, or `nil` for a key that
+    /// isn't one of ours.
+    static func userId(forKey key: String, clientId: String) -> String? {
+        let mirrorPrefix = OAuthRefreshTokenCache.key(for: "")
+        if key.hasPrefix(mirrorPrefix) {
+            let userId = String(key.dropFirst(mirrorPrefix.count))
+            return userId.isEmpty ? nil : userId
+        }
+        let tokenPrefix = "com.twitchkit.\(clientId).\(TwitchClientCache.namespace(for: ""))"
+        let tokenSuffix = ".oauthToken"
+        if key.hasPrefix(tokenPrefix), key.hasSuffix(tokenSuffix),
+           key.count > tokenPrefix.count + tokenSuffix.count {
+            return String(key.dropFirst(tokenPrefix.count).dropLast(tokenSuffix.count))
+        }
+        return nil
+    }
+
+    /// The credential keys in `keys` whose userId `isOrphan` accepts.
+    static func keys(
+        among keys: [String],
+        clientId: String,
+        isOrphan: (_ userId: String) -> Bool
+    ) -> [String] {
+        keys.filter { key in
+            guard let owner = Self.userId(forKey: key, clientId: clientId) else { return false }
+            return isOrphan(owner)
         }
     }
 }

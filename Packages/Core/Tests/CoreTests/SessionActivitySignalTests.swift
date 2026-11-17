@@ -37,4 +37,37 @@ struct SessionActivitySignalTests {
         signal.increment()
         #expect(signal.hasActiveSessions == true)   // count is 1, not 2
     }
+
+    @Test("One account's open channel doesn't make another account active")
+    func perAccountIsolation() {
+        let signal = SessionActivitySignal()
+        signal.increment(forAccount: "a")
+        #expect(signal.hasActiveSessions(forAccount: "a") == true)
+        #expect(signal.hasActiveSessions(forAccount: "b") == false)
+        #expect(signal.hasActiveSessions == true)
+        signal.decrement(forAccount: "a")
+        #expect(signal.hasActiveSessions(forAccount: "a") == false)
+        #expect(signal.hasActiveSessions == false)
+    }
+
+    @Test("Per-account counts balance and never underflow")
+    func perAccountCounting() {
+        let signal = SessionActivitySignal()
+        signal.decrement(forAccount: "a")           // spurious release
+        signal.increment(forAccount: "a")
+        signal.increment(forAccount: "a")
+        signal.decrement(forAccount: "a")
+        #expect(signal.hasActiveSessions(forAccount: "a") == true)
+        signal.decrement(forAccount: "a")
+        #expect(signal.hasActiveSessions(forAccount: "a") == false)
+    }
+
+    @Test("An account-less channel counts for every account")
+    func unattributedCountsForAll() {
+        let signal = SessionActivitySignal()
+        signal.increment()
+        #expect(signal.hasActiveSessions(forAccount: "a") == true)
+        signal.decrement()
+        #expect(signal.hasActiveSessions(forAccount: "a") == false)
+    }
 }

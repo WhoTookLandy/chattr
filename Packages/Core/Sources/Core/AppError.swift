@@ -50,9 +50,10 @@ public struct AppError: Error, Sendable, Equatable {
         /// back to SignInView with a session-expired banner.
         case sessionExpired(login: String)
 
-        /// chattr's Vercel OAuth bridge returned a 4xx/5xx. 4xx == refresh
-        /// token rejected (terminal — usually accompanies a `.sessionExpired`);
-        /// 5xx == transient bridge problem. Caller decides retry.
+        /// chattr's Vercel OAuth bridge returned a non-200 that doesn't say
+        /// the refresh token is invalid (that case is `.sessionExpired`).
+        /// Transient, whatever the status: the credential is probably still
+        /// good. Caller decides retry.
         case bridgeRefreshFailed(status: Int)
 
         /// Network-layer failure (DNS, timeout, no connection, server

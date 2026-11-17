@@ -7,8 +7,8 @@ import Core
 ///
 /// Every client built here shares the app's `SessionActivitySignal` through
 /// its `isLive` closure, so a client's EventSub reconnect stays aggressive
-/// while any channel is open — no matter which path (Helix call, token
-/// refresh, session start) happened to build it first.
+/// while its own account has a channel open — no matter which path (Helix
+/// call, token refresh, session start) happened to build it first.
 ///
 /// Every client also sends its HTTP through a `TwitchKitRefreshInterceptor`,
 /// so TwitchKit's own 401 refresh goes through the chattr-auth bridge
@@ -76,7 +76,7 @@ final class TwitchClientCache {
 
     /// The canonical tokenNamespace string for a given Twitch userId.
     /// Stays stable across launches so Keychain entries persist.
-    static func namespace(for userId: String) -> String {
+    nonisolated static func namespace(for userId: String) -> String {
         "chattr.account.\(userId)"
     }
 
@@ -96,6 +96,17 @@ final class TwitchClientCache {
         let entry = makeClient(forUserId: userId)
         entries[userId] = entry
         return entry
+    }
+
+    /// Whether a client is cached for `userId` right now.
+    func hasCachedClient(forUserId userId: String) -> Bool {
+        entries[userId] != nil
+    }
+
+    /// Whether anything asked for `userId`'s client or token gate this
+    /// launch, including a sign-in still writing its first token.
+    func hasSeen(userId: String) -> Bool {
+        gates[userId] != nil
     }
 
     /// The cached client for `userId` if `lifecycle` is still its live
@@ -139,7 +150,7 @@ final class TwitchClientCache {
             clientId: clientId,
             tokenStore: tokenStore,
             httpClient: http,
-            isLive: { signal.hasActiveSessions }
+            isLive: { signal.hasActiveSessions(forAccount: userId) }
         )
         providerLink.attach(client.auth.tokenProvider)
         return Entry(client: client, lifecycle: lifecycle, tokenStore: baseStore)
