@@ -60,6 +60,9 @@ struct ComposeBar: View {
     @AppStorage(StreamHeaderView.expandedKey) private var videoVisible = false
     @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
     @Environment(\.chatTabs) private var chatTabs
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    #endif
 
     /// The open tab showing this channel — for "Close Chat".
     private var tabId: UUID? {
@@ -455,6 +458,13 @@ struct ComposeBar: View {
             if let tabId {
                 Divider()
                 Button(role: .destructive) {
+                    #if os(iOS)
+                    // Closing the chat also stops its stream (otherwise it
+                    // would carry on in the mini player).
+                    if playback?.channel?.channelLoginName == channelLoginName {
+                        playback?.stop()
+                    }
+                    #endif
                     chatTabs?.close(tabId: tabId)
                 } label: {
                     Label("Close Chat", systemImage: "xmark")

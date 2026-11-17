@@ -75,6 +75,8 @@ final class StreamPlayerController {
 
     @ObservationIgnored var onTap: (() -> Void)?
     @ObservationIgnored var onSwipeDown: (() -> Void)?
+    /// Native engine failed — `PlaybackCenter` rebuilds on the web engine.
+    @ObservationIgnored var onNativeFailure: (() -> Void)?
 
     var isNative: Bool { avPlayer != nil }
 
@@ -217,47 +219,10 @@ enum TwitchHLS {
 
 // MARK: - Native view
 
-/// AVPlayer-backed player surface. Taps toggle the header chrome, a swipe
-/// down hides the video — same contract as the web `StreamPlayerView`.
-struct NativeStreamPlayerView: UIViewRepresentable {
-    let channelLogin: String
-    let quality: PlayerQuality
-    var audioOnly = false
-    let controller: StreamPlayerController
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(controller: controller)
-    }
-
-    func makeUIView(context: Context) -> PlayerLayerView {
-        let view = PlayerLayerView()
-        view.backgroundColor = .clear
-        view.playerLayer.videoGravity = .resizeAspect
-
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped))
-        let swipe = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipedDown))
-        swipe.direction = .down
-        tap.require(toFail: swipe)
-        view.addGestureRecognizer(swipe)
-        view.addGestureRecognizer(tap)
-
-        controller.hostView = view
-        context.coordinator.load(login: channelLogin, audioOnly: audioOnly, quality: quality, into: view)
-        return view
-    }
-
-    func updateUIView(_ view: PlayerLayerView, context: Context) {
-        if context.coordinator.loadedKey != Coordinator.key(channelLogin, audioOnly) {
-            context.coordinator.load(login: channelLogin, audioOnly: audioOnly, quality: quality, into: view)
-        }
-        controller.applyQuality(quality)
-    }
-
-    static func dismantleUIView(_ view: PlayerLayerView, coordinator: Coordinator) {
-        coordinator.teardown()
-        view.playerLayer.player = nil
-    }
-
+/// AVPlayer-backed player pieces, assembled by `NativeStreamEngine`. Taps
+/// toggle the header chrome and a swipe down hides the video, the same
+/// contract as the web player.
+enum NativePlayer {
     final class PlayerLayerView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
@@ -285,7 +250,6 @@ struct NativeStreamPlayerView: UIViewRepresentable {
             teardown()
             loadedKey = Self.key(login, audioOnly)
             controller.reset()
-            controller.nativeFailed = false
 
             loadTask = Task { [weak self, weak view] in
                 do {
@@ -294,7 +258,7 @@ struct NativeStreamPlayerView: UIViewRepresentable {
                     self.start(url: url, quality: quality, in: view)
                 } catch {
                     guard !Task.isCancelled else { return }
-                    self?.controller.nativeFailed = true
+                    self?.controller.onNativeFailure?()
                 }
             }
         }
@@ -329,7 +293,7 @@ struct NativeStreamPlayerView: UIViewRepresentable {
             item.publisher(for: \.status)
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] status in
-                    if status == .failed { self?.controller.nativeFailed = true }
+                    if status == .failed { self?.controller.onNativeFailure?() }
                 }
                 .store(in: &subscriptions)
 
