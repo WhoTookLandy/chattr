@@ -269,7 +269,14 @@ struct ChatPagerScreen: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(chatTabs.tabs) { tab in
-                    chatPage(for: tab, isActive: tab.id == chatTabs.activeTabId)
+                    // No `activeTabId` read here: this body would then re-run
+                    // on every page change and rebuild each mounted
+                    // ChatScreen (fresh model + draft read in its init, then
+                    // the transcript and the UIKit list update). Pages get
+                    // their stable tab id; the few views that care whether
+                    // they're the visible page (stream header, join greeting)
+                    // read `activeTabId` themselves.
+                    chatPage(for: tab)
                         // `.containerRelativeFrame(.horizontal)` sizes each
                         // page to exactly the ScrollView's width — full-page
                         // panels instead of children at intrinsic width.
@@ -304,13 +311,13 @@ struct ChatPagerScreen: View {
     /// will take the full ChatTab and ChatTranscriptModel will attach to ALL its
     /// channels in one go — the rest of this paged container won't change.
     @ViewBuilder
-    private func chatPage(for tab: ChatTab, isActive: Bool) -> some View {
+    private func chatPage(for tab: ChatTab) -> some View {
         if let primaryChannel = tab.channels.first {
             ChatScreen(
                 account: account,
                 accountStore: accountStore,
                 channel: primaryChannel,
-                isActiveTab: isActive
+                tabId: tab.id
             )
         } else {
             // Defensive — ChatTab.init has a precondition against empty
