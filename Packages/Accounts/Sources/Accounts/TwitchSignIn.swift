@@ -79,6 +79,8 @@ public enum TwitchSignIn {
         .moderatorReadWarnings,
         .moderatorReadModerators,
         .moderatorReadVips,
+        // Viewer list (GET /chat/chatters) for channels you moderate.
+        .moderatorReadChatters,
     ]
 
     /// The redirect URI the Vercel bridge 302-redirects back to. Must

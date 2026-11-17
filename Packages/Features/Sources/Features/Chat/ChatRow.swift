@@ -298,17 +298,19 @@ struct ChatRow: View, Equatable {
     @ViewBuilder
     private var messageWithOptionalQuote: some View {
         if showsQuotedReply, let reply = line.replyParent {
-            VStack(alignment: .leading, spacing: 3) {
-                QuotedReplyPreview(reply: reply, onViewThread: onViewThread)
-                messageBody(highlightPlate: false)
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .background {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(line.isHighlighted
-                          ? Color.accentColor.opacity(0.12)
-                          : Color.secondary.opacity(0.07))
+            // Discord-style: a thin elbow curves from the quoted line down
+            // into the reply — binds the pair without a heavy grey plate.
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(alignment: .center, spacing: 4) {
+                    ReplyElbow()
+                        .stroke(Color.secondary.opacity(0.45), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        .frame(width: 16, height: 9)
+                        .offset(y: 4)
+                        .accessibilityHidden(true)
+                    QuotedReplyPreview(reply: reply, onViewThread: onViewThread)
+                }
+                .padding(.leading, 6)
+                messageBody(highlightPlate: line.isHighlighted)
             }
         } else {
             messageBody

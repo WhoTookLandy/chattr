@@ -34,6 +34,9 @@ struct StreamHeaderView: View {
     /// Only the page centered in the pager mounts the player — neighbours
     /// stay as posters so swiping never plays two streams at once.
     let isActive: Bool
+    /// Tap on the viewer count → the viewer list (mods only; the sheet
+    /// explains otherwise).
+    var onShowViewers: () -> Void = {}
 
     /// Shared across every chat page — "I like watching while I chat" is a
     /// user preference, not a per-channel one.
@@ -152,7 +155,17 @@ struct StreamHeaderView: View {
 
     private func wirePlayerCallbacks() {
         player.onTap = { toggleChrome() }
-        player.onSwipeDown = { setExpanded(false) }
+        // Swipe down on the video → picture in picture (keeps watching
+        // while you scroll chat or leave the app). Without PiP support,
+        // it hides the video instead.
+        player.onSwipeDown = {
+            if player.canPictureInPicture {
+                chromeVisible = false
+                player.togglePictureInPicture()
+            } else {
+                setExpanded(false)
+            }
+        }
     }
     #endif
 
@@ -211,16 +224,18 @@ struct StreamHeaderView: View {
             // in name · category · viewers, the title, tags and actions.
             if chromeVisible {
                 VStack(alignment: .leading, spacing: 10) {
-                    Button(action: toggleChrome) {
-                        infoRow(stream)
+                    HStack(alignment: .center, spacing: 8) {
+                        Button(action: toggleChrome) {
+                            infoRow(stream)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Hides stream controls")
+                        subscribeButton
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Hides stream controls")
                     if !tags.isEmpty {
                         // Indented to the text column, under the title.
                         tagRow.padding(.leading, 42)
                     }
-                    ChannelActionRow(channel: channel, isFollowing: isFollowing, style: .compact)
                 }
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
@@ -461,12 +476,17 @@ struct StreamHeaderView: View {
                     }
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Live for \(StreamFormatting.uptime(since: stream.startedAt))")
-                    overlayChip {
-                        Image(systemName: "person.fill")
-                        Text(StreamFormatting.viewers(stream.viewerCount))
+                    Button {
+                        onShowViewers()
+                    } label: {
+                        overlayChip {
+                            Image(systemName: "person.fill")
+                            Text(StreamFormatting.viewers(stream.viewerCount))
+                        }
                     }
-                    .accessibilityElement(children: .ignore)
+                    .buttonStyle(.plain)
                     .accessibilityLabel("\(stream.viewerCount) viewers")
+                    .accessibilityHint("Shows who's in chat")
                     Spacer(minLength: 0)
                     #if os(iOS)
                     glyphButton(player.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
@@ -497,11 +517,11 @@ struct StreamHeaderView: View {
                     touchChrome()
                 } label: {
                     Image(systemName: player.isPaused ? "play.fill" : "pause.fill")
-                        .font(.system(size: 24, weight: .semibold))
+                        .font(.system(size: 32, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 56, height: 56)
-                        .background(.black.opacity(0.45), in: Circle())
-                        .contentShape(Circle())
+                        .shadow(color: .black.opacity(0.5), radius: 4)
+                        .frame(width: 64, height: 64)
+                        .contentShape(Rectangle())
                         .contentTransition(.symbolEffect(.replace))
                 }
                 .buttonStyle(.plain)
@@ -511,14 +531,51 @@ struct StreamHeaderView: View {
         }
     }
 
-    /// White glyph on a translucent dark circle — legible on any frame.
+    /// Bare white glyph with a soft shadow (no circle) — legible on any
+    /// frame thanks to the scrims.
     private func glyph(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 15, weight: .semibold))
+            .font(.system(size: 18, weight: .semibold))
             .foregroundStyle(.white)
-            .frame(width: 34, height: 34)
-            .background(.black.opacity(0.45), in: Circle())
-            .contentShape(Circle())
+            .shadow(color: .black.opacity(0.55), radius: 3)
+            .frame(width: 36, height: 36)
+            .contentShape(Rectangle())
+    }
+
+    /// Compact Subscribe beside the stream info; the chevron menu holds
+    /// Gift a Sub. Both hand off to Twitch (subs are bought there).
+    private var subscribeButton: some View {
+        Menu {
+            Button {
+                openSubs()
+            } label: {
+                Label("Gift a Sub", systemImage: "gift")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text("Subscribe")
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(Color(red: 0x91 / 255, green: 0x46 / 255, blue: 0xFF / 255), in: Capsule())
+        } primaryAction: {
+            openSubs()
+        }
+        .accessibilityLabel("Subscribe")
+        .accessibilityHint("Opens Twitch. Hold for Gift a Sub.")
+    }
+
+    private var subsURL: URL? {
+        URL(string: "https://www.twitch.tv/subs/\(channel.channelLoginName)")
+    }
+
+    private func openSubs() {
+        touchChrome()
+        if let subsURL { openURL(subsURL) }
     }
 
     private func glyphButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
@@ -564,9 +621,9 @@ struct StreamHeaderView: View {
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .frame(height: 34)
-                .background(.black.opacity(0.45), in: Capsule())
+                .padding(.horizontal, 8)
+                .frame(height: 26)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .accessibilityLabel("Chat \(index + 1) of \(chatTabs.tabs.count). Switch chat")
         }

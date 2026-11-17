@@ -22,12 +22,14 @@ struct OpenChatsList: View {
             let split = sections(chatTabs)
             List {
                 if !split.live.isEmpty {
-                    Section("Live") {
+                    Section {
+                        ListSectionTitle("Live")
                         rows(split.live, chatTabs: chatTabs)
                     }
                 }
                 if !split.offline.isEmpty {
-                    Section("Offline") {
+                    Section {
+                        ListSectionTitle("Offline")
                         rows(split.offline, chatTabs: chatTabs)
                     }
                 }
