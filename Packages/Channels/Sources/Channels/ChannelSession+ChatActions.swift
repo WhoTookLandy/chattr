@@ -153,7 +153,30 @@ extension ChannelSession {
     ) async throws -> SendChatMessageResponse {
         // Whitespace trim, empty-message guard and refresh-once/retry-once
         // live in `HelixChatActions.send`.
-        try await chatActions.send(text, replyParentMessageId: replyParentMessageId)
+        //
+        // Own restriction: the outcome is recorded HERE, against the ledger
+        // sequence captured before the first suspension — not by the page,
+        // whose copy may lag a self-clear or echo the session has already
+        // seen. A rejection is dropped if a clear / echo landed meanwhile
+        // (`OwnChatRestrictionLedger.finishSend`); the page then just syncs.
+        let basis = ownRestriction.beginSend()
+        let response: SendChatMessageResponse
+        do {
+            response = try await chatActions.send(text, replyParentMessageId: replyParentMessageId)
+        } catch {
+            // Twitch answers a banned sender with 403 rather than a drop.
+            var rejection: OwnChatRestriction?
+            if let helixError = error as? HelixError, case .forbidden(let apiError) = helixError {
+                rejection = OwnChatRestriction(dropCode: nil, message: apiError.message)
+            }
+            ownRestriction.finishSend(basis: basis, rejection: rejection)
+            throw error
+        }
+        let rejection = response.isSent
+            ? nil
+            : OwnChatRestriction(dropCode: response.dropReason?.code, message: response.dropReason?.message)
+        ownRestriction.finishSend(basis: basis, rejection: rejection)
+        return response
     }
 
     // MARK: - Moderation

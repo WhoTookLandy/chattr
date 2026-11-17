@@ -91,7 +91,7 @@ chattr app target                  ← composition root + DI wiring only
 | **ChatModel** | Display-ready `ChatLine` / `LineRun` model and the `Normalizer` (EventSub & IRC-tag → `ChatLine`). |
 | **Accounts** | Multi-account state — `Account` (SwiftData), `AccountStore`, OAuth flow. |
 | **Channels** | Chat-session lifecycle — `ChannelSession` actor (normalizes each message once and owns the per-channel ring of display-ready rows), `ChannelSessionRegistry`, off-main event routing, badge lookup, backfill, optimistic send. |
-| **Features** | Every SwiftUI screen, grouped by feature folder (`Home`, `Chat`, `Channels`, `Emotes`, `Highlights`, `Filters`, `Settings`, `Tabs`, `App`, `Shared`). |
+| **Features** | Every SwiftUI screen, grouped by feature folder (`Home`, `Chat`, `Channels`, `Emotes`, `Highlights`, `Filters`, `Moderation`, `Settings`, `Tabs`, `App`, `Shared`). |
 
 ### External dependencies
 

@@ -254,6 +254,19 @@ public struct ChatScreen: View {
         // (not on the list) so the empty/connecting states and the area
         // behind the glass compose bar share the same surface.
         .background(Color.chatSurface.ignoresSafeArea())
+        // "You're timed out / banned / warned here" — directly under the
+        // stream header (this bar is applied first, so it sits inside the
+        // header's). Self-contained and observes only its own small state,
+        // so it costs this body and the transcript nothing; renders no
+        // content (zero height) when there's nothing to say. Other
+        // top-of-chat banners can stack as sibling bars beside it.
+        .safeAreaBar(edge: .top) {
+            OwnChatRestrictionBanner(
+                state: chatModel.ownRestriction,
+                channelLoginName: channelLoginName,
+                tabId: tabId
+            )
+        }
         // Stream context (title, category, live/viewers/uptime, or offline
         // + last live) pinned above the transcript. Its own view reading
         // its own stores, so status refreshes never re-run this body.
@@ -334,7 +347,13 @@ public struct ChatScreen: View {
                             showReportConfirmation = false
                         }
                     }
-                }
+                },
+                // Mods get timeouts / ban / warn — never on themselves or
+                // the broadcaster (Twitch refuses both anyway).
+                moderation: (chatModel.currentUserCanModerate
+                             && target.line.authorUserId != account.userId
+                             && target.line.authorUserId != channelId)
+                    ? chatModel : nil
             )
         }
         .sheet(isPresented: $showViewerList) {
@@ -529,6 +548,8 @@ public struct ChatScreen: View {
             channelDisplayName: channelDisplayName,
             replyContext: chatModel.replyContext,
             chatRestrictions: chatModel.chatRestrictions,
+            // The state object, not its value: only the bar observes it.
+            ownRestriction: chatModel.ownRestriction,
             // Seeded once at construction (see `draftSeed` / `init`), not
             // re-read here — the seed only matters at first mount thanks to
             // ComposeBar's own @State semantics, so reading it on every body
