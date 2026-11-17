@@ -47,6 +47,7 @@ public struct ProfileScreen: View {
     @AppStorage(StreamHeaderView.expandedKey) private var showVideoInChat = false
     @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
     @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
+    @AppStorage(PlayerSettings.systemPictureInPictureKey) private var systemPictureInPicture = false
     @State private var isSigningOut = false
     @State private var showingSignOutConfirm = false
     @State private var errorMessage: String?
@@ -204,6 +205,9 @@ public struct ProfileScreen: View {
                 Toggle(isOn: $useNativePlayer) {
                     Label("Native Video Player", systemImage: "play.tv")
                 }
+                Toggle(isOn: $systemPictureInPicture) {
+                    Label("Picture in Picture When Leaving Chat", systemImage: "pip")
+                }
                 if useNativePlayer {
                     Picker(selection: $maxQuality) {
                         ForEach(PlayerQuality.allCases) { quality in
@@ -216,7 +220,7 @@ public struct ProfileScreen: View {
             } header: {
                 Text("Video")
             } footer: {
-                Text("The native player uses Apple's video player for smoother picture-in-picture and quality control. It's experimental: it relies on an unofficial Twitch interface, and if it can't load a stream chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video.")
+                Text("The native player uses Apple's video player for smoother picture-in-picture and quality control. It's experimental: it relies on an unofficial Twitch interface, and if it can't load a stream chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video. With Picture in Picture When Leaving Chat on, backing out of a playing chat moves the video into Apple's floating window (drag, resize, stash it at the edge, and it follows you out of the app); otherwise it stays in chattr's mini player. PiP works best with the native player.")
             }
 
             // App — preferences about chattr itself rather than chat

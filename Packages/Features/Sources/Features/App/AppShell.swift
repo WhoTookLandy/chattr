@@ -81,6 +81,26 @@ public struct AppShell: View {
         playback.isPlaying && !chatOnScreen && !playback.controller.isPictureInPictureActive
     }
 
+    @AppStorage(PlayerSettings.systemPictureInPictureKey) private var useSystemPictureInPicture = false
+
+    /// "Picture in Picture When Leaving Chat": once the mini player has
+    /// taken the video, hand it to the system PiP window. PiP can only start
+    /// from a player that's on screen, hence going via the mounted tile
+    /// rather than straight from the chat header mid-pop. If PiP can't start
+    /// (not ready yet, or the web player refuses), the mini player simply
+    /// stays — nothing is lost. Audio-only keeps its pill.
+    private func handOffToSystemPictureInPicture() {
+        guard useSystemPictureInPicture,
+              !playback.audioOnly || playback.controller.nativeFailed else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard showsMiniPlayer,
+                  playback.controller.canPictureInPicture,
+                  !playback.controller.isPictureInPictureActive else { return }
+            playback.controller.togglePictureInPicture()
+        }
+    }
+
     private func wirePictureInPicture() {
         // PiP's "return to app" → back into that stream's chat.
         // Weak: the center owns the controller that stores these closures.
@@ -211,6 +231,9 @@ public struct AppShell: View {
             // transition, toolbar and tab-bar changes all picked up an extra
             // implicit animation.
             .animation(.snappy(duration: 0.3), value: showsMiniPlayer)
+        }
+        .onChange(of: showsMiniPlayer) { _, shows in
+            if shows { handOffToSystemPictureInPicture() }
         }
         // Sign-out / account switch: nothing keeps playing for the old account.
         .onDisappear { playback.stop() }

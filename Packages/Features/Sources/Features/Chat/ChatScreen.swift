@@ -550,6 +550,16 @@ public struct ChatScreen: View {
                     twitchGlobal: resolvedTwitchGlobals
                 )
             },
+            // Read on demand (when an @mention starts), so the transcript
+            // read stays off this body's dependency list.
+            mentionPoolProvider: { [chatModel, channelLoginName, channelDisplayName] in
+                MentionAutocomplete.pool(
+                    from: chatModel.lines,
+                    broadcasterLogin: channelLoginName,
+                    broadcasterDisplayName: channelDisplayName,
+                    excludingLogin: chatModel.selfLogin
+                )
+            },
             onSend: { draft in
                 // Self-heal: if the model lost its live session under us (a
                 // lifecycle race, or a session teardown+rebuild that left it

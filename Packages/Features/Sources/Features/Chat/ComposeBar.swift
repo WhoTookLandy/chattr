@@ -50,6 +50,10 @@ struct ComposeBar: View {
     /// Builds the emote-picker sections on demand (when the emote button
     /// is tapped) so we don't recompute them on every body eval.
     let emoteSectionsProvider: () -> [EmoteSection]
+    /// Builds the pool of people the `@` suggestions draw from (recent
+    /// chatters + the broadcaster). Called once when a mention starts, not
+    /// per keystroke — the strip then filters that snapshot as you type.
+    let mentionPoolProvider: @MainActor () -> [MentionAutocomplete.Candidate]
     let onSend: @MainActor (String) async -> Void
     /// Opens the chat settings sheet from the ⋯ menu. nil hides the item.
     let onOpenSettings: (() -> Void)?
@@ -78,6 +82,11 @@ struct ComposeBar: View {
     @State private var showingEmotePicker = false
     @State private var pickerSections: [EmoteSection] = []
 
+    /// Snapshot of mention candidates, taken when the draft starts an
+    /// `@mention` and dropped when it ends. nil = no mention in progress.
+    @State private var mentionPool: [MentionAutocomplete.Candidate]?
+    @Environment(\.colorScheme) private var colorScheme
+
     /// Custom init that seeds `composeText`'s @State with the persisted
     /// draft. SwiftUI's `@State` semantics ensure the seed value is
     /// only used at first mount for a given view identity — subsequent
@@ -93,6 +102,7 @@ struct ComposeBar: View {
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
         emoteSectionsProvider: @escaping () -> [EmoteSection],
+        mentionPoolProvider: @escaping @MainActor () -> [MentionAutocomplete.Candidate] = { [] },
         onSend: @escaping @MainActor (String) async -> Void,
         onOpenSettings: (() -> Void)? = nil
     ) {
@@ -104,6 +114,7 @@ struct ComposeBar: View {
         self.onCancelReply = onCancelReply
         self.onDraftChange = onDraftChange
         self.emoteSectionsProvider = emoteSectionsProvider
+        self.mentionPoolProvider = mentionPoolProvider
         self.onSend = onSend
         self._composeText = State(initialValue: seedDraft)
     }
@@ -115,6 +126,10 @@ struct ComposeBar: View {
 
             if let reply = replyContext {
                 replyChip(reply)
+            }
+
+            if !mentionSuggestions.isEmpty {
+                mentionStrip
             }
 
             inputRow
@@ -137,6 +152,7 @@ struct ComposeBar: View {
         // the chip to animate when the target changes. Not chosen
         // today — feels jumpier.
         .animation(.snappy(duration: 0.2), value: replyContext != nil)
+        .animation(.snappy(duration: 0.2), value: mentionSuggestions.isEmpty)
         // Emote picker. Stays open while you tap (so you can stack
         // several emotes); inserts each emote's name into the composer.
         .sheet(isPresented: $showingEmotePicker) {
@@ -295,16 +311,18 @@ struct ComposeBar: View {
                 // floating circle.
                 moreMenu
 
-                // Single-line: Return sends (no send button), and the keyboard
-                // stays up for the next message. Chat messages are one line
-                // on Twitch anyway.
+                // Single-line: Return sends (no send button). Chat messages
+                // are one line on Twitch anyway. The keyboard drops after a
+                // send so the chat gets the screen back (TestFlight feedback);
+                // `onSubmit` resigns focus by default, so we just don't
+                // re-assert it.
                 TextField(textFieldPrompt, text: $composeText)
                     .textFieldStyle(.plain)
                     .focused($focused)
                     .submitLabel(.send)
                     .onSubmit {
                         Task { await sendDraft() }
-                        focused = true
+                        focused = false
                     }
                     // Forward every text change to the parent, which hands
                     // it to `DraftStorage.scheduleSave` — debounced (~400ms),
@@ -313,6 +331,7 @@ struct ComposeBar: View {
                     // foreground.
                     .onChange(of: composeText) { _, newValue in
                         onDraftChange(newValue)
+                        updateMentionPool(for: newValue)
                     }
                     .padding(.leading, 2)
                     .padding(.vertical, 9)
@@ -452,9 +471,10 @@ struct ComposeBar: View {
                 }
             }
         } label: {
-            // A filled "+" disc, iMessage-style: reads as a button that opens
-            // more options, where a bare ⋯ read as decoration.
-            Image(systemName: "plus")
+            // ⋯ on a filled disc: the standard iOS "more" glyph, but on a
+            // button-shaped disc. A bare ⋯ read as decoration; a "+" read as
+            // "add/attach" rather than "more options" (TestFlight feedback).
+            Image(systemName: "ellipsis")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 30, height: 30)
@@ -464,6 +484,59 @@ struct ComposeBar: View {
         }
         .padding(.leading, 4)
         .accessibilityLabel("More options")
+    }
+
+    // MARK: - @mention suggestions
+
+    /// Take the candidate snapshot when a mention starts; drop it when the
+    /// draft no longer ends in one (space typed, text cleared, sent).
+    private func updateMentionPool(for text: String) {
+        let mentioning = MentionAutocomplete.activeQuery(in: text) != nil
+        if mentioning, mentionPool == nil {
+            mentionPool = mentionPoolProvider()
+        } else if !mentioning, mentionPool != nil {
+            mentionPool = nil
+        }
+    }
+
+    /// Current matches. Empty unless a mention is being typed and the field
+    /// has focus (no strip hovering over chat once the keyboard is gone).
+    private var mentionSuggestions: [MentionAutocomplete.Candidate] {
+        guard focused, let pool = mentionPool,
+              let query = MentionAutocomplete.activeQuery(in: composeText) else { return [] }
+        return MentionAutocomplete.suggestions(for: query, in: pool)
+    }
+
+    /// A row of name chips above the field, newest chatters first. Tapping
+    /// one swaps the half-typed "@que" for "@Name ".
+    private var mentionStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(mentionSuggestions, id: \.login) { candidate in
+                    Button {
+                        composeText = MentionAutocomplete.complete(composeText, with: candidate)
+                    } label: {
+                        Text("@\(candidate.insertionName)")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(
+                                candidate.color.isEmpty
+                                    ? Color.primary
+                                    : Color.twitchUsername(hex: candidate.color, scheme: colorScheme)
+                            )
+                            .lineLimit(1)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .glassEffect(.regular.interactive(), in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Mention \(candidate.displayName)")
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .scrollClipDisabled()
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private var channelURL: URL? {
