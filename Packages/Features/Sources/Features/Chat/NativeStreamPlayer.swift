@@ -96,6 +96,13 @@ final class StreamPlayerController {
         onRestoreFromPictureInPicture?()
     }
 
+    /// PiP ended but whether the user returned or closed is unknown (web
+    /// player, video already paused): clear the state, take no action.
+    func pictureInPictureEndedAmbiguously() {
+        isPictureInPictureActive = false
+        isRestoringFromPictureInPicture = false
+    }
+
     func pictureInPictureDidStop() {
         isPictureInPictureActive = false
         if !isRestoringFromPictureInPicture { onPictureInPictureClosed?() }

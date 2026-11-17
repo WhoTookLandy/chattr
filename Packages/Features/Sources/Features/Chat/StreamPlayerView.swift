@@ -142,9 +142,12 @@ enum TwitchWebPlayer {
         var mode = v.webkitPresentationMode;
         if (mode === 'picture-in-picture' && lastMode !== mode) { post({ type: 'pipStart' }); }
         if (lastMode === 'picture-in-picture' && mode !== 'picture-in-picture') {
+          // Already paused inside PiP: the pause tells us nothing, so
+          // report "unknown" (null) rather than guessing either way.
+          var wasPlaying = !v.paused;
           setTimeout(function () {
             var w = video();
-            post({ type: 'pipEnd', restored: !!(w && !w.paused) });
+            post({ type: 'pipEnd', restored: wasPlaying ? !!(w && !w.paused) : null });
           }, 250);
         }
         lastMode = mode;
@@ -190,10 +193,17 @@ enum TwitchWebPlayer {
             case "pipEnd":
                 // Same contract as the native delegate: a return to the app
                 // restores (reopens the chat), a close just stops.
-                if body["restored"] as? Bool == true {
+                switch body["restored"] as? Bool {
+                case true?:
                     controller.pictureInPictureWillRestore()
+                    controller.pictureInPictureDidStop()
+                case false?:
+                    controller.pictureInPictureDidStop()
+                case nil:
+                    // Paused before PiP ended: can't tell return from
+                    // close, so neither reopen the chat nor stop playback.
+                    controller.pictureInPictureEndedAmbiguously()
                 }
-                controller.pictureInPictureDidStop()
             default:
                 break
             }
