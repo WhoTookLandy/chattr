@@ -99,11 +99,12 @@ struct ChatTabsModelLifecycleTests {
         #expect(recorder.events.isEmpty)
         #expect(model.persistence == nil)
 
-        // Reversible: AppShell's `.task` re-wiring on re-appearance restores.
+        // Reversible: AppShell re-wiring on re-appearance restores.
         model.persistence = persistence
         model.hydrateFromPersistence()
         await waitUntil { recorder.opens.count == 2 }
-        #expect(recorder.events == ["open a", "open b"])
+        // Restored tabs open side by side, so only the set is fixed.
+        #expect(recorder.events.sorted() == ["open a", "open b"])
     }
 
     @Test("Closing a restored tab before its open starts skips both open and close")

@@ -9,10 +9,12 @@ import Nuke
 /// channel's chat. Viewing the tab clears its badge.
 struct ActivityScreen: View {
     let store: ActivityStore
-    /// Opens (or re-focuses) the entry's channel chat — AppShell routes it
-    /// to Home → Chats with that tab active.
-    let onOpen: (ChannelDescriptor) -> Void
 
+    /// Opens (or re-focuses) the entry's channel chat — AppShell routes it
+    /// to the Chats tab with that chat pushed. From the environment rather
+    /// than a closure argument, so this view's inputs compare equal when
+    /// AppShell's body re-runs (every badge change).
+    @Environment(\.openChannel) private var openChannel
     @Environment(\.colorScheme) private var colorScheme
     @State private var isVisible = false
 
@@ -29,7 +31,7 @@ struct ActivityScreen: View {
                     List {
                         ForEach(store.entries) { entry in
                             Button {
-                                onOpen(entry.channel)
+                                openChannel?(entry.channel)
                             } label: {
                                 row(entry)
                             }

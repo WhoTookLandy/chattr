@@ -42,11 +42,13 @@ public final class ActivityStore {
     public init() {}
 
     /// Records new hits (any order); duplicates by message id are dropped.
-    public func record(_ newEntries: [Entry]) {
+    /// `asRead` files them without counting them as unread — for hits the
+    /// user is already looking at (the chat on screen).
+    public func record(_ newEntries: [Entry], asRead: Bool = false) {
         let fresh = newEntries.filter { seenIds.insert($0.id).inserted }
         guard !fresh.isEmpty else { return }
         entries.insert(contentsOf: fresh.sorted { $0.timestamp > $1.timestamp }, at: 0)
-        unreadCount += fresh.count
+        if !asRead { unreadCount += fresh.count }
         if entries.count > Self.capacity {
             for dropped in entries[Self.capacity...] { seenIds.remove(dropped.id) }
             entries.removeLast(entries.count - Self.capacity)

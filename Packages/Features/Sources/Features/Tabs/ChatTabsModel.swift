@@ -1,6 +1,9 @@
 import Foundation
 import SwiftUI
 import Core
+import os
+
+private let logger = AppLogger.make("Features.ChatTabsModel")
 
 /// Owns the *UI* state for the Chat tab: which tabs are open, which one is
 /// currently visible. Tab-centric rather than channel-centric — a tab is the
@@ -25,13 +28,13 @@ import Core
 ///
 /// ## Open/close balance
 ///
-/// Every `onOpen` is scheduled through `scheduleOpen`, which records a task
-/// in `openTasks` resolving to whether `onOpen` actually ran. Every release
-/// path (`close`, `tearDown`) *removes* that entry, awaits it, and calls
-/// `onClose` only if it resolved `true`. Removing the entry is what makes the
-/// release exactly-once (a tab can't be released by both `close` and
-/// `tearDown`), and awaiting it is what keeps release from running ahead of
-/// an in-flight acquire.
+/// Every tab added to the strip goes through `scheduleOpen`, which records a
+/// task in `openTasks` resolving to whether `onOpen` actually ran. Every
+/// release path (`close`, `tearDown`) *removes* that entry, awaits it, and
+/// calls `onClose` if it resolved `true`, `onDiscard` if it resolved `false`.
+/// Removing the entry is what makes the release exactly-once (a tab can't be
+/// released by both `close` and `tearDown`), and awaiting it is what keeps
+/// release from running ahead of an in-flight acquire.
 @MainActor
 @Observable
 public final class ChatTabsModel {
@@ -178,7 +181,7 @@ public final class ChatTabsModel {
     /// Symmetric with `onClose`: every `onOpen` for a tab is balanced by
     /// exactly one `onClose` when the tab is closed or the model is torn
     /// down, so refcounts stay honest across the tab's lifetime. A tab whose
-    /// `onOpen` never ran gets no `onClose` either.
+    /// `onOpen` never ran gets no `onClose` either (it gets `onDiscard`).
     public var onOpen: (@MainActor @Sendable (ChatTab) async -> Void)?
 
     /// Called when a tab is closed (or released by `tearDown()`). AppShell
@@ -187,6 +190,15 @@ public final class ChatTabsModel {
     /// `ChatTab` (rather than just an ID) lets AppShell iterate the channels
     /// without needing a separate lookup.
     public var onClose: (@MainActor @Sendable (ChatTab) async -> Void)?
+
+    /// Called instead of `onClose` — exactly once — for a tab that is closed
+    /// (or released by `tearDown()`) without its `onOpen` ever having run:
+    /// it closed, or the model was torn down, before the scheduled open got
+    /// its turn, or no `onOpen` was wired. The tab holds no refcount then,
+    /// but its mounted chat page may already have created the channel's
+    /// session; AppShell wires this to `registry.releaseUnowned(...)` so
+    /// that session doesn't outlive the tab.
+    public var onDiscard: (@MainActor @Sendable (ChatTab) async -> Void)?
 
     /// On-disk persistence handle, scoped to the signed-in account. `nil`
     /// for tests and for the brief window before AppShell wires it up (and
@@ -201,11 +213,19 @@ public final class ChatTabsModel {
 
     /// True once a successful hydrate has run for THIS model instance (reset
     /// by `tearDown()`). `hydrateFromPersistence()` is idempotent against it:
-    /// a second call (e.g. AppShell's `.task` re-firing) is a no-op, so it
+    /// a second call (e.g. AppShell appearing again) is a no-op, so it
     /// can't churn `tabs` 0→1 and spuriously tear down + rebuild a live
     /// channel session. A genuine account swap creates a fresh model (AppShell
     /// is `.id(userId)`), which hydrates the new account's tabs.
     private var hasHydrated = false
+
+    /// True after a hydrate whose fetch threw, until one succeeds. While set,
+    /// `persistTabs()` writes nothing: `save(tabs:)` deletes every row that
+    /// isn't in the strip, and the strip never received the saved tabs.
+    private var hydrationFailed = false
+
+    /// How many restored tabs' `onOpen` may be in flight at once.
+    static let hydrationOpenLimit = 3
 
     /// Bumped by `tearDown()`. Each scheduled open captures the generation it
     /// was created in and skips `onOpen` if the model was torn down before it
@@ -215,13 +235,15 @@ public final class ChatTabsModel {
     private var generation = 0
 
     /// In-flight / completed `onOpen` tasks, keyed by tab id, resolving to
-    /// whether `onOpen` actually ran for the tab. Tracked so that:
+    /// whether `onOpen` actually ran for the tab. One per tab in the strip
+    /// that hasn't been released yet. Tracked so that:
     ///   - `close` can await the acquire before releasing (preventing a
     ///     release-before-acquire race that underflows the registry refcount
     ///     and leaks the channel's EventSub subscription on Twitch's side) —
     ///     this includes tabs restored by hydration, and
-    ///   - `close` / `tearDown` release a tab only if it was acquired, and
-    ///     only once (each removes the entry it consumes).
+    ///   - `close` / `tearDown` release a tab only if it was acquired
+    ///     (discarding it otherwise), and only once (each removes the entry
+    ///     it consumes).
     ///
     /// Bounded by the number of currently-open tabs: release paths remove
     /// their entries, and a completed open leaves a single finished `Task`
@@ -238,25 +260,35 @@ public final class ChatTabsModel {
     /// roll back a UI mutation the user just made.
     private func persistTabs() {
         guard let persistence else { return }
+        guard !hydrationFailed else {
+            logger.warning("Not saving chat tabs: this account's saved tabs could not be read")
+            return
+        }
         do {
             try persistence.save(tabs: tabs)
         } catch {
             // Don't surface — tab list is fine in memory. On next mutation
             // we'll try again; on cold start without this save, the user
             // sees the previous snapshot, which is recoverable.
+            logger.error("Saving chat tabs failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     /// Hydrate tabs from persistence on cold start (or account appearance).
-    /// Called by AppShell's `.task` after `persistence` has been wired up.
-    /// Restores `tabs` in stored order and fires `onOpen` for each tab so the
-    /// registry's refcount + EventSub subscriptions resume. Corrupt rows
+    /// Called by AppShell as it appears, after `persistence` has been wired
+    /// up. Restores `tabs` in stored order and fires `onOpen` for each tab so
+    /// the registry's refcount + EventSub subscriptions resume. Corrupt rows
     /// (no channels) are skipped.
+    ///
+    /// `preferredTabId` is the tab about to be shown (the chat being
+    /// resumed), when the caller knows it: its open goes first and the rest
+    /// follow outward from it, so the chat on screen and its pre-mounted
+    /// neighbours don't queue behind the rest of the strip.
     ///
     /// Active tab restoration is *not* handled here — that lives in
     /// `@SceneStorage` because it's window-state, not account-data. See
-    /// `HomeScreen` for the `@SceneStorage` binding.
-    public func hydrateFromPersistence() {
+    /// `ChatsScreen` for the `@SceneStorage` binding.
+    public func hydrateFromPersistence(openingFirst preferredTabId: UUID? = nil) {
         guard let persistence else { return }
         // Idempotent: only hydrate once per model. A re-run would reset `tabs`
         // and re-fire onOpen, which (paired with a transient empty save) churns
@@ -266,19 +298,45 @@ public final class ChatTabsModel {
             let restored = try persistence.fetchAll().compactMap { $0.toChatTab() }
             tabs = restored
             hasHydrated = true
-            // One recorded task per tab, each chained after the previous so
-            // acquires run sequentially in persisted strip order. Recording
-            // them per tab (rather than one opaque hydration task) is what lets
-            // `close` on a restored tab wait for — or skip — its acquire.
-            var previous: Task<Bool, Never>?
-            for tab in restored {
-                previous = scheduleOpen(tab, after: previous)
+            hydrationFailed = false
+            // One recorded task per tab — that is what lets `close` on a
+            // restored tab wait for, or skip, its acquire. Each is chained
+            // after the tab `hydrationOpenLimit` places ahead of it in the
+            // outward order, so that many run at a time: a session start can
+            // wait seconds for join history, and strictly one after another
+            // left the last tabs without a mention watcher for a long while.
+            let centerId = preferredTabId ?? activeTabId
+            let center = restored.firstIndex(where: { $0.id == centerId }) ?? 0
+            var lanes = [Task<Bool, Never>?](repeating: nil, count: Self.hydrationOpenLimit)
+            for (position, index) in Self.outwardOrder(count: restored.count, from: center).enumerated() {
+                let lane = position % Self.hydrationOpenLimit
+                lanes[lane] = scheduleOpen(restored[index], after: lanes[lane])
             }
         } catch {
             // Empty start is the safe fallback — the user will see the
             // empty-state on the Chat tab and can re-open whichever
-            // channels they want.
+            // channels they want. Their saved tabs stay on disk untouched
+            // (see `hydrationFailed`).
+            hydrationFailed = true
+            logger.error("Restoring chat tabs failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// The indices `0..<count` ordered outward from `center`: the center
+    /// itself, then its neighbours nearest first (right before left).
+    /// `center` is clamped into range.
+    nonisolated static func outwardOrder(count: Int, from center: Int) -> [Int] {
+        guard count > 0 else { return [] }
+        let center = min(max(center, 0), count - 1)
+        var order = [center]
+        order.reserveCapacity(count)
+        var distance = 1
+        while order.count < count {
+            if center + distance < count { order.append(center + distance) }
+            if center - distance >= 0 { order.append(center - distance) }
+            distance += 1
+        }
+        return order
     }
 
     /// Release everything this model holds in the session registry: called by
@@ -289,36 +347,44 @@ public final class ChatTabsModel {
     ///     rather than cancelled, since cancelling an acquire part-way and
     ///     then releasing would unbalance the refcount — gets exactly one
     ///     `onClose`;
+    ///   - every other tab (its open skipped, or never wired) gets exactly
+    ///     one `onDiscard`;
     ///   - `persistence` is detached, so nothing about the teardown is
     ///     written to disk (the account's saved strip stays intact).
     ///
     /// Idempotent: a second call finds no recorded opens and does nothing.
     /// `tabs` is left as-is (the view is leaving anyway), and the hydrate
-    /// guard is reset so that if this same model re-appears, AppShell's
-    /// `.task` re-wires persistence and re-hydrates — re-acquiring what was
+    /// guard is reset so that if this same model re-appears, AppShell
+    /// re-wires persistence and re-hydrates — re-acquiring what was
     /// released here.
-    public func tearDown() {
+    ///
+    /// Returns the task running those callbacks (nil when there is nothing
+    /// to run), so the caller can order work after the last release.
+    @discardableResult
+    public func tearDown() -> Task<Void, Never>? {
         generation &+= 1
         hasHydrated = false
+        hydrationFailed = false
         persistence = nil
         let pending = openTasks
         openTasks.removeAll()
         let releases = tabs.compactMap { tab in pending[tab.id].map { (tab, $0) } }
-        releaseAfterOpen(releases)
+        return releaseAfterOpen(releases)
     }
 
     /// Schedules `onOpen(tab)` (after `prior`, if given) and records it in
     /// `openTasks`. The task resolves `false` without calling `onOpen` if the
-    /// model was torn down, or the tab closed, before it got to run. Returns
-    /// `nil` (records nothing) when no `onOpen` is wired.
+    /// model was torn down, or the tab closed, before it got to run — or if
+    /// no `onOpen` is wired. Recorded either way, so the tab's release path
+    /// can tell "opened" from "never opened" (`onClose` vs `onDiscard`).
     @discardableResult
-    private func scheduleOpen(_ tab: ChatTab, after prior: Task<Bool, Never>? = nil) -> Task<Bool, Never>? {
-        guard let onOpen else { return nil }
+    private func scheduleOpen(_ tab: ChatTab, after prior: Task<Bool, Never>? = nil) -> Task<Bool, Never> {
+        let onOpen = self.onOpen
         let scheduledGeneration = generation
         let tabId = tab.id
         let task = Task { [weak self] () async -> Bool in
             _ = await prior?.value
-            guard let self,
+            guard let onOpen, let self,
                   self.generation == scheduledGeneration,
                   self.tabs.contains(where: { $0.id == tabId })
             else { return false }
@@ -329,16 +395,23 @@ public final class ChatTabsModel {
         return task
     }
 
-    /// Fires `onClose` for each tab whose recorded open resolves `true`,
-    /// sequentially, after that open completes. Callers must already have
-    /// removed the entries from `openTasks` (that removal is the
-    /// exactly-once guarantee).
-    private func releaseAfterOpen(_ releases: [(ChatTab, Task<Bool, Never>)]) {
-        guard let onClose, !releases.isEmpty else { return }
-        Task {
+    /// For each tab, sequentially, once its recorded open completes: fires
+    /// `onClose` if the open resolved `true`, `onDiscard` if it resolved
+    /// `false`. Callers must already have removed the entries from
+    /// `openTasks` (that removal is the exactly-once guarantee). Returns the
+    /// task doing so, or nil when there is nothing to run.
+    @discardableResult
+    private func releaseAfterOpen(_ releases: [(ChatTab, Task<Bool, Never>)]) -> Task<Void, Never>? {
+        let onClose = self.onClose
+        let onDiscard = self.onDiscard
+        guard !releases.isEmpty, onClose != nil || onDiscard != nil else { return nil }
+        return Task {
             for (tab, openTask) in releases {
-                guard await openTask.value else { continue }
-                await onClose(tab)
+                if await openTask.value {
+                    await onClose?(tab)
+                } else {
+                    await onDiscard?(tab)
+                }
             }
         }
     }
@@ -421,8 +494,9 @@ public final class ChatTabsModel {
     /// Closes the tabs with the given ids (unknown ids are ignored). Updates
     /// UI state synchronously (so the rows disappear immediately), persists
     /// ONCE for the whole batch, prunes the compose drafts of channels no
-    /// longer open in any tab, and fires `onClose` asynchronously to let
-    /// AppShell tear down the underlying channel sessions.
+    /// longer open in any tab, and fires `onClose` (or `onDiscard`, for a tab
+    /// whose open never ran) asynchronously to let AppShell tear down the
+    /// underlying channel sessions.
     ///
     /// If a closed tab was active, falls back to the previous tab (or the
     /// new first if the closed tab was index 0). Returns to no-selection only
@@ -458,7 +532,7 @@ public final class ChatTabsModel {
         // hydration) so the registry refcount is settled first — releasing
         // mid-acquire would underflow the count and leak the channel's EventSub
         // subscription. A tab whose acquire never ran resolves `false` and is
-        // not released at all.
+        // discarded (`onDiscard`) instead of released.
         let releases = closedTabs.compactMap { tab in
             openTasks.removeValue(forKey: tab.id).map { (tab, $0) }
         }

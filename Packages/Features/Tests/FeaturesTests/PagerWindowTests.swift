@@ -44,6 +44,14 @@ struct PagerWindowTests {
         #expect(ids.map { window.isMounted($0, in: model) } == [false, false, false, true, true])
     }
 
+    @Test("An unknown tab is never mounted")
+    func unknownTab() {
+        let (model, ids) = fiveTabs()
+        let window = PagerWindow()
+        window.centerId = ids[0]
+        #expect(!window.isMounted(UUID(), in: model))
+    }
+
     @Test("A closed center falls back to the active tab, not to everything")
     func staleCenterFallsBack() {
         let (model, ids) = fiveTabs()

@@ -11,25 +11,37 @@ import DesignSystem
 /// switches to this tab.
 ///
 /// Owns the open channels' status polling (one batched call a minute while
-/// this tab — chat pushed or not — is on screen). It feeds the chat stream
-/// header, the pill's live dot and the rows here.
+/// this tab — chat pushed or not — is on screen and the app is in the
+/// foreground). It feeds the chat stream header, the pill's live dot and the
+/// rows here.
 struct ChatsScreen: View {
     let account: Account
     let accountStore: AccountStore
-    /// The empty state's "See who's live" — switches to Home → Live.
-    let onShowLive: () -> Void
+    /// For the empty state's "See who's live" (Home → Live). The model by
+    /// reference rather than a closure, so this view's inputs compare equal
+    /// when AppShell's body re-runs (every badge change) and its body isn't
+    /// re-run with it.
+    let navigation: AppNavigation
 
     @Environment(\.chatTabs) private var chatTabs
     @Environment(\.channelStatus) private var channelStatus
     @Environment(\.followsStore) private var followsStore
+    @Environment(\.scenePhase) private var scenePhase
 
     private var openChannelIds: [String] {
         (chatTabs?.tabs ?? []).flatMap { $0.channels.map(\.channelId) }
     }
 
+    /// Restarts the status poll when the open channels change or the app
+    /// enters / leaves the background.
+    private struct StatusPollKey: Equatable {
+        let channelIds: [String]
+        let inForeground: Bool
+    }
+
     var body: some View {
         NavigationStack {
-            OpenChatsList(onShowLive: onShowLive)
+            OpenChatsList(onShowLive: { navigation.showLive() })
                 .refreshable {
                     await channelStatus?.refresh(
                         channelIds: openChannelIds, account: account, accountStore: accountStore, force: true
@@ -42,8 +54,16 @@ struct ChatsScreen: View {
                     ChatPagerScreen(account: account, accountStore: accountStore)
                 }
         }
-        .task(id: openChannelIds) {
+        .task(id: StatusPollKey(channelIds: openChannelIds, inForeground: scenePhase != .background)) {
+            // Not while backgrounded: background audio and PiP keep the app
+            // running, and nothing on screen shows these statuses. Coming
+            // back restarts the loop; the store's own staleness check keeps
+            // a quick hop from refetching.
             guard let channelStatus else { return }
+            // A closed chat's stream state is never refreshed again; drop it
+            // rather than let it answer "live" from memory.
+            channelStatus.retainStreamState(forOpenChannels: openChannelIds)
+            guard scenePhase != .background else { return }
             while !Task.isCancelled {
                 await channelStatus.refresh(
                     channelIds: openChannelIds,

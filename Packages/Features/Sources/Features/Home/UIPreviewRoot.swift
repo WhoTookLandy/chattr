@@ -137,7 +137,7 @@ public struct UIPreviewRoot: View {
             }
             .accessibilityLabel("Home")
             Tab(value: PreviewTab.activity) {
-                ActivityScreen(store: activity, onOpen: { _ in })
+                ActivityScreen(store: activity)
             } label: {
                 Image(systemName: "bell")
             }

@@ -38,6 +38,15 @@ struct ActivityStoreTests {
         #expect(store.unreadCount == 2)
     }
 
+    @Test("hits filed as read are listed without counting as unread")
+    func recordsAsRead() {
+        let store = ActivityStore()
+        store.record([entry("a", at: 1)])
+        store.record([entry("b", at: 2)], asRead: true)
+        #expect(store.entries.map(\.id) == ["b", "a"])
+        #expect(store.unreadCount == 1)
+    }
+
     @Test("caps at capacity, oldest dropped")
     func caps() {
         let store = ActivityStore()

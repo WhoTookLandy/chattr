@@ -76,6 +76,28 @@ struct ChatTabsModelObservationTests {
         #expect(!notifies(reading: { _ = model.mentionedTabIds }) { model.markMention(tabId: a) })
     }
 
+    /// The pager's page slots ask `PagerWindow.isMounted` in their bodies,
+    /// and `.scrollPosition(id:)` writes `activeTabId` mid-swipe: once the
+    /// window has a center, that write must not re-run the mounted pages.
+    @Test("A mounted-page query doesn't depend on activeTabId once a center is set")
+    func mountedQueryIgnoresActiveTabWithCenter() {
+        let model = ChatTabsModel()
+        let a = model.open(channel: channel("a"))
+        let b = model.open(channel: channel("b"))
+        let window = PagerWindow()
+        window.centerId = b
+        #expect(!notifies(reading: { _ = window.isMounted(a, in: model) }) { model.activeTabId = a })
+    }
+
+    @Test("Without a center, a mounted-page query follows activeTabId")
+    func mountedQueryFollowsActiveTabWithoutCenter() {
+        let model = ChatTabsModel()
+        let a = model.open(channel: channel("a"))
+        _ = model.open(channel: channel("b"))
+        let window = PagerWindow()
+        #expect(notifies(reading: { _ = window.isMounted(a, in: model) }) { model.activeTabId = a })
+    }
+
     @Test("Re-setting isPresented doesn't notify")
     func sameIsPresentedIsSilent() {
         let model = ChatTabsModel()

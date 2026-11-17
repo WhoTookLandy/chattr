@@ -60,7 +60,7 @@ struct LiveStreamRow: View {
     /// stream content.
     @ViewBuilder
     private var thumbnail: some View {
-        LazyImage(url: thumbnailURL) { state in
+        LazyImage(request: thumbnailRequest) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else if state.error != nil {
@@ -93,13 +93,13 @@ struct LiveStreamRow: View {
         }
     }
 
-    /// Builds the concrete CDN URL by substituting Twitch's `{width}`/`{height}`
-    /// template placeholders. Returns nil if the template is malformed (rare).
-    private var thumbnailURL: URL? {
-        let raw = stream.thumbnailUrl
-            .replacingOccurrences(of: "{width}", with: String(Self.thumbnailWidth))
-            .replacingOccurrences(of: "{height}", with: String(Self.thumbnailHeight))
-        return URL(string: raw)
+    /// The preview request for Twitch's `{width}`/`{height}` template (see
+    /// `StreamFormatting.thumbnailRequest` for its caching). Nil if the
+    /// template is malformed (rare).
+    private var thumbnailRequest: ImageRequest? {
+        StreamFormatting.thumbnailRequest(
+            stream.thumbnailUrl, width: Self.thumbnailWidth, height: Self.thumbnailHeight
+        )
     }
 
     // MARK: - Metadata column

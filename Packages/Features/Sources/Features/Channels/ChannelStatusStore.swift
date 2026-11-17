@@ -47,8 +47,27 @@ public final class ChannelStatusStore {
     /// Last-live only changes when a new broadcast ends.
     static let lastLiveStaleness: TimeInterval = 30 * 60
 
+    /// When each channel's last-live lookup last SUCCEEDED. A failed lookup
+    /// leaves no mark, so it is retried the next time the channel is asked
+    /// for instead of 30 minutes later.
     private var lastLiveFetchedAt: [String: Date] = [:]
-    private var inFlight: Set<String> = []
+
+    /// Channels a `refresh` is fetching right now, by the refresh that
+    /// claimed them. A claim whose task was cancelled no longer counts: the
+    /// poll that replaces a cancelled one (the open set changed) would
+    /// otherwise skip those channels until its next round.
+    private var inFlight: [String: RefreshClaim] = [:]
+
+    private final class RefreshClaim: Sendable {
+        private let cancelled = OSAllocatedUnfairLock(initialState: false)
+        var isCancelled: Bool { cancelled.withLock { $0 } }
+        func cancel() { cancelled.withLock { $0 = true } }
+    }
+
+    /// Pending last-live lookups (see `LastLiveLookupQueue`), and who they
+    /// run as — the most recent requester.
+    @ObservationIgnored private var lastLiveQueue = LastLiveLookupQueue()
+    @ObservationIgnored private var lastLiveRequester: (accountUserId: String, accountStore: AccountStore)?
 
     public init() {}
 
@@ -58,10 +77,50 @@ public final class ChannelStatusStore {
     public func liveStream(for channelId: String, follows: FollowsStore?) -> TwitchStream? {
         let followed = follows?.liveStreams[channelId]
         guard let status = statuses[channelId] else { return followed }
-        if Date().timeIntervalSince(status.fetchedAt) < Self.streamStaleness * 2 {
-            return status.stream
+        return Self.mergedLiveStream(
+            statusStream: status.stream,
+            statusFetchedAt: status.fetchedAt,
+            followedStream: followed,
+            followsRefreshedAt: follows?.liveRefreshedAt,
+            isFollowed: followed != nil || follows?.followedChannelIds.contains(channelId) == true
+        )
+    }
+
+    /// The merge behind `liveStream(for:follows:)`. The follows list answers
+    /// for a channel only once it has loaded and only if the user follows
+    /// the channel — to it, a channel opened from search is never live.
+    /// Where both stores answer, the one refreshed more recently wins,
+    /// including when its answer is "not live".
+    nonisolated static func mergedLiveStream(
+        statusStream: TwitchStream?,
+        statusFetchedAt: Date,
+        followedStream: TwitchStream?,
+        followsRefreshedAt: Date?,
+        isFollowed: Bool
+    ) -> TwitchStream? {
+        guard let followsRefreshedAt, isFollowed else { return statusStream ?? followedStream }
+        return statusFetchedAt >= followsRefreshedAt ? statusStream : followedStream
+    }
+
+    /// Forgets the stream state of every channel not in `channelIds` (the
+    /// open chats): nothing refreshes it once its chat is closed, so it
+    /// would only go stale. A known last-live time is kept — the Following
+    /// list shows it, and it doesn't go stale the same way.
+    public func retainStreamState(forOpenChannels channelIds: [String]) {
+        let open = Set(channelIds)
+        var updated = statuses
+        var changed = false
+        for (id, status) in statuses where !open.contains(id) {
+            if let lastLiveAt = status.lastLiveAt {
+                let cleared = Status(stream: nil, channelInfo: nil, lastLiveAt: lastLiveAt, fetchedAt: .distantPast)
+                guard cleared != status else { continue }
+                updated[id] = cleared
+            } else {
+                updated[id] = nil
+            }
+            changed = true
         }
-        return followed ?? status.stream
+        if changed { statuses = updated }
     }
 
     /// Nil-tolerant form for views reading both (optional) environment
@@ -88,14 +147,35 @@ public final class ChannelStatusStore {
     ) async {
         let now = Date()
         let due = Array(Set(channelIds)).filter { id in
-            guard !inFlight.contains(id) else { return false }
+            if let claim = inFlight[id], !claim.isCancelled { return false }
             guard !force, let status = statuses[id] else { return true }
             return now.timeIntervalSince(status.fetchedAt) >= Self.streamStaleness
         }
         guard !due.isEmpty else { return }
-        inFlight.formUnion(due)
-        defer { inFlight.subtract(due) }
+        let claim = RefreshClaim()
+        for id in due { inFlight[id] = claim }
+        // Only our own claims: a newer refresh may have taken over an id
+        // after this one was cancelled.
+        defer {
+            for id in due where inFlight[id] === claim { inFlight[id] = nil }
+        }
+        // The claim is dropped the moment this task is cancelled, not when
+        // the cancelled request finally unwinds.
+        await withTaskCancellationHandler {
+            await fetchStatuses(
+                for: due, account: account, accountStore: accountStore, includeLastLive: includeLastLive
+            )
+        } onCancel: {
+            claim.cancel()
+        }
+    }
 
+    private func fetchStatuses(
+        for due: [String],
+        account: Account,
+        accountStore: AccountStore,
+        includeLastLive: Bool
+    ) async {
         let client = accountStore.client(for: account)
         do {
             for batch in due.chunked(into: 100) {
@@ -127,18 +207,10 @@ public final class ChannelStatusStore {
                 statuses = updated
 
                 if includeLastLive, !offline.isEmpty {
-                    // Concurrently, not one round trip after another: each
-                    // lookup is an independent `/videos` call, and N offline
-                    // chats used to cost N serial requests at launch and on
-                    // every poll. (Main-actor tasks — the work is the network
-                    // wait; `lastLiveFetchedAt` is still claimed before it.)
-                    var lookups: [Task<Void, Never>] = []
-                    for id in offline {
-                        lookups.append(Task {
-                            await self.refreshLastLive(channelId: id, client: client, account: account, accountStore: accountStore)
-                        })
-                    }
-                    for lookup in lookups { await lookup.value }
+                    // Queued, not awaited: each lookup is an independent
+                    // `/videos` call, and the statuses above shouldn't wait
+                    // on them.
+                    requestLastLive(offline, accountUserId: account.userId, accountStore: accountStore)
                 }
             }
         } catch is CancellationError {
@@ -149,32 +221,59 @@ public final class ChannelStatusStore {
     }
 
     /// Last-live for one channel on demand — the Following list calls this
-    /// as offline rows scroll into view, so a 500-follow account costs one
-    /// `/videos` call per row actually looked at (and none for 30 minutes
-    /// after). No-op while the channel is known to be live.
-    public func ensureLastLive(channelId: String, account: Account, accountStore: AccountStore) async {
+    /// as offline rows scroll into view. It only joins the store's lookup
+    /// line (`LastLiveLookupQueue`): the row's task neither runs the request
+    /// nor can cancel it, so flinging through a long roster costs a few
+    /// lookups for the rows it stops on, not one per row passed. No-op
+    /// while the channel is known to be live, and for 30 minutes after a
+    /// lookup that succeeded.
+    public func ensureLastLive(channelId: String, account: Account, accountStore: AccountStore) {
         guard statuses[channelId]?.isLive != true else { return }
-        await refreshLastLive(
-            channelId: channelId,
-            client: accountStore.client(for: account),
-            account: account,
-            accountStore: accountStore
-        )
+        requestLastLive([channelId], accountUserId: account.userId, accountStore: accountStore)
     }
 
-    private func refreshLastLive(
-        channelId: String,
-        client: TwitchClient,
-        account: Account,
-        accountStore: AccountStore
-    ) async {
-        if let last = lastLiveFetchedAt[channelId],
-           Date().timeIntervalSince(last) < Self.lastLiveStaleness { return }
-        lastLiveFetchedAt[channelId] = Date()
+    /// Queues a last-live lookup for each of `channelIds` that isn't fresh,
+    /// already waiting or already running.
+    private func requestLastLive(_ channelIds: [String], accountUserId: String, accountStore: AccountStore) {
+        lastLiveRequester = (accountUserId: accountUserId, accountStore: accountStore)
+        let now = Date()
+        for id in channelIds {
+            if let last = lastLiveFetchedAt[id],
+               now.timeIntervalSince(last) < Self.lastLiveStaleness { continue }
+            lastLiveQueue.enqueue(id)
+        }
+        startLastLiveLookups()
+    }
+
+    /// Starts lookups until the line is empty or its concurrency limit is
+    /// reached. Each runs on a task the store owns — not a child of whatever
+    /// asked — so a row scrolling away cancels nothing.
+    private func startLastLiveLookups() {
+        guard let requester = lastLiveRequester else { return }
+        while let channelId = lastLiveQueue.startNext() {
+            Task { [weak self] in
+                await self?.lookUpLastLive(
+                    channelId: channelId,
+                    accountUserId: requester.accountUserId,
+                    accountStore: requester.accountStore
+                )
+            }
+        }
+    }
+
+    private func lookUpLastLive(channelId: String, accountUserId: String, accountStore: AccountStore) async {
+        defer {
+            lastLiveQueue.finish(channelId)
+            startLastLiveLookups()
+        }
+        // It may have gone live while it waited.
+        guard statuses[channelId]?.isLive != true else { return }
         do {
-            let page = try await accountStore.withTokenRefresh(for: account) {
+            let client = accountStore.client(forUserId: accountUserId)
+            let page = try await accountStore.withTokenRefresh(forUserId: accountUserId) {
                 try await client.api.fetchVideosPage(userID: channelId, type: "archive", first: 1)
             }
+            lastLiveFetchedAt[channelId] = Date()
             guard let video = page.data.first else { return }
             let end = video.createdAt.addingTimeInterval(Self.seconds(inTwitchDuration: video.duration))
             if statuses[channelId] != nil {

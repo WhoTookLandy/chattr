@@ -36,12 +36,13 @@ private let logger = AppLogger.make("Features.AppShell")
 ///     `\.chatTabs` and surfaced in the chat header's switcher.
 ///
 /// It also injects the `\.openChannel` action (open a channel as a new chat
-/// tab — used by Home, Following, and Search row taps) and, in a single
-/// appearance `.task`, wires `ChatTabsModel`'s `onOpen`/`onClose` to the
+/// tab — used by Home, Following, and Search row taps) and, as it appears,
+/// wires `ChatTabsModel`'s `onOpen`/`onClose`/`onDiscard` to the
 /// session registry's acquire/release refcounting, installs the
 /// account-scoped `TabPersistence`, and hydrates persisted tabs on cold
 /// start. On disappear (account switch / sign-out) it tears the tab model
-/// down, releasing every session it acquired.
+/// down, releasing every session it acquired, then anything else the
+/// registry still holds for the account.
 public struct AppShell: View {
     private let account: Account
     private let accountStore: AccountStore
@@ -135,11 +136,12 @@ public struct AppShell: View {
                 Image(systemName: "house")
             }
             .accessibilityLabel("Home")
+            // Chats and Activity take `navigation` / the store by reference and
+            // no closures: this body re-runs whenever a badge below changes,
+            // and a closure argument (never equal to the last one) would
+            // re-run the tab's root with it.
             Tab(value: AppTab.chats) {
-                ChatsScreen(account: account, accountStore: accountStore) {
-                    navigation.homeSection = .live
-                    navigation.selectedTab = .home
-                }
+                ChatsScreen(account: account, accountStore: accountStore, navigation: navigation)
             } label: {
                 Image(systemName: "bubble.left.and.bubble.right")
             }
@@ -147,10 +149,7 @@ public struct AppShell: View {
             .badge(navigation.chatTabs.mentionedTabIds.count)
             .accessibilityLabel("Chats")
             Tab(value: AppTab.activity) {
-                ActivityScreen(
-                    store: navigation.activity,
-                    onOpen: { channel in navigation.openChannel(channel) }
-                )
+                ActivityScreen(store: navigation.activity)
             } label: {
                 Image(systemName: "bell")
             }
@@ -198,11 +197,12 @@ public struct AppShell: View {
         .overlay { MiniPlayerHost(navigation: navigation, playback: playback) }
         // Sign-out / account switch: nothing keeps playing for the old account.
         .onDisappear { playback.stop() }
-        // Settings → Video & Device → Keep Screen Awake: while a chat or a stream
-        // (the mini player) is on screen.
+        // Settings → Video & Device → Keep Screen Awake: while a chat is on
+        // screen, or a stream is actually showing video (not paused, not the
+        // audio-only pill).
         // Evaluated in the modifier's own body, so these reads don't make the
         // shell itself observe playback / navigation state.
-        .keepsScreenAwake(while: { chatOnScreen || playback.isPlaying })
+        .keepsScreenAwake(while: { chatOnScreen || playback.holdsScreenAwake })
         // Settings → Video & Device → When a Chat Opens, applied just before the
         // pager presents so the header mounts in the chosen state.
         .onAppear {
@@ -215,24 +215,24 @@ public struct AppShell: View {
             }
         }
         #endif
-        // Single appearance task that does, in this exact order:
+        // Single appearance step that does, in this exact order:
         //
         //   0. Point `DraftStorage` at this account's drafts.
-        //   1. Wire `onOpen` / `onClose` on the ChatTabsModel — these
-        //      bridge to the registry's `acquire` / `release` so refcounts
-        //      track tab lifetime.
+        //   1. Wire `onOpen` / `onClose` / `onDiscard` on the ChatTabsModel
+        //      — these bridge to the registry's `acquire` / `release` so
+        //      refcounts track tab lifetime.
         //   2. Install the `TabPersistence` handle so future mutations
         //      write through to SwiftData.
         //   3. Hydrate any persisted tabs from disk — fires the freshly-
         //      wired `onOpen` for each so the registry acquires their
         //      sessions and EventSub subscriptions resume.
         //
-        // Why one `.task` instead of one `.onAppear` + one `.task`:
-        // ordering. `.onAppear` runs synchronously and `.task` runs
-        // asynchronously, so on paper the callbacks would be set before
-        // hydration begins anyway — but combining them into one explicit
-        // sequence makes the dependency obvious to the next reader and
-        // immune to SwiftUI scheduling subtleties.
+        // Why `.onAppear` and not `.task`: all of it is synchronous, and
+        // `.onAppear` finishes before the first frame. From a `.task` the
+        // tabs landed a turn later, so a cold launch into a resumed chat
+        // first drew the Chats tab's empty state. One closure (rather than
+        // wiring in one modifier and hydrating in another) keeps the order
+        // above explicit.
         //
         // ## What `onOpen` does
         //
@@ -249,19 +249,34 @@ public struct AppShell: View {
         //   0 the session is stopped and the EventSub subscription is
         //   released.
         //
+        // ## What `onDiscard` does
+        //
+        //   A tab disappeared before its `onOpen` ran, so it holds no
+        //   refcount — but its mounted ChatScreen may already have built
+        //   the session through `registry.session(...)`. Tears that
+        //   session down unless another tab holds it.
+        //
         // ## Sendable note
         //
-        // Both closures capture only `Sendable` values: `account` is a
-        // SwiftData @Model (non-Sendable), so we pass it directly to
-        // `registry.acquire` only after the closure has hopped onto
-        // `@MainActor` — Account is touched on main, never crossed a
-        // boundary. `onClose` captures `accountUserId` alone (String) for
-        // the same reason but at the value-type level.
-        .task {
+        // The closures capture only `Sendable` values: `account` is a
+        // SwiftData @Model (non-Sendable), so they take `userId` / `login`
+        // as Strings instead.
+        .onAppear {
             // The open-channel tab state lives on `navigation`; bind it once
             // so the wiring below reads the same way it did when ChatTabsModel
             // was a direct `@State`.
             let chatTabs = navigation.chatTabs
+
+            // This shell is now live for the account (see
+            // `ShellSessionOwners`). Recorded as Strings for `onDisappear`,
+            // which must not read `account`. A repeated `onAppear` re-wires,
+            // so its earlier token no longer stands for a live shell.
+            let sessionOwner = UUID()
+            if let previous = mentionWatchTokens.sessionScope {
+                ShellSessionOwners.live[previous.accountUserId]?.remove(previous.owner)
+            }
+            ShellSessionOwners.live[account.userId, default: []].insert(sessionOwner)
+            mentionWatchTokens.sessionScope = (accountUserId: account.userId, owner: sessionOwner)
 
             // 0. Scope compose drafts to this account. Before hydration, so
             //    every ChatScreen the restored tabs mount reads this
@@ -283,98 +298,100 @@ public struct AppShell: View {
             // cycle — the old ChatTabsModel (plus its tabs, TabPersistence,
             // and MentionWatchTokens) would leak on every account switch,
             // since RootView's `.id(userId)` rebuilds AppShell each time.
-            let activity = navigation.activity
             chatTabs.onOpen = {
-                [weak channelSessionRegistry, weak chatTabs, weak activity, mentionWatchTokens,
+                [weak channelSessionRegistry, weak chatTabs, weak navigation = self.navigation, mentionWatchTokens,
                  accountUserId = account.userId,
                  accountLogin = account.login] tab in
                 guard let registry = channelSessionRegistry else { return }
+                var failed: [ChannelDescriptor] = []
                 for channel in tab.channels {
                     do {
-                        let session = try await registry.acquire(
-                            accountUserId: accountUserId,
-                            accountLogin: accountLogin,
-                            channelId: channel.channelId,
-                            channelLoginName: channel.channelLoginName
+                        try await AppShell.acquireAndWatch(
+                            channel, tabId: tab.id, registry: registry,
+                            chatTabs: chatTabs, navigation: navigation, tokens: mentionWatchTokens,
+                            accountUserId: accountUserId, accountLogin: accountLogin
                         )
-                        // Mention watcher: session-level (not ChatTranscriptModel)
-                        // so @-mentions land the red dot even for tabs whose
-                        // page isn't mounted. The handler is deliberately
-                        // tiny — a substring check per message — and runs on
-                        // its own task per drained batch, so it never holds
-                        // up the session or the transcript.
-                        //
-                        // It also feeds the Activity inbox: @-mentions, plus
-                        // highlight-keyword hits (keywords read at tab open,
-                        // like the transcript's own highlighting).
-                        let keywordMatcher = HighlightMatcher(keywords: HighlightSettings.keywords())
-                        let token = await session.subscribe(onBatch: {
-                            [weak chatTabs, weak activity, tabId = tab.id, channel, keywordMatcher] batch in
-                            var mentioned = false
-                            var hits: [ActivityStore.Entry] = []
-                            for update in batch {
-                                guard case .message(let normalized) = update,
-                                      !normalized.line.isHistorical,
-                                      normalized.message.chatterUserId != accountUserId
-                                else { continue }
-                                let text = normalized.message.message.text
-                                let isMention = ChatTabsModel.containsMention(of: accountLogin, in: text)
-                                guard isMention || keywordMatcher.matches(normalized.line.runs) else { continue }
-                                mentioned = mentioned || isMention
-                                let line = normalized.line
-                                hits.append(ActivityStore.Entry(
-                                    id: line.id,
-                                    channel: channel,
-                                    authorDisplayName: line.authorDisplayName,
-                                    authorColor: line.authorColor,
-                                    text: text,
-                                    timestamp: line.timestamp,
-                                    reason: isMention ? .mention : .keyword
-                                ))
-                            }
-                            if mentioned {
-                                await chatTabs?.markMention(tabId: tabId)
-                            }
-                            if !hits.isEmpty {
-                                await activity?.record(hits)
-                            }
-                        })
-                        mentionWatchTokens.byTab[tab.id, default: []]
-                            .append((channelId: channel.channelId, token: token))
                     } catch is CancellationError {
                         // Expected if a release races acquire (rapid
                         // open-then-close). Swallow silently.
                     } catch {
-                        // Construction failure here is rare — usually
-                        // CancellationError above. Log and continue;
-                        // the user's next interaction with the tab
-                        // will re-trigger the acquire path.
+                        // The registry already rolled this acquire back, so
+                        // the tab holds nothing for the channel. Retried
+                        // below.
                         logger.error("acquire failed for \(channel.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        failed.append(channel)
                     }
+                }
+                guard !failed.isEmpty else { return }
+                // Retry with backoff while the tab stays open — on a task of
+                // its own, so a channel that can't start doesn't hold up the
+                // restored tabs queued behind this one. `onClose` cancels
+                // and awaits it before releasing, which keeps a late acquire
+                // from landing after the tab's release.
+                let unacquired = failed
+                mentionWatchTokens.retries[tab.id] = Task {
+                    [weak registry, weak chatTabs, weak navigation, mentionWatchTokens] in
+                    var remaining = unacquired
+                    for delay in AppShell.acquireRetryDelays {
+                        do {
+                            try await Task.sleep(for: delay)
+                        } catch {
+                            return
+                        }
+                        guard let registry,
+                              chatTabs?.tabs.contains(where: { $0.id == tab.id }) == true
+                        else { return }
+                        var stillFailing: [ChannelDescriptor] = []
+                        for channel in remaining {
+                            do {
+                                try await AppShell.acquireAndWatch(
+                                    channel, tabId: tab.id, registry: registry,
+                                    chatTabs: chatTabs, navigation: navigation, tokens: mentionWatchTokens,
+                                    accountUserId: accountUserId, accountLogin: accountLogin
+                                )
+                            } catch is CancellationError {
+                                // The key was released under us; nothing to hold.
+                            } catch {
+                                stillFailing.append(channel)
+                            }
+                        }
+                        remaining = stillFailing
+                        if remaining.isEmpty { return }
+                    }
+                    let unacquiredCount = remaining.count
+                    logger.error("acquire still failing for \(unacquiredCount) channel(s) of a tab; giving up until it is reopened")
                 }
             }
             chatTabs.onClose = {
                 [weak channelSessionRegistry, mentionWatchTokens,
-                 accountUserId = account.userId,
-                 accountLogin = account.login] tab in
+                 accountUserId = account.userId] tab in
+                // Settle a pending acquire retry first: whatever it managed
+                // to acquire is released below with the rest.
+                if let retry = mentionWatchTokens.retries.removeValue(forKey: tab.id) {
+                    retry.cancel()
+                    await retry.value
+                }
                 guard let registry = channelSessionRegistry else { return }
-                // Unsubscribe the mention watchers BEFORE releasing: the
-                // tab's own refcount keeps the session alive here, so
-                // `registry.session` resolves via its fast path (returns
-                // the existing instance, constructs nothing).
+                // Unsubscribe the mention watchers BEFORE releasing, while
+                // the tab's own refcount still keeps the session alive.
+                // `existingSession` never builds one: if the session is
+                // already gone, so are its subscribers.
                 for entry in mentionWatchTokens.byTab[tab.id] ?? [] {
-                    guard let channel = tab.channels.first(where: { $0.channelId == entry.channelId }),
-                          let session = try? await registry.session(
-                              accountUserId: accountUserId,
-                              accountLogin: accountLogin,
-                              channelId: entry.channelId,
-                              channelLoginName: channel.channelLoginName
-                          ) else { continue }
+                    guard let session = registry.existingSession(
+                        accountUserId: accountUserId, channelId: entry.channelId
+                    ) else { continue }
                     await session.unsubscribe(entry.token)
                 }
                 mentionWatchTokens.byTab[tab.id] = nil
                 for channel in tab.channels {
                     await registry.release(accountUserId: accountUserId, channelId: channel.channelId)
+                }
+            }
+            chatTabs.onDiscard = {
+                [weak channelSessionRegistry, accountUserId = account.userId] tab in
+                guard let registry = channelSessionRegistry else { return }
+                for channel in tab.channels {
+                    await registry.releaseUnowned(accountUserId: accountUserId, channelId: channel.channelId)
                 }
             }
 
@@ -391,13 +408,17 @@ public struct AppShell: View {
             )
             chatTabs.persistence = persistence
 
-            // 3. Hydrate. This fires `onOpen` for each restored tab in
-            //    order, which acquires sessions in the registry. The
+            // 3. Hydrate. This fires `onOpen` for each restored tab, a few
+            //    at a time, starting with the chat about to be resumed —
+            //    which acquires sessions in the registry. The
             //    actual EventSub subscriptions happen asynchronously
             //    inside each acquire — the UI shows the restored tab
             //    pills immediately, and messages start flowing in the
             //    chat panel as soon as each subscription confirms.
-            chatTabs.hydrateFromPersistence()
+            let resumedTabId = resumeLastChatOnLaunch
+                ? persistedActiveTabId.flatMap(UUID.init(uuidString:))
+                : nil
+            chatTabs.hydrateFromPersistence(openingFirst: resumedTabId)
             logger.info("AppShell wired tab callbacks + persistence; hydration kicked off")
         }
         // Teardown: release every session this account's tabs acquired.
@@ -407,9 +428,15 @@ public struct AppShell: View {
         // model here. Without this, nothing balanced the `onOpen` acquires
         // and every switch leaked the previous account's chat sessions and
         // EventSub subscriptions. `tearDown()` releases each acquired tab
-        // exactly once, skips opens that hadn't started, and doesn't touch
+        // exactly once, discards opens that hadn't started, and doesn't touch
         // the account's saved tabs; it is reversible (if this same AppShell
-        // re-appeared, the `.task` above would re-wire and re-hydrate).
+        // re-appeared, the `.onAppear` above would re-wire and re-hydrate).
+        //
+        // Then `releaseAll` sweeps up whatever the tabs didn't own (a session
+        // a chat page built without its tab ever acquiring it). It runs
+        // only after the last tab release, so it finds exactly what is left
+        // over — not acquires those releases are still waiting on, nor one a
+        // multi-channel open has yet to make.
         //
         // Deliberately doesn't read `account` here: on account removal the
         // SwiftData `@Model` may already be deleted when this fires, and
@@ -417,8 +444,110 @@ public struct AppShell: View {
         // captured `userId` as a String back when they were wired.
         .onDisappear {
             logger.notice("AppShell disappearing; tearing down chat tabs")
-            navigation.chatTabs.tearDown()
+            let releases = navigation.chatTabs.tearDown()
+            guard let registry = channelSessionRegistry,
+                  let scope = mentionWatchTokens.sessionScope else { return }
+            Task {
+                await releases?.value
+                // Another shell is live for the account: it came back
+                // (switched away and back, or this shell re-appeared) while
+                // the releases ran, or a second window is showing it. The
+                // sessions still in the registry are that shell's — its
+                // tabs hold refcounts on them.
+                guard ShellSessionOwners.retire(scope.owner, forAccountUserId: scope.accountUserId) else { return }
+                await registry.releaseAll(forAccountUserId: scope.accountUserId)
+            }
         }
+    }
+
+    /// Waits between retries of a tab's failed `acquire`.
+    private static let acquireRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(15)]
+
+    /// Acquires `channel`'s session for the tab (one refcount) and installs
+    /// the tab's mention watcher on it. Throws what `registry.acquire`
+    /// throws; the registry has rolled the refcount back by then.
+    private static func acquireAndWatch(
+        _ channel: ChannelDescriptor,
+        tabId: UUID,
+        registry: ChannelSessionRegistry,
+        chatTabs: ChatTabsModel?,
+        navigation: AppNavigation?,
+        tokens: MentionWatchTokens,
+        accountUserId: String,
+        accountLogin: String
+    ) async throws {
+        let session = try await registry.acquire(
+            accountUserId: accountUserId,
+            accountLogin: accountLogin,
+            channelId: channel.channelId,
+            channelLoginName: channel.channelLoginName
+        )
+        // Mention watcher: session-level (not ChatTranscriptModel)
+        // so @-mentions land the red dot even for tabs whose
+        // page isn't mounted. The handler is deliberately
+        // tiny — a substring check per message — and runs on
+        // its own task per drained batch, so it never holds
+        // up the session or the transcript.
+        //
+        // It also feeds the Activity inbox: @-mentions, plus
+        // highlight-keyword hits (keywords read at tab open,
+        // like the transcript's own highlighting).
+        let keywordMatcher = HighlightMatcher(keywords: HighlightSettings.keywords())
+        let token = await session.subscribe(onBatch: {
+            [weak chatTabs, weak navigation, channel, keywordMatcher] batch in
+            var mentioned = false
+            var hits: [ActivityStore.Entry] = []
+            for update in batch {
+                guard case .message(let normalized) = update,
+                      !normalized.line.isHistorical,
+                      normalized.message.chatterUserId != accountUserId
+                else { continue }
+                let text = normalized.message.message.text
+                let isMention = ChatTabsModel.containsMention(of: accountLogin, in: text)
+                guard isMention || keywordMatcher.matches(normalized.line.runs) else { continue }
+                mentioned = mentioned || isMention
+                let line = normalized.line
+                hits.append(ActivityStore.Entry(
+                    id: line.id,
+                    channel: channel,
+                    authorDisplayName: line.authorDisplayName,
+                    authorColor: line.authorColor,
+                    text: text,
+                    timestamp: line.timestamp,
+                    reason: isMention ? .mention : .keyword
+                ))
+            }
+            if mentioned {
+                await chatTabs?.markMention(tabId: tabId)
+            }
+            if !hits.isEmpty {
+                await navigation?.recordActivity(hits, fromTab: tabId)
+            }
+        })
+        tokens.byTab[tabId, default: []]
+            .append((channelId: channel.channelId, token: token))
+    }
+}
+
+/// Which `AppShell`s are live for each account, by a token minted each time
+/// a shell wires itself up. A shell that goes away sweeps the account's
+/// leftover sessions only if no other shell is live for it once its tab
+/// releases have finished. Switching away and straight back mounts a new
+/// shell for the same account, and a second window (iPad) has a shell of its
+/// own on the same registry: the sweep ignores refcounts, so it must not run
+/// under either.
+@MainActor
+private enum ShellSessionOwners {
+    static var live: [String: Set<UUID>] = [:]
+
+    /// Takes `owner` out of the account's live shells. True only when it
+    /// was still there and was the last one, which is when the caller may
+    /// sweep.
+    static func retire(_ owner: UUID, forAccountUserId accountUserId: String) -> Bool {
+        guard live[accountUserId]?.remove(owner) != nil else { return false }
+        guard live[accountUserId]?.isEmpty == true else { return false }
+        live[accountUserId] = nil
+        return true
     }
 }
 
@@ -455,6 +584,33 @@ final class AppNavigation {
     func openChannel(_ channel: ChannelDescriptor, intent: ChatOpenIntent = .implicit) {
         chatTabs.open(channel: channel, intent: intent)
         selectedTab = .chats
+    }
+
+    /// The Chats empty state's "See who's live": Home → Live.
+    func showLive() {
+        homeSection = .live
+        selectedTab = .home
+    }
+
+    /// Whether `tabId`'s chat is what the user is looking at: the Chats tab
+    /// with the pager pushed on that page, and the app in the foreground.
+    func isShowingChat(tabId: UUID) -> Bool {
+        guard selectedTab == .chats, chatTabs.isPresented, chatTabs.activeTabId == tabId else {
+            return false
+        }
+        #if os(iOS)
+        return UIApplication.shared.applicationState == .active
+        #else
+        return true
+        #endif
+    }
+
+    /// Files a tab's mention / keyword hits in the Activity inbox. Hits from
+    /// the chat on screen are filed as read — the user is looking at them,
+    /// and counting them only bumped the badge (and re-ran the shell's
+    /// `TabView`) for nothing.
+    func recordActivity(_ hits: [ActivityStore.Entry], fromTab tabId: UUID) {
+        activity.record(hits, asRead: isShowingChat(tabId: tabId))
     }
 }
 
@@ -527,5 +683,13 @@ private final class MentionWatchTokens {
     /// One entry per channel per open tab: which subscription to remove
     /// from which session when the tab closes.
     var byTab: [UUID: [(channelId: String, token: UUID)]] = [:]
+
+    /// Background retries of a tab's failed acquires, by tab id. The tab's
+    /// `onClose` cancels and awaits its entry before releasing.
+    var retries: [UUID: Task<Void, Never>] = [:]
+
+    /// The account this shell wired itself for and its `ShellSessionOwners`
+    /// token, for the teardown in `onDisappear`.
+    var sessionScope: (accountUserId: String, owner: UUID)?
 }
 

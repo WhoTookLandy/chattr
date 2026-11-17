@@ -40,6 +40,28 @@ struct StreamFormattingTests {
         let url = StreamFormatting.thumbnailURL("https://x/live_user_a-{width}x{height}.jpg", width: 640, height: 360)
         #expect(url?.absoluteString == "https://x/live_user_a-640x360.jpg")
     }
+
+    @Test("a preview's cache identity holds for its lifetime, then changes")
+    func thumbnailCacheIdentity() throws {
+        let url = try #require(URL(string: "https://x/live_user_a-640x360.jpg"))
+        let windowStart = Date(timeIntervalSince1970: 1_000 * StreamFormatting.thumbnailLifetime)
+        let first = StreamFormatting.thumbnailCacheIdentity(for: url, now: windowStart)
+        let sameWindow = StreamFormatting.thumbnailCacheIdentity(
+            for: url, now: windowStart.addingTimeInterval(StreamFormatting.thumbnailLifetime - 1)
+        )
+        let nextWindow = StreamFormatting.thumbnailCacheIdentity(
+            for: url, now: windowStart.addingTimeInterval(StreamFormatting.thumbnailLifetime)
+        )
+        #expect(first == sameWindow)
+        #expect(first != nextWindow)
+        #expect(first.hasPrefix(url.absoluteString))
+    }
+
+    @Test("a malformed preview template yields no request")
+    func thumbnailRequestRejectsBadTemplate() {
+        #expect(StreamFormatting.thumbnailRequest("", width: 640, height: 360) == nil)
+        #expect(StreamFormatting.thumbnailRequest("https://x/a-{width}x{height}.jpg", width: 640, height: 360) != nil)
+    }
 }
 
 @Suite("Compact bot rendering")
