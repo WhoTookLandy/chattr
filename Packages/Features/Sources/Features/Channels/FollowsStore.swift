@@ -229,6 +229,17 @@ public final class FollowsStore {
         for task in allEnrichmentTasks { task.cancel() }
         allEnrichmentTasks = []
 
+        // Any full load from an earlier account session is dead, whichever
+        // path switched accounts: it can no longer commit (generation), and
+        // nobody may join it — an A → B → A round trip must start A afresh.
+        // A load for THIS account is the one calling us (`loadAll` runs
+        // `prepare` first), so it's left alone.
+        allLoadGeneration &+= 1
+        if let inFlight = allLoadInFlight, inFlight.userId != userId {
+            inFlight.task.cancel()
+            allLoadInFlight = nil
+        }
+
         guard hadPreviousAccount else { return }
         loadedAllForUserId = nil
         channels = []
@@ -463,8 +474,8 @@ public final class FollowsStore {
         } catch {
             // Keep what we fetched visible (the footer offers Retry for the
             // rest), matching the pre-throttle per-page-commit behavior.
-            guard allLoadGeneration == generation else { return }
-            if currentUserId == userId, accumulated.count > channels.count {
+            guard allLoadGeneration == generation, currentUserId == userId else { return }
+            if accumulated.count > channels.count {
                 channels = accumulated
                 recomputeSortedAllChannels()
             }
