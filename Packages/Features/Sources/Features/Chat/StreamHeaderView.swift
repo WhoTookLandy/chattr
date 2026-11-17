@@ -457,10 +457,12 @@ struct StreamHeaderView: View {
         }
     }
 
-    /// This page's stream is the one in the PiP window.
+    /// This page's stream is the one in the PiP window. Per-channel flag
+    /// (`PlaybackCenter.pictureInPictureFlag(for:)`), so a PiP transition
+    /// re-renders only this channel's header, not every pre-mounted page's.
     private var isPictureInPictureActive: Bool {
         #if os(iOS)
-        player.isPictureInPictureActive && (playback?.isPlaying(channel.channelId) ?? false)
+        playback?.pictureInPictureFlag(for: channel.channelId).isActive ?? false
         #else
         false
         #endif

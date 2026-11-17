@@ -65,7 +65,20 @@ final class StreamPlayerController {
     /// The stream is in the system picture-in-picture window. The chat
     /// header gives its video area back to chat, and the mini player
     /// stays out of the way, while this is true.
-    var isPictureInPictureActive = false
+    ///
+    /// Global — every reader re-renders on each PiP transition. Per-page
+    /// views (one per pre-mounted chat page) read
+    /// `PlaybackCenter.pictureInPictureFlag(for:)` instead, which only
+    /// changes for the page whose stream is in PiP.
+    private(set) var isPictureInPictureActive = false {
+        didSet {
+            guard isPictureInPictureActive != oldValue else { return }
+            onPictureInPictureActiveChange?()
+        }
+    }
+    /// `isPictureInPictureActive` changed — `PlaybackCenter` keeps its
+    /// per-channel PiP flags in step.
+    @ObservationIgnored var onPictureInPictureActiveChange: (() -> Void)?
     /// Flips once real frames are playing.
     var hasStarted = false
     /// The native player couldn't get a playlist / failed to play — the
@@ -107,6 +120,27 @@ final class StreamPlayerController {
     /// if its autoplay kicks in (including after a native → web fallback,
     /// which reuses this controller). Not cleared by `reset()`.
     @ObservationIgnored private(set) var isHeld = false
+
+    /// What the user wants the stream doing: true = playing, false = they
+    /// paused it. Explicit intent, separate from `isPaused` (the engine's
+    /// report), because a stream buffering before its first frame isn't
+    /// "paused" yet — a user pause in that window would otherwise look like
+    /// "about to autoplay" to `PlaybackCenter.holdPlayback`.
+    ///
+    /// Set by `togglePlay` (the user's play/pause control), and back to
+    /// true whenever the stream is actually seen playing (`noteDidPlay`),
+    /// so a resume from outside our controls (PiP window, lock screen)
+    /// counts too. Our own `pause()`/`resume()` (holds) never touch it.
+    /// Reset per stream by `PlaybackCenter`. Not observed: nothing renders
+    /// from it, so changing it invalidates no view.
+    @ObservationIgnored var wantsPlayback = true
+
+    /// The engine reports real frames playing. While held, that's autoplay
+    /// the hold is about to re-pause, not the user's intent.
+    func noteDidPlay() {
+        update(\.hasStarted, to: true)
+        if !isHeld { wantsPlayback = true }
+    }
 
     func beginHold() {
         isHeld = true
@@ -168,11 +202,22 @@ final class StreamPlayerController {
         refreshAutomaticPictureInPicture()
     }
 
+    /// The user's play/pause control — records their intent
+    /// (`wantsPlayback`) as well as acting on it.
     func togglePlay() {
-        guard let player = avPlayer else { return run("togglePlay") }
+        guard let player = avPlayer else {
+            // Web, or native still loading: the control showed "play" when
+            // the engine reported paused, "pause" otherwise.
+            wantsPlayback = isPaused
+            return run("togglePlay")
+        }
         if player.timeControlStatus == .paused {
+            wantsPlayback = true
             resume()
         } else {
+            // Includes `.waitingToPlayAtSpecifiedRate`: buffering before
+            // the first frame, which is still a pause the user asked for.
+            wantsPlayback = false
             player.pause()
         }
     }
@@ -407,7 +452,7 @@ enum NativePlayer {
                 .sink { [weak self] status in
                     guard let self else { return }
                     self.controller.update(\.isPaused, to: status == .paused)
-                    if status == .playing { self.controller.update(\.hasStarted, to: true) }
+                    if status == .playing { self.controller.noteDidPlay() }
                 }
                 .store(in: &subscriptions)
 
@@ -419,8 +464,9 @@ enum NativePlayer {
                 .store(in: &subscriptions)
 
             // Held (a clip is playing over the stream): stay paused until
-            // the holder releases — `endHold(resume:)` starts it then.
-            if !controller.isHeld { player.play() }
+            // the holder releases — `endHold(resume:)` starts it then. Paused
+            // by the user while the playlist loaded: leave it paused.
+            if !controller.isHeld, controller.wantsPlayback { player.play() }
         }
 
         func teardown() {

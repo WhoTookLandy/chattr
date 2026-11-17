@@ -114,7 +114,45 @@ final class PlaybackCenter {
             guard let self else { return }
             self.fallBackToWeb(quality: self.lastQuality)
         }
-        lifecycle = PlaybackLifecycleObserver(center: self)
+        controller.onPictureInPictureActiveChange = { [weak self] in
+            self?.syncPictureInPictureFlags()
+        }
+    }
+
+    // MARK: Per-channel PiP
+
+    /// One observable flag per channel page that has asked
+    /// (`pictureInPictureFlag(for:)`). Not observed itself: reading the
+    /// dictionary registers no dependency, only reading a flag's
+    /// `isActive` does.
+    @ObservationIgnored private var pictureInPictureFlags: [String: ChannelPictureInPictureFlag] = [:]
+    /// The channel whose flag is currently set, if any.
+    @ObservationIgnored private var pictureInPictureChannelID: String?
+
+    /// Whether `channelId`'s stream is in the PiP window, as a value only
+    /// that channel's readers observe. `controller.isPictureInPictureActive`
+    /// is one global flag: every pre-mounted chat page reading it would
+    /// re-render on any PiP transition. A PiP start or stop here writes at
+    /// most two flags — the channel leaving PiP and the one entering — so
+    /// only the affected page re-evaluates.
+    func pictureInPictureFlag(for channelId: String) -> ChannelPictureInPictureFlag {
+        if let flag = pictureInPictureFlags[channelId] { return flag }
+        let flag = ChannelPictureInPictureFlag()
+        flag.isActive = pictureInPictureChannelID == channelId
+        pictureInPictureFlags[channelId] = flag
+        return flag
+    }
+
+    private func syncPictureInPictureFlags() {
+        let current = controller.isPictureInPictureActive ? channel?.channelId : nil
+        guard current != pictureInPictureChannelID else { return }
+        if let previous = pictureInPictureChannelID {
+            pictureInPictureFlags[previous]?.isActive = false
+        }
+        pictureInPictureChannelID = current
+        if let current {
+            pictureInPictureFlags[current]?.isActive = true
+        }
     }
 
     /// Play `channel` (or keep playing it if it already is). Rebuilds the
@@ -150,11 +188,14 @@ final class PlaybackCenter {
         engine?.teardown()
         if !sameChannel {
             controller.nativeFailed = false
+            // A new stream starts out meant to play.
+            controller.wantsPlayback = true
             // A new stream isn't the one that was held.
             advanceGeneration()
         }
         controller.reset()
         self.channel = channel
+        syncPictureInPictureFlags()
         engineKey = key
         engine = useNative
             ? NativeStreamEngine(login: channel.channelLoginName, audioOnly: audioOnly, quality: quality, controller: controller)
@@ -182,6 +223,8 @@ final class PlaybackCenter {
         controller.holdsForBackground = false
         controller.reset()
         controller.nativeFailed = false
+        controller.wantsPlayback = true
+        syncPictureInPictureFlags()
         hostRevision += 1
     }
 
@@ -197,18 +240,23 @@ final class PlaybackCenter {
     /// - It works while the engine is still loading (no `AVPlayer` yet, or
     ///   the web page not ready): the load won't start playback while
     ///   held, so the stream can't come up behind the clip.
-    /// - Returns nil — and the caller has nothing to resume — when nothing
-    ///   is playing, another hold is out, or the user had already paused
-    ///   the stream (we resume only what we paused).
+    /// - Returns nil when nothing is playing or another hold is out.
+    /// - The hold records, as it begins, whether releasing it resumes
+    ///   (`resumesOnRelease(_:)`): only if the stream was meant to be
+    ///   playing — we resume only what we paused. A user pause, including
+    ///   one made while the stream was buffering before its first frame
+    ///   (`StreamPlayerController.wantsPlayback`), is never undone. The
+    ///   hold still keeps the stream from starting behind the clip.
     /// - It's tied to the playback generation: if the stream stops or
     ///   another channel starts meanwhile, the hold lapses and releasing it
     ///   does nothing.
     func holdPlayback() -> PlaybackHold? {
         guard isPlaying, currentHold == nil else { return nil }
-        // Started and paused = the user paused it. Not started yet = still
-        // loading, about to autoplay: hold that.
-        guard !(controller.hasStarted && controller.isPaused) else { return nil }
-        let hold = PlaybackHold(id: UUID(), generation: generation)
+        let hold = PlaybackHold(
+            id: UUID(),
+            generation: generation,
+            resumeOnRelease: Self.resumesOnRelease(controller)
+        )
         currentHold = hold
         controller.beginHold()
         return hold
@@ -217,7 +265,18 @@ final class PlaybackCenter {
     func releaseHold(_ hold: PlaybackHold) {
         guard currentHold == hold, hold.generation == generation else { return }
         currentHold = nil
-        controller.endHold(resume: true)
+        // `wantsPlayback` again: a user pause made during the hold (lock
+        // screen, say) wins over the hold's own resume.
+        controller.endHold(resume: hold.resumeOnRelease && controller.wantsPlayback)
+    }
+
+    /// Whether a hold taken now should resume the stream on release: the
+    /// user means it to play (`wantsPlayback`), and it isn't sitting paused
+    /// after having started (a pause from outside our controls — PiP
+    /// window, lock screen — that `wantsPlayback` didn't see). A stream
+    /// still loading toward autoplay resumes; one the user paused doesn't.
+    static func resumesOnRelease(_ controller: StreamPlayerController) -> Bool {
+        controller.wantsPlayback && !(controller.hasStarted && controller.isPaused)
     }
 
     private func advanceGeneration() {
@@ -245,10 +304,21 @@ final class PlaybackCenter {
     }
 }
 
+/// "This channel's stream is in the PiP window", observable per channel
+/// (`PlaybackCenter.pictureInPictureFlag(for:)`). Written only by
+/// `PlaybackCenter`, and only when the value changes.
+@MainActor
+@Observable
+final class ChannelPictureInPictureFlag {
+    fileprivate(set) var isActive = false
+}
+
 /// A pause taken with `PlaybackCenter.holdPlayback`.
 struct PlaybackHold: Equatable {
     fileprivate let id: UUID
     fileprivate let generation: Int
+    /// Decided when the hold began (`PlaybackCenter.resumesOnRelease`).
+    let resumeOnRelease: Bool
 }
 
 private struct PlaybackCenterKey: EnvironmentKey {

@@ -100,10 +100,13 @@ struct LandscapeStageLayout: ViewModifier {
     /// the header shows #40's compact PiP bar, which keeps the engine in
     /// its hidden host. Read only in landscape (`stageActive` checks
     /// `isLandscape` first), so portrait pages don't observe PiP state here.
+    /// Per-channel flag, not the global `controller.isPictureInPictureActive`:
+    /// a PiP transition re-evaluates only the page whose stream it is, never
+    /// the pre-mounted neighbours.
     private var isPictureInPictureActive: Bool {
         #if os(iOS)
         guard let playback else { return false }
-        return playback.controller.isPictureInPictureActive && playback.isPlaying(channel.channelId)
+        return playback.pictureInPictureFlag(for: channel.channelId).isActive
         #else
         false
         #endif

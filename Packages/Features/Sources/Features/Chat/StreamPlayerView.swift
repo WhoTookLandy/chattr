@@ -205,12 +205,7 @@ enum TwitchWebPlayer {
                 controller.update(\.isPaused, to: paused)
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
-                if body["playing"] as? Bool == true { controller.update(\.hasStarted, to: true) }
-                // The <video> appeared after the app left and chose to pause
-                // (see `PlaybackLifecycleObserver`): pause it now.
-                if controller.holdsForBackground, body["paused"] as? Bool == false {
-                    _ = controller.pauseForBackground()
-                }
+                if body["playing"] as? Bool == true { controller.noteDidPlay() }
             case "pipStart":
                 controller.pictureInPictureDidStart()
             case "pipEnd":
