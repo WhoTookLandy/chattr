@@ -19,6 +19,9 @@ struct WhatsNewScreen: View {
             version: "Beta",
             title: "Watch while you chat",
             notes: [
+                "New tab bar: Home, Chats, Activity and Search. Settings are behind your avatar on Home.",
+                "Swipe between Live and Following; long-press any channel for a preview.",
+                "Chats: live first, swipe to close, close all offline chats at once.",
                 "Streams play right inside chat. Tap the video for controls, the title and Subscribe; swipe down to hide it.",
                 "Leave a chat and the stream keeps playing in a floating mini player. Tap it to go back, or × to stop.",
                 "Audio only: listen to the stream while chat takes the whole screen.",

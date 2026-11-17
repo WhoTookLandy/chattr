@@ -1,6 +1,11 @@
 Watch while you chat
 
 NEW
+• New tab bar: Home, Chats, Activity, Search. Chats has its own tab (with a red badge when someone mentions you). Settings live behind your avatar on Home.
+• Home: swipe between Live and Following. Following is split into Live and Offline.
+• Chats: live chats first, swipe left to close, and the top-right menu closes all offline chats at once.
+• Long-press any channel for a preview with Watch, Listen (audio only) and Chat only.
+• Search shows who you follow that is live (by category) before you type, and your followed channels first as you type.
 • Streams play right inside chat. Tap the video for controls, the title, tags and Subscribe; swipe down on it to hide it.
 • Mini player: back out of a chat and the stream keeps playing in a floating player across the app. Tap it to return, × or fling it down to stop, drag it to another corner.
 • Audio only (headphones button on the video, or More → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
@@ -16,6 +21,7 @@ FIXED
 • The app freezing after tapping back from a chat (for real this time).
 
 PLEASE TEST
+0. The new tabs: open a channel from Home or Search (it should land in Chats), and relaunch the app with a chat open (it should reopen that chat).
 1. Back out of a playing chat: does the mini player appear without the stream restarting?
 2. Tap the mini player, then back out again a few times.
 3. Audio only, with and without the native player turned on.

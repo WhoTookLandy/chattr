@@ -23,29 +23,19 @@ struct FollowingList: View {
     var body: some View {
         Group {
             if let followsStore, !followsStore.sortedAllChannels.isEmpty {
+                // Live / Offline sections. The store already orders live
+                // first (busiest first), then the rest in follow order.
+                let live = followsStore.sortedAllChannels.filter { followsStore.liveStreams[$0.broadcasterId] != nil }
+                let offline = followsStore.sortedAllChannels.filter { followsStore.liveStreams[$0.broadcasterId] == nil }
                 List {
-                    ForEach(followsStore.sortedAllChannels, id: \.broadcasterId) { channel in
-                        let profileURL = followsStore.profileImageURLs[channel.broadcasterId]
-                        Button {
-                            openChannel?(channel: channel, profileImageURL: profileURL)
-                        } label: {
-                            FollowingRow(
-                                displayName: channel.broadcasterName,
-                                login: channel.broadcasterLogin,
-                                profileImageURL: profileURL,
-                                stream: ChannelStatusStore.liveStream(
-                                    for: channel.broadcasterId, status: channelStatus, follows: followsStore
-                                ),
-                                lastLiveAt: channelStatus?.statuses[channel.broadcasterId]?.lastLiveAt
-                            )
+                    if !live.isEmpty {
+                        Section("Live") {
+                            rows(live, followsStore: followsStore)
                         }
-                        .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
-                        .task {
-                            guard followsStore.liveStreams[channel.broadcasterId] == nil else { return }
-                            await channelStatus?.ensureLastLive(
-                                channelId: channel.broadcasterId, account: account, accountStore: accountStore
-                            )
+                    }
+                    if !offline.isEmpty {
+                        Section("Offline") {
+                            rows(offline, followsStore: followsStore)
                         }
                     }
                 }
@@ -61,6 +51,40 @@ struct FollowingList: View {
         .refreshable {
             await followsStore?.refreshAll(account: account, accountStore: accountStore)
             await followsStore?.refreshLive(account: account, accountStore: accountStore, force: true)
+        }
+    }
+
+    private func rows(_ channels: [FollowedChannel], followsStore: FollowsStore) -> some View {
+        ForEach(channels, id: \.broadcasterId) { channel in
+            let profileURL = followsStore.profileImageURLs[channel.broadcasterId]
+            let stream = ChannelStatusStore.liveStream(
+                for: channel.broadcasterId, status: channelStatus, follows: followsStore
+            )
+            Button {
+                openChannel?(channel: channel, profileImageURL: profileURL)
+            } label: {
+                FollowingRow(
+                    displayName: channel.broadcasterName,
+                    login: channel.broadcasterLogin,
+                    profileImageURL: profileURL,
+                    stream: stream,
+                    lastLiveAt: channelStatus?.statuses[channel.broadcasterId]?.lastLiveAt
+                )
+            }
+            .buttonStyle(.plain)
+            .channelPreviewMenu(
+                name: channel.broadcasterName,
+                profileImageURL: profileURL,
+                stream: stream,
+                open: { openChannel?(channel: channel, profileImageURL: profileURL) }
+            )
+            .listRowBackground(Color.clear)
+            .task {
+                guard followsStore.liveStreams[channel.broadcasterId] == nil else { return }
+                await channelStatus?.ensureLastLive(
+                    channelId: channel.broadcasterId, account: account, accountStore: accountStore
+                )
+            }
         }
     }
 

@@ -1,38 +1,35 @@
 import SwiftUI
+import TwitchKit
 import DesignSystem
 
-/// Home → Chats: the open chats, Messages-style. Each row (`OpenChatRow`)
-/// carries live ring / viewers / category / uptime / title, or offline +
-/// last live. Tap to push the chat pager (sets `activeTabId`, which the
-/// presenting `HomeScreen` derives its push from); swipe to close (releases
-/// the session via the model's `onClose`); drag to reorder (defines the
-/// pager's swipe order).
+/// The Chats tab's list: open chats, Messages-style, in **Live** and
+/// **Offline** sections (live busiest first, offline in open order). Each
+/// row (`OpenChatRow`) carries live ring / viewers / category / uptime /
+/// title or offline + last live, and a red dot for an unseen @-mention.
+///
+/// Tap → push the chat. Swipe left → Close. Long-press → preview card with
+/// Open / Watch / Audio only / Close (`channelPreviewMenu`).
 struct OpenChatsList: View {
-    /// The empty state's CTA — switches Home to its Live section.
+    /// The empty state's CTA — switches to Home → Live.
     let onShowLive: () -> Void
 
     @Environment(\.chatTabs) private var chatTabs
+    @Environment(\.channelStatus) private var channelStatus
+    @Environment(\.followsStore) private var followsStore
 
     var body: some View {
         if let chatTabs, !chatTabs.tabs.isEmpty {
+            let split = sections(chatTabs)
             List {
-                ForEach(chatTabs.tabs) { tab in
-                    Button {
-                        chatTabs.activeTabId = tab.id
-                        chatTabs.isPresented = true
-                    } label: {
-                        OpenChatRow(tab: tab, chatTabs: chatTabs)
+                if !split.live.isEmpty {
+                    Section("Live") {
+                        rows(split.live, chatTabs: chatTabs)
                     }
-                    .buttonStyle(.plain)
-                    .listRowBackground(Color.clear)
                 }
-                .onMove { source, destination in
-                    chatTabs.move(fromOffsets: source, toOffset: destination)
-                }
-                .onDelete { offsets in
-                    // One batched close: a single persistence save and one
-                    // release pass, instead of a save per row.
-                    chatTabs.close(tabIds: offsets.map { chatTabs.tabs[$0].id })
+                if !split.offline.isEmpty {
+                    Section("Offline") {
+                        rows(split.offline, chatTabs: chatTabs)
+                    }
                 }
             }
             .listStyle(.plain)
@@ -48,5 +45,55 @@ struct OpenChatsList: View {
                     .tint(.accentColor)
             }
         }
+    }
+
+    private func rows(_ tabs: [ChatTab], chatTabs: ChatTabsModel) -> some View {
+        ForEach(tabs) { tab in
+            let stream = liveStream(tab)
+            Button {
+                chatTabs.activeTabId = tab.id
+                chatTabs.isPresented = true
+            } label: {
+                OpenChatRow(tab: tab, chatTabs: chatTabs)
+            }
+            .buttonStyle(.plain)
+            .listRowBackground(Color.clear)
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button(role: .destructive) {
+                    chatTabs.close(tabId: tab.id)
+                } label: {
+                    Label("Close", systemImage: "xmark")
+                }
+            }
+            .channelPreviewMenu(
+                name: tab.displayName,
+                profileImageURL: tab.profileImageURL,
+                stream: stream,
+                open: {
+                    chatTabs.activeTabId = tab.id
+                    chatTabs.isPresented = true
+                },
+                close: { chatTabs.close(tabId: tab.id) }
+            )
+        }
+    }
+
+    private func liveStream(_ tab: ChatTab) -> TwitchStream? {
+        guard let id = tab.channels.first?.channelId else { return nil }
+        return ChannelStatusStore.liveStream(for: id, status: channelStatus, follows: followsStore)
+    }
+
+    /// Live chats (busiest first) and offline ones (open order).
+    private func sections(_ chatTabs: ChatTabsModel) -> (live: [ChatTab], offline: [ChatTab]) {
+        var live: [(ChatTab, Int)] = []
+        var offline: [ChatTab] = []
+        for tab in chatTabs.tabs {
+            if let stream = liveStream(tab) {
+                live.append((tab, stream.viewerCount))
+            } else {
+                offline.append(tab)
+            }
+        }
+        return (live.sorted { $0.1 > $1.1 }.map(\.0), offline)
     }
 }

@@ -85,11 +85,10 @@ public struct UIPreviewRoot: View {
         return model
     }()
 
-    /// Home's section; `-uiPreviewTab chats` (or `-uiPreviewChatOpen`) lands
-    /// on Chats, everything else on Live.
+    /// Home's section; `-uiPreviewTab following` lands on Following,
+    /// everything else on Live. (Chats is its own tab in the app.)
     @State private var homeSection: HomeSection = {
         let args = ProcessInfo.processInfo.arguments
-        if args.contains("-uiPreviewChatOpen") { return .chats }
         if let index = args.firstIndex(of: "-uiPreviewTab"),
            args.indices.contains(index + 1),
            let section = HomeSection(rawValue: args[index + 1]) {
@@ -121,8 +120,6 @@ public struct UIPreviewRoot: View {
                                 )
                             case .following:
                                 FollowingList(account: account, accountStore: accountStore)
-                            case .chats:
-                                OpenChatsList(onShowLive: { homeSection = .live })
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
