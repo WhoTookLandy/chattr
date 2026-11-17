@@ -123,7 +123,8 @@ struct OwnChatRestrictionLedgerTests {
         ledger.apply(.dismissed, now: now)
 
         let until = now.addingTimeInterval(600)
-        #expect(ledger.finishSend(basis: basis, rejection: .timedOut(until: until), now: now))
+        let applied = ledger.finishSend(basis: basis, rejection: .timedOut(until: until), now: now)
+        #expect(applied)
         #expect(ledger.current(at: now) == .timedOut(until: until))
     }
 
