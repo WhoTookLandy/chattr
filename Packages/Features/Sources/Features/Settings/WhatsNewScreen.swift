@@ -23,7 +23,7 @@ struct WhatsNewScreen: View {
                 "Leave a chat and the stream keeps playing in a floating mini player. Tap it to go back, or × to stop.",
                 "Audio only: listen to the stream while chat takes the whole screen.",
                 "Native video player (You → Video): picture-in-picture, fullscreen and a quality setting.",
-                "Jump between open chats from the chip on the video, and close a chat from the ⋯ menu.",
+                "Jump between open chats from the chip on the video, and close a chat from the + menu.",
                 "Tap a chat message for that user's card: badges, join date, bio and recent messages.",
                 "Press Return to send; tap the chat to put the keyboard away.",
                 "Chat restrictions like followers-only now show in the message box.",

@@ -5,7 +5,7 @@ NEW
 • Mini player: back out of a chat and the stream keeps playing in a floating player across the app. Tap it to return, × or fling it down to stop, drag it to another corner.
 • Audio only (headphones button on the video, or More → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
 • Native video player (You → Video, experimental): Apple's player with picture-in-picture, fullscreen and a max-quality setting. If it can't load a stream, chattr switches to Twitch's web player.
-• Jump between open chats from the "1 / N" chip on the video. Close a chat from the More (…) menu.
+• Jump between open chats from the "1 / N" chip on the video. Close a chat from the + menu next to the message box.
 • Home → Live now lists every live channel you follow (no more "See all").
 • Tap any chat message to see that user's card: badges, join date, bio and their recent messages (drag it up). Reply, block or report from there.
 • Message bar: press Return to send, and tap the + for more options. Tap the chat to put the keyboard away.
