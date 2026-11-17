@@ -23,7 +23,7 @@ public struct FFZProvider: EmoteProvider {
 
     public var emoteSource: Emote.Source? { .ffz }
 
-    public init(urlSession: URLSession = .shared) {
+    public init(urlSession: URLSession = EmoteProviderTransport.session) {
         self.urlSession = urlSession
     }
 
@@ -82,28 +82,18 @@ public struct FFZProvider: EmoteProvider {
     }
 
     private static func map(_ j: EmoteJSON, ownerChannelId: String?) -> Emote? {
-        // Prefer animated URLs when the emote has them — even in static-only
-        // rendering mode, the first frame is what gets shown. Falling back
-        // to `urls` (static set) when no animated variant exists.
+        // Prefer animated URLs when the emote has them (its static set then
+        // rides along as `staticURLs`, below). Falling back to `urls`
+        // (static set) when no animated variant exists.
         let urlMap = j.animated ?? j.urls ?? [:]
         guard !urlMap.isEmpty else { return nil }
 
-        var urls: [Emote.Size: URL] = [:]
-        for (key, value) in urlMap {
-            let size: Emote.Size? = switch key {
-            case "1": .x1
-            case "2": .x2
-            case "4": .x4
-            default: nil
-            }
-            // FFZ URLs sometimes come back protocol-relative ("//cdn..."),
-            // mirror 7TV's normalization.
-            let normalized = value.hasPrefix("//") ? "https:" + value : value
-            if let size, let url = URL(string: normalized) {
-                urls[size] = url
-            }
-        }
+        let urls = Self.sizedURLs(urlMap)
         guard !urls.isEmpty else { return nil }
+
+        // An animated emote's `urls` is its still image; keep it so a
+        // renderer that won't animate doesn't have to download the animation.
+        let staticURLs: [Emote.Size: URL] = j.animated == nil ? [:] : Self.sizedURLs(j.urls ?? [:])
 
         let aspectRatio: Double? = if let w = j.width, let h = j.height, w > 0, h > 0 {
             Double(w) / Double(h)
@@ -119,7 +109,28 @@ public struct FFZProvider: EmoteProvider {
             isZeroWidth: false,                 // FFZ has no zero-width emotes.
             source: .ffz,
             ownerChannelId: ownerChannelId,
-            aspectRatio: aspectRatio
+            aspectRatio: aspectRatio,
+            staticURLs: staticURLs.isEmpty ? nil : staticURLs
         )
+    }
+
+    /// FFZ's size-keyed URL map ("1" / "2" / "4") as `Emote.Size` → URL.
+    private static func sizedURLs(_ urlMap: [String: String]) -> [Emote.Size: URL] {
+        var urls: [Emote.Size: URL] = [:]
+        for (key, value) in urlMap {
+            let size: Emote.Size? = switch key {
+            case "1": .x1
+            case "2": .x2
+            case "4": .x4
+            default: nil
+            }
+            // FFZ URLs sometimes come back protocol-relative ("//cdn..."),
+            // mirror 7TV's normalization.
+            let normalized = value.hasPrefix("//") ? "https:" + value : value
+            if let size, let url = URL(string: normalized) {
+                urls[size] = url
+            }
+        }
+        return urls
     }
 }

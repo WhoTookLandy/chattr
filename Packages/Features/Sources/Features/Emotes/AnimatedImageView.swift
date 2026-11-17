@@ -32,10 +32,13 @@ private let logger = AppLogger.make("Features.AnimatedImage")
 ///   disk cache we prefetched, so there's no extra network on the hot path.
 /// - Decoding goes through `AnimatedEmoteDecoder`: one in-flight fetch +
 ///   decode per (URL, pixel size) no matter how many rows show the emote,
-///   run off the main thread, with frames downsampled to the display box
-///   and capped in count (see `DecodedAnimation.maxFrameCount`).
+///   run off the main thread two at a time, with frames downsampled to the
+///   display box and capped in count and bytes (see
+///   `DecodedAnimation.maxFrameCount` / `maxByteCost`).
 /// - Reduce Motion → static poster frame (respects the accessibility
-///   setting; SwiftUI symbol effects do the same).
+///   setting; SwiftUI symbol effects do the same). Low Power Mode and a
+///   serious or critical thermal state do the same for as long as they
+///   last (`EmotePlaybackStore`).
 ///
 /// ## Layout
 ///
@@ -66,6 +69,11 @@ struct AnimatedImageView<Placeholder: View>: View {
     /// can keep this view's @State across lines, so state loaded for a
     /// different key is never displayed.
     @State private var loadedKey: LoadKey?
+    /// Holds a cache-hit animation for as long as this view shows it. A
+    /// plain reference box, so filling it is not a state change: the body
+    /// already drew those frames from the cache, and a second pass to draw
+    /// them again was pure overhead.
+    @State private var held = HeldAnimation()
 
     /// Re-decode when the URL, the target pixel size (text-size setting,
     /// display scale) or the playback mode changes.
@@ -73,26 +81,56 @@ struct AnimatedImageView<Placeholder: View>: View {
         let url: URL?
         let maxPixelSize: Int
         /// Only the poster will ever be shown (animations off / Reduce
-        /// Motion), so decode just that frame instead of the whole
-        /// animation — see `DecodedAnimation.init(data:maxPixelSize:posterOnly:)`.
+        /// Motion / power or heat saving), so decode just that frame
+        /// instead of the whole animation — see
+        /// `DecodedAnimation.init(data:maxPixelSize:posterOnly:)`.
         let posterOnly: Bool
     }
 
+    /// See `held`. Only ever touched from this view's main-actor code.
+    private final class HeldAnimation {
+        private var heldKey: LoadKey?
+        private var heldAnimation: DecodedAnimation?
+
+        func animation(for key: LoadKey) -> DecodedAnimation? {
+            heldKey == key ? heldAnimation : nil
+        }
+
+        func hold(_ animation: DecodedAnimation?, for key: LoadKey?) {
+            heldKey = key
+            heldAnimation = animation
+        }
+    }
+
     var body: some View {
+        // Read here, not in `content`, so a change re-keys the load below:
+        // the poster-only decode is a different (much smaller) cache entry.
+        let animates = animate && !reduceMotion && !EmotePlaybackStore.shared.suspendsAnimation
         let key = LoadKey(
             url: url,
             maxPixelSize: AnimatedEmoteDecoder.maxPixelSize(
                 for: CGSize(width: width, height: height), scale: displayScale),
-            posterOnly: !animate || reduceMotion)
-        let isCurrent = loadedKey == key
-        // A synchronous NSCache hit renders the final view on the FIRST pass.
+            posterOnly: !animates)
+        // A synchronous cache hit renders the final view on the FIRST pass.
         // Waiting for `.task` meant every animated emote in every new or
         // reused row drew its placeholder for a frame, then ran a second body
         // pass — dozens of times a second in a busy chat.
-        let shown = isCurrent ? decoded : Self.cachedAnimation(for: key)
-        content(shown, failed: isCurrent && failed)
+        content(shownAnimation(for: key), failed: loadedKey == key && failed, animates: animates)
             .frame(width: width, height: height)
             .task(id: key) { await load(key) }
+    }
+
+    /// The frames to draw for `key` on this pass: the ones loaded into
+    /// state for it, else the ones this view already holds, else a cache
+    /// hit — which is recorded in `held` (a plain box, so no state change)
+    /// both to keep it alive and so `load` can tell "the body drew these"
+    /// from "the cache filled after the body drew its placeholder".
+    private func shownAnimation(for key: LoadKey) -> DecodedAnimation? {
+        if loadedKey == key, let decoded { return decoded }
+        if let kept = held.animation(for: key) { return kept }
+        guard let cached = Self.cachedAnimation(for: key) else { return nil }
+        held.hold(cached, for: key)
+        return cached
     }
 
     /// The cached decode for `key`, if any. A poster-only view can also use
@@ -105,9 +143,9 @@ struct AnimatedImageView<Placeholder: View>: View {
     }
 
     @ViewBuilder
-    private func content(_ decoded: DecodedAnimation?, failed: Bool) -> some View {
+    private func content(_ decoded: DecodedAnimation?, failed: Bool, animates: Bool) -> some View {
         if let decoded {
-            if decoded.frameCount > 1 && animate && !reduceMotion {
+            if decoded.frameCount > 1 && animates {
                 #if canImport(UIKit)
                 // Core-Animation path: frame cycling runs on the render
                 // server (a separate process), so the main thread spends
@@ -131,9 +169,9 @@ struct AnimatedImageView<Placeholder: View>: View {
                 }
                 #endif
             } else {
-                // Single frame, animations off, or Reduce Motion → show the
-                // poster frame (first VISIBLE frame, not frame 0 — see
-                // `DecodedAnimation.posterIndex`).
+                // Single frame, animations off, Reduce Motion, or saving
+                // power → show the poster frame (first VISIBLE frame, not
+                // frame 0 — see `DecodedAnimation.posterIndex`).
                 image(decoded.posterFrame)
             }
         } else {
@@ -151,6 +189,19 @@ struct AnimatedImageView<Placeholder: View>: View {
     private func load(_ key: LoadKey) async {
         // Re-appearance with the same key: already showing it.
         if loadedKey == key, decoded != nil { return }
+        // The body drew these frames straight from the cache and holds them
+        // (see `shownAnimation`), so an NSCache eviction can't blank a
+        // visible emote: no fetch, no decode, and no state write — unless
+        // frames loaded for an earlier key are still in state, which would
+        // keep them in memory behind an emote that no longer shows them.
+        if held.animation(for: key) != nil {
+            if decoded != nil {
+                decoded = nil
+                failed = false
+                loadedKey = nil
+            }
+            return
+        }
         guard let url = key.url else {
             decoded = nil
             failed = true
@@ -158,14 +209,12 @@ struct AnimatedImageView<Placeholder: View>: View {
             return
         }
 
-        // Cache hit: skip BOTH the network/disk fetch and the frame decode.
-        // Re-scrolling to a previously-seen animated emote is instant
-        // instead of re-running CGImageSource frame extraction on every
-        // appearance (the decoded CGImages are immutable + safe to share).
-        // Kept in @State so an NSCache eviction can't blank a visible emote;
-        // the body already drew it from the cache, so this write renders the
-        // same frames (`AnimatedEmoteView.configure` no-ops on them).
+        // The cache filled between the body pass and this task (another
+        // row's decode of the same emote landed), so the body drew the
+        // placeholder: this hit needs the state write to get a second pass.
+        // Still no fetch and no frame decode.
         if let cached = Self.cachedAnimation(for: key) {
+            held.hold(nil, for: nil)
             decoded = cached
             failed = false
             loadedKey = key
@@ -173,6 +222,7 @@ struct AnimatedImageView<Placeholder: View>: View {
         }
 
         // Reset for a new key (id-keyed .task re-runs on change).
+        held.hold(nil, for: nil)
         decoded = nil
         failed = false
         loadedKey = key
@@ -202,10 +252,16 @@ struct AnimatedImageView<Placeholder: View>: View {
 /// Decoded animation frames + per-frame durations, extracted from
 /// animated image data via ImageIO. Handles GIF, animated WebP, and APNG.
 ///
+/// A class, not a struct, so every holder of one decode — the cache, each
+/// view showing it, the Core-Animation layer — retains the SAME object:
+/// that is what lets `DecodedAnimationCache` keep a weak reference and hand
+/// a still-visible animation back after the cache evicted it, instead of
+/// decoding a second copy.
+///
 /// `@unchecked Sendable` because it's built on a background task and
 /// handed to the MainActor view: `CGImage` is immutable + thread-safe to
-/// pass, and the arrays are never mutated after init.
-struct DecodedAnimation: @unchecked Sendable {
+/// pass, and every stored property is a `let` set once in `init`.
+final class DecodedAnimation: @unchecked Sendable {
     /// `internal` (not `private`) so the Core-Animation bridge below can
     /// hand the frames straight to a `CAKeyframeAnimation`.
     let frames: [CGImage]
@@ -267,6 +323,16 @@ struct DecodedAnimation: @unchecked Sendable {
         return Float(presentableFrameRates.first { $0 >= needed } ?? 60)
     }
 
+    /// Where in its loop the animation is at `time`, for any clock every
+    /// view reads the same way. Starting each view's frame cycle here
+    /// (rather than at frame 0 whenever a row happens to appear) keeps the
+    /// same emote in step across rows.
+    func phase(at time: Double) -> Double {
+        guard totalDuration > 0 else { return 0 }
+        let offset = time.truncatingRemainder(dividingBy: totalDuration)
+        return offset < 0 ? offset + totalDuration : offset
+    }
+
     /// True when both values share the same decoded frame objects — i.e.
     /// they are the same `DecodedAnimationCache` entry. Lets
     /// `AnimatedEmoteView.configure` no-op (instead of restarting the frame
@@ -305,6 +371,41 @@ struct DecodedAnimation: @unchecked Sendable {
     /// without being noticeable at emote size.
     static let maxFrameCount = 120
 
+    /// Upper bound on one animation's decoded bytes. A square emote at the
+    /// usual 64 px decode fits all `maxFrameCount` frames in half of this;
+    /// wide emotes and larger text sizes have 3–4× the pixels per frame, and
+    /// are sampled down (same frame-skipping as above) once a full decode
+    /// would pass it. Without a per-entry bound a handful of long, wide
+    /// emotes could take the whole cache — and visible ones stay in memory
+    /// whatever the cache evicts.
+    static let maxByteCost = 4 * 1024 * 1024
+
+    /// How many frames of a `pixelWidth` × `pixelHeight` source may be
+    /// kept when decoded at `maxPixelSize`: `maxFrameCount`, or fewer when
+    /// that many would exceed `maxByteCost`.
+    static func frameLimit(pixelWidth: Int, pixelHeight: Int, maxPixelSize: Int?) -> Int {
+        guard pixelWidth > 0, pixelHeight > 0 else { return maxFrameCount }
+        var width = Double(pixelWidth)
+        var height = Double(pixelHeight)
+        // Thumbnails are scaled to fit `maxPixelSize` and never upscaled.
+        if let maxPixelSize, maxPixelSize > 0 {
+            let scale = min(1, Double(maxPixelSize) / max(width, height))
+            width = (width * scale).rounded(.up)
+            height = (height * scale).rounded(.up)
+        }
+        let bytesPerFrame = max(1, Int(width) * Int(height) * 4)
+        return min(maxFrameCount, max(1, maxByteCost / bytesPerFrame))
+    }
+
+    /// `frameLimit` for an image source, from its header (no frame decode).
+    private static func frameLimit(source: CGImageSource, maxPixelSize: Int?) -> Int {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int
+        else { return maxFrameCount }
+        return frameLimit(pixelWidth: width, pixelHeight: height, maxPixelSize: maxPixelSize)
+    }
+
     /// - Parameters:
     ///   - data: Encoded GIF / animated WebP / APNG (or a still image).
     ///   - maxPixelSize: When set, every frame is decoded straight to a
@@ -318,6 +419,10 @@ struct DecodedAnimation: @unchecked Sendable {
     ///     (Animated Emotes off, Reduce Motion): they show just the poster,
     ///     so decoding and retaining up to `maxFrameCount` frames for them
     ///     is wasted CPU and memory.
+    ///
+    /// Also `nil` when the calling task is cancelled part-way: the frame
+    /// loops check between frames, so a decode nobody is waiting for any
+    /// more stops instead of running out its (up to 120-frame) course.
     init?(data: Data, maxPixelSize: Int? = nil, posterOnly: Bool = false) {
         // Don't let the source keep its own decoded copy of every frame —
         // we hold the (downsampled) CGImages ourselves.
@@ -342,8 +447,10 @@ struct DecodedAnimation: @unchecked Sendable {
             frameOptions = [kCGImageSourceShouldCacheImmediately: true] as [CFString: Any] as CFDictionary
         }
 
-        // Keep every `step`-th frame so at most `maxFrameCount` survive.
-        let step = max(1, (count + Self.maxFrameCount - 1) / Self.maxFrameCount)
+        // Keep every `step`-th frame so the survivors fit both the frame
+        // cap and the byte budget.
+        let frameLimit = DecodedAnimation.frameLimit(source: source, maxPixelSize: maxPixelSize)
+        let step = max(1, (count + frameLimit - 1) / frameLimit)
 
         func decodeFrame(at index: Int) -> CGImage? {
             if maxPixelSize != nil {
@@ -359,10 +466,11 @@ struct DecodedAnimation: @unchecked Sendable {
             // decode's — but stop at the first visible one.
             var fallback: CGImage?
             var poster: CGImage?
-            for start in stride(from: 0, to: count, by: step).prefix(Self.posterScanWindow) {
+            for start in stride(from: 0, to: count, by: step).prefix(DecodedAnimation.posterScanWindow) {
+                if Task.isCancelled { return nil }
                 guard let image = decodeFrame(at: start) else { continue }
                 if fallback == nil { fallback = image }
-                if Self.alphaCoverage(of: image) >= Self.posterMinCoverage {
+                if DecodedAnimation.alphaCoverage(of: image) >= DecodedAnimation.posterMinCoverage {
                     poster = image
                     break
                 }
@@ -379,15 +487,16 @@ struct DecodedAnimation: @unchecked Sendable {
 
         var frames: [CGImage] = []
         var durations: [Double] = []
-        frames.reserveCapacity(min(count, Self.maxFrameCount))
-        durations.reserveCapacity(min(count, Self.maxFrameCount))
+        frames.reserveCapacity(min(count, frameLimit))
+        durations.reserveCapacity(min(count, frameLimit))
         for start in stride(from: 0, to: count, by: step) {
+            if Task.isCancelled { return nil }
             guard let image = decodeFrame(at: start) else { continue }
             // The kept frame is held for the skipped frames' time too, so
             // the total loop duration is unchanged.
             var duration = 0.0
             for index in start..<min(start + step, count) {
-                duration += Self.frameDuration(source: source, index: index)
+                duration += DecodedAnimation.frameDuration(source: source, index: index)
             }
             frames.append(image)
             durations.append(duration)
@@ -398,9 +507,9 @@ struct DecodedAnimation: @unchecked Sendable {
         self.frames = frames
         self.durations = durations
         self.totalDuration = total
-        self.normalizedKeyTimes = Self.keyTimes(for: durations, total: total)
-        self.peakFrameRate = Self.peakFrameRate(for: durations)
-        self.posterIndex = Self.findPosterIndex(in: frames)
+        self.normalizedKeyTimes = DecodedAnimation.keyTimes(for: durations, total: total)
+        self.peakFrameRate = DecodedAnimation.peakFrameRate(for: durations)
+        self.posterIndex = DecodedAnimation.findPosterIndex(in: frames)
     }
 
     /// First frame with ≥5% non-transparent pixels, scanned over the first
@@ -455,14 +564,32 @@ struct DecodedAnimation: @unchecked Sendable {
         return frames[frames.count - 1]
     }
 
+    /// Shortest frame delay played as written. Anything shorter — and the
+    /// 0 that many GIFs carry to mean "as fast as possible" — plays at
+    /// 100 ms instead, the rule browsers apply (Chrome, Firefox and Safari
+    /// all turn a delay of 10 ms or less into 100 ms), so an emote runs at
+    /// the speed its author saw. Played literally, a 10 ms delay ran ten
+    /// times too fast and asked the display for 60 Hz.
+    static let minimumFrameDelay = 0.011
+
+    /// The delay a frame is actually shown for, given the one its file
+    /// declares (`nil` = none declared).
+    static func clampedFrameDelay(_ declared: Double?) -> Double {
+        guard let declared, declared >= minimumFrameDelay else { return 0.1 }
+        return declared
+    }
+
     /// Per-frame delay in seconds, read from the format-specific
-    /// properties. Falls back to ~10fps when no delay is present.
+    /// properties and clamped (see `clampedFrameDelay`). Falls back to
+    /// ~10fps when no delay is present.
     private static func frameDuration(source: CGImageSource, index: Int) -> Double {
-        guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any] else {
-            return 0.1
-        }
-        // GIF — prefer the unclamped delay (browsers clamp to 0.1 min,
-        // but emotes often run faster).
+        let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+        return clampedFrameDelay(props.flatMap { declaredFrameDelay(in: $0) })
+    }
+
+    private static func declaredFrameDelay(in props: [CFString: Any]) -> Double? {
+        // GIF — prefer the unclamped delay (ImageIO's clamped value turns
+        // everything under 50 ms into 100 ms, but emotes often run faster).
         if let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
             if let d = gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double, d > 0 { return d }
             if let d = gif[kCGImagePropertyGIFDelayTime] as? Double, d > 0 { return d }
@@ -477,7 +604,7 @@ struct DecodedAnimation: @unchecked Sendable {
             if let d = png[kCGImagePropertyAPNGUnclampedDelayTime] as? Double, d > 0 { return d }
             if let d = png[kCGImagePropertyAPNGDelayTime] as? Double, d > 0 { return d }
         }
-        return 0.1
+        return nil
     }
 }
 
@@ -494,17 +621,34 @@ struct DecodedAnimation: @unchecked Sendable {
 /// share across views and actors. `NSCache` evicts under memory pressure
 /// using each entry's `byteCost`.
 ///
-/// `@unchecked Sendable`: `NSCache` is internally thread-safe, and the
-/// cached `DecodedAnimation` is itself immutable.
+/// ## Live table
+///
+/// Evicting an entry frees nothing while a view still shows it — the view
+/// holds the same `DecodedAnimation` — and a new row asking for that emote
+/// used to decode a second copy next to it. So every stored animation is
+/// also tracked weakly under its cache key: a miss consults that table
+/// first and re-adopts an animation that is still alive. Memory is then
+/// bounded by "what is on screen" plus the cache limit, not by how often
+/// the cache turned over.
+///
+/// `@unchecked Sendable`: `NSCache` is internally thread-safe, the cached
+/// `DecodedAnimation` is itself immutable, and the live table is only
+/// touched under `liveLock`.
 final class DecodedAnimationCache: @unchecked Sendable {
     static let shared = DecodedAnimationCache()
 
-    private final class Entry {
-        let value: DecodedAnimation
-        init(_ value: DecodedAnimation) { self.value = value }
+    private let cache = NSCache<NSString, DecodedAnimation>()
+
+    /// A live animation, without keeping it alive.
+    private struct WeakAnimation {
+        weak var animation: DecodedAnimation?
     }
 
-    private let cache = NSCache<NSString, Entry>()
+    /// Guards `live` and `liveSweepThreshold`.
+    private let liveLock = NSLock()
+    private var live: [String: WeakAnimation] = [:]
+    /// Entry count at which dead references are swept out of `live`.
+    private var liveSweepThreshold = 256
 
     init() {
         // ~64 MB ceiling on decoded frames. Tuned for "a few hundred distinct
@@ -527,10 +671,19 @@ final class DecodedAnimationCache: @unchecked Sendable {
     private let aliases = NSCache<NSString, NSNumber>()
 
     func decoded(for url: URL, maxPixelSize: Int, posterOnly: Bool = false) -> DecodedAnimation? {
-        let key = Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) as NSString
-        if let entry = cache.object(forKey: key) { return entry.value }
-        guard let effective = aliases.object(forKey: key)?.intValue, effective != maxPixelSize else { return nil }
-        return cache.object(forKey: Self.key(url: url, maxPixelSize: effective, posterOnly: posterOnly) as NSString)?.value
+        let key = Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
+        if let hit = entry(forKey: key) { return hit }
+        guard let effective = aliases.object(forKey: key as NSString)?.intValue, effective != maxPixelSize else { return nil }
+        return entry(forKey: Self.key(url: url, maxPixelSize: effective, posterOnly: posterOnly))
+    }
+
+    /// The entry stored under `key` — from the cache, or, once evicted,
+    /// from whichever view still holds it (which puts it back in the cache).
+    private func entry(forKey key: String) -> DecodedAnimation? {
+        if let cached = cache.object(forKey: key as NSString) { return cached }
+        guard let alive = liveLock.withLock({ live[key]?.animation }) else { return nil }
+        cache.setObject(alive, forKey: key as NSString, cost: alive.byteCost)
+        return alive
     }
 
     /// Points the `requested` bucket at the entry stored under `effective`.
@@ -542,10 +695,25 @@ final class DecodedAnimationCache: @unchecked Sendable {
     }
 
     func store(_ animation: DecodedAnimation, for url: URL, maxPixelSize: Int, posterOnly: Bool = false) {
-        cache.setObject(
-            Entry(animation),
-            forKey: Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) as NSString,
-            cost: animation.byteCost)
+        let key = Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
+        cache.setObject(animation, forKey: key as NSString, cost: animation.byteCost)
+        liveLock.withLock {
+            live[key] = WeakAnimation(animation: animation)
+            // Dead references are only ever removed here, so the table grows
+            // with every distinct emote decoded; sweep when it has doubled.
+            if live.count > liveSweepThreshold {
+                live = live.filter { $0.value.animation != nil }
+                liveSweepThreshold = max(256, live.count * 2)
+            }
+        }
+    }
+
+    /// Drops every cached animation (memory warning, Clear Cache). Ones a
+    /// view is still showing stay alive through that view and are found
+    /// again through the live table, so nothing on screen blanks or is
+    /// decoded twice.
+    func removeAll() {
+        cache.removeAllObjects()
     }
 }
 
@@ -559,6 +727,11 @@ final class DecodedAnimationCache: @unchecked Sendable {
 /// starts one task and later requests await it. The task is cancelled only
 /// when every view waiting on it has gone away (scrolled off), so fast
 /// scrolling doesn't leave a backlog of decodes nobody will see.
+///
+/// Fetches run as they come (Nuke queues them); the frame extraction after
+/// each is CPU-bound, so only `maxConcurrentDecodes` run at once. Opening a
+/// channel full of animated emotes used to start one decode per emote, all
+/// competing with each other and with chat's own background work.
 actor AnimatedEmoteDecoder {
     static let shared = AnimatedEmoteDecoder()
 
@@ -568,6 +741,31 @@ actor AnimatedEmoteDecoder {
     }
 
     private var inFlight: [String: InFlight] = [:]
+
+    private static let maxConcurrentDecodes = 2
+    /// Decode slots taken, and the tasks queued for one (FIFO). Actor state.
+    private var activeDecodes = 0
+    private var decodeQueue: [CheckedContinuation<Void, Never>] = []
+
+    /// Returns once the caller holds a decode slot. Not cancellation-aware
+    /// on purpose: a cancelled task takes its turn, sees the cancellation,
+    /// and gives the slot straight back.
+    private func acquireDecodeSlot() async {
+        if activeDecodes < Self.maxConcurrentDecodes {
+            activeDecodes += 1
+            return
+        }
+        // `releaseDecodeSlot` hands its slot over, still counted.
+        await withCheckedContinuation { decodeQueue.append($0) }
+    }
+
+    private func releaseDecodeSlot() {
+        if decodeQueue.isEmpty {
+            activeDecodes -= 1
+        } else {
+            decodeQueue.removeFirst().resume()
+        }
+    }
 
     /// Guards each waiter's release so the normal-return path and the
     /// cancellation path can't both decrement the waiter count.
@@ -637,11 +835,22 @@ actor AnimatedEmoteDecoder {
                    let shared = cache.decoded(for: url, maxPixelSize: effective, posterOnly: posterOnly) {
                     return shared
                 }
-                // CPU-bound frame extraction, off the main thread and off
-                // this actor.
-                guard let decoded = DecodedAnimation(data: data, maxPixelSize: effective, posterOnly: posterOnly) else {
-                    return nil
+                await self.acquireDecodeSlot()
+                // Another size bucket of this emote may have decoded the
+                // same frames while this task waited for its slot.
+                if let shared = cache.decoded(for: url, maxPixelSize: effective, posterOnly: posterOnly) {
+                    await self.releaseDecodeSlot()
+                    return shared
                 }
+                // CPU-bound frame extraction, off the main thread and off
+                // this actor. Stops between frames once cancelled.
+                let decoded = Task.isCancelled
+                    ? nil
+                    : DecodedAnimation(data: data, maxPixelSize: effective, posterOnly: posterOnly)
+                await self.releaseDecodeSlot()
+                // A decode cut short is not "these bytes aren't an image".
+                try Task.checkCancellation()
+                guard let decoded else { return nil }
                 cache.store(decoded, for: url, maxPixelSize: effective, posterOnly: posterOnly)
                 return decoded
             }
@@ -780,6 +989,13 @@ final class AnimatedEmoteView: UIView {
         // which is what frame-based animation (GIF/WebP/APNG) wants.
         keyframes.calculationMode = .discrete
         keyframes.repeatCount = .infinity
+        // Begin as if the loop had been running since a common origin, so
+        // every layer showing this emote is on the same frame however late
+        // its row appeared (or was re-attached). Both readings come from
+        // the one `now`, so the phase doesn't depend on when the
+        // transaction commits.
+        let now = CACurrentMediaTime()
+        keyframes.beginTime = layer.convertTime(now, from: nil) - animation.phase(at: now)
         // Let the render server run this layer at the rate the emote needs
         // (its shortest frame) rather than the full display refresh. Other
         // on-screen motion (scrolling) still gets full rate — the system

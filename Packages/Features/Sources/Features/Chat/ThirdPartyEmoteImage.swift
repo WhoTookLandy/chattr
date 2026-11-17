@@ -15,20 +15,19 @@ struct ThirdPartyEmoteImage: View {
     /// Size multiplier from the chat text-size setting, so emotes track the
     /// surrounding text instead of staying fixed at 24pt.
     let scale: CGFloat
-    /// From `ChatAppearance.animatedEmotes`. Off → animated emotes show their
-    /// poster frame (cheaper, calmer).
+    /// From `ChatAppearance.animatedEmotes`. Off → animated emotes show a
+    /// still (cheaper, calmer): the provider's static file when it lists
+    /// one, else the animation's poster frame.
     let allowAnimation: Bool
     /// Resolved once: a stable URL across re-renders keeps Nuke's
     /// fetch-dedup and cache hits effective.
-    private let imageURL: URL?
+    private let source: EmoteImageSource
 
     init(emote: Emote, scale: CGFloat = 1, allowAnimation: Bool = true) {
         self.emote = emote
         self.scale = scale
         self.allowAnimation = allowAnimation
-        // The 2x size matches a chat line on @2x/@3x displays; fall back to
-        // whatever exists for partial-variant emotes.
-        self.imageURL = emote.urls[.x2] ?? emote.urls[.x1] ?? emote.urls[.x4]
+        self.source = EmoteImageSource.thirdParty(emote, animate: allowAnimation)
     }
 
     var body: some View {
@@ -37,8 +36,8 @@ struct ThirdPartyEmoteImage: View {
             height: EmoteDisplayMetrics.lineHeight * scale
         )
         EmoteImageView(
-            url: imageURL,
-            isAnimated: emote.isAnimated,
+            url: source.url,
+            isAnimated: source.isAnimated,
             width: box.width, height: box.height,
             accessibilityLabel: emote.name,
             boxSize: box,

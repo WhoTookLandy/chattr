@@ -94,13 +94,18 @@ struct EmoteIndexCacheTests {
     func freshHitSkipsChannelNetwork() async throws {
         let base = tempBase()
         let cache = JSONDiskCache(subdirectory: "ch", baseDirectory: base)
-        // Seed a fresh channel-only entry for channel "555".
+        let provider = CountingProvider(returning: [sampleEmote("GLOBAL")], channel: [sampleEmote("OTHER", owner: "555")])
+        // Seed a fresh channel-only entry for channel "555", written by this
+        // same provider set just now — the only kind that skips the fetch.
         await cache.save(
             key: "555",
-            value: ChannelEmoteCachePayload(broadcasterId: "555", byName: ["Kappa": sampleEmote("Kappa", owner: "555")]),
+            value: ChannelEmoteCachePayload(
+                broadcasterId: "555",
+                byName: ["Kappa": sampleEmote("Kappa", owner: "555")],
+                sources: EmoteIndex.sourceSignature(of: [provider]),
+                fetchedAt: Date()),
             version: ChannelEmoteCachePayload.cacheVersion)
 
-        let provider = CountingProvider(returning: [sampleEmote("GLOBAL")], channel: [sampleEmote("OTHER", owner: "555")])
         let index = EmoteIndex(providers: [provider], cache: cache)
 
         await index.load(broadcasterId: "555", broadcasterLogin: "x")

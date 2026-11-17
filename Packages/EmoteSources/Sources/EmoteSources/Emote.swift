@@ -25,9 +25,8 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
     public let isAnimated: Bool
 
     /// True for 7TV "zero-width" overlays (e.g., RainTime stacks on top of the
-    /// previous emote). Slice-2's renderer treats these as ordinary emotes;
-    /// proper overlay layout is a later slice's concern. We flag them so the
-    /// future overlay renderer has the info it needs.
+    /// previous emote). `ChatRow` draws one stacked on the emote it follows;
+    /// with no emote before it, it renders as an ordinary emote.
     public let isZeroWidth: Bool
 
     /// Which provider issued this emote. Used for collision precedence
@@ -45,6 +44,14 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
     /// image loads. Optional so cache entries persisted before this field
     /// existed keep decoding (missing key → nil → square-ish fallback box).
     public let aspectRatio: Double?
+
+    /// Still-image URLs for an animated emote, keyed like `urls`, when the
+    /// provider's response lists a separate static file (FFZ does). A
+    /// renderer that will not animate loads this instead of downloading the
+    /// animation to pull one frame out of it. `nil` when the provider has no
+    /// static variant, and for cache entries persisted before the field
+    /// existed (missing key → nil → the animated file is used, as before).
+    public let staticURLs: [Size: URL]?
 
     /// Raw values are persisted in the on-disk emote cache — renaming a case or
     /// changing a raw value is a breaking change; bump the cache version if you do.
@@ -68,7 +75,8 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
         isZeroWidth: Bool,
         source: Source,
         ownerChannelId: String? = nil,
-        aspectRatio: Double? = nil
+        aspectRatio: Double? = nil,
+        staticURLs: [Size: URL]? = nil
     ) {
         self.id = id
         self.name = name
@@ -78,5 +86,6 @@ public struct Emote: Codable, Sendable, Equatable, Hashable, Identifiable {
         self.source = source
         self.ownerChannelId = ownerChannelId
         self.aspectRatio = aspectRatio
+        self.staticURLs = staticURLs
     }
 }

@@ -1,7 +1,6 @@
 import Foundation
 import EmoteSources
 import TwitchKit
-import Core
 import os
 
 /// A single emote as the picker renders it — unifying Twitch native
@@ -14,10 +13,11 @@ public struct PickerEmote: Identifiable, Hashable, Sendable {
     /// The token the user types in chat to use this emote — what we
     /// insert into the composer on tap.
     public let name: String
-    /// 2x CDN URL for the grid thumbnail.
+    /// 2x CDN URL for the grid thumbnail. The grid shows stills, so this is
+    /// the emote's static variant when it has one (`EmoteImageSource`).
     public let imageURL: URL?
-    /// Whether the emote has an animated variant. Used later for
-    /// animated rendering; today the grid renders the static frame.
+    /// Whether `imageURL` is an animated file, which the grid renders as
+    /// its poster frame through the frame decoder rather than `LazyImage`.
     public let isAnimated: Bool
 
     /// Pre-lowercased `name`, computed once at build time. The picker's
@@ -29,24 +29,21 @@ public struct PickerEmote: Identifiable, Hashable, Sendable {
 
     /// Build from a third-party (7TV/BTTV/FFZ) emote.
     init(_ emote: Emote) {
+        let source = EmoteImageSource.thirdParty(emote, animate: false)
         self.id = "\(emote.source.rawValue)-\(emote.id)"
         self.name = emote.name
-        // Prefer 2x (chat-row scale); fall back across available sizes.
-        self.imageURL = emote.urls[.x2] ?? emote.urls[.x1] ?? emote.urls[.x4]
-        self.isAnimated = emote.isAnimated
+        self.imageURL = source.url
+        self.isAnimated = source.isAnimated
         self.searchKey = emote.name.lowercased()
     }
 
     /// Build from a Twitch native emote.
     init(twitch emote: TwitchEmote) {
+        let source = EmoteImageSource.twitch(id: emote.id, formats: emote.format, animate: false)
         self.id = "twitch-\(emote.id)"
         self.name = emote.name
-        let animated = emote.format.contains("animated")
-        self.imageURL = Endpoints.TwitchCDN.emote(
-            id: emote.id,
-            format: animated ? "animated" : "static"
-        )
-        self.isAnimated = animated
+        self.imageURL = source.url
+        self.isAnimated = source.isAnimated
         self.searchKey = emote.name.lowercased()
     }
 }
@@ -57,6 +54,10 @@ public struct EmoteSection: Identifiable, Hashable, Sendable {
     public let id: String
     public let title: String
     public let emotes: [PickerEmote]
+    /// Set only on the stand-in `EmoteCatalog.buildSections(emoteIndex:twitchGlobal:)`
+    /// returns while the real sections are still being sorted; names that
+    /// build for `EmoteCatalog.resolve(_:)`.
+    var pendingBuild: Int? = nil
 }
 
 /// Builds the picker's sectioned emote list from the data chattr already
@@ -67,46 +68,69 @@ public struct EmoteSection: Identifiable, Hashable, Sendable {
 /// Section order is relevance-first: this channel's custom emotes at the
 /// top (what people actually want), then Twitch global, then third-party
 /// globals by provider. Each section is name-sorted (case-insensitive) for
-/// predictable browsing; the third-party sorts are memoized per emote
-/// table (see `buildSections(emoteIndex:twitchGlobal:)`).
+/// predictable browsing; the sorted result is memoized per emote table
+/// (see `buildSections(emoteIndex:twitchGlobal:)`).
 ///
 /// Future commits add the channel's Twitch subscriber emotes and the
 /// user's subscribed-emote set (both need their own Helix fetches).
 public enum EmoteCatalog {
 
-    /// Preferred entry point. Reads the index's snapshot and publish
-    /// generation atomically and reuses the sorted third-party sections
-    /// while the generation is unchanged — so re-opening the picker on a
-    /// channel with thousands of emotes doesn't re-run thousands of
-    /// `localizedCaseInsensitiveCompare` sorts on the main thread.
+    /// Preferred entry point, called on the main thread as the picker
+    /// opens. It never sorts there: while the index's publish generation
+    /// and the Twitch globals are unchanged it returns the memoized
+    /// sections; otherwise it starts the build — thousands of
+    /// `localizedCaseInsensitiveCompare`s on a big channel — on a
+    /// background task and returns a one-section stand-in for it, which
+    /// `EmotePickerView` exchanges for the result through `resolve(_:)`.
     public static func buildSections(
         emoteIndex: EmoteIndex?,
         twitchGlobal: [String: TwitchEmote]
     ) -> [EmoteSection] {
         let versioned = emoteIndex?.snapshotWithGeneration()
-        return assemble(
-            thirdPartySections(versioned?.emotes ?? [:], generation: versioned?.generation),
-            twitchGlobal: twitchGlobal)
+        let thirdParty = versioned?.emotes ?? [:]
+        let generation = versioned?.generation
+        if let ready = memoizedSections(thirdParty: thirdParty, generation: generation, twitchGlobal: twitchGlobal) {
+            return ready
+        }
+        let task = Task.detached(priority: .userInitiated) {
+            EmoteCatalog.sortedSections(thirdParty: thirdParty, generation: generation, twitchGlobal: twitchGlobal)
+        }
+        let token = state.withLock { (state: inout State) -> Int in
+            state.lastToken += 1
+            state.pending.append(PendingBuild(token: state.lastToken, task: task))
+            // One picker is open at a time; one spare covers a second
+            // compose bar asking before the first picker has resolved.
+            if state.pending.count > 2 {
+                state.pending.removeFirst(state.pending.count - 2)
+            }
+            return state.lastToken
+        }
+        return [EmoteSection(id: "pending", title: "", emotes: [], pendingBuild: token)]
     }
 
-    /// Dictionary-based entry point. Also memoized: an unchanged snapshot
-    /// (the same table handed back by `EmoteIndex.snapshot()`) compares
-    /// equal to the cached one, so it skips the sort too.
+    /// The finished sections for a value `buildSections(emoteIndex:twitchGlobal:)`
+    /// returned: the value itself, unless it is the stand-in for a build
+    /// still running, in which case this waits for that build.
+    static func resolve(_ sections: [EmoteSection]) async -> [EmoteSection] {
+        guard let token = sections.first?.pendingBuild else { return sections }
+        let task = state.withLock { (state: inout State) -> Task<[EmoteSection], Never>? in
+            state.pending.first { $0.token == token }?.task
+        }
+        guard let task else { return [] }
+        return await task.value
+    }
+
+    /// Dictionary-based entry point. Synchronous and complete: it sorts on
+    /// the caller's thread unless the same tables are memoized.
     public static func buildSections(
         thirdParty: [String: Emote],
         twitchGlobal: [String: TwitchEmote]
     ) -> [EmoteSection] {
-        assemble(thirdPartySections(thirdParty, generation: nil), twitchGlobal: twitchGlobal)
+        memoizedSections(thirdParty: thirdParty, generation: nil, twitchGlobal: twitchGlobal)
+            ?? sortedSections(thirdParty: thirdParty, generation: nil, twitchGlobal: twitchGlobal)
     }
 
     // MARK: - Memo
-
-    /// The expensive, third-party half of the picker (channel set + the
-    /// per-provider globals — thousands of emotes on big channels).
-    private struct ThirdPartySections: Sendable {
-        let channel: EmoteSection?
-        let globals: [EmoteSection]
-    }
 
     private struct Memo: Sendable {
         /// `EmoteIndex.generation` the sections were built from; `nil` when
@@ -114,51 +138,67 @@ public enum EmoteCatalog {
         /// unique, so equal generations mean the same table.
         let generation: Int?
         let thirdParty: [String: Emote]
-        let sections: ThirdPartySections
+        let twitchGlobal: [String: TwitchEmote]
+        let sections: [EmoteSection]
     }
 
-    /// Single-entry memo (one picker is open at a time). Lock-protected so
-    /// `buildSections` stays callable from any isolation.
-    private static let memo = OSAllocatedUnfairLock<Memo?>(initialState: nil)
+    private struct PendingBuild: Sendable {
+        let token: Int
+        let task: Task<[EmoteSection], Never>
+    }
 
-    private static func thirdPartySections(
-        _ thirdParty: [String: Emote],
-        generation: Int?
-    ) -> ThirdPartySections {
-        if let cached = memo.withLock({ $0 }) {
-            if let generation, cached.generation == generation {
-                return cached.sections
-            }
-            // Different/unknown generation: fall back to content equality
-            // (cheap when it's the same dictionary storage).
-            if cached.thirdParty == thirdParty {
-                return cached.sections
-            }
+    private struct State: Sendable {
+        /// Single-entry memo (one picker is open at a time).
+        var memo: Memo?
+        var pending: [PendingBuild] = []
+        var lastToken = 0
+    }
+
+    /// Lock-protected so `buildSections` stays callable from any isolation
+    /// and the background build can publish its result.
+    private static let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// The memoized sections, if they were built from these tables. A
+    /// known generation settles the third-party half without comparing
+    /// thousands of emotes; only the bare-dictionary path compares content.
+    private static func memoizedSections(
+        thirdParty: [String: Emote],
+        generation: Int?,
+        twitchGlobal: [String: TwitchEmote]
+    ) -> [EmoteSection]? {
+        guard let memo = state.withLock({ $0.memo }) else { return nil }
+        if let generation {
+            guard memo.generation == generation else { return nil }
+        } else {
+            guard memo.thirdParty == thirdParty else { return nil }
         }
-        let built = buildThirdPartySections(thirdParty)
-        let entry = Memo(generation: generation, thirdParty: thirdParty, sections: built)
-        memo.withLock { $0 = entry }
-        return built
+        return memo.twitchGlobal == twitchGlobal ? memo.sections : nil
     }
 
     // MARK: - Building
 
-    /// Section order is: channel emotes, Twitch global, then third-party
-    /// globals by provider.
-    private static func assemble(
-        _ thirdParty: ThirdPartySections,
+    /// Builds and memoizes the sections. Section order is: channel emotes,
+    /// Twitch global, then third-party globals by provider.
+    private static func sortedSections(
+        thirdParty: [String: Emote],
+        generation: Int?,
         twitchGlobal: [String: TwitchEmote]
     ) -> [EmoteSection] {
         var sections: [EmoteSection] = []
+        let allThirdParty = Array(thirdParty.values)
 
         // 1. Channel emotes (third-party with an owner). The big draw —
         //    the channel's curated 7TV/BTTV/FFZ set.
-        if let channel = thirdParty.channel {
-            sections.append(channel)
+        let channelEmotes = allThirdParty.filter { $0.ownerChannelId != nil }
+        if !channelEmotes.isEmpty {
+            sections.append(EmoteSection(
+                id: "channel",
+                title: "Channel Emotes",
+                emotes: sortedPickerEmotes(channelEmotes)
+            ))
         }
 
-        // 2. Twitch global (Kappa, LUL, etc.). A few hundred entries —
-        //    cheap enough to sort per open.
+        // 2. Twitch global (Kappa, LUL, etc.).
         if !twitchGlobal.isEmpty {
             sections.append(EmoteSection(
                 id: "twitch-global",
@@ -171,34 +211,21 @@ public enum EmoteCatalog {
 
         // 3. Third-party globals, grouped by provider so the user can
         //    find a known 7TV/BTTV/FFZ emote by where it lives.
-        sections.append(contentsOf: thirdParty.globals)
-
-        return sections
-    }
-
-    private static func buildThirdPartySections(_ thirdParty: [String: Emote]) -> ThirdPartySections {
-        let allThirdParty = Array(thirdParty.values)
-
-        let channelEmotes = allThirdParty.filter { $0.ownerChannelId != nil }
-        let channel: EmoteSection? = channelEmotes.isEmpty ? nil : EmoteSection(
-            id: "channel",
-            title: "Channel Emotes",
-            emotes: sortedPickerEmotes(channelEmotes)
-        )
-
-        var globals: [EmoteSection] = []
         let globalThirdParty = allThirdParty.filter { $0.ownerChannelId == nil }
         for source in Emote.Source.allCases {
             let group = globalThirdParty.filter { $0.source == source }
             guard !group.isEmpty else { continue }
-            globals.append(EmoteSection(
+            sections.append(EmoteSection(
                 id: "global-\(source.rawValue)",
                 title: "\(sourceLabel(source)) Global",
                 emotes: sortedPickerEmotes(group)
             ))
         }
 
-        return ThirdPartySections(channel: channel, globals: globals)
+        let memo = Memo(
+            generation: generation, thirdParty: thirdParty, twitchGlobal: twitchGlobal, sections: sections)
+        state.withLock { $0.memo = memo }
+        return sections
     }
 
     // MARK: - Helpers

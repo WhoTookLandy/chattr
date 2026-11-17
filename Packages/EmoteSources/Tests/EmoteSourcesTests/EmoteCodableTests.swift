@@ -104,4 +104,47 @@ struct ChannelEmoteCachePayloadTests {
         #expect(decoded.byName["ZULUL"] == emote)
         #expect(ChannelEmoteCachePayload.cacheVersion == 3)
     }
+
+    @Test("payload round-trips its provider set and fetch time")
+    func roundTripsSourcesAndFetchTime() throws {
+        let fetchedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let payload = ChannelEmoteCachePayload(
+            broadcasterId: "99", byName: [:], sources: ["bttv", "sevenTV"], fetchedAt: fetchedAt)
+
+        let decoded = try JSONDecoder().decode(
+            ChannelEmoteCachePayload.self,
+            from: try JSONEncoder().encode(payload))
+
+        #expect(decoded.sources == ["bttv", "sevenTV"])
+        #expect(decoded.fetchedAt == fetchedAt)
+    }
+
+    @Test("a file written before the provider set was recorded still decodes")
+    func legacyPayloadDecodesWithoutSources() throws {
+        // Same cache version as today's files, so it must keep decoding —
+        // otherwise the stale copy couldn't cover a failed refetch.
+        let legacy = """
+        {
+          "broadcasterId": "99",
+          "byName": {
+            "ZULUL": {
+              "id": "ffz:1",
+              "name": "ZULUL",
+              "urls": ["x1", "https://ffz/1"],
+              "isAnimated": false,
+              "isZeroWidth": false,
+              "source": "ffz",
+              "ownerChannelId": "99"
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(ChannelEmoteCachePayload.self, from: legacy)
+
+        #expect(decoded.byName["ZULUL"]?.source == .ffz)
+        #expect(decoded.byName["ZULUL"]?.staticURLs == nil)
+        #expect(decoded.sources == nil)
+        #expect(decoded.fetchedAt == nil)
+    }
 }

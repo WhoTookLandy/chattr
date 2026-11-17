@@ -352,6 +352,7 @@ struct FFZDecodingTests {
         #expect(e.isAnimated == false)
         #expect(e.source == .ffz)
         #expect(e.urls[.x2]?.absoluteString == "https://cdn.frankerfacez.com/emote/100/2")
+        #expect(e.staticURLs == nil)
     }
 
     @Test("Prefers animated URLs when both present")
@@ -381,6 +382,8 @@ struct FFZDecodingTests {
         let e = emotes[0]
         #expect(e.isAnimated == true)
         #expect(e.urls[.x1]?.absoluteString.contains("/animated/") == true)
+        // The still image rides along for renderers that won't animate.
+        #expect(e.staticURLs?[.x1]?.absoluteString == "https://cdn.frankerfacez.com/emote/200/static/1")
     }
 
     @Test("404 on channel endpoint returns empty")
