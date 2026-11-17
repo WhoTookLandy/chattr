@@ -77,27 +77,46 @@ struct ChatTranscript: View {
     @State private var liveAgainDismiss: Task<Void, Never>?
 
     var body: some View {
-        // `isEmpty` (not `lines.isEmpty`): the `lines` getter materializes the
-        // full visible window once the ring wraps, and this body re-runs per
-        // flush — while `isEmpty` is a stored flag that only invalidates when
-        // it flips. See TranscriptStore.isEmpty's doc comment.
-        if chatModel.isEmpty {
-            // Distinguish "attaching" (sessions not yet subscribed) from
-            // "attached but quiet" (subscriptions live, but no messages
-            // have arrived yet). Without explicit state UI a quiet channel
-            // looks identical to a broken connection.
-            EmptyOrConnectingState(
-                isAttached: chatModel.attachState == .attached,
-                channelLoginName: channelLoginName
-            )
-        } else {
-            chatScrollView
+        Group {
+            // `isEmpty` (not `lines.isEmpty`): the `lines` getter materializes
+            // the full visible window once the ring wraps, and this body
+            // re-runs per flush — while `isEmpty` is a stored flag that only
+            // invalidates when it flips. See TranscriptStore.isEmpty's doc
+            // comment.
+            if chatModel.isEmpty {
+                // Distinguish "attaching" (sessions not yet subscribed) from
+                // "attached but quiet" (subscriptions live, but no messages
+                // have arrived yet). Without explicit state UI a quiet channel
+                // looks identical to a broken connection.
+                EmptyOrConnectingState(
+                    isAttached: chatModel.attachState == .attached,
+                    channelLoginName: channelLoginName
+                )
+            } else {
+                chatScrollView
+            }
+        }
+        // Keep the model's block filter in sync with the active account's
+        // BlockStore. Attached OUTSIDE the empty/non-empty branch on purpose:
+        // `isEmpty` counts VISIBLE rows, so blocking every chatter on screen
+        // flips to the empty state — and an observer living on the list
+        // branch would be torn down with it, leaving a later unblock unable
+        // to bring the hidden rows back. `blockStore` is @Observable, so
+        // reading `.blockedIds` here re-fires this onChange whenever a
+        // block/unblock mutates the set.
+        .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
+            chatModel.blockedIds = ids
+        }
+        // Seed once on appear; .onChange above handles every subsequent
+        // mutation. (A `.task(id: blockedIds)` re-hashed the whole Set on
+        // every block/unblock and restarted the task — redundant.)
+        .task {
+            chatModel.blockedIds = blockStore?.blockedIds ?? []
         }
     }
 
     /// The list (either implementation) plus everything both share: the
-    /// floating pills, the connection-banner reducer, and the block-filter
-    /// sync.
+    /// floating pills and the connection-banner reducer.
     @ViewBuilder
     private var chatScrollView: some View {
         messageList
@@ -124,19 +143,6 @@ struct ChatTranscript: View {
                         if connectionBanner == .liveAgain { connectionBanner = .hidden }
                     }
                 }
-            }
-            // Keep the model's block filter in sync with the active account's
-            // BlockStore. `blockStore` is @Observable, so reading `.blockedIds`
-            // here re-fires this onChange whenever a block/unblock mutates the
-            // set.
-            .onChange(of: blockStore?.blockedIds ?? []) { _, ids in
-                chatModel.blockedIds = ids
-            }
-            // Seed once on appear; .onChange above handles every subsequent
-            // mutation. (A `.task(id: blockedIds)` re-hashed the whole Set on
-            // every block/unblock and restarted the task — redundant.)
-            .task {
-                chatModel.blockedIds = blockStore?.blockedIds ?? []
             }
             // Sending re-pins to the live edge so the user sees their own
             // message, like any chat app — while scrolled up it would

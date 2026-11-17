@@ -258,6 +258,7 @@ public actor EmoteIndex {
         var channelByProvider = [[Emote]](repeating: [], count: fetchProviders.count)
         var allGlobalsSucceeded = true
         var allChannelsSucceeded = true
+        var failedChannelProviders: Set<Int> = []
 
         await withTaskGroup(of: FetchOutcome.self) { group in
             for (index, provider) in fetchProviders.enumerated() {
@@ -292,12 +293,21 @@ public actor EmoteIndex {
                     if !succeeded { allGlobalsSucceeded = false }
                 case let .channel(index, emotes, succeeded):
                     channelByProvider[index] = emotes
-                    if !succeeded { allChannelsSucceeded = false }
+                    if !succeeded {
+                        allChannelsSucceeded = false
+                        failedChannelProviders.insert(index)
+                    }
                 }
             }
         }
 
-        let channelSets = fetchChannel ? channelByProvider : diskChannelSets
+        let channelSets = fetchChannel
+            ? Self.channelSetsWithFallback(
+                fetched: channelByProvider,
+                failed: failedChannelProviders,
+                providers: fetchProviders,
+                stale: diskChannel)
+            : diskChannelSets
         let finalSnapshot = Self.compose(globals: globalsByProvider, channel: channelSets)
 
         // All providers failed or returned nothing. Don't clobber a
@@ -329,6 +339,29 @@ public actor EmoteIndex {
                 version: ChannelEmoteCachePayload.cacheVersion)
         }
         logger.info("EmoteIndex loaded for \(broadcasterLogin, privacy: .public): \(finalSnapshot.count) emote(s)")
+    }
+
+    /// The channel sets to publish after a network pass: each provider's
+    /// fresh result, except that a provider whose fetch FAILED contributes
+    /// its own entries from the stale disk copy instead of nothing. Without
+    /// this, a stale cache + one provider's outage published a snapshot
+    /// missing that provider's channel emotes entirely (the snapshot is
+    /// non-empty as long as anything else loaded, so it replaced the
+    /// disk-restored one). Providers with an unknown `emoteSource` keep the
+    /// old behavior: nothing to attribute stale entries to.
+    static func channelSetsWithFallback(
+        fetched: [[Emote]],
+        failed: Set<Int>,
+        providers: [any EmoteProvider],
+        stale: [String: Emote]?
+    ) -> [[Emote]] {
+        guard let stale, !failed.isEmpty else { return fetched }
+        var sets = fetched
+        for index in failed where sets.indices.contains(index) && providers.indices.contains(index) {
+            guard let source = providers[index].emoteSource else { continue }
+            sets[index] = stale.values.filter { $0.source == source }
+        }
+        return sets
     }
 
     /// Atomically publish a resolved snapshot: actor-isolated `byName` plus

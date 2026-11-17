@@ -64,6 +64,32 @@ struct DecodedAnimationTests {
         let decoded = try #require(DecodedAnimation(data: data))
         #expect(decoded.posterIndex == 0)
     }
+
+    @Test("Poster-only decode keeps just the first visible frame")
+    func posterOnlyKeepsSingleVisibleFrame() throws {
+        let data = Self.apng(alphas: [0, 0, 1, 1])
+        let decoded = try #require(DecodedAnimation(data: data, maxPixelSize: 16, posterOnly: true))
+        #expect(decoded.frameCount == 1)
+        #expect(decoded.posterIndex == 0)
+        let full = try #require(DecodedAnimation(data: data, maxPixelSize: 16))
+        #expect(decoded.byteCost * 4 == full.byteCost, "one frame retained instead of four")
+    }
+
+    @Test("Poster-only decode of an all-transparent animation still yields a frame")
+    func posterOnlyAllBlankFallsBack() throws {
+        let data = Self.apng(alphas: [0, 0])
+        let decoded = try #require(DecodedAnimation(data: data, posterOnly: true))
+        #expect(decoded.frameCount == 1)
+    }
+
+    @Test("Poster-only and full decodes are separate cache entries")
+    func posterOnlyCacheKeyIsDistinct() throws {
+        let url = try #require(URL(string: "https://cdn.test/emote.webp"))
+        #expect(
+            DecodedAnimationCache.key(url: url, maxPixelSize: 32, posterOnly: true)
+                != DecodedAnimationCache.key(url: url, maxPixelSize: 32, posterOnly: false)
+        )
+    }
 }
 
 @Suite("DecodedAnimation keyframe timing")

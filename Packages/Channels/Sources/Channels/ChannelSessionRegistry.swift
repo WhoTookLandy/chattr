@@ -158,7 +158,7 @@ public final class ChannelSessionRegistry {
     /// single iterator on its account's `client.eventSub.events` stream and
     /// routes each event to the matching session's inbox via `router`.
     /// Detached (never main-actor). Started lazily on first session creation
-    /// for an account.
+    /// for an account and kept for that client's lifetime.
     var eventDispatchTasks: [String: Task<Void, Never>] = [:]
 
     /// Per-account connection-state mirrors, keyed by `accountUserId`. One per
@@ -166,8 +166,20 @@ public final class ChannelSessionRegistry {
     var connectionStatusStores: [String: ConnectionStatusStore] = [:]
 
     /// Per-account tasks consuming `client.eventSub.connectionState`. Started
-    /// alongside the event dispatcher; cancelled in `stopDispatcherIfIdle`.
+    /// alongside the event dispatcher and, like it, kept for the client's
+    /// lifetime (see `ensureEventDispatch`).
     var connectionDispatchTasks: [String: Task<Void, Never>] = [:]
+
+    /// The client each account's dispatcher consumes, held weakly so the
+    /// registry never keeps an evicted client alive. Lets
+    /// `ensureEventDispatch` tell "already consuming this client" from "the
+    /// account got a new client" without a reused-address false match.
+    var dispatchClients: [String: WeakClient] = [:]
+
+    final class WeakClient {
+        weak var client: TwitchClient?
+        init(_ client: TwitchClient) { self.client = client }
+    }
 
     /// Per-account moderated-channel fetches, keyed by `accountUserId`. The
     /// value is the fetch Task rather than the resolved set so concurrent
@@ -378,8 +390,6 @@ public final class ChannelSessionRegistry {
         }
         // Identity-based: a no-op if a newer session already took the route.
         router.unregister(session)
-        // The dispatcher may have been started just for this session.
-        stopDispatcherIfIdle(accountUserId: accountUserId)
     }
 
     // MARK: - Reference counting
@@ -505,16 +515,8 @@ public final class ChannelSessionRegistry {
             // caller's teardown loop; a re-acquire waits on it via `stopping`.
             logger.debug("release \(key, privacy: .public) → refcount 0; no started session (start cancelled or already gone)")
         }
-        // After tearing down the session, check if THIS account has
-        // any remaining sessions. If not, cancel the shared event
-        // dispatcher Task — otherwise the WebSocket stays connected
-        // forever (the Task's `for await event in client.eventSub.events`
-        // keeps the stream alive even after all sessions are gone).
-        //
-        // Without this, closing all chat tabs leaves an idle WebSocket
-        // consuming socket resources + occasional Twitch heartbeat
-        // traffic for the rest of the app's foreground lifetime.
-        stopDispatcherIfIdle(accountUserId: accountUserId)
+        // The account's event dispatcher deliberately outlives its last
+        // session — its streams are single-use (see `ensureEventDispatch`).
     }
 
     /// Releases EVERY session for an account at once, regardless of how
@@ -557,7 +559,6 @@ public final class ChannelSessionRegistry {
             await teardown.value
         }
         logger.notice("releaseAll for account \(accountUserId, privacy: .public): \(keys.count) channel(s), \(releasedRefs) ref(s) released, \(startedTeardowns.count) session(s) stopped")
-        stopDispatcherIfIdle(accountUserId: accountUserId)
     }
 
     /// Synchronously removes everything the registry holds for `key` — the

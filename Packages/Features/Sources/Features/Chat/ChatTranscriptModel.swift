@@ -291,10 +291,16 @@ public final class ChatTranscriptModel {
     ///   to the live edge to show the new row (see `outgoingSendCount`). The
     ///   thread sheet passes false: it shows the row itself, and yanking the
     ///   list behind it would lose the reader's place in scrollback.
+    /// - Parameter clearsComposerDraft: whether this send came from the MAIN
+    ///   compose bar, whose persisted draft (`draftKey`) it consumes. The
+    ///   thread sheet's composer and a failed-row retry pass false — their
+    ///   text never came from that draft, and clearing it would silently
+    ///   discard whatever the user has half-typed in the main bar.
     public func send(
         text: String,
         replyOverride: ReplyContext? = nil,
-        repinsTranscript: Bool = true
+        repinsTranscript: Bool = true,
+        clearsComposerDraft: Bool = true
     ) async {
         // Trim exactly as `ChannelSession.send` does, or the echo's text
         // match would miss.
@@ -316,7 +322,7 @@ public final class ChatTranscriptModel {
         // Starting the send is the deliberate draft-clear point: the message
         // is on screen from here, and a failed row offers Retry — restoring
         // the draft on failure would only confuse.
-        if !draftKey.isEmpty {
+        if clearsComposerDraft, !draftKey.isEmpty {
             dependencies.clearDraft(draftKey)
         }
 
@@ -369,7 +375,9 @@ public final class ChatTranscriptModel {
         // and its echo can't find two rows.
         store.remove(id: failedLineId)
         store.publishPending()
-        await send(text: retryText, replyOverride: preservedReply)
+        // The retried text comes from the failed row, not the compose bar —
+        // whatever the user has typed there since must survive.
+        await send(text: retryText, replyOverride: preservedReply, clearsComposerDraft: false)
     }
 
     /// View-facing reset for the error alert.

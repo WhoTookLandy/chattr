@@ -181,6 +181,22 @@ struct ChatTranscriptModelDependencyTests {
         await model.detach()
     }
 
+    @Test("Thread-sheet sends and retries leave the main composer's draft alone")
+    func nonComposerSendsKeepDraft() async throws {
+        let recorder = Recorder()
+        let model = makeModel(recorder)
+        await model.attach(sessions: [makeSession()], currentUserId: "me-1", draftKey: "twitch/chan-1")
+
+        // Offline: each send fails at once and leaves a retryable row.
+        await model.send(text: "in thread", repinsTranscript: false, clearsComposerDraft: false)
+        #expect(recorder.clearedDrafts.isEmpty)
+
+        let failed = try #require(model.lines.last)
+        await model.retry(failedLineId: failed.id)
+        #expect(recorder.clearedDrafts.isEmpty)
+        await model.detach()
+    }
+
     @Test("No draft key (tests, previews) clears nothing")
     func sendWithoutDraftKey() async {
         let recorder = Recorder()

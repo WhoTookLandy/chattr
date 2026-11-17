@@ -41,6 +41,16 @@ public struct ChatScreen: View {
 
     @State private var errorMessage: String?
 
+    /// The attach epoch owned by the CURRENT session-lifecycle task (see
+    /// `.task(id: channelId)`). Each run of that task mints a fresh lease and
+    /// detaches with whatever epoch it holds at teardown. Out-of-band attaches
+    /// — the error view's Retry button and the compose bar's self-heal — record
+    /// into the live lease too, so the attachment they create is torn down
+    /// when the view goes away. Without it, a retry after a failed start left
+    /// the task holding the `0` sentinel and its `detach(ifEpoch: 0)` no-op'd,
+    /// keeping a subscription draining the session offscreen.
+    @State private var attachLease = AttachLease()
+
     /// The persisted compose draft for this channel, read from `DraftStorage`
     /// exactly once at construction (see `init`). `ComposeBar` only consumes
     /// `seedDraft` at first mount thanks to its own `@State(initialValue:)`
@@ -342,7 +352,12 @@ public struct ChatScreen: View {
         // SwiftUI's task cancellation completes before the next view's
         // `.task` body starts.
         .task(id: channelId) {
-            let attachEpoch = await startSession()
+            // A lease per task run: a channelId change starts a new run with
+            // a new lease, so the outgoing run's teardown can never detach an
+            // epoch the incoming run (or a retry during it) established.
+            let lease = AttachLease()
+            attachLease = lease
+            await startSession(recordingInto: lease)
             // Hold the task open until SwiftUI cancels us (view torn down
             // or channelId changes). Sleeping for a year is the canonical
             // SwiftUI idiom — Task.sleep is implemented as a scheduler
@@ -356,7 +371,7 @@ public struct ChatScreen: View {
             // model (the "I see chat but it says Not connected" bug). The
             // chatModel reference survives because @State storage persists
             // until the task fully exits.
-            await chatModel.detach(ifEpoch: attachEpoch)
+            await chatModel.detach(ifEpoch: lease.epoch)
         }
         .task {
             guard let store = badgeStore else { return }
@@ -486,7 +501,7 @@ public struct ChatScreen: View {
                 // `startSession`/`attach` are epoch-guarded + idempotent, so a
                 // no-op when already attached.
                 if chatModel.attachState != .attached {
-                    _ = await startSession()
+                    await startSession(recordingInto: attachLease)
                 }
                 await chatModel.send(text: draft)
             },
@@ -519,7 +534,8 @@ public struct ChatScreen: View {
             // never clears and `.task(id: channelId)` won't re-fire for the
             // same channel — the only escape was closing the tab.
             Button("Retry") {
-                Task { await startSession() }
+                let lease = attachLease
+                Task { await startSession(recordingInto: lease) }
             }
             .buttonStyle(.borderedProminent)
         }
@@ -594,13 +610,24 @@ public struct ChatScreen: View {
 
     // MARK: - Session lifecycle
 
+    /// Starts (or re-establishes) the session attachment and records the
+    /// resulting epoch into `lease`, which the session-lifecycle task passes
+    /// to `detach(ifEpoch:)` on teardown. A failed, cancelled or missing-
+    /// registry start records nothing, leaving the lease's previous epoch
+    /// (or the `0` pre-attach sentinel, whose teardown no-ops unless nothing
+    /// ever attached).
     @MainActor
-    /// - Returns: the attach epoch the model established (passed to
-    ///   `detach(ifEpoch:)` on teardown), or `0` if no attach happened
-    ///   (missing registry, cancelled, or error). `0` is the pre-attach
-    ///   sentinel — a teardown keyed on it no-ops unless nothing ever attached.
-    @discardableResult
-    private func startSession() async -> Int {
+    private func startSession(recordingInto lease: AttachLease) async {
+        let epoch = await attachSession()
+        if epoch != 0 {
+            lease.epoch = epoch
+        }
+    }
+
+    @MainActor
+    /// - Returns: the attach epoch the model established, or `0` if no attach
+    ///   happened (missing registry, cancelled, or error).
+    private func attachSession() async -> Int {
         // Clear any prior failure so a retry (button or compose-bar
         // self-heal) actually dismisses the error view; a repeat failure
         // re-sets it below.
@@ -718,4 +745,13 @@ public struct ChatScreen: View {
             return 0
         }
     }
+}
+
+/// Mutable holder for the attach epoch a `ChatScreen` session-lifecycle task
+/// owns — see `ChatScreen.attachLease`. A reference type so the Retry button
+/// and the compose-bar self-heal can record into the lease of the task run
+/// that is live when they fire.
+@MainActor
+final class AttachLease {
+    var epoch = 0
 }

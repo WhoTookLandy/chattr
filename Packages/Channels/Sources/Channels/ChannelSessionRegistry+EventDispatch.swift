@@ -9,50 +9,47 @@ extension ChannelSessionRegistry {
 
     // MARK: - Event dispatch
 
-    /// Cancel + remove the shared event dispatcher Task for an account if
-    /// it has no remaining sessions. The dispatcher's `for await event in
-    /// client.eventSub.events` keeps the WebSocket alive — without
-    /// cancelling, closing all chat tabs would leave an idle connection.
-    ///
-    /// Idempotent: calling when there's no dispatcher (or sessions still
-    /// exist) is a no-op.
-    ///
-    /// Implementation note: `sessions` is keyed by "userId/channelId", so
-    /// "any session for this account" is detected by a key prefix scan.
-    /// O(N) over total sessions, but N is tiny (~tabs the user has open).
-    func stopDispatcherIfIdle(accountUserId: String) {
-        let prefix = "\(accountUserId)/"
-        // Consider both started sessions AND in-flight routing targets — a
-        // session mid-start still needs the dispatcher to deliver (and buffer)
-        // its live events, so it must keep the dispatcher alive.
-        let hasActiveSessions =
-            sessions.keys.contains { $0.hasPrefix(prefix) } ||
-            dispatchTargets.keys.contains { $0.hasPrefix(prefix) }
-        guard !hasActiveSessions else { return }
-        guard let task = eventDispatchTasks[accountUserId] else { return }
-        task.cancel()
-        eventDispatchTasks[accountUserId] = nil
-        // Tear down the connection-state pump + drop the store alongside the
-        // event dispatcher — they share the account's lifetime.
-        connectionDispatchTasks[accountUserId]?.cancel()
-        connectionDispatchTasks[accountUserId] = nil
-        connectionStatusStores[accountUserId] = nil
-        logger.notice("Stopped event dispatcher for account \(accountUserId, privacy: .public) — no remaining sessions")
-    }
-
     /// Starts the single event-dispatch loop for this account's client if it
-    /// isn't already running. Subsequent calls for the same account are no-ops.
+    /// isn't already running for THIS client. A call with the same client is
+    /// a no-op; a call with a different client (the account was removed and
+    /// re-added, so the cache built a new one) replaces the old consumers.
+    ///
+    /// Lifetime: the consumers are deliberately NOT cancelled when the
+    /// account's last session closes. `client.eventSub.events` and
+    /// `.connectionState` are single-consumer `AsyncStream`s created ONCE per
+    /// `EventSubClient`, and cancelling the Task iterating one terminates the
+    /// stream for good. The client is cached and reused, so a cancelled
+    /// consumer meant every later session for the account (close the last
+    /// tab, then reopen a channel) got history but no live events. Iterating
+    /// the streams never kept the WebSocket open either — the socket belongs
+    /// to the `EventSubClient` — so cancelling bought nothing.
+    ///
+    /// Instead the consumers live exactly as long as their client: they
+    /// capture only the streams, never the client, so when an evicted client
+    /// deallocates its `deinit` finishes both streams and the loops exit.
     func ensureEventDispatch(client: TwitchClient, accountUserId: String) {
-        guard eventDispatchTasks[accountUserId] == nil else { return }
+        if eventDispatchTasks[accountUserId] != nil,
+           let current = dispatchClients[accountUserId]?.client,
+           current === client {
+            return
+        }
+        // Consumers left over from a previous (or deallocated) client. Their
+        // streams belong to a client nobody uses any more, so cancelling them
+        // is safe — and the new client needs its own consumers.
+        eventDispatchTasks[accountUserId]?.cancel()
+        connectionDispatchTasks[accountUserId]?.cancel()
+        dispatchClients[accountUserId] = WeakClient(client)
 
         // ONE iterator on the client's event stream — that's the whole point
         // of this Task. Detached so the loop never runs on (or waits for) the
         // main actor; it touches only the Sendable router, whose `route` is a
         // lock-protected lookup + non-blocking inbox yield. Nothing here
-        // awaits a session or a subscriber.
+        // awaits a session or a subscriber. Captures the stream, NOT the
+        // client, so the client can deallocate (which finishes the stream).
         let router = self.router
+        let events = client.eventSub.events
         eventDispatchTasks[accountUserId] = Task.detached(priority: .userInitiated) {
-            for await event in client.eventSub.events {
+            for await event in events {
                 guard !Task.isCancelled else { return }
                 router.route(event, accountUserId: accountUserId)
             }
@@ -63,23 +60,21 @@ extension ChannelSessionRegistry {
         // `connectionState` stream and mirrors it into the @Observable store the
         // ChatScreen reads. Started here (with the event dispatcher) so it begins
         // before connect() and observes the initial .connecting/.connected
-        // transitions — the stream has no value replay for late subscribers. The
-        // inner `== nil` guard keeps the block safe regardless of placement.
-        if connectionDispatchTasks[accountUserId] == nil {
-            let store = connectionStatus(forAccountUserId: accountUserId)
-            connectionDispatchTasks[accountUserId] = Task { @MainActor [weak self] in
-                // Track the previous state so a RECOVERY (reconnecting →
-                // connected) is distinguishable from the cold-start connect
-                // (connecting → connected, which the join backfill covers).
-                var previous: ConnectionState = .connecting
-                for await state in client.eventSub.connectionState {
-                    guard !Task.isCancelled else { return }
-                    store.update(state)
-                    if Self.isReconnectRecovery(from: previous, to: state) {
-                        self?.resyncSessionsAfterReconnect(accountUserId: accountUserId)
-                    }
-                    previous = state
+        // transitions — the stream has no value replay for late subscribers.
+        let store = connectionStatus(forAccountUserId: accountUserId)
+        let states = client.eventSub.connectionState
+        connectionDispatchTasks[accountUserId] = Task { @MainActor [weak self] in
+            // Track the previous state so a RECOVERY (reconnecting →
+            // connected) is distinguishable from the cold-start connect
+            // (connecting → connected, which the join backfill covers).
+            var previous: ConnectionState = .connecting
+            for await state in states {
+                guard !Task.isCancelled else { return }
+                store.update(state)
+                if Self.isReconnectRecovery(from: previous, to: state) {
+                    self?.resyncSessionsAfterReconnect(accountUserId: accountUserId)
                 }
+                previous = state
             }
         }
     }
