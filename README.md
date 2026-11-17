@@ -47,8 +47,11 @@ Swift Package Manager resolves all dependencies on first build — no extra setu
 
 ### Twitch client ID
 
-The app authenticates with Twitch via OAuth (authorization-code flow with PKCE,
-handled by TwitchKit), so **no client secret is required or stored**. The public
+Sign-in uses Twitch's **Device Code Grant** first (show a code, approve on
+Twitch — in the Twitch app when installed), with the browser authorization-code
+flow as a fallback. Either way **no client secret ships in the app**: the code
+exchange (browser flow) and every token refresh go through the chattr-auth
+bridge, which holds the secret server-side. The public
 client ID lives in [`chattr/chattrApp.swift`](chattr/chattrApp.swift). To run
 against your own Twitch developer app, register one at
 [dev.twitch.tv](https://dev.twitch.tv) and replace `chattrApp.clientId`.
