@@ -30,7 +30,59 @@ extension ChannelSessionRegistry {
         // accounts fetch each provider's global set once, not N×M times.
         let new = EmoteIndex(providers: Self.enabledEmoteProviders(), globalCatalog: .shared)
         emoteIndexes[key] = new
+        // Every table the index publishes (interim provider results, a
+        // background revalidation) reaches the channel's session, not only
+        // the one `loadEmotes` waits for.
+        Task { [weak self, weak new] in
+            await new?.setPublishObserver { [weak self, weak new] in
+                Task { @MainActor [weak self, weak new] in
+                    guard let self, let new else { return }
+                    self.scheduleEmoteRefresh(key: key, index: new)
+                }
+            }
+        }
         return new
+    }
+
+    /// Coalesces a burst of publishes into one `emoteTableDidChange()`: the
+    /// refresh that runs reads whatever table is current by then.
+    private func scheduleEmoteRefresh(key: String, index: EmoteIndex) {
+        guard emoteRefreshes[key] == nil else { return }
+        emoteRefreshes[key] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self else { return }
+            self.emoteRefreshes[key] = nil
+            // The key may have been released (and re-opened with a fresh
+            // index) meanwhile.
+            guard self.emoteIndexes[key] === index else { return }
+            await self.dispatchTargets[key]?.emoteTableDidChange()
+        }
+    }
+
+    /// Loads the channel's registry-owned `EmoteIndex` and, when that
+    /// published a new table, has the channel's session re-normalize the
+    /// rows it built against the old one and re-send them to its subscribers
+    /// (`ChannelSession.emoteTableDidChange()`).
+    ///
+    /// The registry starts this itself when it creates a session, so a tab
+    /// with no chat page mounted still resolves emotes. Safe to call again
+    /// (a chat page appearing, a retry after a partial load):
+    /// `EmoteIndex.load` shares an in-flight load and is a no-op once fully
+    /// loaded.
+    public func loadEmotes(accountUserId: String, channelId: String, channelLoginName: String) async {
+        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
+        let index = emoteIndex(forAccountUserId: accountUserId, channelId: channelId)
+        // `load` reports nothing (and returns at once when already loaded);
+        // the generation moves exactly when a table was published.
+        let generationBefore = index.generation
+        await dependencies.loadEmoteIndex(index, channelId, channelLoginName)
+        guard index.generation != generationBefore else { return }
+        // The key may have been released (and re-opened with a fresh index)
+        // while the providers answered.
+        guard emoteIndexes[key] === index else { return }
+        // `dispatchTargets` also holds a session that is still starting; it
+        // ignores this until its join backfill is committed.
+        await dispatchTargets[key]?.emoteTableDidChange()
     }
 
     /// The third-party providers the user has enabled (Settings → Chat →
@@ -62,7 +114,8 @@ extension ChannelSessionRegistry {
 
     /// Returns (creating if needed) the per-account connection-state store. A
     /// `ChatScreen` observes this to drive its "Reconnecting… / Live again"
-    /// pill. Same lifetime as the account's event dispatcher.
+    /// pill. Same lifetime as the account's event dispatcher: kept while the
+    /// account's client lives, dropped when its streams end.
     public func connectionStatus(forAccountUserId accountUserId: String) -> ConnectionStatusStore {
         if let existing = connectionStatusStores[accountUserId] {
             return existing

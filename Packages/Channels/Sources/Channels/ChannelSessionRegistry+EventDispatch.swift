@@ -27,6 +27,13 @@ extension ChannelSessionRegistry {
     /// Instead the consumers live exactly as long as their client: they
     /// capture only the streams, never the client, so when an evicted client
     /// deallocates its `deinit` finishes both streams and the loops exit.
+    /// That is the only way the streams end on their own (TwitchKit finishes
+    /// them nowhere else), and every session retains its client — so a
+    /// stream can't end under an open session, and there is nothing to
+    /// restart: the ended dispatcher just clears its account's entries
+    /// (`eventStreamDidFinish`). Note a client whose socket ever connected
+    /// only deallocates after `eventSub.disconnect()`: its own receive and
+    /// keepalive tasks retain it until then.
     func ensureEventDispatch(client: TwitchClient, accountUserId: String) {
         if eventDispatchTasks[accountUserId] != nil,
            let current = dispatchClients[accountUserId]?.client,
@@ -39,6 +46,8 @@ extension ChannelSessionRegistry {
         eventDispatchTasks[accountUserId]?.cancel()
         connectionDispatchTasks[accountUserId]?.cancel()
         dispatchClients[accountUserId] = WeakClient(client)
+        let generation = nextToken()
+        dispatchGenerations[accountUserId] = generation
 
         // ONE iterator on the client's event stream — that's the whole point
         // of this Task. Detached so the loop never runs on (or waits for) the
@@ -48,11 +57,14 @@ extension ChannelSessionRegistry {
         // client, so the client can deallocate (which finishes the stream).
         let router = self.router
         let events = client.eventSub.events
-        eventDispatchTasks[accountUserId] = Task.detached(priority: .userInitiated) {
+        eventDispatchTasks[accountUserId] = Task.detached(priority: .userInitiated) { [weak self] in
             for await event in events {
                 guard !Task.isCancelled else { return }
                 router.route(event, accountUserId: accountUserId)
             }
+            // Cancelled: replaced by newer consumers, which own the entries.
+            guard !Task.isCancelled else { return }
+            await self?.eventStreamDidFinish(accountUserId: accountUserId, generation: generation)
         }
         logger.info("Started event dispatcher for account \(accountUserId, privacy: .public)")
 
@@ -68,15 +80,39 @@ extension ChannelSessionRegistry {
             // connected) is distinguishable from the cold-start connect
             // (connecting → connected, which the join backfill covers).
             var previous: ConnectionState = .connecting
+            // When the socket was first seen down, until it is back: the
+            // gap-fill takes nothing sent before the drop.
+            var droppedAt: Date?
             for await state in states {
                 guard !Task.isCancelled else { return }
                 store.update(state)
+                if previous == .connected, state != .connected, droppedAt == nil {
+                    droppedAt = Date()
+                }
                 if Self.isReconnectRecovery(from: previous, to: state) {
-                    self?.resyncSessionsAfterReconnect(accountUserId: accountUserId)
+                    self?.resyncSessionsAfterReconnect(accountUserId: accountUserId, droppedAt: droppedAt)
+                }
+                if state == .connected {
+                    droppedAt = nil
                 }
                 previous = state
             }
         }
+    }
+
+    /// The account's event stream ended by itself — its client is gone
+    /// (evicted or replaced, then deallocated). Drops the dispatch state
+    /// that belonged to that client, unless newer consumers took over.
+    func eventStreamDidFinish(accountUserId: String, generation: UInt64) {
+        guard dispatchGenerations[accountUserId] == generation else { return }
+        dispatchGenerations[accountUserId] = nil
+        eventDispatchTasks[accountUserId] = nil
+        // Its stream ended with the same client; cancelling is a formality.
+        connectionDispatchTasks[accountUserId]?.cancel()
+        connectionDispatchTasks[accountUserId] = nil
+        dispatchClients[accountUserId] = nil
+        connectionStatusStores[accountUserId] = nil
+        logger.info("Event stream ended for account \(accountUserId, privacy: .public); dropped its dispatcher state")
     }
 
     /// True when a state transition means "the socket was down and is back" —
@@ -97,17 +133,25 @@ extension ChannelSessionRegistry {
     /// and must never block the connection pump's stream consumption.
     /// Sessions mid-`start()` are skipped: their initial backfill is already
     /// fetching against the post-reconnect subscription.
-    private func resyncSessionsAfterReconnect(accountUserId: String) {
+    ///
+    /// With several channels open each fetch starts after its own short
+    /// random delay, so one reconnect isn't N requests to the history
+    /// service in the same instant.
+    private func resyncSessionsAfterReconnect(accountUserId: String, droppedAt: Date?) {
         let prefix = "\(accountUserId)/"
         let accountSessions = sessions.filter { $0.key.hasPrefix(prefix) }.map(\.value)
         guard !accountSessions.isEmpty else { return }
         logger.info("EventSub reconnected for account \(accountUserId, privacy: .public) — resyncing \(accountSessions.count) session(s)")
         for session in accountSessions {
+            let jitter: Duration = accountSessions.count > 1
+                ? .milliseconds(Int.random(in: 0..<Self.resyncJitterMilliseconds))
+                : .zero
             // Weak-capture: if the tab is closed (and the session released)
             // between this reconnect and the gap-fill running, the session must
             // be free to deallocate rather than be pinned by a best-effort Task.
             Task { [weak session] in
-                await session?.resyncAfterReconnect()
+                try? await Task.sleep(for: jitter)
+                await session?.resyncAfterReconnect(droppedAt: droppedAt)
             }
             // Live-event banners: a poll / prediction / train that began,
             // ended or resolved while the socket was down has no EventSub
@@ -119,6 +163,9 @@ extension ChannelSessionRegistry {
             }
         }
     }
+
+    /// Upper bound of the per-session delay before a reconnect gap-fill.
+    private static let resyncJitterMilliseconds = 2_000
 
     /// Test hook: whether the off-main router currently delivers this
     /// account × channel's events anywhere. Routing starts BEFORE `start()`

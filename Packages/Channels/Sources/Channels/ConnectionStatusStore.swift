@@ -8,7 +8,9 @@ import TwitchKit
 /// Keyed per *account* (not per channel) because one WebSocket per account is
 /// shared by all that account's open channels — they all reflect the same
 /// connection state. Lifetime matches the account's event dispatcher: created
-/// with the first session for the account, dropped when the last one closes.
+/// with the first session for the account and kept for as long as the
+/// account's client lives (the dispatcher's streams can't be re-consumed, so
+/// it isn't torn down with the last session).
 @MainActor
 @Observable
 public final class ConnectionStatusStore {

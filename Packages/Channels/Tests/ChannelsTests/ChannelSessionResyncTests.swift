@@ -250,6 +250,81 @@ struct ChannelSessionResyncTests {
         #expect(await fetches.count == 1)
     }
 
+    @Test("Gap candidates: rows sent before the cutoff are dropped, untimed rows kept")
+    func gapCandidatesRespectCutoff() {
+        let cutoff = Date(timeIntervalSince1970: 1_000)
+        let fetched = [
+            BackfillMessage(message: chatMessage(id: "old"), sentAt: Date(timeIntervalSince1970: 999)),
+            BackfillMessage(message: chatMessage(id: "edge"), sentAt: cutoff),
+            BackfillMessage(message: chatMessage(id: "untimed"), sentAt: nil),
+            BackfillMessage(message: chatMessage(id: "new"), sentAt: Date(timeIntervalSince1970: 1_001)),
+        ]
+        let candidates = ChannelHistoryMerge.gapCandidates(fetched, notBefore: cutoff)
+        #expect(candidates.map(\.message.messageId) == ["edge", "untimed", "new"])
+    }
+
+    @Test("Gap-fill never appends history older than what the session had already received")
+    func resyncIgnoresPreJoinHistory() async throws {
+        let fetches = FetchLog()
+        let now = Date()
+        let session = makeSession(fetches: fetches, fetched: [
+            // Sent an hour before the session existed: join history, which
+            // never landed here. Not part of any gap.
+            BackfillMessage(message: chatMessage(id: "old1"), sentAt: now.addingTimeInterval(-3_600)),
+            BackfillMessage(message: chatMessage(id: "old2"), sentAt: now.addingTimeInterval(-3_500)),
+            // Sent after the last live row: the gap.
+            BackfillMessage(message: chatMessage(id: "gap1"), sentAt: now.addingTimeInterval(120)),
+        ])
+        await session.applyBackfill([])   // opened with no join history
+        await session.handle(event: .chatMessage(chatMessage(id: "live1")))
+        let (subscription, _) = await session.subscribe()
+
+        await session.resyncAfterReconnect()
+
+        #expect(shape(await session.currentSnapshot()) == ["live1", "gap1", "|"])
+        #expect(shape(subscription.takePending()) == ["gap1", "|"])
+    }
+
+    @Test("The registry's drop time floors the gap even after newer live rows arrived")
+    func resyncUsesDropTimeAsFloor() async throws {
+        let fetches = FetchLog()
+        let now = Date()
+        // The socket dropped ten minutes ago; the row sent five minutes ago
+        // was missed, though a live row has arrived since the reconnect.
+        let session = makeSession(fetches: fetches, fetched: [
+            BackfillMessage(message: chatMessage(id: "gap1"), sentAt: now.addingTimeInterval(-300)),
+        ])
+        await session.applyBackfill([])
+        await session.handle(event: .chatMessage(chatMessage(id: "afterReconnect")))
+
+        await session.resyncAfterReconnect(droppedAt: now.addingTimeInterval(-600))
+
+        #expect(shape(await session.currentSnapshot()) == ["afterReconnect", "gap1", "|"])
+    }
+
+    @Test("A resync requested during a fetch runs once more afterwards instead of being dropped")
+    func overlappingResyncQueuesOneFollowUp() async throws {
+        let fetches = FetchLog()
+        let gate = Gate()
+        let session = makeSession(fetches: fetches, gate: gate, fetched: [record(id: "gap1")])
+        await session.applyBackfill([])
+
+        let first = Task { await session.resyncAfterReconnect() }
+        while await fetches.count == 0 { await Task.yield() }
+        // Two more reconnects while the first fetch is held: they return at
+        // once and collapse into a single follow-up.
+        await session.resyncAfterReconnect()
+        await session.resyncAfterReconnect()
+        #expect(await fetches.count == 1)
+
+        await gate.open()
+        await first.value
+
+        #expect(await fetches.count == 2)
+        // The follow-up found nothing new: one gap, one divider.
+        #expect(shape(await session.currentSnapshot()) == ["gap1", "|"])
+    }
+
     @Test("Resync is skipped while the initial backfill is still pending")
     func resyncSkippedWhileBackfillPending() async {
         let fetches = FetchLog()

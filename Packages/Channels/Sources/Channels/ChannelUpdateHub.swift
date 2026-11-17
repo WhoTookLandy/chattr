@@ -69,6 +69,15 @@ struct ChannelUpdateHub {
         return subscription
     }
 
+    /// A mailbox that is already closed and never registered: what a
+    /// subscriber of a stopped session gets, so its consumer loop ends at
+    /// once instead of waiting on a stream nothing will ever finish.
+    func makeFinishedSubscriber() -> ChannelSubscription {
+        let subscription = ChannelSubscription(capacity: subscriberBacklogLimit)
+        subscription.finish()
+        return subscription
+    }
+
     /// Removes and closes the mailbox for `token`. Unknown tokens are a no-op.
     mutating func removeSubscriber(_ token: UUID) {
         subscribers.removeValue(forKey: token)?.finish()
@@ -89,6 +98,9 @@ struct ChannelUpdateHub {
     /// Synchronous: the whole batch is committed to the ring and posted to
     /// every mailbox in one actor turn, so it lands contiguously — nothing
     /// can interleave inside it. Posting never waits on a subscriber.
+    ///
+    /// State-only updates (`ChannelUpdate.isStateOnly`) are delivered but
+    /// not stored: no replay reads them, so they would only spend ring slots.
     mutating func emit(_ updates: [ChannelUpdate]) {
         guard !updates.isEmpty else { return }
         if backfillPending {
@@ -97,9 +109,11 @@ struct ChannelUpdateHub {
             // the ring. The registry exposes the session only once `start()`
             // returns, so no subscriber normally exists in this window and
             // the delivery below is a no-op.
-            pendingLive.append(contentsOf: updates)
+            for update in updates where !update.isStateOnly {
+                pendingLive.append(update)
+            }
         } else {
-            for update in updates {
+            for update in updates where !update.isStateOnly {
                 ring.append(update)
             }
         }

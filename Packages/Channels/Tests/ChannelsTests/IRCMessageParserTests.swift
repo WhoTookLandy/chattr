@@ -109,12 +109,12 @@ struct IRCMessageParserTests {
         #expect(fragments[2].text == " world")
     }
 
-    @Test("Emote offsets are UTF-16 code units — emoji before the emote")
+    @Test("Emote offsets are Unicode code points — non-BMP emoji before the emote")
     func emotesTagAfterEmoji() throws {
-        // "👍👍 Kappa hi" — each 👍 is TWO UTF-16 code units (surrogate
-        // pair), so Kappa spans UTF-16 offsets 5-9. A parser that counts
-        // Characters (or scalars) would slice mid-emoji or off-by-N.
-        let line = "@emotes=25:5-9;id=1;room-id=1;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :👍👍 Kappa hi"
+        // "👍👍 Kappa hi" — Twitch counts each 👍 as ONE position (a code
+        // point), though it is two UTF-16 code units, so Kappa spans 3-7.
+        // A parser that counts UTF-16 units would slice "ppa h".
+        let line = "@emotes=25:3-7;id=1;room-id=1;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :👍👍 Kappa hi"
         let message = try #require(IRCMessageParser.parse(line, channelLogin: "ch"))
 
         let fragments = message.message.fragments
@@ -125,6 +125,20 @@ struct IRCMessageParserTests {
         #expect(fragments[1].text == "Kappa")
         #expect(fragments[1].emote?.id == "25")
         #expect(fragments[2].text == " hi")
+    }
+
+    @Test("A multi-scalar emoji counts one position per code point")
+    func emotesTagAfterMultiScalarEmoji() throws {
+        // "👍🏽 Kappa" — thumbs-up + skin-tone modifier is ONE Character but
+        // TWO code points (and four UTF-16 units), so Kappa spans 3-7.
+        let line = "@emotes=25:3-7;id=1;room-id=1;user-id=2 :nick!nick@nick.tmi.twitch.tv PRIVMSG #ch :👍🏽 Kappa"
+        let message = try #require(IRCMessageParser.parse(line, channelLogin: "ch"))
+
+        let fragments = message.message.fragments
+        try #require(fragments.count == 2)
+        #expect(fragments[0].text == "👍🏽 ")
+        #expect(fragments[1].type == .emote)
+        #expect(fragments[1].text == "Kappa")
     }
 
     @Test("Multiple emotes, including repeats of the same emote id")

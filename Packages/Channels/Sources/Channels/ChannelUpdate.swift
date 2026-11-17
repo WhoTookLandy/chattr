@@ -21,7 +21,10 @@ public enum ChannelUpdate: Sendable {
     /// A rendered non-message row: a sub / raid / system bubble, or the
     /// "New" divider. Ids and timestamps were minted once when the session
     /// produced the row, so every replay of the ring yields the same row.
-    case row(ChatLine)
+    ///
+    /// `indirect`: a `ChatLine` stored inline would make every update — and
+    /// so every ring slot and mailbox entry — as wide as a whole line.
+    indirect case row(ChatLine)
 
     /// A moderator deleted one message — flip that row to a placeholder.
     case messageDeleted(targetMessageId: String)
@@ -44,6 +47,19 @@ public enum ChannelUpdate: Sendable {
     /// merged ABOVE the live rows) or when a subscriber fell so far behind
     /// that replaying its backlog would cost more than starting over.
     case reprime([ChannelUpdate])
+
+    /// True for updates that carry state rather than transcript content.
+    /// They are delivered to subscribers but never kept in the ring: a
+    /// replay ignores them, and a transcript reads restrictions / mod status
+    /// from their own sources when it attaches.
+    var isStateOnly: Bool {
+        switch self {
+        case .restrictionsUpdated, .moderationStatusChanged:
+            return true
+        case .message, .row, .messageDeleted, .chatCleared, .messagesClearedFromUser, .reprime:
+            return false
+        }
+    }
 
     /// A message normalized with no third-party emotes. For previews and
     /// tests, which have no session to normalize for them; production rows

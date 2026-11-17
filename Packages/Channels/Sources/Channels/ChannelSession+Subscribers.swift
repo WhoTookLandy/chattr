@@ -24,7 +24,14 @@ extension ChannelSession {
     ///
     /// Drain `subscription.wakeups` / `takePending()`; pass
     /// `subscription.token` to `unsubscribe(_:)` when done.
+    ///
+    /// On a stopped session the subscription comes back already finished
+    /// (with the last snapshot): nothing will ever be posted, so its
+    /// `wakeups` must end rather than wait forever.
     public func subscribe() -> (subscription: ChannelSubscription, snapshot: [ChannelUpdate]) {
+        guard !isStopped else {
+            return (hub.makeFinishedSubscriber(), hub.snapshot)
+        }
         refreshStaleNormalization()
         let subscription = hub.addSubscriber()
         return (subscription, hub.snapshot)
@@ -36,7 +43,7 @@ extension ChannelSession {
     /// handler only delays its own batches.
     @discardableResult
     public func subscribe(onBatch handler: @escaping @Sendable ([ChannelUpdate]) async -> Void) -> UUID {
-        let subscription = hub.addSubscriber()
+        let subscription = isStopped ? hub.makeFinishedSubscriber() : hub.addSubscriber()
         Task {
             await Self.drain(subscription, into: handler)
         }
@@ -87,24 +94,48 @@ extension ChannelSession {
 
     // MARK: - Normalization
 
+    /// The channel's emote table was (re)published. Rows normalized against
+    /// the older table — everything a background tab received before its
+    /// emotes loaded — are refreshed, and when that changed how any of them
+    /// renders, every subscriber gets the ring again as one `.reprime`:
+    /// they already hold those rows with emote names as plain text, and
+    /// nothing else would correct them until the page was remounted.
+    ///
+    /// Called by `ChannelSessionRegistry.loadEmotes`. A no-op before the
+    /// join backfill is committed (no subscriber exists yet, and whoever
+    /// subscribes first refreshes in `subscribe()`) and after `stop()`.
+    public func emoteTableDidChange() {
+        guard !isStopped, !hub.backfillPending else { return }
+        guard refreshStaleNormalization() > 0 else { return }
+        hub.reprimeSubscribers()
+    }
+
     /// Re-normalizes ring messages built against an older emote table —
     /// typically history and early live rows normalized before the channel's
     /// 7TV/BTTV/FFZ set finished loading. Called from `subscribe()`, so the
     /// work happens once, off the main actor, and the refreshed rows are what
-    /// every later subscriber primes from. (Rows already delivered to a live
-    /// subscriber aren't re-sent — same as before: a re-attach picks them up.)
-    private func refreshStaleNormalization() {
-        guard normalizer.hasEmoteIndex, !hub.ring.isEmpty else { return }
+    /// every later subscriber primes from; and from `emoteTableDidChange()`,
+    /// which re-sends them to the subscribers already attached.
+    ///
+    /// Returns how many rows now render differently (a row with no emote in
+    /// it is re-stamped but unchanged).
+    @discardableResult
+    private func refreshStaleNormalization() -> Int {
+        guard normalizer.hasEmoteIndex, !hub.ring.isEmpty else { return 0 }
         let table = normalizer.currentEmoteTable()
-        guard table.generation != 0 else { return }
+        guard table.generation != 0 else { return 0 }
 
         // A local copy, so the ring rewrite's closure captures a value rather
         // than the actor while `hub` is being mutated.
         let rowNormalizer = normalizer
+        var changed = 0
         let interval = signposter.beginInterval("renormalize", id: signposter.makeSignpostID())
         let refreshed = hub.refreshMessages { stale in
-            rowNormalizer.renormalized(stale, table: table)
+            guard let fresh = rowNormalizer.renormalized(stale, table: table) else { return nil }
+            if fresh.line.runs != stale.line.runs { changed += 1 }
+            return fresh
         }
         signposter.endInterval("renormalize", interval, "refreshed=\(refreshed)")
+        return changed
     }
 }

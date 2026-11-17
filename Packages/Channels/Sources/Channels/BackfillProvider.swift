@@ -42,7 +42,7 @@ public struct BackfillMessage: Sendable {
 ///     a `ChatMessage` value per line.
 ///   - **Twitch-native emotes**: IRC encodes emotes via the `emotes` tag
 ///     in a different format from EventSub's pre-tokenized `fragments`.
-///     The parser converts the tag's UTF-16 ranges into interleaved
+///     The parser converts the tag's code-point ranges into interleaved
 ///     text/emote fragments, so backfilled native emotes render the same
 ///     as live ones; third-party emotes (7TV/BTTV/FFZ) resolve via the
 ///     Normalizer tokenizing text fragments against the emote index.
@@ -273,55 +273,59 @@ internal enum IRCMessageParser {
     /// Build the EventSub-shaped `fragments` array from the message text
     /// and the `emotes=` IRC tag (`emoteId:start-end,start-end/emoteId:...`).
     ///
-    /// The tag's offsets index UTF-16 code units of the message text and
-    /// the end offset is inclusive, so slicing goes through the UTF-16
-    /// view — Character-based indexing would misalign on any message
-    /// containing a non-BMP scalar (emoji) before an emote.
+    /// The tag's offsets count Unicode code points (scalars) of the message
+    /// text — not UTF-16 code units, and not Characters — and the end offset
+    /// is inclusive, so slicing goes through the scalar view. Either other
+    /// unit misaligns on a message with a non-BMP scalar (most emoji: one
+    /// code point, two UTF-16 units) or a multi-scalar Character before an
+    /// emote.
     private static func makeFragments(messageText: String, emotesTag: String?) -> [[String: Any]] {
-        let occurrences = parseEmotesTag(emotesTag, in: messageText)
+        let scalars = Array(messageText.unicodeScalars)
+        let occurrences = parseEmotesTag(emotesTag, scalarCount: scalars.count)
         guard !occurrences.isEmpty else {
             return [["type": "text", "text": messageText]]
         }
 
-        let codeUnits = Array(messageText.utf16)
+        func text(_ slice: ArraySlice<Unicode.Scalar>) -> String {
+            String(String.UnicodeScalarView(slice))
+        }
         var fragments: [[String: Any]] = []
         var cursor = 0
         for occurrence in occurrences {
             if cursor < occurrence.start {
                 fragments.append([
                     "type": "text",
-                    "text": String(decoding: codeUnits[cursor..<occurrence.start], as: UTF16.self),
+                    "text": text(scalars[cursor..<occurrence.start]),
                 ])
             }
             fragments.append([
                 "type": "emote",
-                "text": String(decoding: codeUnits[occurrence.start...occurrence.end], as: UTF16.self),
+                "text": text(scalars[occurrence.start...occurrence.end]),
                 // IRC doesn't carry emote_set_id (EventSub does); the
                 // renderer only needs the id to build the CDN URL.
                 "emote": ["id": occurrence.id, "emote_set_id": ""],
             ])
             cursor = occurrence.end + 1
         }
-        if cursor < codeUnits.count {
+        if cursor < scalars.count {
             fragments.append([
                 "type": "text",
-                "text": String(decoding: codeUnits[cursor...], as: UTF16.self),
+                "text": text(scalars[cursor...]),
             ])
         }
         return fragments
     }
 
     /// Parse the `emotes=` tag into occurrences sorted by message position.
-    /// Offsets are UTF-16 code units; `end` is inclusive. Entries with
+    /// Offsets are Unicode code points; `end` is inclusive. Entries with
     /// malformed or out-of-bounds ranges are dropped (rustlog occasionally
     /// relays lines whose ranges don't fit the text), as are overlaps,
     /// so the caller can always emit contiguous fragments.
     private static func parseEmotesTag(
         _ tag: String?,
-        in messageText: String
+        scalarCount: Int
     ) -> [(start: Int, end: Int, id: String)] {
         guard let tag, !tag.isEmpty else { return [] }
-        let utf16Count = messageText.utf16.count
 
         var occurrences: [(start: Int, end: Int, id: String)] = []
         for entry in tag.split(separator: "/") {
@@ -333,7 +337,7 @@ internal enum IRCMessageParser {
                 guard bounds.count == 2,
                       let start = Int(bounds[0]),
                       let end = Int(bounds[1]),
-                      start >= 0, start <= end, end < utf16Count
+                      start >= 0, start <= end, end < scalarCount
                 else { continue }
                 occurrences.append((start: start, end: end, id: emoteId))
             }
