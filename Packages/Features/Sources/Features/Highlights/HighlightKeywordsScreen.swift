@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The Highlights feature's single settings home: the keyword list AND
-/// the sound toggle. Reachable from You → Chat → Highlights. (The sound
+/// the sound toggle. Reachable from Settings → Chat → Highlights. (The sound
 /// toggle used to live inline on the Profile screen, a different surface
 /// from the keywords it modifies — one feature, one page now.)
 ///

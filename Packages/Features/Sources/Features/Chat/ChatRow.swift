@@ -120,7 +120,7 @@ struct ChatRow: View, Equatable {
 
     /// Chat rendering preferences (text size, timestamps, badges, animated
     /// emotes). Injected at RootView from @AppStorage-backed keys, so
-    /// edits in ChatAppearanceScreen re-render visible rows live — the
+    /// edits in AppearanceSettingsScreen re-render visible rows live — the
     /// same environment-invalidation mechanism as `colorScheme` above,
     /// which also means it composes safely with the Equatable
     /// short-circuit (environment changes bypass `==`).

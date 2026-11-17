@@ -30,7 +30,7 @@ public struct RootView: View {
     // Chat appearance preferences — read here (the app's root) so one
     // environment injection covers every chat surface at once: live chat,
     // the thread sheet, and the settings screen's preview. @AppStorage
-    // observes the keys via KVO, so ChatAppearanceScreen's writes
+    // observes the keys via KVO, so AppearanceSettingsScreen's writes
     // re-render all of them live.
     @AppStorage(ChatAppearance.textSizePointsKey) private var chatTextSizePoints: Double = ChatAppearance.defaultTextSizePoints
     @AppStorage(ChatAppearance.showTimestampsKey) private var chatShowTimestamps: Bool = false

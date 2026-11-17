@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// You → Chat → Filters. Toggles for dropping transcript noise:
+/// Settings → Chat → Filters. Toggles for dropping transcript noise:
 /// command messages and well-known bots. Writes through
 /// `ChatFilterSettings`; `ChatTranscriptModel` reads the values at attach.
 struct ChatFiltersScreen: View {
@@ -34,7 +34,11 @@ struct ChatFiltersScreen: View {
 
             Section {
                 Toggle(isOn: $compactBots) {
-                    Label("Compact Bot Messages", systemImage: "text.badge.minus")
+                    SettingLabel(
+                        "Compact Bot Messages",
+                        systemImage: "text.badge.minus",
+                        disabledReason: hideBots ? "Not needed while Hide Known Bots is on" : nil
+                    )
                 }
                 .disabled(hideBots)
             } footer: {

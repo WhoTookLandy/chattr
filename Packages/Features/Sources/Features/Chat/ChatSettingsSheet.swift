@@ -31,7 +31,7 @@ import ChatModel
 struct ChatSettingsSheet: View {
     let chatModel: ChatTranscriptModel
     let channelLoginName: String
-    /// Signed-in user's login, forwarded to `ChatAppearanceScreen` for
+    /// Signed-in user's login, forwarded to `AppearanceSettingsScreen` for
     /// its "@you" mention preview row.
     let currentUserLogin: String
 
@@ -49,7 +49,7 @@ struct ChatSettingsSheet: View {
     @State private var errorMessage: String?
 
     // Viewer-preference quick toggles — same UserDefaults keys as
-    // ChatAppearanceScreen, so flipping one here updates open chats and
+    // AppearanceSettingsScreen, so flipping one here updates open chats and
     // the appearance screen alike.
     @AppStorage(ChatAppearance.showTimestampsKey) private var showTimestamps: Bool = false
     @AppStorage(ChatAppearance.animatedEmotesKey) private var animatedEmotes: Bool = true
@@ -220,20 +220,24 @@ struct ChatSettingsSheet: View {
                 get: { loginNameDisplay != .off },
                 set: { loginNameDisplay = $0 ? .displayFirst : .off }
             )) {
-                Label("Show Username", systemImage: "at")
+                SettingLabel("Show Username", systemImage: "at", subtitle: "Beside localized display names")
             }
             Toggle(isOn: $edgeToEdge) {
-                Label("Edge-to-Edge Chat", systemImage: "arrow.up.left.and.arrow.down.right")
+                SettingLabel(
+                    "Edge-to-Edge Chat",
+                    systemImage: "arrow.up.left.and.arrow.down.right",
+                    subtitle: "Chat scrolls behind the floating header"
+                )
             }
             NavigationLink {
-                ChatAppearanceScreen(currentUserLogin: currentUserLogin)
+                AppearanceSettingsScreen(currentUserLogin: currentUserLogin)
             } label: {
-                Label("Chat Appearance", systemImage: "textformat.size")
+                SettingLabel("All Appearance Settings", systemImage: "textformat.size", subtitle: "Text size, badges, theme")
             }
         } header: {
             Text("My Preferences")
         } footer: {
-            Text("Preferences apply on this device, in every channel.")
+            Text("Preferences apply on this device, in every channel. Find everything else in Settings, behind your avatar on Home.")
         }
     }
 
