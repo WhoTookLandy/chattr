@@ -223,8 +223,9 @@ public struct AppShell: View {
             if PlaybackPreferences.videoOnOpen == .autoplayOnWiFi {
                 NetworkReachability.warmUp()
             }
-            navigation.chatTabs.onWillPresent = { [weak playback] in
-                ChatOpenVideoPolicy.apply(playback: playback)
+            let chatTabs = navigation.chatTabs
+            chatTabs.onWillPresent = { [weak playback, weak chatTabs] tab in
+                ChatOpenVideoPolicy.apply(opening: tab, chatTabs: chatTabs, playback: playback)
             }
         }
         #endif

@@ -122,7 +122,9 @@ final class PlaybackLifecycleObserver: NSObject {
         let controller = center.controller
         guard !controller.isPaused else { return }
 
-        if controller.isNative {
+        // The native engine, loaded or still resolving its playlist (no
+        // AVPlayer yet, so `controller.isNative` is still false).
+        if center.engine is NativeStreamEngine {
             // Audio-only: listening with the screen off is the point —
             // unless it's muted, then there's nothing to hear.
             if center.audioOnly, !controller.nativeFailed, !controller.isMuted { return }
@@ -131,10 +133,16 @@ final class PlaybackLifecycleObserver: NSObject {
             // Web player with PiP allowed: leave WebKit's own behaviour.
             return
         }
-        pausedForBackground = controller.pauseForBackground()
+        // Pause what's playing now, and hold an engine that's still loading
+        // (or rebuilding) paused when it finishes — otherwise it would
+        // start playing in the background.
+        controller.holdsForBackground = true
+        _ = controller.pauseForBackground()
+        pausedForBackground = true
     }
 
     @objc private func willEnterForeground() {
+        center?.controller.holdsForBackground = false
         guard pausedForBackground else { return }
         pausedForBackground = false
         guard let center, center.isPlaying else { return }

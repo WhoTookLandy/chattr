@@ -72,8 +72,16 @@ final class StreamPlayerController {
     /// header falls back to the web player for this channel.
     var nativeFailed = false
     /// The next engine starts muted (Wi-Fi autoplay, or a rebuild of a
-    /// muted stream). Set by `PlaybackCenter` before it builds an engine.
+    /// muted stream). Set by `PlaybackCenter` before it builds an engine,
+    /// and mirrored into `isMuted` by `reset()` so the requested mute holds
+    /// while the engine loads — and through a fallback rebuild that happens
+    /// before it ever played.
     @ObservationIgnored var startsMuted = false
+    /// The app left the foreground and `PlaybackLifecycleObserver` chose to
+    /// pause, possibly while the engine was still loading (no AVPlayer or
+    /// <video> to pause yet). An engine that finishes loading while this is
+    /// set stays paused. Cleared when the app comes back.
+    @ObservationIgnored var holdsForBackground = false
 
     @ObservationIgnored weak var webView: WKWebView?
     @ObservationIgnored var avPlayer: AVPlayer?
@@ -118,7 +126,7 @@ final class StreamPlayerController {
 
     func reset() {
         update(\.isPaused, to: false)
-        update(\.isMuted, to: false)
+        update(\.isMuted, to: startsMuted)
         update(\.canPictureInPicture, to: false)
         update(\.isPictureInPictureActive, to: false)
         update(\.hasStarted, to: false)
@@ -153,7 +161,16 @@ final class StreamPlayerController {
     }
 
     func toggleMute() {
-        guard let player = avPlayer else { return run("toggleMute") }
+        guard let player = avPlayer else {
+            guard webView != nil else {
+                // Native playlist still resolving: change the mute the
+                // player will start with.
+                startsMuted.toggle()
+                update(\.isMuted, to: startsMuted)
+                return
+            }
+            return run("toggleMute")
+        }
         player.isMuted.toggle()
         update(\.isMuted, to: player.isMuted)
     }
@@ -341,8 +358,8 @@ enum NativePlayer {
             let player = AVPlayer(playerItem: item)
             if controller.startsMuted {
                 player.isMuted = true
-                controller.update(\.isMuted, to: true)
             }
+            controller.update(\.isMuted, to: player.isMuted)
             view.playerLayer.player = player
             controller.avPlayer = player
 
@@ -370,7 +387,14 @@ enum NativePlayer {
                 }
                 .store(in: &subscriptions)
 
-            player.play()
+            if controller.holdsForBackground {
+                // The app left while the playlist resolved and this stream
+                // may not play in the background: stay paused until it comes
+                // back (`PlaybackLifecycleObserver` resumes at the live edge).
+                controller.update(\.isPaused, to: true)
+            } else {
+                player.play()
+            }
         }
 
         func teardown() {
