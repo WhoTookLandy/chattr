@@ -135,9 +135,6 @@ public struct ChatScreen: View {
     /// is presented. Opened from the compose bar's gear button.
     @State private var showChatSettings = false
 
-    /// The transient join greeting (see `ChatWelcomePill`).
-    @State private var showWelcome = false
-
     // NOTE: compose-bar state (`composeText`, `isSending`, `composeFocused`)
     // lives inside the extracted `ComposeBar` view below — NOT here on
     // ChatScreen. That isolation matters: every keystroke in the
@@ -169,21 +166,26 @@ public struct ChatScreen: View {
     /// nil during previews / detached views just skips the prefetch.
     @Environment(\.chatImagePrefetcher) private var chatImagePrefetcher
 
-    /// True only for the tab currently centered in the pager. Every page is
-    /// alive in the pager's `LazyHStack`, so per-page one-shot UI (the join
-    /// greeting) waits until its page is actually the one on screen.
-    private let isActiveTab: Bool
+    /// The pager tab this page renders, or nil outside the pager (always
+    /// active then). Stable for the page's lifetime — deliberately NOT an
+    /// `isActive` flag: a flag would change on every swipe, re-creating this
+    /// struct and re-running this body (and the transcript + UIKit list update
+    /// under it) for each page whose flag flipped. The views that care which
+    /// page is visible (`StreamHeaderView`, `ChatWelcomeOverlay`) derive it
+    /// from `ChatTabsModel.activeTabId` themselves, so a swipe invalidates
+    /// only them.
+    private let tabId: UUID?
 
     public init(
         account: Account,
         accountStore: AccountStore,
         channel: ChannelDescriptor,
-        isActiveTab: Bool = true
+        tabId: UUID? = nil
     ) {
         self.account = account
         self.accountStore = accountStore
         self.channel = channel
-        self.isActiveTab = isActiveTab
+        self.tabId = tabId
         // Read the persisted draft once, here at construction. `State(initial-
         // Value:)` is the correct home for a value that only matters at first
         // mount — a `.task`-based seed would arrive AFTER `ComposeBar` has
@@ -224,6 +226,7 @@ public struct ChatScreen: View {
                 ChatTranscript(
                     chatModel: chatModel,
                     channelLoginName: channelLoginName,
+                    tabId: tabId,
                     connectionStatus: connectionStatus,
                     rowContent: { line in chatRow(for: line) },
                     rowInputs: rowInputs,
@@ -238,15 +241,14 @@ public struct ChatScreen: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Join greeting. Attached BEFORE the safe-area bars so it lays out
-        // inside them — under the stream header, not on top of it.
+        // inside them — under the stream header, not on top of it. Its own
+        // view so its state, its active-page read and its animation stay
+        // scoped to the pill: the `.animation(value:)` used to sit on this
+        // whole chain, animating anything in the transcript that changed in
+        // the same transaction.
         .overlay(alignment: .top) {
-            if showWelcome {
-                ChatWelcomePill(channelDisplayName: channelDisplayName)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
+            ChatWelcomeOverlay(channel: channel, tabId: tabId)
         }
-        .animation(.snappy, value: showWelcome)
         // Chat surface color — slightly lifted off pure black/white in
         // both schemes (see DesignSystem.Color.chatSurface). Applied here
         // (not on the list) so the empty/connecting states and the area
@@ -256,18 +258,12 @@ public struct ChatScreen: View {
         // + last live) pinned above the transcript. Its own view reading
         // its own stores, so status refreshes never re-run this body.
         .safeAreaBar(edge: .top) {
-            StreamHeaderView(channel: channel, isActive: isActiveTab) {
+            StreamHeaderView(channel: channel, tabId: tabId) {
                 showViewerList = true
             }
         }
         .safeAreaBar(edge: .bottom) {
             composeBarView
-        }
-        .task(id: isActiveTab) {
-            guard isActiveTab, ChatWelcomePill.claimGreeting(for: channel.id) else { return }
-            showWelcome = true
-            try? await Task.sleep(for: .seconds(5))
-            showWelcome = false
         }
         // Send-failure alert is gone — drops and network errors now
         // surface inline on the failed row itself (red exclamation +

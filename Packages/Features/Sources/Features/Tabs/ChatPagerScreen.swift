@@ -40,10 +40,12 @@ import Core
 ///
 /// ## How sessions persist across swipes
 ///
-/// `LazyHStack` lazily mounts ChatScreens — only the visible page (plus
-/// a small adjacent buffer) actually exists in the view tree. When the user
-/// swipes far away, off-screen ChatScreens unmount and their ChatTranscriptModels
-/// release their subscriptions.
+/// The pager keeps a WINDOW of ChatScreens mounted — the settled page plus
+/// one neighbour each side (`PagerWindow`) — so the page being swiped in is
+/// already attached and laid out before the gesture starts. Pages outside
+/// the window are bare placeholders; when the window moves past a page, its
+/// ChatScreen unmounts and its ChatTranscriptModel releases its
+/// subscriptions.
 ///
 /// **The underlying `ChannelSession` stays alive in the registry, though.**
 /// It keeps receiving events, keeps appending to its ring buffer. When the
@@ -67,6 +69,11 @@ struct ChatPagerScreen: View {
         #endif
     }()
     @State private var showFollows = false
+
+    /// Which pages are mounted (see `PagerWindow`). A reference held in
+    /// `@State`: this body only passes it along and never reads its
+    /// properties, so moving the window doesn't re-run the pager.
+    @State private var window = PagerWindow()
 
     @Environment(\.chatTabs) private var chatTabs
 
@@ -93,6 +100,7 @@ struct ChatPagerScreen: View {
                     // and the video overlay carries back / hide-video.
                     .background {
                         ChatNavBarAutoHider(chatTabs: chatTabs)
+                        PagerWindowTracker(chatTabs: chatTabs, window: window)
                     }
             }
         }
@@ -267,18 +275,31 @@ struct ChatPagerScreen: View {
         @Bindable var bindable = chatTabs
 
         ScrollView(.horizontal) {
-            LazyHStack(spacing: 0) {
+            // Eager `HStack`, not `LazyHStack`: mounting is decided by
+            // `PagerWindow` (settled page ± 1), so neighbours are ready
+            // BEFORE a swipe instead of mounting mid-gesture as they scroll
+            // into view. Slots outside the window are a plain color.
+            HStack(spacing: 0) {
                 ForEach(chatTabs.tabs) { tab in
-                    chatPage(for: tab, isActive: tab.id == chatTabs.activeTabId)
-                        // `.containerRelativeFrame(.horizontal)` sizes each
-                        // page to exactly the ScrollView's width — full-page
-                        // panels instead of children at intrinsic width.
-                        .containerRelativeFrame(.horizontal)
-                        // `.id(tab.id)` is the snap anchor for
-                        // `.scrollPosition(id:)`. SwiftUI uses tab.id (UUID)
-                        // for view identity AND for the paged-position lookup
-                        // — same value, both purposes.
-                        .id(tab.id)
+                    // No `activeTabId` read here: this body would then re-run
+                    // on every page change and rebuild each mounted
+                    // ChatScreen (fresh model + draft read in its init, then
+                    // the transcript and the UIKit list update). Pages get
+                    // their stable tab id; the few views that care whether
+                    // they're the visible page (stream header, join greeting,
+                    // list throttling) read `activeTabId` themselves.
+                    ChatPagerPage(tabId: tab.id, chatTabs: chatTabs, window: window) {
+                        chatPage(for: tab)
+                    }
+                    // `.containerRelativeFrame(.horizontal)` sizes each
+                    // page to exactly the ScrollView's width — full-page
+                    // panels instead of children at intrinsic width.
+                    .containerRelativeFrame(.horizontal)
+                    // `.id(tab.id)` is the snap anchor for
+                    // `.scrollPosition(id:)`. SwiftUI uses tab.id (UUID)
+                    // for view identity AND for the paged-position lookup
+                    // — same value, both purposes.
+                    .id(tab.id)
                 }
             }
             .scrollTargetLayout()
@@ -288,6 +309,16 @@ struct ChatPagerScreen: View {
         // writes activeTabId in ChatTabsModel → ScrollView animates to that
         // page. Swipe-to-page writes back here → header title + page-dot update.
         .scrollPosition(id: $bindable.activeTabId)
+        // Freeze the mounted window while the user drags / the page snaps
+        // (see `PagerWindow`). `.animating` (a quick-switcher jump) doesn't
+        // count, so the destination mounts before the scroll lands. Writes
+        // only — this body never reads the flag.
+        .onScrollPhaseChange { _, phase in
+            let scrolling = phase == .interacting || phase == .decelerating
+            if window.isUserScrolling != scrolling {
+                window.isUserScrolling = scrolling
+            }
+        }
         .scrollIndicators(.hidden)
         // Edge-to-Edge Chat: SwiftUI hangs the toolbar's scroll-edge
         // treatment off THIS pager ScrollView (the nearest scroll
@@ -304,13 +335,13 @@ struct ChatPagerScreen: View {
     /// will take the full ChatTab and ChatTranscriptModel will attach to ALL its
     /// channels in one go — the rest of this paged container won't change.
     @ViewBuilder
-    private func chatPage(for tab: ChatTab, isActive: Bool) -> some View {
+    private func chatPage(for tab: ChatTab) -> some View {
         if let primaryChannel = tab.channels.first {
             ChatScreen(
                 account: account,
                 accountStore: accountStore,
                 channel: primaryChannel,
-                isActiveTab: isActive
+                tabId: tab.id
             )
         } else {
             // Defensive — ChatTab.init has a precondition against empty

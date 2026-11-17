@@ -198,13 +198,20 @@ public struct AppShell: View {
         // Stream keeps playing after leaving its chat: a floating player
         // over every tab. Tap → back to that chat; × or fling down → stop.
         .overlay {
-            if showsMiniPlayer {
-                MiniPlayerOverlay(center: playback) { channel in
-                    navigation.openChannel(channel)
+            ZStack {
+                if showsMiniPlayer {
+                    MiniPlayerOverlay(center: playback) { channel in
+                        navigation.openChannel(channel)
+                    }
                 }
             }
+            // Scoped to the overlay. On the TabView itself this animated the
+            // WHOLE app tree in the transaction where `showsMiniPlayer` flips —
+            // which is exactly the chat push / pop — so the navigation
+            // transition, toolbar and tab-bar changes all picked up an extra
+            // implicit animation.
+            .animation(.snappy(duration: 0.3), value: showsMiniPlayer)
         }
-        .animation(.snappy(duration: 0.3), value: showsMiniPlayer)
         // Sign-out / account switch: nothing keeps playing for the old account.
         .onDisappear { playback.stop() }
         #endif

@@ -113,6 +113,58 @@ final class ChatListViewController: UIViewController {
     /// every row when they change. Nil before the first update.
     private var rowInputs: ChatRowInputs?
 
+    /// True while the app is in the background — typically the stream
+    /// playing on in Picture in Picture. Nothing here is visible then, yet
+    /// every model flush would still apply a snapshot and force-lay-out
+    /// self-sizing SwiftUI cells at message rate, competing with the video
+    /// for the CPU (and the battery). While suspended, updates only record
+    /// what they'd need; the model's change log keeps every change, and
+    /// returning to the foreground catches up in one apply (or one reset,
+    /// if the log no longer reaches back that far).
+    private var isSuspended = false
+
+    /// A row-inputs change that arrived while suspended — applied as a
+    /// reconfigure-all on resume.
+    private var pendingReconfigureAll = false
+
+    /// False while this list is a mounted pager neighbour rather than the
+    /// visible page (see `PagerWindow`). Off-screen, every flush would still
+    /// apply a snapshot and force-lay-out cells nobody sees; instead updates
+    /// coalesce into one refresh per `offscreenRefreshInterval`, keeping the
+    /// neighbour close enough to current that swiping to it shows live chat.
+    /// Becoming visible catches up immediately.
+    var isVisible = true {
+        didSet {
+            guard isViewLoaded, isVisible != oldValue else { return }
+            if isVisible {
+                throttledRefresh?.cancel()
+                throttledRefresh = nil
+                guard !isSuspended else { return }
+                refresh()
+                pinToBottomIfNeeded()
+            }
+        }
+    }
+
+    /// How often an off-screen neighbour applies what has arrived.
+    private static let offscreenRefreshInterval: Duration = .milliseconds(750)
+
+    /// The pending off-screen refresh, if one is scheduled.
+    private var throttledRefresh: Task<Void, Never>?
+
+    /// One coalesced refresh `offscreenRefreshInterval` from now — later
+    /// updates inside the interval ride along.
+    private func scheduleThrottledRefresh() {
+        guard throttledRefresh == nil else { return }
+        throttledRefresh = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.offscreenRefreshInterval)
+            guard let self, !Task.isCancelled else { return }
+            self.throttledRefresh = nil
+            guard !self.isSuspended else { return }
+            self.refresh()
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         configureCollectionView()
@@ -153,10 +205,31 @@ final class ChatListViewController: UIViewController {
             self, selector: #selector(keyboardWillHide),
             name: UIResponder.keyboardWillHideNotification, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification, object: nil
+        )
     }
 
     @objc private func keyboardWillShow() { keyboardVisible = true }
     @objc private func keyboardWillHide() { keyboardVisible = false }
+
+    @objc private func appDidEnterBackground() { isSuspended = true }
+
+    /// Catch up before the first foreground frame, so the transcript is
+    /// already current when the app (or the PiP restore) comes back.
+    @objc private func appWillEnterForeground() {
+        guard isSuspended else { return }
+        isSuspended = false
+        let reconfigureAll = pendingReconfigureAll
+        pendingReconfigureAll = false
+        refresh(reconfigureAll: reconfigureAll)
+        pinToBottomIfNeeded()
+    }
 
     @objc private func transcriptTapped(_ gesture: UITapGestureRecognizer) {
         // Row taps are handled in shouldSelectItemAt; this covers the gaps.
@@ -296,7 +369,8 @@ final class ChatListViewController: UIViewController {
         // reconfigure every row already in the list, in the same apply as
         // whatever data arrived. Not on the first update — every row is
         // fresh then.
-        let inputsChanged = self.rowInputs != nil && self.rowInputs != rowInputs
+        let isFirstUpdate = self.rowInputs == nil
+        let inputsChanged = !isFirstUpdate && self.rowInputs != rowInputs
         self.rowInputs = rowInputs
 
         var jumpRequested = scrollToBottomToken != lastScrollToBottomToken
@@ -317,6 +391,22 @@ final class ChatListViewController: UIViewController {
                 isPinnedToBottom = true
             }
         }
+        // Backgrounded (see `isSuspended`): the accessors, row inputs and any
+        // re-pin request are recorded above; the data waits for the resume.
+        if isSuspended {
+            if inputsChanged { pendingReconfigureAll = true }
+            return
+        }
+        // Off-screen pager neighbour (see `isVisible`): coalesce plain data
+        // updates. The first update (priming the list, so the page is ready
+        // before it's swiped in) and the rare row-input / re-pin changes
+        // still apply at once.
+        if !isVisible, !isFirstUpdate, !inputsChanged, !jumpRequested {
+            scheduleThrottledRefresh()
+            return
+        }
+        throttledRefresh?.cancel()
+        throttledRefresh = nil
         refresh(reconfigureAll: inputsChanged)
         if jumpRequested { pinToBottomIfNeeded() }
     }

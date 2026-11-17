@@ -46,13 +46,23 @@ public final class ChatTabsModel {
     ///
     /// Activating a tab marks its mention as seen — looking at the chat IS
     /// acknowledging the ping, no separate "mark read" affordance needed.
+    ///
+    /// Writes are de-duplicated: Observation notifies on EVERY set, equal
+    /// value or not, and `.scrollPosition(id:)` can write back the id it
+    /// already holds. Each redundant write invalidated every reader — the
+    /// pager, the pill, the edge hints, and (through the mention clear)
+    /// AppShell's whole `TabView`.
     public var activeTabId: UUID? {
-        didSet {
-            if let activeTabId {
-                mentionedTabIds.remove(activeTabId)
-            }
+        get { storedActiveTabId }
+        set {
+            guard newValue != storedActiveTabId else { return }
+            storedActiveTabId = newValue
+            if let newValue { clearMention(newValue) }
         }
     }
+
+    /// Observed backing storage for `activeTabId` (see its de-dup note).
+    private var storedActiveTabId: UUID?
 
     /// Whether the chat pager is pushed on screen. Separate from
     /// `activeTabId` on purpose: the push used to be derived from
@@ -60,14 +70,21 @@ public final class ChatTabsModel {
     /// `.scrollPosition(id:)` is bound to — and the pager wrote the visible
     /// page's id straight back, re-presenting the chat mid-pop (the
     /// back-button freeze). Popping now only clears this flag.
-    public var isPresented = false {
-        didSet {
+    ///
+    /// De-duplicated like `activeTabId`: AppShell's body reads this flag, and
+    /// the navigation binding can re-write the value it already holds.
+    public var isPresented: Bool {
+        get { storedIsPresented }
+        set {
+            guard newValue != storedIsPresented else { return }
+            storedIsPresented = newValue
             // Coming back to a chat acknowledges its ping, like switching to it.
-            if isPresented, let activeTabId {
-                mentionedTabIds.remove(activeTabId)
-            }
+            if newValue, let activeTabId { clearMention(activeTabId) }
         }
     }
+
+    /// Observed backing storage for `isPresented`.
+    private var storedIsPresented = false
 
     /// Tabs holding an unseen @-mention of the signed-in user — drives the
     /// red dots in the quick-switcher popover and the channel pill.
@@ -84,8 +101,19 @@ public final class ChatTabsModel {
         // Only skip the chat the user is actually looking at — the active
         // tab of a popped pager is off screen, so its pings still count.
         guard !(isPresented && tabId == activeTabId),
+              !mentionedTabIds.contains(tabId),
               tabs.contains(where: { $0.id == tabId }) else { return }
         mentionedTabIds.insert(tabId)
+    }
+
+    /// Clears `tabId`'s mention only when it has one. Mutating an
+    /// `@Observable` set notifies even when nothing changes, and AppShell's
+    /// body reads `mentionedTabIds` (the Chats tab badge) — so an unguarded
+    /// remove re-ran the root `TabView` on every chat swipe, and an
+    /// unguarded insert on every repeat ping in a background tab.
+    private func clearMention(_ tabId: UUID) {
+        guard mentionedTabIds.contains(tabId) else { return }
+        mentionedTabIds.remove(tabId)
     }
 
     /// Whether `text` @-mentions `login` as a whole word — "@landy" matches,
@@ -364,7 +392,7 @@ public final class ChatTabsModel {
         for tabId in tabIds {
             guard let closedIndex = tabs.firstIndex(where: { $0.id == tabId }) else { continue }
             closedTabs.append(tabs.remove(at: closedIndex))
-            mentionedTabIds.remove(tabId)
+            clearMention(tabId)
             if activeTabId == tabId {
                 // Prefer the tab to the left for "natural" rightward-close UX.
                 // If we closed index 0, fall to the new index 0 (which was 1).

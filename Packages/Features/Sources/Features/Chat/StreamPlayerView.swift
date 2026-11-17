@@ -193,10 +193,13 @@ enum TwitchWebPlayer {
             case "swipeDown":
                 controller.onSwipeDown?()
             case "state":
-                controller.isPaused = body["paused"] as? Bool ?? false
-                controller.isMuted = body["muted"] as? Bool ?? false
-                controller.canPictureInPicture = body["pip"] as? Bool ?? false
-                if body["playing"] as? Bool == true { controller.hasStarted = true }
+                // `update` skips unchanged values: one changed field (say,
+                // `paused`) would otherwise re-notify all four, re-running
+                // every view that reads any of them.
+                controller.update(\.isPaused, to: body["paused"] as? Bool ?? false)
+                controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
+                controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
+                if body["playing"] as? Bool == true { controller.update(\.hasStarted, to: true) }
             case "pipStart":
                 controller.pictureInPictureDidStart()
             case "pipEnd":

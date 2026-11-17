@@ -112,11 +112,24 @@ final class StreamPlayerController {
     var isNative: Bool { avPlayer != nil }
 
     func reset() {
-        isPaused = false
-        isMuted = false
-        canPictureInPicture = false
-        isPictureInPictureActive = false
-        hasStarted = false
+        update(\.isPaused, to: false)
+        update(\.isMuted, to: false)
+        update(\.canPictureInPicture, to: false)
+        update(\.isPictureInPictureActive, to: false)
+        update(\.hasStarted, to: false)
+    }
+
+    /// Writes `value` only when it differs. Observation notifies on every
+    /// set, equal or not, and the engines report state far more often than
+    /// it changes (the web bridge re-sends every field on any change; AVPlayer
+    /// re-reports `.playing` after each stall) — each redundant write
+    /// re-rendered the stream header and the mini player.
+    func update<Value: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<StreamPlayerController, Value>,
+        to value: Value
+    ) {
+        guard self[keyPath: keyPath] != value else { return }
+        self[keyPath: keyPath] = value
     }
 
     func togglePlay() {
@@ -135,7 +148,7 @@ final class StreamPlayerController {
     func toggleMute() {
         guard let player = avPlayer else { return run("toggleMute") }
         player.isMuted.toggle()
-        isMuted = player.isMuted
+        update(\.isMuted, to: player.isMuted)
     }
 
     func togglePictureInPicture() {
@@ -327,15 +340,15 @@ enum NativePlayer {
                 pip.canStartPictureInPictureAutomaticallyFromInline = true
                 pip.delegate = self
                 controller.pictureInPicture = pip
-                controller.canPictureInPicture = true
+                controller.update(\.canPictureInPicture, to: true)
             }
 
             player.publisher(for: \.timeControlStatus)
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] status in
                     guard let self else { return }
-                    self.controller.isPaused = status == .paused
-                    if status == .playing { self.controller.hasStarted = true }
+                    self.controller.update(\.isPaused, to: status == .paused)
+                    if status == .playing { self.controller.update(\.hasStarted, to: true) }
                 }
                 .store(in: &subscriptions)
 
