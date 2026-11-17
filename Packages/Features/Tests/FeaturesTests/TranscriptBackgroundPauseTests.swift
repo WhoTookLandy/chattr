@@ -12,7 +12,11 @@ import ChatModel
 ///
 /// `@testable import Channels` reaches `ChannelSession.handle(event:)`, which
 /// posts a live event to a real (never-started) session's subscribers.
-@Suite("Transcript background pause", .timeLimit(.minutes(1)))
+///
+/// The limit is a hang guard, and it counts time spent queued for the main
+/// actor. The whole target runs in parallel on one simulator, and on CI that
+/// wait has run to about 90 seconds before these tests get their turn.
+@Suite("Transcript background pause", .timeLimit(.minutes(5)))
 @MainActor
 struct TranscriptBackgroundPauseTests {
 

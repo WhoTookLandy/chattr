@@ -7,7 +7,11 @@ import ChatModel
 /// stuck-send wake task and the row edits it applies. Runs on real time with
 /// a short fallback timeout (the state machine itself is covered without
 /// sleeping by `OutgoingMessageReconcilerTests`).
-@Suite("OutgoingMessages stuck-send wake", .timeLimit(.minutes(1)))
+///
+/// The limit is a hang guard, and it counts time spent queued for the main
+/// actor. The whole target runs in parallel on one simulator, and on CI that
+/// wait has run to about 90 seconds before these tests get their turn.
+@Suite("OutgoingMessages stuck-send wake", .timeLimit(.minutes(5)))
 @MainActor
 struct OutgoingMessagesTests {
 
