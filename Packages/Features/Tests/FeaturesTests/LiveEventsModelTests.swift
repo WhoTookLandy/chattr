@@ -179,16 +179,20 @@ struct LiveEventsModelTests {
         func deleteToken() async throws {}
     }
 
-    /// Polls `condition` on the main actor for up to ~2s.
+    /// Polls `condition` on the main actor until it holds, for up to ~10s of
+    /// polling. `run` is a long-lived loop with no completion signal to
+    /// await, so this is how the test sees it reach a state. It returns as
+    /// soon as the condition holds, so the bound only matters on failure;
+    /// it is generous because CI runners can stall the whole test process.
     private func eventually(_ condition: () async -> Bool) async throws -> Bool {
-        for _ in 0..<200 {
+        for _ in 0..<1000 {
             if await condition() { return true }
             try await Task.sleep(for: .milliseconds(10))
         }
         return await condition()
     }
 
-    @Test("a superseded run exiting late leaves the replacement's result timeout armed")
+    @Test("a superseded run exiting late leaves the replacement's prune timer armed")
     func supersededRunLeavesReplacementTimers() async throws {
         UserDefaults.standard.removeObject(forKey: LiveEventsSettings.pollsKey)
         // Not the account's own channel: no Helix traffic, just the mailbox.
@@ -199,8 +203,17 @@ struct LiveEventsModelTests {
             accountUserId: "me-1",
             fetchBackfill: { _, _ in [] }
         )
-        // A finished poll lingering on screen: its result timeout is armed.
-        await session.applyLiveEvent(.poll(poll(id: "p1", votes: [2, 1], status: .completed)))
+        // A running poll with a known deadline: the model arms its prune
+        // timer for it. The deadline is an hour out, so nothing can expire
+        // while the test runs. (A completed poll's result lingers only
+        // `resultLinger` = 10s of wall-clock time from when the fixture was
+        // built; a CI runner that stalled the test process longer than that
+        // saw the poll pruned before the model subscribed, failing every
+        // expectation below.) A deadline also keeps the session from asking
+        // Helix for one, and this isn't the account's own channel anyway.
+        var running = poll(id: "p1", votes: [2, 1])
+        running.endsAt = Date().addingTimeInterval(3600)
+        await session.applyLiveEvent(.poll(running))
         let model = LiveEventsModel()
 
         let first = Task { await model.run(session: session) }
