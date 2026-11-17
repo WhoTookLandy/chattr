@@ -143,9 +143,14 @@ public final class FollowsStore {
     public func loadAllIfNeeded(account: Account, accountStore: AccountStore) async {
         let userId = account.userId
         guard loadedAllForUserId != userId else { return }
-        if let inFlight = allLoadInFlight, inFlight.userId == userId {
-            await inFlight.task.value
-            return
+        if let inFlight = allLoadInFlight {
+            if inFlight.userId == userId {
+                await inFlight.task.value
+                return
+            }
+            // Another account's load: it can never commit now (the account
+            // and generation checks in `loadAll`), so stop its requests.
+            inFlight.task.cancel()
         }
         let task = Task { [weak self] in
             guard let self else { return }
@@ -158,6 +163,9 @@ public final class FollowsStore {
 
     /// The `loadAllIfNeeded` load in flight, keyed by account.
     @ObservationIgnored private var allLoadInFlight: (userId: String, task: Task<Void, Never>)?
+
+    /// Bumped by every full load; only the newest may commit (see `loadAll`).
+    @ObservationIgnored private var allLoadGeneration = 0
 
     /// Force-reload the All list (pull-to-refresh on the All view).
     public func refreshAll(account: Account, accountStore: AccountStore) async {
@@ -369,6 +377,12 @@ public final class FollowsStore {
     private func loadAll(account: Account, accountStore: AccountStore) async {
         prepare(forAccountUserId: account.userId)
 
+        // Only the newest full load may commit. A load that outlived an
+        // account round trip (A → B → A) still passes the account check, so
+        // without this an older snapshot could land after a newer one.
+        allLoadGeneration &+= 1
+        let generation = allLoadGeneration
+
         // Cancel in-flight enrichment from a previous *All* load only — the
         // live refresh's enrichment is independent.
         for task in allEnrichmentTasks { task.cancel() }
@@ -404,7 +418,7 @@ public final class FollowsStore {
                 }
                 // A swap to another account (via either load path) wiped the
                 // store mid-request; don't commit this account's page into it.
-                guard currentUserId == userId else { throw CancellationError() }
+                guard currentUserId == userId, allLoadGeneration == generation else { throw CancellationError() }
                 pagesFetched += 1
 
                 accumulated.append(contentsOf: page.data)
@@ -440,6 +454,7 @@ public final class FollowsStore {
                 }
             } while cursor != nil
 
+            guard currentUserId == userId, allLoadGeneration == generation else { throw CancellationError() }
             allLoadState = .loaded
             loadedAllForUserId = account.userId
             logger.info("Loaded \(self.channels.count) followed channels across \(pagesFetched) page(s)")
@@ -448,6 +463,7 @@ public final class FollowsStore {
         } catch {
             // Keep what we fetched visible (the footer offers Retry for the
             // rest), matching the pre-throttle per-page-commit behavior.
+            guard allLoadGeneration == generation else { return }
             if currentUserId == userId, accumulated.count > channels.count {
                 channels = accumulated
                 recomputeSortedAllChannels()

@@ -236,7 +236,8 @@ struct DecodedAnimation: @unchecked Sendable {
     let normalizedKeyTimes: [NSNumber]
 
     /// Frame rate the animation actually needs — the rate of its SHORTEST
-    /// frame, so no frame can be skipped — clamped to 10...60. Handed to
+    /// frame, so no frame can be skipped — rounded up to a rate the display
+    /// can present (see `presentableFrameRates`), 10...60. Handed to
     /// Core Animation so an emote cycling at 10–30 fps doesn't hold the
     /// render server at the display's full refresh rate.
     let peakFrameRate: Float
@@ -254,9 +255,16 @@ struct DecodedAnimation: @unchecked Sendable {
         return times
     }
 
+    /// Rates that divide both 60 Hz and 120 Hz evenly — what the display can
+    /// actually run a layer at. A 25 fps request with a 25 Hz maximum lets the
+    /// system settle on 20 Hz and drop frames, so the need is rounded UP to
+    /// the next of these instead.
+    private static let presentableFrameRates: [Double] = [10, 12, 15, 20, 30, 60]
+
     private static func peakFrameRate(for durations: [Double]) -> Float {
         guard let shortest = durations.filter({ $0 > 0 }).min() else { return 60 }
-        return Float(min(60, max(10, (1 / shortest).rounded(.up))))
+        let needed = 1 / shortest
+        return Float(presentableFrameRates.first { $0 >= needed } ?? 60)
     }
 
     /// True when both values share the same decoded frame objects — i.e.
@@ -511,8 +519,26 @@ final class DecodedAnimationCache: @unchecked Sendable {
         "\(maxPixelSize)|\(posterOnly ? "poster" : "full")|\(url.absoluteString)"
     }
 
+    /// Requested size bucket → the size the frames were actually decoded at
+    /// (see `AnimatedEmoteDecoder.effectivePixelSize`), so a larger bucket
+    /// resolves to the one cost-bearing entry instead of storing — and
+    /// charging `totalCostLimit` for — the same frames twice. Tiny values;
+    /// an evicted alias just costs a header read on the next decode request.
+    private let aliases = NSCache<NSString, NSNumber>()
+
     func decoded(for url: URL, maxPixelSize: Int, posterOnly: Bool = false) -> DecodedAnimation? {
-        cache.object(forKey: Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) as NSString)?.value
+        let key = Self.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) as NSString
+        if let entry = cache.object(forKey: key) { return entry.value }
+        guard let effective = aliases.object(forKey: key)?.intValue, effective != maxPixelSize else { return nil }
+        return cache.object(forKey: Self.key(url: url, maxPixelSize: effective, posterOnly: posterOnly) as NSString)?.value
+    }
+
+    /// Points the `requested` bucket at the entry stored under `effective`.
+    func alias(_ url: URL, requested: Int, to effective: Int, posterOnly: Bool = false) {
+        guard requested != effective else { return }
+        aliases.setObject(
+            NSNumber(value: effective),
+            forKey: Self.key(url: url, maxPixelSize: requested, posterOnly: posterOnly) as NSString)
     }
 
     func store(_ animation: DecodedAnimation, for url: URL, maxPixelSize: Int, posterOnly: Bool = false) {
@@ -603,9 +629,12 @@ actor AnimatedEmoteDecoder {
                 // one decode (and one cache entry's memory) instead of each
                 // re-extracting every frame.
                 let effective = AnimatedEmoteDecoder.effectivePixelSize(data: data, requested: maxPixelSize)
+                // The alias lets the view's synchronous lookup at the
+                // requested bucket find the shared entry; the frames are
+                // stored (and their cost charged) once, under `effective`.
+                cache.alias(url, requested: maxPixelSize, to: effective, posterOnly: posterOnly)
                 if effective != maxPixelSize,
                    let shared = cache.decoded(for: url, maxPixelSize: effective, posterOnly: posterOnly) {
-                    cache.store(shared, for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
                     return shared
                 }
                 // CPU-bound frame extraction, off the main thread and off
@@ -614,11 +643,6 @@ actor AnimatedEmoteDecoder {
                     return nil
                 }
                 cache.store(decoded, for: url, maxPixelSize: effective, posterOnly: posterOnly)
-                if effective != maxPixelSize {
-                    // Alias under the requested bucket too, so the view's
-                    // synchronous lookup finds it.
-                    cache.store(decoded, for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
-                }
                 return decoded
             }
             inFlight[key] = InFlight(task: task, waiters: 1)
