@@ -589,6 +589,81 @@ struct LiveEventsReducerTests {
         #expect(!state.apply(try update(.predictionLock(prediction(points: [10, 20]))), at: checkedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry + 1)))
     }
 
+    @Test("a safety expiry isn't a tombstone: Helix restores the prediction and later snapshots and the resolve still land")
+    func expiredPredictionRestoredByHelix() throws {
+        var state = LiveEventsState()
+        let lockedAt = t0.addingTimeInterval(60)
+        state.apply(try update(.predictionLock(prediction(points: [10, 20]))), at: lockedAt)
+
+        // Nothing confirmed it for 30+ minutes (a long background): expired,
+        // but not known to be over.
+        let late = lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry + 60)
+        #expect(state.prune(now: late))
+        #expect(state.prediction == nil)
+        #expect(state.expired.contains("pred-1", kind: .prediction))
+        #expect(!state.tombstones.contains("pred-1", kind: .prediction))
+
+        // A late non-terminal EventSub duplicate still can't revive it.
+        #expect(!state.apply(try update(.predictionLock(prediction(points: [10, 20]))), at: late))
+        #expect(state.prediction == nil)
+
+        // Helix says it is still locked: authoritative, so it comes back.
+        let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(id: "pred-1", status: "LOCKED")))
+        #expect(state.reconcile(.prediction, snapshot: snapshot, fetchedAt: late, now: late))
+        #expect(state.prediction?.id == "pred-1")
+        #expect(state.prediction?.status == .locked)
+        #expect(state.prediction?.confirmedAt == late)
+        #expect(!state.expired.contains("pred-1", kind: .prediction))
+
+        // The eventual resolve is shown.
+        let resolvedAt = late.addingTimeInterval(120)
+        #expect(state.apply(try update(.predictionEnd(prediction(points: [10, 20], status: "resolved", winner: "o0"))), at: resolvedAt))
+        #expect(state.prediction?.status == .resolved)
+        #expect(state.prediction?.winningOutcomeId == "o0")
+        #expect(state.prediction?.concludedAt == resolvedAt)
+    }
+
+    @Test("an expired prediction's real resolve still shows, from EventSub or from Helix")
+    func expiredPredictionResolveStillShows() throws {
+        let lockedAt = t0.addingTimeInterval(60)
+        let late = lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry + 60)
+
+        var viaEventSub = LiveEventsState()
+        viaEventSub.apply(try update(.predictionLock(prediction(points: [10, 20]))), at: lockedAt)
+        viaEventSub.prune(now: late)
+        #expect(viaEventSub.apply(try update(.predictionEnd(prediction(points: [10, 20], status: "resolved", winner: "o1"))), at: late))
+        #expect(viaEventSub.prediction?.status == .resolved)
+        #expect(viaEventSub.tombstones.contains("pred-1", kind: .prediction))
+
+        // Helix: a finished snapshot into an empty slot is normally not news,
+        // but this one was on screen until we gave up on it too early.
+        var viaHelix = LiveEventsState()
+        viaHelix.apply(try update(.predictionLock(prediction(id: "pred-9", points: [500, 100]))), at: lockedAt)
+        viaHelix.prune(now: late)
+        let resolved = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "RESOLVED", winner: "y")))
+        #expect(viaHelix.reconcile(.prediction, snapshot: resolved, fetchedAt: late, now: late))
+        #expect(viaHelix.prediction?.status == .resolved)
+        #expect(viaHelix.prediction?.winningOutcomeId == "y")
+    }
+
+    @Test("reconcile before prune: a locked prediction past unconfirmedExpiry that Helix still reports stays up, even with a lagging tally")
+    func reconcileBeforePrune() throws {
+        var state = LiveEventsState()
+        let lockedAt = t0.addingTimeInterval(60)
+        // EventSub delivered a bigger tally than Helix will report.
+        state.apply(try update(.predictionLock(prediction(id: "pred-9", points: [5000, 1000]))), at: lockedAt)
+        let back = lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry + 600)
+
+        // The session's order: reconcile, then prune.
+        let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "LOCKED")))
+        #expect(state.reconcile(.prediction, snapshot: snapshot, fetchedAt: back, now: back))
+        #expect(!state.prune(now: back))
+        #expect(state.prediction?.status == .locked)
+        #expect(state.prediction?.totalPoints == 6000)
+        #expect(state.prediction?.confirmedAt == back)
+        #expect(!state.tombstones.contains("pred-9", kind: .prediction))
+    }
+
     @Test("an active train is dropped overdueGrace after its expires_at")
     func hypeTrainExpiry() throws {
         var state = LiveEventsState()
@@ -703,16 +778,67 @@ struct ChannelSessionLiveEventsTests {
         func deleteToken() async throws {}
     }
 
-    private func makeSession() async -> ChannelSession {
+    private func makeSession(appForeground: AppForegroundSignal = AppForegroundSignal()) async -> ChannelSession {
         let session = ChannelSession(
             client: TwitchClient(clientId: "test-client", tokenStore: NullTokenStore()),
             channelId: "1",
             channelLoginName: "ch",
             accountUserId: "1",
-            fetchBackfill: { _, _ in [] }
+            fetchBackfill: { _, _ in [] },
+            appForeground: appForeground
         )
         await session.applyBackfill([])
         return session
+    }
+
+    private func pollEnd() throws -> EventSubEvent {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let json = """
+        {
+            "id": "poll-1",
+            "broadcaster_user_id": "1",
+            "broadcaster_user_login": "ch",
+            "broadcaster_user_name": "Ch",
+            "title": "Best map?",
+            "choices": [{ "id": "a", "title": "A", "votes": 3, "channel_points_votes": 0, "bits_votes": 0 }, { "id": "b", "title": "B", "votes": 1, "channel_points_votes": 0, "bits_votes": 0 }],
+            "bits_voting": { "is_enabled": false },
+            "channel_points_voting": { "is_enabled": false },
+            "status": "completed",
+            "started_at": "2027-01-01T00:00:00Z"
+        }
+        """
+        return .pollEnd(try decoder.decode(EventSubPoll.self, from: Data(json.utf8)))
+    }
+
+    @Test("the periodic Helix check exists only while something is unfinished and the app is in the foreground")
+    func verificationLifecycle() async throws {
+        let foreground = AppForegroundSignal()
+        let session = await makeSession(appForeground: foreground)
+        // Quiet channel: no task at all.
+        #expect(await !session.isVerifyingLiveEvents)
+
+        try await session.handle(event: pollBegin())
+        #expect(await session.isVerifyingLiveEvents)
+
+        // Backgrounded (background audio / PiP): cancelled, and a repeated
+        // nudge is a no-op.
+        foreground.set(false)
+        await session.appForegroundDidChange()
+        #expect(await !session.isVerifyingLiveEvents)
+        await session.appForegroundDidChange()
+        #expect(await !session.isVerifyingLiveEvents)
+
+        // Back in the foreground: one reconcile (it fails here, with no
+        // token, which leaves the poll alone), then the check re-arms.
+        foreground.set(true)
+        await session.appForegroundDidChange()
+        #expect(await session.isVerifyingLiveEvents)
+
+        // The poll ends: nothing unfinished, so the task goes away.
+        try await session.handle(event: pollEnd())
+        #expect(await !session.isVerifyingLiveEvents)
     }
 
     private func pollBegin() throws -> EventSubEvent {

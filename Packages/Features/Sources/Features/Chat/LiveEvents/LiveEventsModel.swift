@@ -58,6 +58,11 @@ final class LiveEventsModel {
     /// that started, locked or ended meanwhile pops open as usual.
     func run(session: ChannelSession) async {
         let subscription = await session.subscribeLiveEvents()
+        // `suspend()` cancelled the result timeout. If the primed state
+        // equals what is on screen (back within a result's linger, nothing
+        // new), `receive` changes nothing, so re-arm it here or the result
+        // would stay up for good in a quiet channel.
+        resume()
         // AsyncStream iteration ends on task cancellation as well as on
         // `finish()` (unsubscribe / session stop).
         for await _ in subscription.wakeups {
@@ -139,6 +144,9 @@ final class LiveEventsModel {
     /// `LiveEventsState.nextPruneDate`). The session prunes too, but only
     /// when another event arrives — this makes a finished banner go away on
     /// time in a quiet channel.
+    /// Whether a result timeout is armed. Internal for tests.
+    var isPruneScheduled: Bool { pruneTask != nil }
+
     private func schedulePrune() {
         pruneTask?.cancel()
         pruneTask = nil
@@ -165,6 +173,14 @@ final class LiveEventsModel {
         collapseTask = nil
         pruneTask = nil
         expanded = nil
+    }
+
+    /// The page is visible again: re-arm every timer `suspend()` cancelled,
+    /// whether or not the next snapshot differs. That is only the result
+    /// timeout: `suspend()` folded the open banner, so there is no
+    /// auto-collapse to restore. Internal for tests.
+    func resume() {
+        schedulePrune()
     }
 
     /// The transcript detached (its session is going away): forget

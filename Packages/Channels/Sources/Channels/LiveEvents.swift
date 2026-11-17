@@ -282,9 +282,9 @@ public struct LiveHypeTrain: Sendable, Equatable, Identifiable {
 /// Twitch only runs one poll, one prediction and one Hype Train at a time.
 ///
 /// Equality covers what the banners show (the three events). The reducer's
-/// bookkeeping (`tombstones`) is left out on purpose: recording a finished
-/// id never counts as a change, so it never publishes and never re-renders
-/// a banner.
+/// bookkeeping (`tombstones`, `expired`) is left out on purpose: recording
+/// an id never counts as a change, so it never publishes and never
+/// re-renders a banner.
 public struct LiveEventsState: Sendable, Equatable {
     public var poll: LivePoll?
     public var prediction: LivePrediction?
@@ -292,6 +292,15 @@ public struct LiveEventsState: Sendable, Equatable {
 
     /// Ids of recently finished events, per kind. See `LiveEventTombstones`.
     var tombstones = LiveEventTombstones()
+    /// Ids of unfinished events `prune` dropped on a safety expiry (deadline
+    /// long past, or unconfirmed for `unconfirmedExpiry`) rather than because
+    /// they are known to be over. Deliberately NOT tombstones: the event may
+    /// still be running (say the app sat in the background past the expiry
+    /// with no Helix check), so an authoritative Helix snapshot restores it,
+    /// and its real end / resolve from EventSub is still shown. Only a
+    /// non-terminal EventSub update for one is ignored, so a late duplicate
+    /// can't revive it. Same bounded storage as the tombstones.
+    var expired = LiveEventTombstones()
 
     public init(poll: LivePoll? = nil, prediction: LivePrediction? = nil, hypeTrain: LiveHypeTrain? = nil) {
         self.poll = poll
@@ -307,7 +316,8 @@ public struct LiveEventsState: Sendable, Equatable {
 }
 
 /// A small, bounded memory of event ids that are over: ended, archived,
-/// replaced by a newer event, expired, or cleared by a Helix reconcile. The
+/// replaced by a newer event, or cleared by a Helix reconcile (a safety
+/// expiry is not one; see `LiveEventsState.expired`). The
 /// reducer rejects any later update for one of these ids unless it is the
 /// event currently shown, so a delayed or duplicated `end`, or a late
 /// `progress`, can never bring a finished event back.
@@ -336,6 +346,14 @@ struct LiveEventTombstones: Sendable {
         case .poll: poll = list
         case .prediction: prediction = list
         case .hypeTrain: hypeTrain = list
+        }
+    }
+
+    mutating func remove(_ id: String, kind: LiveEventKind) {
+        switch kind {
+        case .poll: poll.removeAll { $0 == id }
+        case .prediction: prediction.removeAll { $0 == id }
+        case .hypeTrain: hypeTrain.removeAll { $0 == id }
         }
     }
 

@@ -179,9 +179,23 @@ public actor ChannelSession {
     /// Latest-value mailboxes of the banner consumers.
     var liveEventSubscribers: [UUID: LiveEventsSubscription] = [:]
     /// The non-blocking live-topic subscribe + Helix seed kicked off by
-    /// `start()` on the account's own channel, followed by the periodic
-    /// Helix check. Cancelled by `stop()`.
+    /// `start()` on the account's own channel. Cancelled by `stop()`.
     var liveEventsTask: Task<Void, Never>?
+    /// The periodic Helix check (`liveEventsVerifyInterval`). At most one
+    /// per session, and it exists ONLY while an event is unfinished, the app
+    /// is in the foreground and the session is running — see
+    /// `updateLiveEventsVerification()`. A quiet channel, or a backgrounded
+    /// app (background audio / PiP), has no task and makes no requests.
+    var liveEventsVerifyTask: Task<Void, Never>?
+    /// The registry's shared foreground flag (`AppForegroundSignal`). While
+    /// the app is in the background no live-event Helix request starts:
+    /// EventSub updates still reduce (no network), and coming back
+    /// reconciles once (`appForegroundDidChange()`).
+    let appForeground: AppForegroundSignal
+    /// The foreground value this session last acted on, so a repeated or
+    /// out-of-order nudge is a no-op.
+    var lastSeenAppForeground: Bool
+    var isAppInForeground: Bool { appForeground.isInForeground }
     /// One Helix reconcile at a time (start, reconnect and the periodic
     /// check can overlap).
     var liveEventsReconcileInFlight = false
@@ -206,8 +220,11 @@ public actor ChannelSession {
         fetchBackfill: @escaping @Sendable (String, Int) async -> [BackfillMessage] = { login, limit in
             await BackfillProvider.fetchRecentMessages(channelLogin: login, limit: limit)
         },
-        joinBackfillTimeout: Duration = .seconds(3)
+        joinBackfillTimeout: Duration = .seconds(3),
+        appForeground: AppForegroundSignal = AppForegroundSignal()
     ) {
+        self.appForeground = appForeground
+        self.lastSeenAppForeground = appForeground.isInForeground
         self.client = client
         self.channelId = channelId
         self.channelLoginName = channelLoginName
@@ -315,16 +332,10 @@ public actor ChannelSession {
         // authorizes those topics for the broadcaster's token alone), and
         // off the critical path like the restrictions fetch above.
         if channelId == accountUserId {
+            // The seed's reconcile arms the periodic Helix check only if it
+            // finds something unfinished (`updateLiveEventsVerification`).
             liveEventsTask = Task { [weak self] in
                 await self?.startLiveEvents()
-                // Periodic Helix check while an event is unfinished (see
-                // `liveEventsVerifyInterval`). `self` is re-bound each round,
-                // so the sleeping loop never keeps the session alive.
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: ChannelSession.liveEventsVerifyInterval)
-                    guard !Task.isCancelled, let self else { return }
-                    await self.verifyLiveEvents()
-                }
             }
         }
 
@@ -412,6 +423,7 @@ public actor ChannelSession {
 
         liveEventsTask?.cancel()
         liveEventsTask = nil
+        updateLiveEventsVerification()   // isStopped: cancels the check
         finishLiveEventSubscribers()
 
         // Cancel the in-flight restrictions fetch so it stops retaining the

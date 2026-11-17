@@ -248,8 +248,17 @@ extension LiveEventsState {
     ///   for `resultLinger` (see `prune`). Every accepted update stamps
     ///   `confirmedAt = now`.
     /// - An archived poll is removed outright — the broadcaster hid it.
+    /// - An id `prune` safety-expired (see `expired`) gets back in only on
+    ///   its real end / resolve, never on a non-terminal EventSub update.
     @discardableResult
     public mutating func apply(_ update: LiveEventUpdate, at now: Date) -> Bool {
+        fold(update, at: now, fromHelix: false)
+    }
+
+    /// `apply`, plus whether the update is an authoritative Helix snapshot,
+    /// which may also restore a safety-expired unfinished event.
+    @discardableResult
+    private mutating func fold(_ update: LiveEventUpdate, at now: Date, fromHelix: Bool) -> Bool {
         let before = self
         switch update {
         case .poll(var incoming):
@@ -263,6 +272,7 @@ extension LiveEventsState {
             } else if !admit(
                 incoming.id, kind: .poll,
                 incomingStart: incoming.startedAt, incomingConcluded: incoming.status.isConcluded,
+                fromHelix: fromHelix,
                 current: poll.map { (id: $0.id, startedAt: $0.startedAt, isConcluded: $0.status.isConcluded) }
             ) {
                 return false
@@ -296,6 +306,7 @@ extension LiveEventsState {
             } else if !admit(
                 incoming.id, kind: .prediction,
                 incomingStart: incoming.startedAt, incomingConcluded: incoming.status.isConcluded,
+                fromHelix: fromHelix,
                 current: prediction.map { (id: $0.id, startedAt: $0.startedAt, isConcluded: $0.status.isConcluded) }
             ) {
                 return false
@@ -318,6 +329,7 @@ extension LiveEventsState {
             } else if !admit(
                 incoming.id, kind: .hypeTrain,
                 incomingStart: incoming.startedAt, incomingConcluded: incoming.status.isConcluded,
+                fromHelix: fromHelix,
                 current: hypeTrain.map { (id: $0.id, startedAt: $0.startedAt, isConcluded: $0.status.isConcluded) }
             ) {
                 return false
@@ -328,6 +340,10 @@ extension LiveEventsState {
                 if incoming.concludedAt == nil { incoming.concludedAt = now }
             }
             hypeTrain = incoming
+        }
+        // Back on screen (or newly stored): no longer an expired id.
+        if let id = storedId(update.kind) {
+            expired.remove(id, kind: update.kind)
         }
         return self != before
     }
@@ -342,8 +358,18 @@ extension LiveEventsState {
     /// flight is never undone by the slower Helix answer.
     ///
     /// A finished snapshot only matters for the event on screen (it
-    /// concludes it). A finished event we never showed isn't news, so it is
-    /// only tombstoned.
+    /// concludes it) or one `prune` safety-expired (we showed it and gave up
+    /// on it too early, so its result is still news). A finished event we
+    /// never showed isn't news, so it is only tombstoned.
+    ///
+    /// Helix is authoritative: an unfinished snapshot restores a
+    /// safety-expired event, and one that still reports the stored
+    /// unfinished event confirms it (`confirmedAt`) even when its tally lags
+    /// what EventSub already delivered.
+    ///
+    /// Callers reconcile BEFORE they `prune`, so an event that went past
+    /// `unconfirmedExpiry` unchecked (a long background) is confirmed rather
+    /// than expired the moment Helix answers again.
     @discardableResult
     public mutating func reconcile(
         _ kind: LiveEventKind,
@@ -353,10 +379,13 @@ extension LiveEventsState {
     ) -> Bool {
         let before = self
         if let snapshot, snapshot.kind == kind {
-            if storedId(kind) == nil, snapshot.isConcluded {
+            if storedId(kind) == nil, snapshot.isConcluded, !expired.contains(snapshot.eventId, kind: kind) {
                 tombstones.insert(snapshot.eventId, kind: kind)
             } else {
-                apply(snapshot, at: now)
+                fold(snapshot, at: now, fromHelix: true)
+                if !snapshot.isConcluded {
+                    confirm(kind, id: snapshot.eventId, at: now)
+                }
             }
         }
         if let event = stored(kind),
@@ -370,14 +399,20 @@ extension LiveEventsState {
 
     /// Drops results that have lingered `resultLinger`, active events long
     /// past their deadline, and unfinished events nothing has confirmed for
-    /// `unconfirmedExpiry`. Dropped ids are tombstoned. Returns whether
-    /// anything changed.
+    /// `unconfirmedExpiry`. A dropped result is tombstoned (it is over); a
+    /// dropped unfinished event is only marked `expired`, since a safety
+    /// expiry doesn't mean it ended. Returns whether anything changed.
     @discardableResult
     public mutating func prune(now: Date) -> Bool {
         let before = self
         for kind in LiveEventKind.allCases {
             if let event = stored(kind), let expiry = Self.expiry(of: event), now >= expiry {
-                remove(kind)
+                if event.isConcluded {
+                    remove(kind)
+                } else {
+                    expired.insert(event.id, kind: kind)
+                    clear(kind)
+                }
             }
         }
         return self != before
@@ -467,10 +502,27 @@ extension LiveEventsState {
     private mutating func remove(_ kind: LiveEventKind) {
         guard let id = storedId(kind) else { return }
         tombstones.insert(id, kind: kind)
+        clear(kind)
+    }
+
+    private mutating func clear(_ kind: LiveEventKind) {
         switch kind {
         case .poll: poll = nil
         case .prediction: prediction = nil
         case .hypeTrain: hypeTrain = nil
+        }
+    }
+
+    /// Stamps `confirmedAt` on the stored event of `kind` if it is `id` and
+    /// still unfinished.
+    private mutating func confirm(_ kind: LiveEventKind, id: String, at now: Date) {
+        switch kind {
+        case .poll:
+            if poll?.id == id, poll?.status.isConcluded == false { poll?.confirmedAt = now }
+        case .prediction:
+            if prediction?.id == id, prediction?.status.isConcluded == false { prediction?.confirmedAt = now }
+        case .hypeTrain:
+            if hypeTrain?.id == id, hypeTrain?.status.isConcluded == false { hypeTrain?.confirmedAt = now }
         }
     }
 
@@ -496,9 +548,13 @@ extension LiveEventsState {
         kind: LiveEventKind,
         incomingStart: Date?,
         incomingConcluded: Bool,
+        fromHelix: Bool,
         current: (id: String, startedAt: Date?, isConcluded: Bool)?
     ) -> Bool {
         if tombstones.contains(id, kind: kind) { return false }
+        // Safety-expired, not known to be over: only its real end, or Helix
+        // saying it is still running, brings it back.
+        if expired.contains(id, kind: kind), !incomingConcluded, !fromHelix { return false }
         guard let current else { return true }
         let isNewer: Bool
         if let incomingStart, let currentStart = current.startedAt, incomingStart != currentStart {

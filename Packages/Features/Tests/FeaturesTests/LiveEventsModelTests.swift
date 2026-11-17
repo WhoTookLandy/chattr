@@ -81,6 +81,34 @@ struct LiveEventsModelTests {
         #expect(model.state.isEmpty)
     }
 
+    @Test("resuming with an unchanged snapshot re-arms the result timeout, so a finished banner still goes away")
+    func unchangedResumeRearmsPrune() async throws {
+        UserDefaults.standard.removeObject(forKey: LiveEventsSettings.pollsKey)
+        let model = LiveEventsModel()
+        // A finished poll whose linger runs out shortly.
+        var finished = poll(id: "p1", votes: [2, 1], status: .completed)
+        finished.concludedAt = Date().addingTimeInterval(-LiveEventsState.resultLinger + 0.3)
+        let state = LiveEventsState(poll: finished)
+        model.receive(state)
+        #expect(model.isPruneScheduled)
+
+        // Swiped away within the linger: the timer is cancelled.
+        model.suspend()
+        #expect(!model.isPruneScheduled)
+
+        // Swiped back: `run` resumes, then the session primes the same
+        // state, which `receive` ignores as unchanged.
+        model.resume()
+        model.receive(state)
+        #expect(model.isPruneScheduled)
+
+        // And the result really does go away on its own.
+        for _ in 0..<50 where model.state.poll != nil {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(model.state.poll == nil)
+    }
+
     @Test("a disabled kind never pops open")
     func disabledKind() {
         LiveEventsSettings.setEnabled(false, for: .poll)
