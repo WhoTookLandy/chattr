@@ -698,7 +698,7 @@ Old:
 ```swift
 let twitchClient = TwitchClient(
     clientId: "8rqdpnm3o5zkv7nlbqsipjdyum3i5k",
-    clientSecret: "mdmfgo5dmhoaz21l870sxg3ddeyrnv",
+    clientSecret: "<redacted>",
     isLive: { @MainActor in appState.isLive }
 )
 ```
@@ -707,7 +707,7 @@ New:
 ```swift
 let twitchClient = TwitchClient(
     clientId: "8rqdpnm3o5zkv7nlbqsipjdyum3i5k",
-    clientSecret: "mdmfgo5dmhoaz21l870sxg3ddeyrnv",
+    clientSecret: "<redacted>",
     tokenStore: KeychainTokenStore(identifier: "streamly"),
     isLive: { @MainActor in appState.isLive }
 )
@@ -966,7 +966,7 @@ In `~/Dev/Streamly/Streamly/App/SceneDelegate.swift`, replace lines 19-24:
 ```swift
 let twitchClient = TwitchClient(
     clientId: "8rqdpnm3o5zkv7nlbqsipjdyum3i5k",
-    clientSecret: "mdmfgo5dmhoaz21l870sxg3ddeyrnv",
+    clientSecret: "<redacted>",
     scopes: Scopes.streamer,
     tokenStore: KeychainTokenStore(identifier: "streamly"),
     isLive: { @MainActor in appState.isLive }
