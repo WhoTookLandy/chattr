@@ -29,7 +29,7 @@ struct ChatsScreen: View {
     /// match any of the new account's tabs, and the restore skips it.
     @SceneStorage("chattr.chat.activeTabId") private var persistedActiveTabId: String?
 
-    /// You → App → Resume Last Chat.
+    /// Settings → Chat → Resume Last Chat.
     @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
 
     private var openChannelIds: [String] {

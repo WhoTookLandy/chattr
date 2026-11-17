@@ -16,7 +16,7 @@ import ChatModel
 /// otherwise.
 struct ChatViewerPolicy {
 
-    /// The chat-filter toggles (You → Chat → Filters) at attach time.
+    /// The chat-filter toggles (Settings → Chat → Filters) at attach time.
     struct Filters: Equatable, Sendable {
         var hideCommands = false
         var hideBots = false

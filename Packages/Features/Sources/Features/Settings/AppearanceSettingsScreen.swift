@@ -2,9 +2,11 @@ import SwiftUI
 import ChatModel
 import Channels
 import EmoteSources
+import DesignSystem
 
-/// Chat appearance settings with a live preview. Pushed from
-/// ProfileScreen's Chat section.
+/// Settings → Appearance: the app theme plus how chat text looks, with a
+/// live preview. Also pushed from the in-chat settings sheet
+/// (`ChatSettingsSheet`) for the full set of display knobs.
 ///
 /// ## Why a live preview
 ///
@@ -19,7 +21,7 @@ import EmoteSources
 ///
 /// Using the production row view (not a hand-drawn imitation) means the
 /// preview can never drift from reality when ChatRow's rendering evolves.
-struct ChatAppearanceScreen: View {
+struct AppearanceSettingsScreen: View {
     /// The signed-in user's login, used to render a realistic
     /// "@you" mention in the highlighted preview row.
     let currentUserLogin: String
@@ -32,7 +34,8 @@ struct ChatAppearanceScreen: View {
     @AppStorage(ChatAppearance.animatedEmotesKey) private var animatedEmotes: Bool = true
     @AppStorage(ChatAppearance.edgeToEdgeKey) private var edgeToEdge: Bool = false
     @AppStorage(ChatAppearance.loginNameDisplayKey) private var loginNameDisplay: ChatAppearance.LoginNameDisplay = .displayFirst
-    @AppStorage(ChatAppearance.chatHistoryLinesKey) private var chatHistoryLines: Int = ChatAppearance.defaultChatHistoryLines
+    /// App-wide light/dark/system theme (DesignSystem; RootView applies it).
+    @AppStorage(AppearanceMode.storageKey) private var appearanceMode: AppearanceMode = .system
 
     /// Same Dynamic Type multiplier RootView applies at injection — the
     /// preview must render at the size live chat will actually use.
@@ -57,6 +60,18 @@ struct ChatAppearanceScreen: View {
     var body: some View {
         Form {
             Section {
+                Picker(selection: $appearanceMode) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                } label: {
+                    Label("Theme", systemImage: "circle.lefthalf.filled")
+                }
+            } footer: {
+                Text("System follows your device's light or dark setting.")
+            }
+
+            Section {
                 VStack(alignment: .leading, spacing: 10) {
                     ChatRow(line: Self.previewLineChatter, badgeEntries: Self.previewModBadge)
                     ChatRow(line: Self.previewLineEmote, badgeEntries: [])
@@ -70,7 +85,7 @@ struct ChatAppearanceScreen: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Chat preview reflecting the current appearance settings")
             } header: {
-                Text("Preview")
+                Text("Chat Preview")
             } footer: {
                 Text("A sample of how chat messages will look.")
             }
@@ -118,7 +133,7 @@ struct ChatAppearanceScreen: View {
             } header: {
                 Text("Message Details")
             } footer: {
-                Text("Show the send time before each message, and chatter badges (moderator, subscriber, VIP) before usernames.")
+                Text("Badges show a chatter's role, like moderator, subscriber or VIP, before their name.")
             }
 
             Section {
@@ -135,32 +150,24 @@ struct ChatAppearanceScreen: View {
                 Text("When a chatter's display name differs from their username — common for non-Latin names — show the username alongside it.")
             }
 
-            // Animated Emotes moved to You → Chat → Emotes — it's an
-            // emote setting, and that page owns everything emote-shaped.
-            // The @AppStorage mirror above stays: the preview rows still
+            // Animated Emotes lives on Chat → Emotes (it's an emote setting)
+            // and Chat History on Chat (behaviour, not looks). The
+            // animatedEmotes mirror above stays: the preview rows still
             // need the value to render accurately.
 
             Section {
-                Picker(selection: $chatHistoryLines) {
-                    ForEach(ChatAppearance.chatHistoryOptions, id: \.self) { count in
-                        Text("\(count) messages").tag(count)
-                    }
-                } label: {
-                    Label("Chat History", systemImage: "clock.arrow.circlepath")
-                }
-            } footer: {
-                Text("How many messages each chat keeps in scrollback. Larger histories use more memory and make switching between open chats slower. Applies the next time a chat opens.")
-            }
-
-            Section {
                 Toggle(isOn: $edgeToEdge) {
-                    Label("Edge-to-Edge Chat", systemImage: "arrow.up.left.and.arrow.down.right")
+                    SettingLabel(
+                        "Edge-to-Edge Chat",
+                        systemImage: "arrow.up.left.and.arrow.down.right",
+                        subtitle: "Chat scrolls behind the floating header"
+                    )
                 }
             } footer: {
-                Text("Chat runs to the top of the screen and scrolls behind the floating header.")
+                Text("All of these apply instantly, in every open chat.")
             }
         }
-        .navigationTitle("Chat Appearance")
+        .navigationTitle("Appearance")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
