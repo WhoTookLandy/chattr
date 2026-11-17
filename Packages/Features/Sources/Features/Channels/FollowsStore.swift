@@ -142,7 +142,10 @@ public final class FollowsStore {
     /// in-flight load instead of running a duplicate paginated fetch.
     public func loadAllIfNeeded(account: Account, accountStore: AccountStore) async {
         let userId = account.userId
-        guard loadedAllForUserId != userId else { return }
+        // A caller that's already cancelled (e.g. a torn-down `.task` for the
+        // previous account) must not switch the store: the unstructured load
+        // task below wouldn't inherit its cancellation.
+        guard !Task.isCancelled, loadedAllForUserId != userId else { return }
         // Switch accounts NOW, synchronously, as the inline load always did —
         // not later when the queued task starts. Otherwise a `refreshLive` for
         // the store's current account in that gap would see no switch, leave
