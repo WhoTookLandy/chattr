@@ -44,6 +44,9 @@ public struct ProfileScreen: View {
     /// when the scene was torn down. Read by HomeScreen's scene
     /// restoration; default on (resume) matches pre-toggle behavior.
     @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
+    @AppStorage(StreamHeaderView.expandedKey) private var showVideoInChat = false
+    @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
+    @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
     @State private var isSigningOut = false
     @State private var showingSignOutConfirm = false
     @State private var errorMessage: String?
@@ -191,6 +194,29 @@ public struct ProfileScreen: View {
                 }
             } header: {
                 Text("Privacy")
+            }
+
+            // Video — the in-chat stream player.
+            Section {
+                Toggle(isOn: $showVideoInChat) {
+                    Label("Show Video in Chat", systemImage: "play.rectangle")
+                }
+                Toggle(isOn: $useNativePlayer) {
+                    Label("Native Video Player", systemImage: "play.tv")
+                }
+                if useNativePlayer {
+                    Picker(selection: $maxQuality) {
+                        ForEach(PlayerQuality.allCases) { quality in
+                            Text(quality.label).tag(quality)
+                        }
+                    } label: {
+                        Label("Max Quality", systemImage: "dial.medium")
+                    }
+                }
+            } header: {
+                Text("Video")
+            } footer: {
+                Text("The native player uses Apple's video player for smoother picture-in-picture and quality control. It's experimental: it relies on an unofficial Twitch interface, and if it can't load a stream chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video.")
             }
 
             // App — preferences about chattr itself rather than chat

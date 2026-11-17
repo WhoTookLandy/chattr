@@ -247,7 +247,7 @@ public struct ChatScreen: View {
         // + last live) pinned above the transcript. Its own view reading
         // its own stores, so status refreshes never re-run this body.
         .safeAreaBar(edge: .top) {
-            StreamHeaderView(channel: channel)
+            StreamHeaderView(channel: channel, isActive: isActiveTab)
         }
         .safeAreaBar(edge: .bottom) {
             composeBarView

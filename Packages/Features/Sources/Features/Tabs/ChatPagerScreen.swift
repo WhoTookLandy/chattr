@@ -89,6 +89,11 @@ struct ChatPagerScreen: View {
                     .overlay {
                         PagerEdgeHints(chatTabs: chatTabs)
                     }
+                    // While the visible chat plays its stream, the bar hides
+                    // and the video overlay carries back / hide-video.
+                    .background {
+                        ChatNavBarAutoHider(chatTabs: chatTabs)
+                    }
             }
         }
         // Same surface as the transcript itself (ChatScreen applies it
