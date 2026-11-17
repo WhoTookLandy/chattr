@@ -54,6 +54,12 @@ def main() -> None:
     bundle_id, build_number, notes_path = sys.argv[1:4]
     with open(notes_path, encoding="utf-8") as f:
         notes = f.read().strip()
+    # App Store Connect rejects emoji (anything outside the Basic
+    # Multilingual Plane) in whatsNew; drop them rather than fail.
+    stripped = "".join(ch for ch in notes if ord(ch) <= 0xFFFF)
+    if stripped != notes:
+        print("Note: removed emoji from the notes (App Store Connect doesn't allow them).")
+        notes = stripped
     if len(notes) > 4000:
         sys.exit(f"Notes are {len(notes)} characters; TestFlight allows 4000.")
 

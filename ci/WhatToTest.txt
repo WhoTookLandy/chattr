@@ -3,10 +3,11 @@ Watch while you chat
 NEW
 • Streams play right inside chat. Tap the video for controls, the title, tags and Subscribe; swipe down on it to hide it.
 • Mini player: back out of a chat and the stream keeps playing in a floating player across the app. Tap it to return, × or fling it down to stop, drag it to another corner.
-• Audio only (🎧 on the video, or ⋯ → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
+• Audio only (headphones button on the video, or More → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
 • Native video player (You → Video, experimental): Apple's player with picture-in-picture, fullscreen and a max-quality setting. If it can't load a stream, chattr switches to Twitch's web player.
-• Jump between open chats from the "1 / N" chip on the video. Close a chat from the ⋯ menu.
+• Jump between open chats from the "1 / N" chip on the video. Close a chat from the More (…) menu.
 • Home → Live now lists every live channel you follow (no more "See all").
+• Tidier message bar: the More (…) menu now sits inside it.
 • Followers-only, slow mode and other chat restrictions now show in the message box.
 
 FIXED
