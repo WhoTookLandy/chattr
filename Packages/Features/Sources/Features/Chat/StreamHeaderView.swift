@@ -48,6 +48,7 @@ struct StreamHeaderView: View {
     @AppStorage(Self.expandedKey) private var isExpanded = false
     @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
     @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
+    @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
 
     /// Player overlay + tags + action row. Hidden by default so chat keeps
     /// the room; any tap on the video or info row toggles it.
@@ -82,7 +83,11 @@ struct StreamHeaderView: View {
     var body: some View {
         Group {
             if isExpanded, let stream {
-                watchingLayout(stream)
+                if audioOnly {
+                    audioBar(stream)
+                } else {
+                    watchingLayout(stream)
+                }
             } else {
                 compactCard
             }
@@ -195,12 +200,15 @@ struct StreamHeaderView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-                if !stream.title.isEmpty {
+                // Title only with the chrome up — the resting row stays one
+                // line so chat keeps the room.
+                if chromeVisible, !stream.title.isEmpty {
                     Text(stream.title)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                        .lineLimit(chromeVisible ? 2 : 1)
+                        .lineLimit(2)
                         .multilineTextAlignment(.leading)
+                        .transition(.opacity)
                 }
             }
             Spacer(minLength: 0)
@@ -213,21 +221,7 @@ struct StreamHeaderView: View {
         ZStack {
             poster(stream)
 
-            #if os(iOS)
-            if isActive {
-                if isNativeEngine {
-                    NativeStreamPlayerView(
-                        channelLogin: channel.channelLoginName,
-                        quality: maxQuality,
-                        controller: player
-                    )
-                    .id("native")
-                } else {
-                    StreamPlayerView(channelLogin: channel.channelLoginName, controller: player)
-                        .id("web")
-                }
-            }
-            #endif
+            playerEngine(audioOnly: false)
 
             if chromeVisible {
                 playerOverlay(stream)
@@ -247,6 +241,91 @@ struct StreamHeaderView: View {
             player.onSwipeDown = { setExpanded(false) }
         }
         #endif
+    }
+
+    /// The mounted player — web or native — for the active page only.
+    @ViewBuilder
+    private func playerEngine(audioOnly: Bool) -> some View {
+        #if os(iOS)
+        if isActive {
+            if isNativeEngine {
+                NativeStreamPlayerView(
+                    channelLogin: channel.channelLoginName,
+                    quality: maxQuality,
+                    audioOnly: audioOnly,
+                    controller: player
+                )
+                .id("native")
+            } else {
+                StreamPlayerView(channelLogin: channel.channelLoginName, controller: player)
+                    .id("web")
+            }
+        }
+        #endif
+    }
+
+    // MARK: - Audio-only bar
+
+    /// Listen-only mode: the video is gone and chat gets the whole screen;
+    /// a slim glass bar keeps the stream identity, play/pause and a way
+    /// back to video. The player stays mounted but invisible (the native
+    /// engine switches to Twitch's audio-only rendition to save data).
+    private func audioBar(_ stream: TwitchStream) -> some View {
+        HStack(spacing: 10) {
+            avatar(ring: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(channel.channelDisplayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Image(systemName: "headphones")
+                    Text("Audio only")
+                    Text("·")
+                    Circle().fill(.red).frame(width: 6, height: 6)
+                    Text(StreamFormatting.viewers(stream.viewerCount))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            #if os(iOS)
+            barButton(player.isPaused ? "play.fill" : "pause.fill",
+                      label: player.isPaused ? "Play" : "Pause") {
+                player.togglePlay()
+            }
+            #endif
+            barButton("video.fill", label: "Show video") {
+                withAnimation(.snappy(duration: 0.25)) { audioOnly = false }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: .rect(cornerRadius: 18, style: .continuous))
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
+        .background(alignment: .topLeading) {
+            playerEngine(audioOnly: true)
+                .frame(width: 2, height: 2)
+                .opacity(0.01)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func barButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.body)
+                .foregroundStyle(.primary)
+                .frame(width: 36, height: 36)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: Circle())
+        .accessibilityLabel(label)
     }
 
     /// Stream thumbnail: what neighbouring pages show, and what sits under
@@ -295,11 +374,14 @@ struct StreamHeaderView: View {
             .allowsHitTesting(false)
 
             VStack(spacing: 0) {
-                HStack(spacing: 4) {
+                HStack(spacing: 8) {
                     glyphButton("chevron.left", label: "Back") { dismiss() }
-                    glyphButton("chevron.down", label: "Hide video") { setExpanded(false) }
                     Spacer()
                     pageIndicator
+                    glyphButton("headphones", label: "Audio only") {
+                        chromeVisible = false
+                        withAnimation(.snappy(duration: 0.25)) { audioOnly = true }
+                    }
                     if let channelURL {
                         ShareLink(item: channelURL) { glyph("square.and.arrow.up") }
                             .buttonStyle(.plain)
@@ -365,11 +447,11 @@ struct StreamHeaderView: View {
                     touchChrome()
                 } label: {
                     Image(systemName: player.isPaused ? "play.fill" : "pause.fill")
-                        .font(.system(size: 34, weight: .semibold))
+                        .font(.system(size: 24, weight: .semibold))
                         .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.5), radius: 4)
-                        .frame(width: 64, height: 64)
-                        .contentShape(Rectangle())
+                        .frame(width: 56, height: 56)
+                        .background(.black.opacity(0.45), in: Circle())
+                        .contentShape(Circle())
                         .contentTransition(.symbolEffect(.replace))
                 }
                 .buttonStyle(.plain)
@@ -379,14 +461,14 @@ struct StreamHeaderView: View {
         }
     }
 
-    /// Bare white glyph with a soft shadow — Twitch-style, no circle.
+    /// White glyph on a translucent dark circle — legible on any frame.
     private func glyph(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.5), radius: 3)
-            .frame(width: 36, height: 36)
-            .contentShape(Rectangle())
+            .frame(width: 34, height: 34)
+            .background(.black.opacity(0.45), in: Circle())
+            .contentShape(Circle())
     }
 
     private func glyphButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
@@ -405,16 +487,38 @@ struct StreamHeaderView: View {
     }
 
     /// "1 / 3" — stands in for the nav pill's page dots while the bar is
-    /// hidden. Only with two or more open chats.
+    /// hidden, and is itself the quick switcher: tap → menu of open chats.
+    /// Only with two or more open chats.
     @ViewBuilder
     private var pageIndicator: some View {
         if let chatTabs, chatTabs.tabs.count > 1,
            let index = chatTabs.tabs.firstIndex(where: { $0.channels.first?.channelId == channel.channelId }) {
-            overlayChip {
-                Text("\(index + 1) / \(chatTabs.tabs.count)")
-                    .monospacedDigit()
+            Menu {
+                ForEach(chatTabs.tabs) { tab in
+                    Button {
+                        chatTabs.activeTabId = tab.id
+                    } label: {
+                        if tab.channels.first?.channelId == channel.channelId {
+                            Label(tab.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(tab.displayName)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("\(index + 1) / \(chatTabs.tabs.count)")
+                        .monospacedDigit()
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                .background(.black.opacity(0.45), in: Capsule())
             }
-            .accessibilityLabel("Chat \(index + 1) of \(chatTabs.tabs.count)")
+            .accessibilityLabel("Chat \(index + 1) of \(chatTabs.tabs.count). Switch chat")
         }
     }
 
@@ -594,9 +698,10 @@ struct ChatNavBarAutoHider: View {
     @Environment(\.followsStore) private var followsStore
     @Environment(\.channelStatus) private var channelStatus
     @AppStorage(StreamHeaderView.expandedKey) private var isExpanded = false
+    @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
 
     private var hidesBar: Bool {
-        guard isExpanded,
+        guard isExpanded, !audioOnly,
               let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
               let channelId = chatTabs.tabs.first(where: { $0.id == visibleId })?.channels.first?.channelId
         else { return false }

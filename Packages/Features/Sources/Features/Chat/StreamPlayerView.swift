@@ -218,46 +218,52 @@ private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
 
 /// Restores the edge swipe-back gesture while the navigation bar is hidden
 /// (UIKit's default pop-gesture delegate refuses to begin without a visible
-/// bar). Installed once per navigation controller; only allows the pop when
-/// there's something to pop, and makes horizontal scroll views (the chat
-/// pager) wait for the edge swipe to fail so swiping from the very left edge
-/// always means "back".
+/// bar).
+///
+/// Scoped to the chat screen: our delegate is swapped in when the chat
+/// appears and the ORIGINAL delegate is put back when it disappears, so
+/// Home and every other screen keep UIKit's stock behaviour. (The first
+/// version left its delegate installed and made every scroll view wait on
+/// the pop gesture, which froze touches after going back.)
 struct SwipeBackEnabler: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> Controller { Controller() }
     func updateUIViewController(_ controller: Controller, context: Context) {}
 
     final class Controller: UIViewController {
+        private let popDelegate = PopGestureDelegate()
+        private weak var originalDelegate: (any UIGestureRecognizerDelegate)?
+        private weak var installedOn: UIGestureRecognizer?
+
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
             guard let nav = navigationController,
                   let gesture = nav.interactivePopGestureRecognizer,
-                  !(gesture.delegate is PopGestureDelegate)
+                  gesture.delegate !== popDelegate
             else { return }
-            let delegate = PopGestureDelegate(navigationController: nav)
-            // The gesture holds its delegate weakly; anchor it to the nav.
-            objc_setAssociatedObject(nav, &PopGestureDelegate.associationKey, delegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-            gesture.delegate = delegate
+            originalDelegate = gesture.delegate
+            popDelegate.navigationController = nav
+            gesture.delegate = popDelegate
+            installedOn = gesture
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            restore()
+        }
+
+        private func restore() {
+            guard let gesture = installedOn, gesture.delegate === popDelegate else { return }
+            gesture.delegate = originalDelegate
+            installedOn = nil
         }
     }
 
     final class PopGestureDelegate: NSObject, UIGestureRecognizerDelegate {
-        nonisolated(unsafe) static var associationKey: UInt8 = 0
         weak var navigationController: UINavigationController?
-
-        init(navigationController: UINavigationController) {
-            self.navigationController = navigationController
-        }
 
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             guard let nav = navigationController else { return false }
             return nav.viewControllers.count > 1 && nav.transitionCoordinator == nil
-        }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            otherGestureRecognizer.view is UIScrollView
         }
     }
 }

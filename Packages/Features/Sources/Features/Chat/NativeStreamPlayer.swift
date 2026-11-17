@@ -17,6 +17,9 @@ enum PlayerSettings {
     static let nativePlayerKey = "chattr.player.native"
     /// Native player only — caps the HLS variant AVPlayer may pick.
     static let maxQualityKey = "chattr.player.maxQuality"
+    /// Listen-only mode: no video surface, just chat + stream audio. The
+    /// native player switches to Twitch's audio-only rendition (saves data).
+    static let audioOnlyKey = "chattr.player.audioOnly"
 }
 
 /// Resolution cap for the native player. `auto` lets AVPlayer adapt freely.
@@ -164,7 +167,7 @@ enum TwitchHLS {
         let data: DataField?
     }
 
-    static func playlistURL(login: String) async throws -> URL {
+    static func playlistURL(login: String, audioOnly: Bool = false) async throws -> URL {
         var request = URLRequest(url: URL(string: "https://gql.twitch.tv/gql")!)
         request.httpMethod = "POST"
         request.setValue(webClientID, forHTTPHeaderField: "Client-ID")
@@ -185,6 +188,7 @@ enum TwitchHLS {
             URLQueryItem(name: "sig", value: token.signature),
             URLQueryItem(name: "token", value: token.value),
             URLQueryItem(name: "allow_source", value: "true"),
+            URLQueryItem(name: "allow_audio_only", value: "true"),
             URLQueryItem(name: "fast_bread", value: "true"),
             URLQueryItem(name: "player_backend", value: "mediaplayer"),
             URLQueryItem(name: "playlist_include_framerate", value: "true"),
@@ -192,7 +196,22 @@ enum TwitchHLS {
             URLQueryItem(name: "p", value: String(Int.random(in: 1_000_000...9_999_999))),
         ]
         guard let url = components.url else { throw Unavailable() }
-        return url
+        guard audioOnly else { return url }
+        // Audio-only: pick the `audio_only` variant out of the master
+        // playlist. If Twitch didn't offer one, the full stream still plays.
+        return (try? await audioOnlyVariant(in: url)) ?? url
+    }
+
+    private static func audioOnlyVariant(in master: URL) async throws -> URL? {
+        let (data, _) = try await URLSession.shared.data(from: master)
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+        for (index, line) in lines.enumerated()
+        where line.hasPrefix("#EXT-X-STREAM-INF") && line.contains("audio_only") {
+            guard index + 1 < lines.count else { return nil }
+            return URL(string: lines[index + 1], relativeTo: master)?.absoluteURL
+        }
+        return nil
     }
 }
 
@@ -203,6 +222,7 @@ enum TwitchHLS {
 struct NativeStreamPlayerView: UIViewRepresentable {
     let channelLogin: String
     let quality: PlayerQuality
+    var audioOnly = false
     let controller: StreamPlayerController
 
     func makeCoordinator() -> Coordinator {
@@ -222,13 +242,13 @@ struct NativeStreamPlayerView: UIViewRepresentable {
         view.addGestureRecognizer(tap)
 
         controller.hostView = view
-        context.coordinator.load(login: channelLogin, quality: quality, into: view)
+        context.coordinator.load(login: channelLogin, audioOnly: audioOnly, quality: quality, into: view)
         return view
     }
 
     func updateUIView(_ view: PlayerLayerView, context: Context) {
-        if context.coordinator.loadedLogin != channelLogin {
-            context.coordinator.load(login: channelLogin, quality: quality, into: view)
+        if context.coordinator.loadedKey != Coordinator.key(channelLogin, audioOnly) {
+            context.coordinator.load(login: channelLogin, audioOnly: audioOnly, quality: quality, into: view)
         }
         controller.applyQuality(quality)
     }
@@ -246,7 +266,11 @@ struct NativeStreamPlayerView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         let controller: StreamPlayerController
-        var loadedLogin: String?
+        var loadedKey: String?
+
+        static func key(_ login: String, _ audioOnly: Bool) -> String {
+            "\(login)|\(audioOnly)"
+        }
         private var loadTask: Task<Void, Never>?
         private var subscriptions: Set<AnyCancellable> = []
 
@@ -257,15 +281,15 @@ struct NativeStreamPlayerView: UIViewRepresentable {
         @objc func tapped() { controller.onTap?() }
         @objc func swipedDown() { controller.onSwipeDown?() }
 
-        func load(login: String, quality: PlayerQuality, into view: PlayerLayerView) {
+        func load(login: String, audioOnly: Bool, quality: PlayerQuality, into view: PlayerLayerView) {
             teardown()
-            loadedLogin = login
+            loadedKey = Self.key(login, audioOnly)
             controller.reset()
             controller.nativeFailed = false
 
             loadTask = Task { [weak self, weak view] in
                 do {
-                    let url = try await TwitchHLS.playlistURL(login: login)
+                    let url = try await TwitchHLS.playlistURL(login: login, audioOnly: audioOnly)
                     guard !Task.isCancelled, let self, let view else { return }
                     self.start(url: url, quality: quality, in: view)
                 } catch {

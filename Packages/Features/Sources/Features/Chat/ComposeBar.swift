@@ -58,6 +58,13 @@ struct ComposeBar: View {
     /// Same preference the stream header reads — the ⋯ menu's Show/Hide
     /// Video flips it.
     @AppStorage(StreamHeaderView.expandedKey) private var videoVisible = false
+    @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
+    @Environment(\.chatTabs) private var chatTabs
+
+    /// The open tab showing this channel — for "Close Chat".
+    private var tabId: UUID? {
+        chatTabs?.tabs.first { $0.channels.first?.channelLoginName == channelLoginName }?.id
+    }
 
     @State private var composeText: String
     @State private var isSending: Bool = false
@@ -396,11 +403,36 @@ struct ComposeBar: View {
                     Label("Clear Draft", systemImage: "xmark.circle")
                 }
             }
-            Button {
-                withAnimation(.snappy(duration: 0.25)) { videoVisible.toggle() }
-            } label: {
-                Label(videoVisible ? "Hide Video" : "Show Video",
-                      systemImage: videoVisible ? "rectangle.slash" : "play.rectangle")
+            // Video modes: watch, listen, or neither.
+            if !videoVisible || audioOnly {
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) {
+                        videoVisible = true
+                        audioOnly = false
+                    }
+                } label: {
+                    Label("Show Video", systemImage: "play.rectangle")
+                }
+            }
+            if !audioOnly {
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) {
+                        videoVisible = true
+                        audioOnly = true
+                    }
+                } label: {
+                    Label("Audio Only", systemImage: "headphones")
+                }
+            }
+            if videoVisible {
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) {
+                        videoVisible = false
+                        audioOnly = false
+                    }
+                } label: {
+                    Label(audioOnly ? "Stop Audio" : "Hide Video", systemImage: "rectangle.slash")
+                }
             }
             Divider()
             if let channelURL {
@@ -418,6 +450,14 @@ struct ComposeBar: View {
                     #endif
                 } label: {
                     Label("Copy Channel Link", systemImage: "link")
+                }
+            }
+            if let tabId {
+                Divider()
+                Button(role: .destructive) {
+                    chatTabs?.close(tabId: tabId)
+                } label: {
+                    Label("Close Chat", systemImage: "xmark")
                 }
             }
         } label: {
