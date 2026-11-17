@@ -1,6 +1,7 @@
 import Testing
 import Foundation
-import Channels
+import TwitchKit
+@testable import Channels
 @testable import Features
 
 /// Banner-presentation rules on top of the Channels reducer: what pops open,
@@ -116,5 +117,117 @@ struct LiveEventsModelTests {
         let model = LiveEventsModel()
         model.receive(LiveEventsState(poll: poll()))
         #expect(model.expanded == nil)
+    }
+
+    // MARK: - Attention among hidden banners
+
+    private func prediction(id: String = "pr1", status: LivePrediction.Status = .active) -> LivePrediction {
+        LivePrediction(
+            id: id,
+            title: "Win?",
+            outcomes: [
+                LivePrediction.Outcome(id: "o1", title: "Yes", color: "BLUE", users: 1, points: 10),
+                LivePrediction.Outcome(id: "o2", title: "No", color: "PINK", users: 1, points: 10),
+            ],
+            status: status
+        )
+    }
+
+    @Test("a disabled Hype Train levelling up doesn't mask a poll result in the same snapshot")
+    func disabledHigherPriorityDoesNotMask() {
+        UserDefaults.standard.removeObject(forKey: LiveEventsSettings.pollsKey)
+        LiveEventsSettings.setEnabled(false, for: .hypeTrain)
+        defer { UserDefaults.standard.removeObject(forKey: LiveEventsSettings.hypeTrainKey) }
+        let model = LiveEventsModel()
+
+        model.receive(LiveEventsState(poll: poll(id: "p1"), hypeTrain: LiveHypeTrain(id: "t1", level: 1)))
+        #expect(model.expanded == .poll)
+        model.toggle(.poll)
+        #expect(model.expanded == nil)
+
+        // The train levels up (news, but its banner is off) as the poll
+        // completes (news, and shown): the poll gets the attention.
+        model.receive(LiveEventsState(
+            poll: poll(id: "p1", votes: [2, 1], status: .completed),
+            hypeTrain: LiveHypeTrain(id: "t1", level: 2)
+        ))
+        #expect(model.expanded == .poll)
+    }
+
+    @Test("a dismissed prediction locking doesn't mask a poll result in the same snapshot")
+    func dismissedHigherPriorityDoesNotMask() {
+        UserDefaults.standard.removeObject(forKey: LiveEventsSettings.pollsKey)
+        UserDefaults.standard.removeObject(forKey: LiveEventsSettings.predictionsKey)
+        let model = LiveEventsModel()
+
+        model.receive(LiveEventsState(poll: poll(id: "p1"), prediction: prediction(id: "pr1")))
+        model.dismiss(.prediction)
+        #expect(model.expanded == nil)
+
+        model.receive(LiveEventsState(
+            poll: poll(id: "p1", votes: [2, 1], status: .completed),
+            prediction: prediction(id: "pr1", status: .locked)
+        ))
+        #expect(model.expanded == .poll)
+    }
+
+    // MARK: - Run ownership
+
+    private struct NullTokenStore: TwitchTokenStore {
+        func loadToken() async throws -> OAuthToken? { nil }
+        func saveToken(_ token: OAuthToken) async throws {}
+        func deleteToken() async throws {}
+    }
+
+    /// Polls `condition` on the main actor for up to ~2s.
+    private func eventually(_ condition: () async -> Bool) async throws -> Bool {
+        for _ in 0..<200 {
+            if await condition() { return true }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return await condition()
+    }
+
+    @Test("a superseded run exiting late leaves the replacement's result timeout armed")
+    func supersededRunLeavesReplacementTimers() async throws {
+        UserDefaults.standard.removeObject(forKey: LiveEventsSettings.pollsKey)
+        // Not the account's own channel: no Helix traffic, just the mailbox.
+        let session = ChannelSession(
+            client: TwitchClient(clientId: "test-client", tokenStore: NullTokenStore()),
+            channelId: "chan-1",
+            channelLoginName: "somechannel",
+            accountUserId: "me-1",
+            fetchBackfill: { _, _ in [] }
+        )
+        // A finished poll lingering on screen: its result timeout is armed.
+        await session.applyLiveEvent(.poll(poll(id: "p1", votes: [2, 1], status: .completed)))
+        let model = LiveEventsModel()
+
+        let first = Task { await model.run(session: session) }
+        let primed = try await eventually { model.state.poll?.id == "p1" }
+        #expect(primed)
+        #expect(model.isPruneScheduled)
+
+        // Probe reset so the replacement's re-arm is observable.
+        model.suspend()
+        #expect(!model.isPruneScheduled)
+
+        // A rapid switch away and back: the replacement subscribes and
+        // re-arms the timer before the first run's cancellation lands.
+        let second = Task { await model.run(session: session) }
+        let rearmed = try await eventually { model.isPruneScheduled }
+        #expect(rearmed)
+
+        // The first run now exits. It no longer owns the timers, so it
+        // must not suspend the replacement's.
+        first.cancel()
+        await first.value
+        #expect(model.isPruneScheduled)
+        #expect(await session.liveEventSubscribers.count == 1)
+
+        second.cancel()
+        await second.value
+        #expect(!model.isPruneScheduled)
+        #expect(await session.liveEventSubscribers.isEmpty)
     }
 }

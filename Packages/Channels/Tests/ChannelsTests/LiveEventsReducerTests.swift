@@ -454,6 +454,12 @@ struct LiveEventsReducerTests {
         state.apply(try update(.predictionBegin(prediction())), at: t0)
         state.apply(try update(.hypeTrainBegin(hypeTrain(level: 1))), at: t0)
         #expect(state.attentionKind(comparedTo: old) == .hypeTrain)
+        // An ineligible (hidden) kind is skipped, not a dead end: the next
+        // notable kind in priority order gets the attention.
+        let withoutTrain = state.attentionKind(comparedTo: old) { $0 != .hypeTrain }
+        #expect(withoutTrain == .prediction)
+        let nothingEligible = state.attentionKind(comparedTo: old) { _ in false }
+        #expect(nothingEligible == nil)
 
         old = state
         state.apply(try update(.hypeTrainProgress(hypeTrain(level: 1, progress: 600))), at: t0)

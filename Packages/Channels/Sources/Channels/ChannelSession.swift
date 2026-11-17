@@ -134,6 +134,11 @@ public actor ChannelSession {
     /// need to know about `AccountStore` or `Account` directly.
     let chatActions: HelixChatActions
 
+    /// The `HelixAuthRetry` that `topics` and `chatActions` share, kept for
+    /// the session's own Helix reads (the live-event reconcile — see
+    /// `ChannelSession+LiveEvents.swift`).
+    let authRetry: HelixAuthRetry
+
     /// Fetches recent chat history (channelLogin, limit) → messages with
     /// their send times. Defaults to `BackfillProvider.fetchRecentMessages`;
     /// tests inject a stub so the join-backfill and reconnect-resync actor
@@ -192,9 +197,12 @@ public actor ChannelSession {
     /// EventSub updates still reduce (no network), and coming back
     /// reconciles once (`appForegroundDidChange()`).
     let appForeground: AppForegroundSignal
-    /// The foreground value this session last acted on, so a repeated or
-    /// out-of-order nudge is a no-op.
-    var lastSeenAppForeground: Bool
+    /// The foreground transition (`AppForegroundSignal.State.generation`)
+    /// this session last acted on. A repeated or out-of-order nudge is a
+    /// no-op, but a transition the session hasn't seen is never lost — even
+    /// when both nudges of a background → foreground flip arrive after the
+    /// flag is already back to the value the session last acted on.
+    var lastSeenAppForegroundGeneration: UInt64
     var isAppInForeground: Bool { appForeground.isInForeground }
     /// The one Helix reconcile pass in flight, if any (start, reconnect,
     /// foreground and the periodic check can overlap; they never stack).
@@ -230,7 +238,7 @@ public actor ChannelSession {
         appForeground: AppForegroundSignal = AppForegroundSignal()
     ) {
         self.appForeground = appForeground
-        self.lastSeenAppForeground = appForeground.isInForeground
+        self.lastSeenAppForegroundGeneration = appForeground.state.generation
         self.client = client
         self.channelId = channelId
         self.channelLoginName = channelLoginName
@@ -238,6 +246,7 @@ public actor ChannelSession {
         self.normalizer = ChannelUpdateNormalizer(accountLogin: accountLogin, emoteIndex: emoteIndex)
         self.hub = ChannelUpdateHub(capacity: max(1, ringCapacity), channelLoginName: channelLoginName)
         let authRetry = HelixAuthRetry(refreshTokenHandler: refreshTokenHandler)
+        self.authRetry = authRetry
         self.topics = EventSubTopics(
             client: client,
             channelId: channelId,

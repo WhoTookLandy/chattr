@@ -111,9 +111,10 @@ extension ChannelSession {
     static let liveEventsVerifyInterval: Duration = .seconds(5 * 60)
 
     /// Subscribes the live-event topics and seeds from Helix. Never throws:
-    /// a token that predates the scopes gets 403s, logged at info, and the
-    /// banners simply never appear. The seed arms the periodic check if it
-    /// finds something unfinished.
+    /// a token that predates the scopes gets 403s on the subscribes and
+    /// sends no Helix read at all (`requireLiveEventScope`), each logged at
+    /// info, and the banners simply never appear. The seed arms the
+    /// periodic check if it finds something unfinished.
     func startLiveEvents() async {
         await withTaskGroup(of: Void.self) { group in
             for topic in EventSubTopics.liveEventSubscriptions(broadcasterID: channelId) {
@@ -167,20 +168,24 @@ extension ChannelSession {
 
     /// The app moved between foreground and background: the registry
     /// updated the shared `appForeground` flag and nudges every session.
-    /// Re-reads the flag (so a stale or repeated nudge is a no-op).
+    /// Re-reads the flag and its transition generation, so a stale or
+    /// repeated nudge is a no-op while a transition this session missed —
+    /// both nudges of a background → foreground flip arriving after the
+    /// flag is already back to `true` — still counts.
     /// Backgrounded: the periodic check stops, an in-flight reconcile pass
-    /// is cancelled, and no live-event Helix request starts. Foregrounded:
-    /// one reconcile catches up on whatever changed meanwhile (and confirms
-    /// a locked prediction that sat past `unconfirmedExpiry` unchecked),
-    /// then the check re-arms if something is still unfinished. If the
-    /// cancelled pass hasn't exited yet, the request is queued behind it
-    /// rather than dropped (`liveEventsReconcilePending`).
+    /// is cancelled, and no live-event Helix request starts. Foregrounded
+    /// (including after a missed background stretch): one reconcile catches
+    /// up on whatever changed meanwhile (and confirms a locked prediction
+    /// that sat past `unconfirmedExpiry` unchecked), then the check re-arms
+    /// if something is still unfinished. If the cancelled pass hasn't
+    /// exited yet, the request is queued behind it rather than dropped
+    /// (`liveEventsReconcilePending`).
     public func appForegroundDidChange() async {
-        let inForeground = isAppInForeground
-        guard inForeground != lastSeenAppForeground else { return }
-        lastSeenAppForeground = inForeground
+        let foreground = appForeground.state
+        guard foreground.generation != lastSeenAppForegroundGeneration else { return }
+        lastSeenAppForegroundGeneration = foreground.generation
         updateLiveEventsVerification()
-        if inForeground {
+        if foreground.isInForeground {
             await reconcileLiveEvents()
         } else {
             liveEventsReconcileTask?.cancel()
@@ -282,11 +287,22 @@ extension ChannelSession {
     /// One pass over the three kinds. Throws `CancellationError` — and
     /// starts no further request — as soon as the task is cancelled or the
     /// session can no longer fetch.
+    ///
+    /// Each GET goes through `authRetry` (refresh via the bridge, retry
+    /// once), so a token that went stale before the seed doesn't leave a
+    /// running event hidden — and the periodic check un-armed — until some
+    /// later trigger. Every attempt first re-checks that the session can
+    /// still fetch (the bridge refresh suspends) and that the stored token
+    /// carries the kind's scope (`requireLiveEventScope`).
     private func reconcileLiveEventsOnce() async throws {
         try checkCanFetchLiveEvents()
         let pollFetchedAt = Date()
         do {
-            let page = try await client.api.fetchPollsPage(broadcasterID: channelId, first: 1)
+            let page = try await authRetry.run("fetchPollsPage") {
+                try checkCanFetchLiveEvents()
+                try await requireLiveEventScope(.channelReadPolls)
+                return try await client.api.fetchPollsPage(broadcasterID: channelId, first: 1)
+            }
             reconcileLiveEvent(.poll, snapshot: page.data.first.map(LiveEventUpdate.init(helixPoll:)), fetchedAt: pollFetchedAt)
         } catch {
             try rethrowIfCancelled(error)
@@ -296,7 +312,11 @@ extension ChannelSession {
         try checkCanFetchLiveEvents()
         let predictionFetchedAt = Date()
         do {
-            let page = try await client.api.fetchPredictionsPage(broadcasterID: channelId, first: 1)
+            let page = try await authRetry.run("fetchPredictionsPage") {
+                try checkCanFetchLiveEvents()
+                try await requireLiveEventScope(.channelReadPredictions)
+                return try await client.api.fetchPredictionsPage(broadcasterID: channelId, first: 1)
+            }
             reconcileLiveEvent(.prediction, snapshot: page.data.first.flatMap(LiveEventUpdate.init(helixPrediction:)), fetchedAt: predictionFetchedAt)
         } catch {
             try rethrowIfCancelled(error)
@@ -306,7 +326,11 @@ extension ChannelSession {
         try checkCanFetchLiveEvents()
         let trainFetchedAt = Date()
         do {
-            let status = try await client.api.fetchHypeTrainStatus(forBroadcasterID: channelId)
+            let status = try await authRetry.run("fetchHypeTrainStatus") {
+                try checkCanFetchLiveEvents()
+                try await requireLiveEventScope(.channelReadHypeTrain)
+                return try await client.api.fetchHypeTrainStatus(forBroadcasterID: channelId)
+            }
             reconcileLiveEvent(.hypeTrain, snapshot: status?.current.map(LiveEventUpdate.init(helixHypeTrain:)), fetchedAt: trainFetchedAt)
         } catch {
             try rethrowIfCancelled(error)
@@ -317,6 +341,31 @@ extension ChannelSession {
     private func checkCanFetchLiveEvents() throws {
         try Task.checkCancellation()
         guard canFetchLiveEvents else { throw CancellationError() }
+    }
+
+    /// Throws before any request unless the stored token is CONFIRMED to
+    /// carry `scope` — the same fail-closed pre-check `HelixChatActions`
+    /// runs for moderation actions, and for the same reason: a request
+    /// Twitch answers 401 makes TwitchKit's `HelixClient` run its own
+    /// `/oauth2/token` refresh, which always fails in chattr (the client
+    /// secret lives on the bridge) and deletes the Keychain token. A sign-in
+    /// that predates the live-event scopes would hit that on every reconcile.
+    ///
+    /// - No token stored: rethrows `HelixError.notAuthenticated`, which
+    ///   `authRetry` answers with a bridge refresh and one more attempt —
+    ///   no request has gone out, so nothing destructive ran.
+    /// - Token without the scope, or with no recorded scope list:
+    ///   `LiveEventScopeNotGranted`, which is not auth-refreshable
+    ///   (refreshing never adds a scope), so the kind is skipped quietly.
+    ///
+    /// Runs inside each `authRetry` attempt, so the credential a bridge
+    /// refresh swapped in is checked again before the retry goes out. Reads
+    /// the token without refreshing.
+    private func requireLiveEventScope(_ scope: TwitchScope) async throws {
+        let token = try await client.auth.tokenProvider.token()
+        guard HelixChatActions.grants(token, anyOf: [scope]) else {
+            throw LiveEventScopeNotGranted(scope: scope.rawValue)
+        }
     }
 
     /// A cancelled fetch can surface as `CancellationError` or as a
@@ -376,7 +425,12 @@ extension ChannelSession {
             return
         }
         do {
-            let page = try await client.api.fetchPollsPage(broadcasterID: channelId, ids: [pollId])
+            // Same scope pre-check and auth retry as the reconcile pass.
+            let page = try await authRetry.run("fetchPollsPage(deadline)") {
+                try checkCanFetchLiveEvents()
+                try await requireLiveEventScope(.channelReadPolls)
+                return try await client.api.fetchPollsPage(broadcasterID: channelId, ids: [pollId])
+            }
             guard let poll = page.data.first, !isStopped else { return }
             applyLiveEvent(.pollDeadline(
                 pollId: pollId,
@@ -385,5 +439,18 @@ extension ChannelSession {
         } catch {
             logger.info("Poll deadline fetch failed for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+    }
+}
+
+/// A live-event read skipped before any request: the stored token isn't
+/// confirmed to carry the kind's scope (the account signed in before chattr
+/// asked for it). Not auth-refreshable — refreshing never adds a scope — so
+/// `HelixAuthRetry` passes it straight through. See
+/// `ChannelSession.requireLiveEventScope(_:)`.
+struct LiveEventScopeNotGranted: Error, LocalizedError, Equatable {
+    let scope: String
+
+    var errorDescription: String? {
+        "\(scope) isn't confirmed for this sign-in; skipped"
     }
 }
