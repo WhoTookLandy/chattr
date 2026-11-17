@@ -267,7 +267,13 @@ final class DeviceCodeSignInModel {
             logger.notice("Device code approved after the sheet finished; discarding the token")
             return
         }
-        await completeSignIn(with: token)
+        // The token is single-use (the device code is spent), so saving it must
+        // not inherit this run's cancellation: backgrounding cancels `work`,
+        // and a cancelled URLSession call inside the account add would throw
+        // away the only token we'll get. An unstructured Task does not inherit
+        // cancellation; awaiting its value keeps the ordering.
+        let persist = Task { await self.completeSignIn(with: token) }
+        await persist.value
     }
 
     /// Atomically (on the main actor) takes ownership of finishing the

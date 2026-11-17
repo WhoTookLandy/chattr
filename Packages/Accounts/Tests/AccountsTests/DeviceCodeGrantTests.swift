@@ -349,6 +349,18 @@ struct DeviceCodeGrantTests {
         #expect(schedule.nextPollAt == start.addingTimeInterval(26))
     }
 
+    @Test("Setting the device clock back never stalls polling beyond one interval")
+    func scheduleSurvivesClockMovedBack() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let schedule = DeviceCodePollSchedule(prompt: Self.prompt(interval: 5), issuedAt: start)
+        schedule.recordPoll(at: start)
+        // Clock jumps back an hour: the raw gap to nextPollAt is 3605 s.
+        #expect(schedule.delay(at: start.addingTimeInterval(-3600)) == 5)
+        // The normal case is unchanged.
+        #expect(schedule.delay(at: start.addingTimeInterval(2)) == 3)
+        #expect(schedule.delay(at: start.addingTimeInterval(9)) == 0)
+    }
+
     @Test("Server-reported expiry ends polling with .expired")
     func serverExpiry() async throws {
         let (grant, _, _) = Self.grant(token: [Self.pending, (json: #"{"status":400,"message":"invalid device code"}"#, status: 400)])

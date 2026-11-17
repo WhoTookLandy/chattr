@@ -45,8 +45,10 @@ public enum Endpoints {
 
     // MARK: - Twitch identity (Device Code Grant)
     //
-    // Called directly from the device — the device-code grant needs only the
-    // public client_id, never the client_secret. Refreshes of the resulting
+    // Called directly from the device with only the client_id. Twitch documents
+    // these requests without a client_secret even for confidential clients,
+    // but that's unverified for this client: if Twitch rejects the client,
+    // sign-in falls back to the browser flow. Refreshes of the resulting
     // tokens still go through `ChattrAuth.refresh`.
 
     public enum TwitchID {
