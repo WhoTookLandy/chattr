@@ -10,9 +10,9 @@ import Channels
 /// binds the same keys with `@AppStorage`, so flipping one hides or shows an
 /// open chat's banner immediately.
 ///
-/// TODO(settings registry): register these three rows in the searchable
-/// settings registry once that lands; today they live in You → Chat →
-/// Filters (`ChatFiltersScreen`).
+/// The rows live in Settings → Chat → Filters (`ChatFiltersScreen`) and are
+/// registered in `SettingsRegistry` (`livePolls`, `livePredictions`,
+/// `liveHypeTrain`).
 public enum LiveEventsSettings {
     static let pollsKey = "chattr.liveEvents.polls"
     static let predictionsKey = "chattr.liveEvents.predictions"

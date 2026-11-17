@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Settings → Chat → Filters. Toggles for dropping transcript noise:
-/// command messages and well-known bots. Writes through
+/// Settings → Chat → Filters. Toggles for dropping transcript noise
+/// (command messages, well-known bots) and for the live-event banners
+/// (`LiveEventsSettings`, applied live). The noise filters write through
 /// `ChatFilterSettings`; `ChatTranscriptModel` reads the values at attach.
 struct ChatFiltersScreen: View {
 
@@ -49,22 +50,22 @@ struct ChatFiltersScreen: View {
                 Text("Shows bot messages smaller and dimmed, capped at three lines, with decorative banner lines removed. Applies instantly.")
             }
 
-            // Live-event banners. TODO(settings registry): register these
-            // rows once the searchable settings registry lands.
+            // Live-event banners — registered in `SettingsRegistry`
+            // (livePolls / livePredictions / liveHypeTrain).
             Section {
                 Toggle(isOn: $showPolls) {
-                    Label("Polls", systemImage: "chart.bar.fill")
+                    SettingLabel("Polls", systemImage: "chart.bar.fill", subtitle: "Live votes and their results")
                 }
                 Toggle(isOn: $showPredictions) {
-                    Label("Predictions", systemImage: "sparkles")
+                    SettingLabel("Predictions", systemImage: "sparkles", subtitle: "Channel Points bets and outcomes")
                 }
                 Toggle(isOn: $showHypeTrain) {
-                    Label("Hype Train", systemImage: "train.side.front.car")
+                    SettingLabel("Hype Train", systemImage: "train.side.front.car", subtitle: "Level and progress while it runs")
                 }
             } header: {
                 Text("Live Event Banners")
             } footer: {
-                Text("Shows live polls, predictions and Hype Trains as banners at the top of chat. Twitch only shares these with the broadcaster, so they appear in your own channel. Applies instantly.")
+                Text("Banners at the top of chat. Twitch only shares polls, predictions and Hype Trains with the broadcaster, so these only appear on your own channel. Applies instantly.")
             }
         }
         .navigationTitle("Filters")

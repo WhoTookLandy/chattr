@@ -38,6 +38,7 @@ struct SettingsRegistryTests {
         #expect(SettingsRegistry.search("dark mode").map(\.id).contains("theme"))
     }
 
+<<<<<<< HEAD
     @Test("Playback and device settings are findable by their synonyms")
     func playbackDeviceKeywords() {
         #expect(SettingsRegistry.search("sleep").map(\.id).contains("keepScreenAwake"))
@@ -46,6 +47,17 @@ struct SettingsRegistryTests {
         #expect(SettingsRegistry.search("autoplay").map(\.id).contains("videoOnOpen"))
         #expect(SettingsRegistry.search("wifi").map(\.id).contains("videoOnOpen"))
         #expect(SettingsRegistry.search("vibration").map(\.id).contains("haptics"))
+=======
+    @Test("Live-event banner toggles are findable and point at Filters")
+    func liveEventBanners() {
+        #expect(SettingsRegistry.search("vote").map(\.id).contains("livePolls"))
+        #expect(SettingsRegistry.search("bet").map(\.id).contains("livePredictions"))
+        #expect(SettingsRegistry.search("hype train").map(\.id).contains("liveHypeTrain"))
+        let banners = Set(SettingsRegistry.search("banner").map(\.id))
+        #expect(banners.isSuperset(of: ["livePolls", "livePredictions", "liveHypeTrain"]))
+        let byId = Dictionary(uniqueKeysWithValues: SettingsRegistry.entries.map { ($0.id, $0) })
+        #expect(byId["livePolls"]?.breadcrumb == "Chat › Filters")
+>>>>>>> 680dc0c (feat(settings): register live-event banner toggles in the settings registry)
     }
 
     @Test("Every term must match")

@@ -17,7 +17,11 @@ struct ChannelSessionLiveEventsReconcileTests {
         private struct State: Sendable {
             var requests: [String] = []
             var holdNext: Set<String> = []
+            /// Parked and not yet released.
             var held: Set<String> = []
+            /// The parked request's gate, once it has started waiting.
+            /// `release(_:)` may land before or after this is stored.
+            var gates: [String: CheckedContinuation<Void, Never>] = [:]
         }
 
         private let state = OSAllocatedUnfairLock(initialState: State())
@@ -39,7 +43,11 @@ struct ChannelSessionLiveEventsReconcileTests {
         }
 
         func release(_ endpoint: String) {
-            state.withLock { _ = $0.held.remove(endpoint) }
+            let gate = state.withLock { s -> CheckedContinuation<Void, Never>? in
+                s.held.remove(endpoint)
+                return s.gates.removeValue(forKey: endpoint)
+            }
+            gate?.resume()
         }
 
         func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -59,8 +67,13 @@ struct ChannelSessionLiveEventsReconcileTests {
                 // URLSession reports it.
                 let state = self.state
                 await Task.detached {
-                    while state.withLock({ $0.held.contains(endpoint) }) {
-                        try? await Task.sleep(for: .milliseconds(5))
+                    await withCheckedContinuation { (gate: CheckedContinuation<Void, Never>) in
+                        let alreadyReleased = state.withLock { s -> Bool in
+                            guard s.held.contains(endpoint) else { return true }
+                            s.gates[endpoint] = gate
+                            return false
+                        }
+                        if alreadyReleased { gate.resume() }
                     }
                 }.value
                 if Task.isCancelled { throw URLError(.cancelled) }
