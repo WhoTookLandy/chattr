@@ -21,14 +21,13 @@ private let logger = AppLogger.make("Features.OwnChatRestrictionState")
 /// (it outlives this page — the pager destroys pages two swipes away — and
 /// it sees self-clears and own echoes in arrival order). While attached,
 /// this page never runs the reducer itself: it REPORTS what only it sees
-/// (send rejections, dismiss) to the session, and SYNCS from it when the
-/// stream says the session's copy moved (our own clear or echo, a reprime).
-/// Every report and sync returns the session's ledger, adopted only if its
-/// `generation` is newer than the copy held — so out-of-order completions
-/// can never put an older state back. A send rejection is reported against
-/// the session captured when the send started (it lands there even if the
-/// page detached meanwhile), with the generation held then as its basis, so
-/// the ledger can drop one a newer self-clear has superseded.
+/// (dismiss) to the session, and SYNCS from it when the session's copy
+/// moved (our own clear or echo, a refused send, a reprime). Every report
+/// and sync returns the session's ledger, adopted only if its `generation`
+/// is newer than the copy held — so out-of-order completions can never put
+/// an older state back. Send outcomes are recorded by `ChannelSession.send`
+/// itself, ordered against clears and echoes by the ledger's `sequence`;
+/// the page holds no basis of its own that could lag.
 ///
 /// Detached (tests, previews), the same reducer runs locally instead.
 ///
@@ -56,8 +55,7 @@ final class OwnChatRestrictionState {
     /// locally only.
     @ObservationIgnored private var session: ChannelSession?
     /// The session `ledger` was copied from. Survives detach, so a re-attach
-    /// to the same session keeps a newer copy than its snapshot, and a send
-    /// started mid-attach knows whether its basis belongs to its session.
+    /// to the same session keeps a newer copy than its snapshot.
     @ObservationIgnored private var source: ChannelSession?
 
     /// The previous report / sync, so the next runs after it: the session
@@ -98,26 +96,21 @@ final class OwnChatRestrictionState {
 
     // MARK: - Signals
 
-    /// The basis a send starting now should report its outcome against
-    /// (`reportSendRejection`): the generation held, if it came from that
-    /// send's session.
-    func sendBasis(for session: ChannelSession) -> Int? {
-        source === session ? ledger.generation : nil
+    /// A send through `session` came back refused for our standing. The
+    /// session already recorded the outcome in `ChannelSession.send` (or
+    /// dropped it as stale — the session alone knows its own order), so
+    /// this only syncs. A no-op if the page detached meanwhile: the next
+    /// attach restores from the session anyway.
+    func syncAfterRejectedSend(on session: ChannelSession) {
+        guard self.session === session else { return }
+        enqueue(.sync, on: session)
     }
 
-    /// A precise restriction learned from a send attempt, recorded on the
-    /// session the send went through (`session`, captured when it started)
-    /// against `basis` (`sendBasis(for:)`, also captured then). Recorded
-    /// there even if this page detached meanwhile.
-    func reportSendRejection(_ restriction: OwnChatRestriction, on session: ChannelSession, basis: Int?) {
-        enqueue(.record(.rejected(restriction), basis: basis), on: session)
-    }
-
-    /// A precise restriction learned from a send attempt — the detached /
-    /// test form: reports to the attached session, else applies locally.
+    /// A precise restriction learned outside a session send — the detached
+    /// / test form: records on the attached session, else applies locally.
     func apply(_ restriction: OwnChatRestriction) {
         if let session {
-            reportSendRejection(restriction, on: session, basis: sendBasis(for: session))
+            enqueue(.record(.rejected(restriction)), on: session)
         } else {
             applyLocally(.rejected(restriction))
         }
@@ -160,7 +153,7 @@ final class OwnChatRestrictionState {
     func dismiss() {
         if current != nil { current = nil }
         if let session {
-            enqueue(.record(.dismissed, basis: nil), on: session)
+            enqueue(.record(.dismissed), on: session)
         } else {
             applyLocally(.dismissed)
         }
@@ -170,7 +163,7 @@ final class OwnChatRestrictionState {
 
     private enum Operation: Sendable {
         case sync
-        case record(OwnChatRestrictionLedger.Event, basis: Int?)
+        case record(OwnChatRestrictionLedger.Event)
     }
 
     private func enqueue(_ operation: Operation, on session: ChannelSession) {
@@ -181,8 +174,8 @@ final class OwnChatRestrictionState {
             switch operation {
             case .sync:
                 result = await session.ownChatRestriction()
-            case .record(let event, let basis):
-                result = await session.recordOwnChatRestriction(event, basis: basis)
+            case .record(let event):
+                result = await session.recordOwnChatRestriction(event)
             }
             self?.adopt(result, from: session)
         }

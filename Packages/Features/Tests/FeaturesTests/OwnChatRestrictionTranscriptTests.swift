@@ -7,10 +7,10 @@ import Channels
 
 /// The transcript's side of "you're timed out / banned here". The session's
 /// ledger is the authority: the page syncs from it on our own clear / echo
-/// and on reprime, and reports send rejections and dismissals to it.
+/// and on reprime or a refused send, and reports dismissals to it.
 /// Sessions are real but never started, as in
 /// `ChatTranscriptModelModerationTests`, so `recordOwnChatRestriction`
-/// stands in for what `handle(event:)` records before fanning an update out.
+/// stands in for what `handle(event:)` and `send(...)` record.
 @Suite("ChatTranscriptModel own chat restriction")
 @MainActor
 struct OwnChatRestrictionTranscriptTests {
@@ -141,46 +141,37 @@ struct OwnChatRestrictionTranscriptTests {
         await remounted.detach()
     }
 
-    @Test("A send rejection started before a newer self-clear can't restore its stale deadline")
-    func staleRejectionLosesToNewerClear() async {
+    @Test("A refused send syncs the session's verdict, even when the page's copy lagged a self-clear")
+    func rejectedSendSyncsFromSession() async {
         let session = makeSession()
         let model = makeModel()
         await model.attach(sessions: [session], currentUserId: "me-1")
 
-        // The send starts while unrestricted…
-        let basis = model.ownRestriction.sendBasis(for: session)
-        // …a mod times us out meanwhile…
+        // The session records a self-clear the page hasn't synced yet…
         await session.recordOwnChatRestriction(.ownMessagesCleared)
-        model.apply(.messagesClearedFromUser(targetUserId: "me-1"))
-        // …and only then does the older rejection come back.
-        model.ownRestriction.reportSendRejection(
-            .timedOut(until: Date.now.addingTimeInterval(30)), on: session, basis: basis
-        )
+        // …then a send started after it is refused; `ChannelSession.send`
+        // records that (stands in here), since no clear / echo followed.
+        let until = Date.now.addingTimeInterval(600)
+        await session.recordOwnChatRestriction(.rejected(.timedOut(until: until)))
+        model.ownRestriction.syncAfterRejectedSend(on: session)
         await model.ownRestriction.pendingSync?.value
 
-        #expect(await session.ownChatRestriction().current() == .removedByModerator)
-        #expect(model.ownRestriction.current == .removedByModerator)
-
-        // A remount restores the clear, not the stale deadline.
+        #expect(model.ownRestriction.current == .timedOut(until: until))
         await model.detach()
-        let remounted = makeModel()
-        await remounted.attach(sessions: [session], currentUserId: "me-1")
-        #expect(remounted.ownRestriction.current == .removedByModerator)
-        await remounted.detach()
     }
 
-    @Test("A send rejection arriving after detach still lands on the session")
+    @Test("A send refused after detach: the page doesn't sync, a remount restores the session's copy")
     func rejectionAfterDetachIsKept() async {
         let session = makeSession()
         let model = makeModel()
         await model.attach(sessions: [session], currentUserId: "me-1")
-        let basis = model.ownRestriction.sendBasis(for: session)
 
         await model.detach()
-        model.ownRestriction.reportSendRejection(.banned, on: session, basis: basis)
+        await session.recordOwnChatRestriction(.rejected(.banned))
+        model.ownRestriction.syncAfterRejectedSend(on: session)
         await model.ownRestriction.pendingSync?.value
+        #expect(model.ownRestriction.current == nil)
 
-        #expect(await session.ownChatRestriction().current() == .banned)
         let remounted = makeModel()
         await remounted.attach(sessions: [session], currentUserId: "me-1")
         #expect(remounted.ownRestriction.current == .banned)

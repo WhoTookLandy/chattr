@@ -138,10 +138,10 @@ struct HelixChatActions: Sendable {
         isolation: isolated (any Actor)? = #isolation
     ) async throws {
         let trimmedReason = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
-        try await requireGrantedScope(.moderatorManageBannedUsers)
         do {
             _ = try await authRetry.run(durationSeconds == nil ? "banUser" : "timeoutUser") {
-                try await client.api.banUser(
+                try await requireGrantedScope(.moderatorManageBannedUsers)
+                return try await client.api.banUser(
                     broadcasterID: channelId,
                     moderatorID: accountUserId,
                     userID: userId,
@@ -159,8 +159,8 @@ struct HelixChatActions: Sendable {
         userId: String,
         isolation: isolated (any Actor)? = #isolation
     ) async throws {
-        try await requireGrantedScope(.moderatorManageBannedUsers)
         try await authRetry.run("unbanUser") {
+            try await requireGrantedScope(.moderatorManageBannedUsers)
             try await client.api.unbanUser(
                 broadcasterID: channelId,
                 moderatorID: accountUserId,
@@ -180,10 +180,10 @@ struct HelixChatActions: Sendable {
         guard !trimmed.isEmpty else {
             throw AppError(message: "A warning needs a reason.")
         }
-        try await requireGrantedScope(.moderatorManageWarnings)
         do {
             _ = try await authRetry.run("warnChatUser") {
-                try await client.api.warnChatUser(
+                try await requireGrantedScope(.moderatorManageWarnings)
+                return try await client.api.warnChatUser(
                     broadcasterID: channelId,
                     moderatorID: accountUserId,
                     userID: userId,
@@ -266,9 +266,11 @@ struct HelixChatActions: Sendable {
         return scopes.contains { granted.contains($0.rawValue) }
     }
 
-    /// Throws `.needsSignInAgain` before any request when the stored token
-    /// is known to lack `scope` (an account signed in before chattr asked
-    /// for it).
+    /// Throws `.needsSignInAgain` before any request unless the stored
+    /// token is CONFIRMED to carry `scope` (an account signed in before
+    /// chattr asked for it doesn't). Runs inside each `authRetry` attempt,
+    /// so a credential the bridge refresh swapped in — possibly an older,
+    /// unscoped one — is checked again before the retry goes out.
     ///
     /// Why not let Twitch answer: a missing scope is a 401, and a 401
     /// through `HelixClient` triggers TwitchKit's own refresh, which fails in
@@ -278,14 +280,13 @@ struct HelixChatActions: Sendable {
     /// of that can succeed — checking first keeps the credential intact and
     /// gives the card its "sign in again" message.
     ///
-    /// Reads the token without refreshing. Proceeds when the token can't be
-    /// read (the normal `authRetry` recovery handles a wiped store) or
-    /// carries no scope list (nothing to judge by — the request decides).
+    /// Fails closed: a token that can't be read, or that carries no recorded
+    /// scope list, can't prove the scope, so nothing is sent. Reads the
+    /// token without refreshing.
     private func requireGrantedScope(_ scope: TwitchScope) async throws {
         guard let token = try? await client.auth.tokenProvider.token(),
-              let granted = token.scope else { return }
-        guard granted.contains(scope.rawValue) else {
-            logger.notice("\(scope.rawValue, privacy: .public) isn't granted to this sign-in; asking to sign in again")
+              Self.grants(token, anyOf: [scope]) else {
+            logger.notice("\(scope.rawValue, privacy: .public) isn't confirmed for this sign-in; asking to sign in again")
             throw ModerationActionError.needsSignInAgain
         }
     }

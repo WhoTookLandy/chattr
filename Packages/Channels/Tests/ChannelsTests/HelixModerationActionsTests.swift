@@ -34,8 +34,8 @@ struct HelixModerationActionsTests {
         func deleteToken() async throws { deleteCount.withLock { $0 += 1 } }
     }
 
-    /// No recorded scope list: the action pre-checks can't judge, so the
-    /// request goes out (and the banned lookup stays unknown).
+    /// No recorded scope list: nothing confirms a scope, so the action
+    /// pre-checks refuse it (and the banned lookup stays unknown).
     private static let plainToken = OAuthToken(accessToken: "test-token")
 
     /// What a current sign-in carries: a refresh token and the moderation
@@ -93,7 +93,7 @@ struct HelixModerationActionsTests {
         status: Int = 200,
         json: String = "{\"data\":[]}",
         accountUserId: String = "mod-1",
-        token: OAuthToken = HelixModerationActionsTests.plainToken,
+        token: OAuthToken = HelixModerationActionsTests.fullyScopedToken,
         refreshes: RefreshCounter = RefreshCounter()
     ) -> (HelixChatActions, RecordingHTTPClient, FixedTokenStore) {
         let http = RecordingHTTPClient(status: status, json: json)
@@ -322,6 +322,63 @@ struct HelixModerationActionsTests {
         try await actions.banUser(userId: "target-9", durationSeconds: 600, reason: nil)
 
         #expect(http.requests.count == 1)
+    }
+
+    @Test("A token with no recorded scope list fails closed: sign-in-again, no request, token kept")
+    func actionsWithUnknownScopesNeverHitTwitch() async {
+        let refreshes = RefreshCounter()
+        let (actions, http, store) = makeActions(
+            status: 401,
+            json: #"{"error":"Unauthorized","status":401,"message":"Missing scope"}"#,
+            token: Self.plainToken,
+            refreshes: refreshes
+        )
+
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.banUser(userId: "target-9", durationSeconds: 600, reason: nil)
+        }
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.unbanUser(userId: "target-9")
+        }
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.warnUser(userId: "target-9", reason: "be nice")
+        }
+
+        #expect(http.requests.isEmpty)
+        #expect(refreshes.count == 0)
+        #expect(store.deletes == 0)
+    }
+
+    @Test("A bridge refresh that recovers an older, unscoped credential is re-checked: no second request")
+    func retryRechecksRecoveredCredential() async throws {
+        let http = RecordingHTTPClient(
+            status: 401,
+            json: #"{"error":"Unauthorized","status":401,"message":"Invalid OAuth token"}"#
+        )
+        // Scoped but expired, and with no refresh token so TwitchKit's own
+        // 401 handling throws without a token-endpoint round trip.
+        let expiredScoped = OAuthToken(accessToken: "test-token", scope: ["moderator:manage:banned_users"])
+        let client = TwitchClient(clientId: "test-client", tokenStore: FixedTokenStore(expiredScoped), httpClient: http)
+        let refreshes = RefreshCounter()
+        let actions = HelixChatActions(
+            client: client,
+            channelId: "chan-1",
+            accountUserId: "mod-1",
+            authRetry: HelixAuthRetry(refreshTokenHandler: {
+                refreshes.increment()
+                // The bridge hands back a credential with no recorded scopes.
+                try await client.auth.tokenProvider.setToken(Self.plainToken)
+            }),
+            http: http
+        )
+
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.banUser(userId: "target-9", durationSeconds: 600, reason: nil)
+        }
+
+        #expect(refreshes.count == 1)
+        let banRequests = http.requests.filter { $0.url?.path == "/helix/moderation/bans" }
+        #expect(banRequests.count == 1)
     }
 
     @Test("The pre-check's error survives the session's error mapping")

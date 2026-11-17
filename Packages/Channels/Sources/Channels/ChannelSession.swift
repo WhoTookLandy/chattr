@@ -439,10 +439,12 @@ public actor ChannelSession {
             ownRestriction.apply(.ownMessagesCleared)
         }
         // …and one of OUR messages was broadcast, so nothing blocks us any
-        // more. Recorded here (not by the page) so it's ordered against the
-        // clears above. The nil check comes first: while unrestricted —
-        // nearly always — this costs one comparison per message.
-        if ownRestriction.stored != nil, case .message(let message) = channelEvent,
+        // more, and any send still awaiting its answer started before this
+        // (its rejection is stale). Recorded here (not by the page) so it's
+        // ordered against the clears above. The cheap check comes first:
+        // unrestricted with no send in flight — nearly always — this costs
+        // two comparisons per message.
+        if ownRestriction.observesOwnEchoes, case .message(let message) = channelEvent,
            message.chatterUserId == accountUserId {
             ownRestriction.apply(.ownMessageDelivered)
         }

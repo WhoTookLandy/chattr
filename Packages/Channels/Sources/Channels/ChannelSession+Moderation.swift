@@ -80,21 +80,16 @@ extension ChannelSession {
         ownRestriction
     }
 
-    /// Records a signal only the chat page sees (a send rejection, the user
-    /// dismissing the banner) and returns the resulting ledger for the page
-    /// to adopt. Self-clears and own echoes arrive through `handle(event:)`
-    /// instead and must not be forwarded here (tests use it to stand in for
-    /// them).
-    ///
-    /// - Parameter basis: for a send rejection, the ledger generation the
-    ///   page held when the send started; a self-clear since then makes the
-    ///   rejection stale and it's dropped (`OwnChatRestrictionLedger.apply`).
+    /// Records a signal only the chat page sees (the user dismissing the
+    /// banner) and returns the resulting ledger for the page to adopt.
+    /// Self-clears and own echoes arrive through `handle(event:)`, and send
+    /// outcomes are recorded by `send(...)` itself; none of those are
+    /// forwarded here (tests use it to stand in for them).
     @discardableResult
     public func recordOwnChatRestriction(
-        _ event: OwnChatRestrictionLedger.Event,
-        basis: Int? = nil
+        _ event: OwnChatRestrictionLedger.Event
     ) -> OwnChatRestrictionLedger {
-        ownRestriction.apply(event, basis: basis)
+        ownRestriction.apply(event)
         return ownRestriction
     }
 

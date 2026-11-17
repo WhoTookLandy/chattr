@@ -352,11 +352,6 @@ public final class ChatTranscriptModel {
         if repinsTranscript {
             outgoingSendCount &+= 1
         }
-        // A rejection is reported to THIS session (even if the page detaches
-        // before Twitch answers), against the own-restriction generation
-        // held now — so the ledger can drop it if a self-clear lands first.
-        let restrictionBasis = ownRestriction.sendBasis(for: session)
-
         do {
             let response = try await session.send(canonical, replyParentMessageId: reply?.parentMessageId)
             if response.isSent {
@@ -372,17 +367,18 @@ public final class ChatTranscriptModel {
             let reason = response.dropReason?.message ?? "Twitch didn't broadcast the message."
             outgoing.failed(pendingId: pendingId, reason: reason, retryText: canonical)
             logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(reason, privacy: .public)")
-            // Timed out / banned / warned: the precise state (and the
-            // timeout's end) for the banner and the compose bar.
-            if let restriction = OwnChatRestriction(dropCode: response.dropReason?.code, message: response.dropReason?.message) {
-                ownRestriction.reportSendRejection(restriction, on: session, basis: restrictionBasis)
+            // Timed out / banned / warned: `session.send` already recorded
+            // the precise state (and the timeout's end) unless a newer clear
+            // or echo made it stale; the banner and compose bar sync to it.
+            if OwnChatRestriction(dropCode: response.dropReason?.code, message: response.dropReason?.message) != nil {
+                ownRestriction.syncAfterRejectedSend(on: session)
             }
         } catch HelixError.forbidden(let apiError) {
             // Twitch answers a banned sender with 403 rather than a drop.
             outgoing.failed(pendingId: pendingId, reason: apiError.message, retryText: canonical)
             logger.error("send forbidden: \(apiError.message, privacy: .public)")
-            if let restriction = OwnChatRestriction(dropCode: nil, message: apiError.message) {
-                ownRestriction.reportSendRejection(restriction, on: session, basis: restrictionBasis)
+            if OwnChatRestriction(dropCode: nil, message: apiError.message) != nil {
+                ownRestriction.syncAfterRejectedSend(on: session)
             }
         } catch {
             // Network blip, unauthorized after refresh-and-retry, … — same
