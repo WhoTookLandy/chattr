@@ -2,7 +2,7 @@
 import SwiftUI
 import UIKit
 
-/// Owns `UIApplication.isIdleTimerDisabled` for Settings → App → Keep
+/// Owns `UIApplication.isIdleTimerDisabled` for Settings → Video & Device → Keep
 /// Screen Awake.
 ///
 /// Refcounted: anything that should keep the screen on while it's visible

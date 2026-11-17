@@ -116,7 +116,7 @@ public struct UIPreviewRoot: View {
                                     liveStreams: HomePreviewData.streams,
                                     profileImageURLs: [:],
                                     liveLoadState: .loaded,
-                                    onStreamTap: { _ in }
+                                    onStreamTap: { _, _ in }
                                 )
                             case .following:
                                 FollowingList(account: account, accountStore: accountStore)

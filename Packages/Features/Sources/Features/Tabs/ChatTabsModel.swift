@@ -78,7 +78,7 @@ public final class ChatTabsModel {
         set {
             guard newValue != storedIsPresented else { return }
             if newValue, let tab = tabs.first(where: { $0.id == activeTabId }) {
-                onWillPresent?(tab)
+                onWillPresent?(tab, presentingIntent)
             }
             storedIsPresented = newValue
             // Coming back to a chat acknowledges its ping, like switching to it.
@@ -90,10 +90,27 @@ public final class ChatTabsModel {
     private var storedIsPresented = false
 
     /// Runs just before a chat comes on screen — the pager being presented,
-    /// or a channel opened while it already is — with the tab it opens on.
-    /// AppShell applies the "when a chat opens" video preference here,
-    /// before the header mounts. Swipes between pages don't run it.
-    @ObservationIgnored public var onWillPresent: (@MainActor (ChatTab) -> Void)?
+    /// or a channel opened while it already is — with the tab it opens on
+    /// and how it was opened. AppShell applies the "when a chat opens" video
+    /// preference here (implicit opens only), before the header mounts.
+    /// Swipes between pages don't run it.
+    @ObservationIgnored public var onWillPresent: (@MainActor (ChatTab, ChatOpenIntent) -> Void)?
+
+    /// The intent of the open in progress, read by the `isPresented` setter.
+    /// Set only for the duration of one `open` / `present` call, so a later
+    /// presentation (the back stack, a plain tap) is always `.implicit`.
+    @ObservationIgnored private var presentingIntent: ChatOpenIntent = .implicit
+
+    /// Brings an already-open tab on screen (the open-chats list), carrying
+    /// the user's intent through to `onWillPresent`.
+    public func present(tabId: UUID, intent: ChatOpenIntent = .implicit) {
+        guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
+        if isPresented { onWillPresent?(tab, intent) }
+        activeTabId = tabId
+        presentingIntent = intent
+        isPresented = true
+        presentingIntent = .implicit
+    }
 
     /// Tabs holding an unseen @-mention of the signed-in user — drives the
     /// red dots in the quick-switcher popover and the channel pill.
@@ -333,7 +350,7 @@ public final class ChatTabsModel {
     /// keep the refcount honest — re-focusing isn't a new acquisition.
     public func open(_ tab: ChatTab) {
         // Already on screen, `isPresented` won't change — announce here.
-        if isPresented { onWillPresent?(tab) }
+        if isPresented { onWillPresent?(tab, .implicit) }
         let isNew = !tabs.contains(where: { $0.id == tab.id })
         if isNew {
             tabs.append(tab)
@@ -353,22 +370,27 @@ public final class ChatTabsModel {
     /// `onOpen` fires only when a new tab is actually appended. The
     /// idempotent re-focus path (same channel already in a single-channel
     /// tab) skips it for the same refcount-honesty reason as `open(_:)`.
+    ///
+    /// `intent` is `.explicit` when the user already chose how to watch
+    /// (the preview menu's Watch / Listen / Chat Only); it reaches
+    /// `onWillPresent` so the "when a chat opens" preference doesn't
+    /// override that choice.
     @discardableResult
-    public func open(channel: ChannelDescriptor) -> UUID {
+    public func open(channel: ChannelDescriptor, intent: ChatOpenIntent = .implicit) -> UUID {
         // If an existing tab has just this channel, re-open it rather than
         // creating a duplicate (idempotent open-from-follows).
         if let existing = tabs.first(where: { $0.channels.count == 1 && $0.channels[0] == channel }) {
-            // Already on screen, `isPresented` won't change — announce here.
-            if isPresented { onWillPresent?(existing) }
-            activeTabId = existing.id
-            isPresented = true
+            present(tabId: existing.id, intent: intent)
             return existing.id
         }
         let tab = ChatTab(channel: channel)
-        if isPresented { onWillPresent?(tab) }
+        // Already on screen, `isPresented` won't change — announce here.
+        if isPresented { onWillPresent?(tab, intent) }
         tabs.append(tab)
         activeTabId = tab.id
+        presentingIntent = intent
         isPresented = true
+        presentingIntent = .implicit
         persistTabs()
         scheduleOpen(tab)
         return tab.id

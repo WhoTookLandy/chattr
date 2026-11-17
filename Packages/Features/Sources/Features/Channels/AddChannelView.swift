@@ -208,8 +208,8 @@ struct AddChannelView: View {
                         name: stream.userName,
                         profileImageURL: profileURL,
                         stream: stream,
-                        open: {
-                            openChannel?(stream: stream, profileImageURL: profileURL)
+                        open: { intent in
+                            openChannel?(stream: stream, profileImageURL: profileURL, intent: intent)
                             dismiss()
                         }
                     )

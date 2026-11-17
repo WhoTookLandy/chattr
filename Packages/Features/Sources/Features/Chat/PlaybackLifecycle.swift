@@ -7,7 +7,7 @@ import WebKit
 
 extension StreamPlayerController {
     /// Whether leaving the app may hand this stream to picture in picture,
-    /// per Settings → Video → Picture in Picture.
+    /// per Settings → Video & Device → Picture in Picture.
     var allowsAutomaticPictureInPicture: Bool {
         switch PlaybackPreferences.pictureInPicture {
         case .off: false

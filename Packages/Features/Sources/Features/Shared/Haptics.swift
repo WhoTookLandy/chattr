@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings → App → Haptic Feedback. Every haptic in the app goes through
+/// Settings → Video & Device → Haptic Feedback. Every haptic in the app goes through
 /// `.appSensoryFeedback(_:trigger:)` so this one switch silences them all.
 enum HapticSettings {
     /// Default on (the system default for feedback).

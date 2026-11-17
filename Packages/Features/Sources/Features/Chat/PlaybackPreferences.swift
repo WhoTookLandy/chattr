@@ -1,6 +1,6 @@
 import Foundation
 
-/// Device and playback preferences (Settings → Video and Settings → App).
+/// Device and playback preferences (Settings → Video & Device).
 ///
 /// Plain `UserDefaults` keys, read at the moment they matter — leaving the
 /// app, opening a chat, a mute change. No chat view observes them, so

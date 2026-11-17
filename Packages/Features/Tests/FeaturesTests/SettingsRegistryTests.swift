@@ -38,6 +38,16 @@ struct SettingsRegistryTests {
         #expect(SettingsRegistry.search("dark mode").map(\.id).contains("theme"))
     }
 
+    @Test("Playback and device settings are findable by their synonyms")
+    func playbackDeviceKeywords() {
+        #expect(SettingsRegistry.search("sleep").map(\.id).contains("keepScreenAwake"))
+        #expect(SettingsRegistry.search("lock").map(\.id).contains("keepScreenAwake"))
+        #expect(SettingsRegistry.search("pip").map(\.id).contains("pictureInPicture"))
+        #expect(SettingsRegistry.search("autoplay").map(\.id).contains("videoOnOpen"))
+        #expect(SettingsRegistry.search("wifi").map(\.id).contains("videoOnOpen"))
+        #expect(SettingsRegistry.search("vibration").map(\.id).contains("haptics"))
+    }
+
     @Test("Every term must match")
     func allTermsMustMatch() {
         let ids = SettingsRegistry.search("hide bots").map(\.id)

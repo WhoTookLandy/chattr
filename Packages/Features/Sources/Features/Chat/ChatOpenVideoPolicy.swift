@@ -1,7 +1,7 @@
 #if os(iOS)
 import Foundation
 
-/// Settings → Video → When a Chat Opens. Runs just before a chat comes on
+/// Settings → Video & Device → When a Chat Opens. Runs just before a chat comes on
 /// screen (`ChatTabsModel.onWillPresent`), so the header mounts already in
 /// the chosen state — no frame of the wrong layout, no engine started and
 /// immediately torn down.
@@ -11,7 +11,12 @@ enum ChatOpenVideoPolicy {
     /// (cold start). It belongs to one opening: the next one cancels it.
     private static var pendingDecision: Task<Void, Never>?
 
-    static func apply(opening tab: ChatTab, chatTabs: ChatTabsModel?, playback: PlaybackCenter?) {
+    static func apply(
+        opening tab: ChatTab,
+        intent: ChatOpenIntent,
+        chatTabs: ChatTabsModel?,
+        playback: PlaybackCenter?
+    ) {
         pendingDecision?.cancel()
         pendingDecision = nil
         guard let playback else { return }
@@ -21,6 +26,11 @@ enum ChatOpenVideoPolicy {
         // preference, even while a different stream plays.
         if isPlaying(tab, in: playback) { return }
         playback.startNextStreamMuted = false
+
+        // Watch / Listen / Chat Only from the preview menu already set the
+        // video state (and audio-only) the user asked for: honour it, with
+        // sound, on any network.
+        if intent == .explicit { return }
 
         switch PlaybackPreferences.videoOnOpen {
         case .lastUsed:

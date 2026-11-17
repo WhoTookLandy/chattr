@@ -67,15 +67,13 @@ struct VideoDeviceSettingsScreen: View {
                     SettingLabel(
                         "Picture in Picture",
                         systemImage: "pip",
-                        subtitle: pictureInPicture.subtitle,
-                        disabledReason: useNativePlayer ? nil : "Needs Native Video Player on"
+                        subtitle: pictureInPicture.subtitle
                     )
                 }
-                .disabled(!useNativePlayer)
             } header: {
                 Text("Video")
             } footer: {
-                Text("Autoplay starts the stream muted, and only on Wi-Fi; on cellular the video stays closed. With \"With Sound On\", a muted or paused stream pauses when you leave instead of opening picture in picture.\n\nThe native player relies on an unofficial Twitch interface; if it can't load a stream, chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video.")
+                Text("Autoplay starts the stream muted, and only on Wi-Fi; on cellular the video stays closed. Picture in picture opens automatically with the native player; with \"With Sound On\", a muted or paused stream pauses when you leave instead.\n\nThe native player relies on an unofficial Twitch interface; if it can't load a stream, chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video.")
             }
 
             Section {
