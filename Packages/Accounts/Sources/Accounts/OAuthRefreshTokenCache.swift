@@ -51,6 +51,10 @@ private let logger = AppLogger.make("Accounts.OAuthRefreshTokenCache")
 /// inject an in-memory fake so the namespacing + nil/empty guard logic is
 /// covered without a host-app entitlement (a plain SwiftPM test bundle has no
 /// Keychain access and SecItem returns `errSecMissingEntitlement`).
+///
+/// Each operation also takes an optional `keychain` argument. `AccountStore`
+/// passes its own (`AccountStore.refreshTokenKeychain`), so a test can watch
+/// one store without swapping the process-wide seam under parallel suites.
 enum OAuthRefreshTokenCache {
 
     /// Backend used for all Keychain reads/writes. Defaults to the real
@@ -77,7 +81,11 @@ enum OAuthRefreshTokenCache {
     /// keep the previous cached value than overwrite with nothing (Twitch
     /// sometimes only rotates refresh tokens conditionally; absence in a
     /// response means "carry on with the previous one," not "we revoked it").
-    static func save(refreshToken: String?, for userId: String) {
+    static func save(
+        refreshToken: String?,
+        for userId: String,
+        in keychain: any RefreshTokenKeychain = OAuthRefreshTokenCache.keychain
+    ) {
         guard let refreshToken, !refreshToken.isEmpty else {
             logger.info("OAuthRefreshTokenCache.save called with nil/empty for \(userId, privacy: .public); skipping")
             return
@@ -92,13 +100,19 @@ enum OAuthRefreshTokenCache {
     }
 
     /// Read the cached refresh token, or nil if none stored.
-    static func load(for userId: String) -> String? {
+    static func load(
+        for userId: String,
+        in keychain: any RefreshTokenKeychain = OAuthRefreshTokenCache.keychain
+    ) -> String? {
         guard let data = keychain.load(key: key(for: userId)) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
     /// Drop the cached refresh token (used when removing an account).
-    static func delete(for userId: String) {
+    static func delete(
+        for userId: String,
+        in keychain: any RefreshTokenKeychain = OAuthRefreshTokenCache.keychain
+    ) {
         keychain.delete(key: key(for: userId))
         logger.info("Cleared cached refresh_token for \(userId, privacy: .public)")
     }

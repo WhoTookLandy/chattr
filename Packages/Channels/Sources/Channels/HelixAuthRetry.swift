@@ -18,8 +18,10 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 ///                          rejection: the refresh token is dead and the
 ///                          account is already force-signed-out, so the
 ///                          refresh below throws `.sessionExpired`.
-///   - .notAuthenticated  — the store is empty (e.g. wiped by TwitchKit's
-///                          logout in builds before the interceptor).
+///   - .notAuthenticated  — TwitchKit holds no token: its in-memory copy was
+///                          dropped after a refresh it couldn't complete, or
+///                          the store was wiped by TwitchKit's
+///                          logout in builds before the interceptor.
 /// All three mean "refresh via the bridge and retry once." This mirrors
 /// `AccountStore.withTokenRefresh`, which nets the same three cases around
 /// the Helix call sites outside `ChannelSession`. (Previously only the chat

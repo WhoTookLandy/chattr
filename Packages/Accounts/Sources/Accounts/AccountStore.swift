@@ -52,6 +52,15 @@ public final class AccountStore {
     /// Single-flight gate for bridge refreshes — see `TokenRefresher`.
     let tokenRefresher = TokenRefresher()
 
+    /// Test override for the `OAuthRefreshTokenCache` backend; `nil` (always,
+    /// in the app) uses the cache's process-wide seam.
+    private let refreshTokenKeychainOverride: (any RefreshTokenKeychain)?
+
+    /// Where this store mirrors refresh tokens (see `OAuthRefreshTokenCache`).
+    var refreshTokenKeychain: any RefreshTokenKeychain {
+        refreshTokenKeychainOverride ?? OAuthRefreshTokenCache.keychain
+    }
+
     public convenience init(modelContainer: ModelContainer, clientId: String) {
         self.init(
             modelContainer: modelContainer,
@@ -61,17 +70,19 @@ public final class AccountStore {
         )
     }
 
-    /// Designated init with the seams tests swap out. `twitchTransport` and
-    /// `tokenStoreFactory` default to the real network and Keychain (see
-    /// `TwitchClientCache`).
+    /// Designated init with the seams tests swap out. `twitchTransport`,
+    /// `tokenStoreFactory` and `refreshTokenKeychain` default to the real
+    /// network and Keychain (see `TwitchClientCache`).
     init(
         modelContainer: ModelContainer,
         clientId: String,
         defaults: UserDefaults,
         bridgeRefresh: BridgeTokenRefresh,
         twitchTransport: any HTTPClient = URLSessionHTTPClient(),
-        tokenStoreFactory: (@Sendable (_ namespace: String) -> any TwitchTokenStore)? = nil
+        tokenStoreFactory: (@Sendable (_ namespace: String) -> any TwitchTokenStore)? = nil,
+        refreshTokenKeychain: (any RefreshTokenKeychain)? = nil
     ) {
+        self.refreshTokenKeychainOverride = refreshTokenKeychain
         let activity = SessionActivitySignal()
         self.sessionActivity = activity
         self.repository = AccountRepository(modelContainer: modelContainer)
@@ -85,9 +96,9 @@ public final class AccountStore {
         self.bridgeRefresh = bridgeRefresh
         // TwitchKit's own 401 refresh goes through the bridge, never Twitch
         // (see `TwitchKitRefreshInterceptor`). Weak: the cache is ours.
-        clients.refreshHandler = { [weak self] userId in
-            guard let self else { return .unavailable }
-            return await self.answerTwitchKitRefresh(userId: userId)
+        clients.refreshHandler = { [weak self] userId, lifecycle in
+            guard let self else { return .unavailable(current: nil) }
+            return await self.answerTwitchKitRefresh(userId: userId, lifecycle: lifecycle)
         }
     }
 
@@ -177,19 +188,22 @@ public final class AccountStore {
     public func add(token: OAuthToken, scopes: [TwitchScope]) async throws -> Account {
         // 1. Learn who the token belongs to via a probe client over an
         //    in-memory store — nothing hits the Keychain until we know the userId.
-        let probe = clients.makeProbeClient()
-        try await probe.auth.setToken(token)
+        let probe = clients.makeProbeClient(token: token)
         let user = try await probe.api.fetchUser()
 
-        // 2. Build the persistent (Keychain-backed) client, seed it, cache it.
+        // 2. Retire any client this account already had (re-authorizing),
+        //    so a refresh still running on it can't overwrite or delete the
+        //    token saved below. Then build the persistent (Keychain-backed)
+        //    client, seed it, cache it.
+        clients.evict(userId: user.id)
         let persistent = clients.makeClient(forUserId: user.id)
-        try await persistent.auth.setToken(token)
+        try await persistent.client.auth.setToken(token)
         clients.install(persistent, forUserId: user.id)
 
         // 3. Cache the refresh_token chattr-side so it survives TwitchKit's
         //    defensive `logout()` if a future refresh fails (see
         //    OAuthRefreshTokenCache header for the full rationale).
-        OAuthRefreshTokenCache.save(refreshToken: token.refreshToken, for: user.id)
+        OAuthRefreshTokenCache.save(refreshToken: token.refreshToken, for: user.id, in: refreshTokenKeychain)
 
         // 4. Persist the Account row.
         // Note: TwitchUser.profileImageUrl uses lowercase 'url' (Codable from snake_case).
@@ -273,21 +287,21 @@ public final class AccountStore {
             logger.info("forceSignOut: no Account row for userId \(userId) — likely already gone")
             // Still clear the in-memory client cache — it may have
             // outlived the row.
-            OAuthRefreshTokenCache.delete(for: userId)
+            OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
             clients.evict(userId: userId)
             return
         }
 
         // Best-effort cleanup. Each step logs on failure but doesn't throw.
         do {
-            try await clients.client(forUserId: userId).auth.logout()
+            try await clients.logOut(userId: userId)
         } catch {
             // .warning, not .error: forceSignOut is intentionally best-
             // effort; a TwitchKit logout failure is expected if the
             // token was already invalid. Worth seeing but not "broken."
             logger.warning("forceSignOut: TwitchKit logout failed for @\(account.login, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        OAuthRefreshTokenCache.delete(for: userId)
+        OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
         clients.evict(userId: userId)
         // Mark, don't delete — see the doc comment. Also clear the stored
         // selection if it pointed here, so RootView's fallback picks a
@@ -319,8 +333,11 @@ public final class AccountStore {
         let platform = account.platform
 
         // TwitchAuth.logout() delegates to tokenProvider.logout() internally.
+        // `logOut` marks the client as signing out first, so the guarded
+        // token store lets this delete through and drops any save from a
+        // refresh still in flight.
         do {
-            try await clients.client(forUserId: userId).auth.logout()
+            try await clients.logOut(userId: userId)
         } catch {
             // .warning, not .error: removal proceeds regardless. A leftover
             // Keychain entry under this namespace is harmless — re-adding
@@ -330,7 +347,7 @@ public final class AccountStore {
         // Clear our refresh_token cache for this user too — TwitchKit's
         // logout only touches its own store; our fallback cache is separate
         // (intentionally — see OAuthRefreshTokenCache header).
-        OAuthRefreshTokenCache.delete(for: userId)
+        OAuthRefreshTokenCache.delete(for: userId, in: refreshTokenKeychain)
         clients.evict(userId: userId)
         // If we removed the active account, clear the stored selection so
         // RootView's @AppStorage fallback (accounts.first by addedAt) picks
@@ -359,7 +376,7 @@ public final class AccountStore {
     /// strand them at "Session expired — please sign in again." Mirroring
     /// at launch protects them for the cost of one Keychain read + write.
     public func warmRefreshTokenCacheIfNeeded(for account: Account) async {
-        if OAuthRefreshTokenCache.load(for: account.userId) != nil {
+        if OAuthRefreshTokenCache.load(for: account.userId, in: refreshTokenKeychain) != nil {
             return  // Already populated; nothing to do.
         }
         let client = client(for: account)
@@ -369,7 +386,7 @@ public final class AccountStore {
                 logger.info("warmRefreshTokenCache: TwitchKit token has no refresh_token for @\(account.login)")
                 return
             }
-            OAuthRefreshTokenCache.save(refreshToken: refreshToken, for: account.userId)
+            OAuthRefreshTokenCache.save(refreshToken: refreshToken, for: account.userId, in: refreshTokenKeychain)
             logger.info("warmRefreshTokenCache: mirrored refresh_token for @\(account.login)")
         } catch {
             // TwitchKit's store is empty (or unreadable). We can't backfill

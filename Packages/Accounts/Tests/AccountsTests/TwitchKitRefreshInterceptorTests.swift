@@ -8,25 +8,43 @@ import TwitchKit
 
 // MARK: - Fixtures
 
-/// An in-memory token store that counts writes and deletes, so a test can
-/// prove whether TwitchKit logged an account out behind a call.
+/// An in-memory token store that counts reads, writes and deletes, so a test
+/// can prove whether TwitchKit logged an account out behind a call. With
+/// `failLoadsAfter`, every read after that many throws, like a Keychain read
+/// that fails mid-session.
 private final class CountingTokenStore: TwitchTokenStore, Sendable {
     private struct State: Sendable {
         var token: OAuthToken?
+        var loads = 0
         var saves = 0
         var deletes = 0
     }
 
-    private let state: OSAllocatedUnfairLock<State>
+    struct LoadFailed: Error {}
 
-    init(_ token: OAuthToken?) {
+    private let state: OSAllocatedUnfairLock<State>
+    private let failLoadsAfter: Int?
+
+    init(_ token: OAuthToken?, failLoadsAfter: Int? = nil) {
         state = OSAllocatedUnfairLock(initialState: State(token: token))
+        self.failLoadsAfter = failLoadsAfter
     }
 
     var token: OAuthToken? { state.withLock { $0.token } }
+    var loads: Int { state.withLock { $0.loads } }
+    var saves: Int { state.withLock { $0.saves } }
     var deletes: Int { state.withLock { $0.deletes } }
 
-    func loadToken() async throws -> OAuthToken? { state.withLock { $0.token } }
+    func loadToken() async throws -> OAuthToken? {
+        let (token, loads) = state.withLock { state -> (OAuthToken?, Int) in
+            state.loads += 1
+            return (state.token, state.loads)
+        }
+        if let failLoadsAfter, loads > failLoadsAfter {
+            throw LoadFailed()
+        }
+        return token
+    }
 
     func saveToken(_ token: OAuthToken) async throws {
         state.withLock {
@@ -138,6 +156,87 @@ private final class BridgeStubURLProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 
+/// Holds one bridge response until the test opens it, so a test can change
+/// the account while a refresh is in flight. No sleeps: the test awaits
+/// `waitForArrival()`, acts, then calls `open()`.
+private final class BridgeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var arrived = false
+    private var opened = false
+    private var arrivalWaiter: CheckedContinuation<Void, Never>?
+    private var pendingRelease: (() -> Void)?
+
+    /// Returns once the bridge request has reached the stub.
+    func waitForArrival() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow = lock.withLock { () -> Bool in
+                if arrived { return true }
+                arrivalWaiter = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
+    /// Called by the stub when the request arrives; `release` delivers the
+    /// response.
+    func arrive(release: @escaping () -> Void) {
+        let (waiter, releaseNow) = lock.withLock { () -> (CheckedContinuation<Void, Never>?, Bool) in
+            arrived = true
+            let waiter = arrivalWaiter
+            arrivalWaiter = nil
+            if !opened { pendingRelease = release }
+            return (waiter, opened)
+        }
+        waiter?.resume()
+        if releaseNow { release() }
+    }
+
+    /// Lets the held response through.
+    func open() {
+        let release = lock.withLock { () -> (() -> Void)? in
+            opened = true
+            let release = pendingRelease
+            pendingRelease = nil
+            return release
+        }
+        release?()
+    }
+}
+
+/// The bridge, but each response waits for its `BridgeGate`.
+private final class GatedBridgeURLProtocol: URLProtocol, @unchecked Sendable {
+    private struct Route: Sendable {
+        let gate: BridgeGate
+        let data: Data
+        let statusCode: Int
+    }
+
+    private static let routes = OSAllocatedUnfairLock<[URL: Route]>(initialState: [:])
+
+    static func register(_ url: URL, gate: BridgeGate, json: String, statusCode: Int) {
+        routes.withLock { $0[url] = Route(gate: gate, data: Data(json.utf8), statusCode: statusCode) }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let route = Self.routes.withLock({ $0[url] }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+        route.gate.arrive { [self] in
+            let response = HTTPURLResponse(url: url, statusCode: route.statusCode, httpVersion: "HTTP/1.1", headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: route.data)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private let staleToken = OAuthToken(
     accessToken: "stale-access",
     refreshToken: "refresh-1",
@@ -152,38 +251,65 @@ private let freshToken = OAuthToken(
     tokenType: "bearer"
 )
 
+/// What the user gets by signing in again while a refresh is in flight.
+private let reauthorizedToken = OAuthToken(
+    accessToken: "reauthorized-access",
+    refreshToken: "refresh-reauthorized",
+    scope: ["user:manage:chat_color"]
+)
+
 private let freshBridgeJSON = #"""
 {"access_token":"fresh-access","refresh_token":"refresh-2","expires_in":14400,"scope":["user:manage:chat_color"],"token_type":"bearer"}
 """#
+
+private let invalidGrantJSON = #"{"status":400,"message":"Invalid refresh token","error":"invalid_grant"}"#
+
+/// Whether `error` is the `HelixError.networkError` TwitchKit wraps a thrown
+/// transport error in.
+private func isNetworkError(_ error: any Error) -> Bool {
+    if case HelixError.networkError = error { return true }
+    return false
+}
 
 // MARK: - Interceptor
 
 @Suite("TwitchKitRefreshInterceptor (TwitchKit's 401 refresh)")
 struct TwitchKitRefreshInterceptorTests {
 
+    /// A real `TwitchClient` wired the way `TwitchClientCache` wires one:
+    /// guarded store, interceptor, shared lifecycle. With
+    /// `retireDuringRefresh`, the client is retired while the refresh runs,
+    /// as `remove` / re-authorization would.
     private func makeClient(
         answer: TwitchKitRefreshAnswer,
-        refreshes: Counter
+        refreshes: Counter,
+        store: CountingTokenStore = CountingTokenStore(staleToken),
+        retireDuringRefresh: Bool = false
     ) -> (TwitchClient, HelixStub, CountingTokenStore) {
         let helix = HelixStub(validAccessToken: freshToken.accessToken)
-        let store = CountingTokenStore(staleToken)
-        let http = TwitchKitRefreshInterceptor(base: helix, tokenStore: store) {
+        let lifecycle = TwitchClientLifecycle()
+        let http = TwitchKitRefreshInterceptor(base: helix, lifecycle: lifecycle) {
             refreshes.increment()
+            if retireDuringRefresh { lifecycle.retire() }
             return answer
         }
-        let client = TwitchClient(clientId: "test-client", tokenStore: store, httpClient: http)
+        let client = TwitchClient(
+            clientId: "test-client",
+            tokenStore: LifecycleGuardedTokenStore(base: store, lifecycle: lifecycle),
+            httpClient: http
+        )
         return (client, helix, store)
+    }
+
+    private func request(_ url: String, method: String = "POST", body: String? = nil) -> URLRequest {
+        var request = URLRequest(url: URL(string: url)!)
+        request.httpMethod = method
+        request.httpBody = body.map { Data($0.utf8) }
+        return request
     }
 
     @Test("Recognises TwitchKit's refresh grant and nothing else")
     func recognisesRefreshGrant() {
-        func request(_ url: String, method: String = "POST", body: String? = nil) -> URLRequest {
-            var request = URLRequest(url: URL(string: url)!)
-            request.httpMethod = method
-            request.httpBody = body.map { Data($0.utf8) }
-            return request
-        }
-
         #expect(TwitchKitRefreshInterceptor.isTokenRefresh(request(
             "https://id.twitch.tv/oauth2/token",
             body: "client_id=abc&grant_type=refresh_token&refresh_token=r1"
@@ -198,6 +324,44 @@ struct TwitchKitRefreshInterceptorTests {
         #expect(!TwitchKitRefreshInterceptor.isTokenRefresh(request(
             "https://api.twitch.tv/helix/users", method: "GET"
         )))
+    }
+
+    @Test("Device-code sign-in (/oauth2/device and the device_code grant) passes through to the transport")
+    func deviceCodeFlowPassesThrough() async throws {
+        let transport = HelixStub(validAccessToken: freshToken.accessToken)
+        let refreshes = Counter()
+        let interceptor = TwitchKitRefreshInterceptor(base: transport, lifecycle: TwitchClientLifecycle()) {
+            refreshes.increment()
+            return .discarded
+        }
+        // Bodies as TwitchKit's `twitchFormEncoded` writes them (':' is not
+        // percent-encoded) and as a percent-encoding client would.
+        let device = request(
+            "https://id.twitch.tv/oauth2/device",
+            body: "client_id=abc&scopes=chat:read user:write:chat"
+        )
+        let deviceGrant = request(
+            "https://id.twitch.tv/oauth2/token",
+            body: "client_id=abc&device_code=dc-1&grant_type=urn:ietf:params:oauth:grant-type:device_code&scopes=chat:read"
+        )
+        let encodedDeviceGrant = request(
+            "https://id.twitch.tv/oauth2/token",
+            body: "client_id=abc&device_code=dc-1&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
+        )
+
+        #expect(!TwitchKitRefreshInterceptor.isTokenRefresh(device))
+        #expect(!TwitchKitRefreshInterceptor.isTokenRefresh(deviceGrant))
+        #expect(!TwitchKitRefreshInterceptor.isTokenRefresh(encodedDeviceGrant))
+
+        _ = try await interceptor.data(for: device)
+        _ = try await interceptor.data(for: deviceGrant)
+        _ = try await interceptor.data(for: encodedDeviceGrant)
+
+        #expect(refreshes.count == 0)
+        let paths = transport.requests.map { $0.url?.path() }
+        #expect(paths == ["/oauth2/device", "/oauth2/token", "/oauth2/token"])
+        let bodies = transport.requests.map { $0.httpBody }
+        #expect(bodies == [device.httpBody, deviceGrant.httpBody, encodedDeviceGrant.httpBody])
     }
 
     @Test("A 401 is refreshed through the handler: Twitch's token endpoint is never called and nothing is deleted")
@@ -215,10 +379,10 @@ struct TwitchKitRefreshInterceptorTests {
         #expect(store.token == freshToken)
     }
 
-    @Test("An unavailable bridge leaves the token in place and surfaces .unauthorized")
+    @Test("An unavailable bridge hands back the current token and surfaces .unauthorized")
     func unavailableKeepsToken() async throws {
         let refreshes = Counter()
-        let (client, helix, store) = makeClient(answer: .unavailable, refreshes: refreshes)
+        let (client, helix, store) = makeClient(answer: .unavailable(current: staleToken), refreshes: refreshes)
 
         do {
             try await client.api.updateUserChatColor(userID: "42", color: "blue")
@@ -235,8 +399,28 @@ struct TwitchKitRefreshInterceptorTests {
         #expect(store.token == staleToken)
     }
 
-    @Test("A rejected refresh lets TwitchKit clear its store, still without calling Twitch")
-    func rejectedClearsStore() async throws {
+    @Test("An unavailable bridge with no token to hand back fails the call without deleting anything")
+    func unavailableWithoutTokenDeletesNothing() async throws {
+        let refreshes = Counter()
+        let (client, helix, store) = makeClient(answer: .unavailable(current: nil), refreshes: refreshes)
+
+        do {
+            try await client.api.updateUserChatColor(userID: "42", color: "blue")
+            Issue.record("Expected HelixError.networkError")
+        } catch {
+            #expect(isNetworkError(error), "Expected HelixError.networkError, got \(error)")
+        }
+
+        // TwitchKit called logout(); the guarded store dropped its delete.
+        #expect(helix.twitchTokenEndpointRequests == 0)
+        #expect(helix.helixRequests.count == 1)
+        #expect(store.deletes == 0)
+        #expect(store.saves == 0)
+        #expect(store.token == staleToken)
+    }
+
+    @Test("A rejected refresh fails with .oauth; TwitchKit's own delete is dropped (forceSignOut owns it)")
+    func rejectedFailsWithoutTwitchKitDelete() async throws {
         let refreshes = Counter()
         let (client, helix, store) = makeClient(answer: .rejected, refreshes: refreshes)
 
@@ -250,8 +434,29 @@ struct TwitchKitRefreshInterceptorTests {
         }
 
         #expect(helix.twitchTokenEndpointRequests == 0)
-        #expect(store.deletes == 1)
-        #expect(store.token == nil)
+        #expect(store.deletes == 0)
+    }
+
+    @Test("Tokens refreshed for a client retired meanwhile are neither saved nor used")
+    func refreshForRetiredClientIsDiscarded() async throws {
+        let refreshes = Counter()
+        let (client, helix, store) = makeClient(
+            answer: .refreshed(freshToken),
+            refreshes: refreshes,
+            retireDuringRefresh: true
+        )
+
+        do {
+            try await client.api.updateUserChatColor(userID: "42", color: "blue")
+            Issue.record("Expected HelixError.networkError")
+        } catch {
+            #expect(isNetworkError(error), "Expected HelixError.networkError, got \(error)")
+        }
+
+        #expect(helix.helixRequests.count == 1)
+        #expect(store.saves == 0)
+        #expect(store.deletes == 0)
+        #expect(store.token == staleToken)
     }
 }
 
@@ -266,14 +471,28 @@ struct AccountStoreTwitchKitRefreshTests {
         let account: Account
         let helix: HelixStub
         let tokenStore: CountingTokenStore
+        let refreshKeychain: InMemoryRefreshTokenKeychain
         let bridgeURL: URL
         let defaults: UserDefaults
         let suite: String
         // Keeps the in-memory SwiftData store alive for the test.
         let container: ModelContainer
+
+        var userId: String { account.userId }
+
+        func cachedRefreshToken() -> String? {
+            OAuthRefreshTokenCache.load(for: account.userId, in: refreshKeychain)
+        }
     }
 
-    private func makeHarness(bridgeStatus: Int, bridgeJSON: String) throws -> Harness {
+    /// `gate`, when given, holds the bridge's response until the test opens
+    /// it.
+    private func makeHarness(
+        bridgeStatus: Int,
+        bridgeJSON: String,
+        tokenStore: CountingTokenStore = CountingTokenStore(staleToken),
+        gate: BridgeGate? = nil
+    ) throws -> Harness {
         let container = try ModelContainer(
             for: Account.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
@@ -282,19 +501,25 @@ struct AccountStoreTwitchKitRefreshTests {
         let defaults = UserDefaults(suiteName: suite)!
 
         let bridgeURL = URL(string: "https://bridge.test/\(UUID().uuidString)/oauth/refresh")!
-        BridgeStubURLProtocol.register(bridgeURL, json: bridgeJSON, statusCode: bridgeStatus)
         let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [BridgeStubURLProtocol.self]
+        if let gate {
+            GatedBridgeURLProtocol.register(bridgeURL, gate: gate, json: bridgeJSON, statusCode: bridgeStatus)
+            config.protocolClasses = [GatedBridgeURLProtocol.self]
+        } else {
+            BridgeStubURLProtocol.register(bridgeURL, json: bridgeJSON, statusCode: bridgeStatus)
+            config.protocolClasses = [BridgeStubURLProtocol.self]
+        }
 
         let helix = HelixStub(validAccessToken: freshToken.accessToken)
-        let tokenStore = CountingTokenStore(staleToken)
+        let refreshKeychain = InMemoryRefreshTokenKeychain()
         let store = AccountStore(
             modelContainer: container,
             clientId: "test-client",
             defaults: defaults,
             bridgeRefresh: BridgeTokenRefresh(endpoint: bridgeURL, session: URLSession(configuration: config)),
             twitchTransport: helix,
-            tokenStoreFactory: { _ in tokenStore }
+            tokenStoreFactory: { _ in tokenStore },
+            refreshTokenKeychain: refreshKeychain
         )
 
         let userId = "refresh-\(UUID().uuidString)"
@@ -308,12 +533,14 @@ struct AccountStoreTwitchKitRefreshTests {
         container.mainContext.insert(account)
         try container.mainContext.save()
         store.selectAccount(account)
+        OAuthRefreshTokenCache.save(refreshToken: staleToken.refreshToken, for: userId, in: refreshKeychain)
 
         return Harness(
             store: store,
             account: account,
             helix: helix,
             tokenStore: tokenStore,
+            refreshKeychain: refreshKeychain,
             bridgeURL: bridgeURL,
             defaults: defaults,
             suite: suite,
@@ -325,7 +552,7 @@ struct AccountStoreTwitchKitRefreshTests {
     func expiredTokenRefreshesThroughBridge() async throws {
         let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON)
         defer { h.defaults.removePersistentDomain(forName: h.suite) }
-        let userId = h.account.userId
+        let userId = h.userId
 
         // A plain call: no withTokenRefresh around it, so only TwitchKit's
         // own 401 handling is in play.
@@ -339,6 +566,7 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.tokenStore.deletes == 0)
         #expect(h.tokenStore.token?.accessToken == "fresh-access")
         #expect(h.tokenStore.token?.refreshToken == "refresh-2")
+        #expect(h.cachedRefreshToken() == "refresh-2")
         #expect(!h.account.needsReauth)
     }
 
@@ -346,7 +574,7 @@ struct AccountStoreTwitchKitRefreshTests {
     func bridgeOutageKeepsAccount() async throws {
         let h = try makeHarness(bridgeStatus: 503, bridgeJSON: #"{"error":"upstream"}"#)
         defer { h.defaults.removePersistentDomain(forName: h.suite) }
-        let userId = h.account.userId
+        let userId = h.userId
 
         do {
             try await h.store.client(forUserId: userId).api.updateUserChatColor(userID: userId, color: "blue")
@@ -363,14 +591,37 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(!h.account.needsReauth)
     }
 
+    @Test("A bridge outage hands TwitchKit its in-memory token, never a fresh Keychain read that can throw")
+    func bridgeOutageWithFailingKeychainReadKeepsAccount() async throws {
+        // The first read (TwitchKit loading the token for the call) works;
+        // every later read throws, like a Keychain error mid-session.
+        let tokenStore = CountingTokenStore(staleToken, failLoadsAfter: 1)
+        let h = try makeHarness(bridgeStatus: 503, bridgeJSON: #"{"error":"upstream"}"#, tokenStore: tokenStore)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+
+        do {
+            try await h.store.client(forUserId: userId).api.updateUserChatColor(userID: userId, color: "blue")
+            Issue.record("Expected HelixError.unauthorized")
+        } catch HelixError.unauthorized {
+            // Expected: TwitchKit got its own token back, so it retried
+            // (still 401) instead of logging out.
+        } catch {
+            Issue.record("Expected HelixError.unauthorized, got \(error)")
+        }
+
+        #expect(tokenStore.loads == 1)
+        #expect(tokenStore.deletes == 0)
+        #expect(tokenStore.token == staleToken)
+        #expect(h.helix.twitchTokenEndpointRequests == 0)
+        #expect(!h.account.needsReauth)
+    }
+
     @Test("A revoked refresh token (invalid_grant) surfaces session-expired and marks the account needsReauth")
     func revokedRefreshTokenNeedsReauth() async throws {
-        let h = try makeHarness(
-            bridgeStatus: 400,
-            bridgeJSON: #"{"status":400,"message":"Invalid refresh token","error":"invalid_grant"}"#
-        )
+        let h = try makeHarness(bridgeStatus: 400, bridgeJSON: invalidGrantJSON)
         defer { h.defaults.removePersistentDomain(forName: h.suite) }
-        let userId = h.account.userId
+        let userId = h.userId
         let login = h.account.login
         let client = h.store.client(forUserId: userId)
 
@@ -383,6 +634,7 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.helix.twitchTokenEndpointRequests == 0)
         #expect(h.account.needsReauth)
         #expect(h.tokenStore.token == nil)
+        #expect(h.cachedRefreshToken() == nil)
         #expect(h.defaults.string(forKey: AccountStore.lastSessionExpiredLoginKey) == login)
     }
 
@@ -396,5 +648,98 @@ struct AccountStoreTwitchKitRefreshTests {
         #expect(h.tokenStore.deletes >= 1)
         #expect(h.tokenStore.token == nil)
         #expect(try await h.store.allAccounts().isEmpty)
+    }
+
+    @Test("A refresh that settles after the account was removed saves nothing anywhere")
+    func refreshSettlingAfterRemovalIsDiscarded() async throws {
+        let gate = BridgeGate()
+        let h = try makeHarness(bridgeStatus: 200, bridgeJSON: freshBridgeJSON, gate: gate)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+        let userId = h.userId
+        let client = h.store.client(forUserId: userId)
+
+        let call = Task {
+            try await client.api.updateUserChatColor(userID: userId, color: "blue")
+        }
+        await gate.waitForArrival()
+
+        try await h.store.remove(account: h.account)
+        let savesAfterRemoval = h.tokenStore.saves
+        let deletesAfterRemoval = h.tokenStore.deletes
+        #expect(deletesAfterRemoval == 1)
+        #expect(h.tokenStore.token == nil)
+        #expect(h.cachedRefreshToken() == nil)
+
+        gate.open()
+        let result = await call.result
+
+        switch result {
+        case .success:
+            Issue.record("Expected the call to fail once its account was removed")
+        case .failure(let error):
+            #expect(isNetworkError(error), "Expected HelixError.networkError, got \(error)")
+        }
+        #expect(h.tokenStore.saves == savesAfterRemoval)
+        #expect(h.tokenStore.deletes == deletesAfterRemoval)
+        #expect(h.tokenStore.token == nil)
+        #expect(h.cachedRefreshToken() == nil)
+        // No retry with the discarded token.
+        #expect(h.helix.helixRequests.count == 1)
+        #expect(h.helix.twitchTokenEndpointRequests == 0)
+    }
+
+    /// Holds the bridge, re-authorizes the account the way `add(token:)`
+    /// does once it knows the userId, then lets the stale refresh's
+    /// response through.
+    private func reauthorizeDuringRefresh(bridgeStatus: Int, bridgeJSON: String) async throws -> (Harness, Result<Void, any Error>) {
+        let gate = BridgeGate()
+        let h = try makeHarness(bridgeStatus: bridgeStatus, bridgeJSON: bridgeJSON, gate: gate)
+        let userId = h.userId
+        let client = h.store.client(forUserId: userId)
+
+        let call = Task {
+            try await client.api.updateUserChatColor(userID: userId, color: "blue")
+        }
+        await gate.waitForArrival()
+
+        h.store.clients.evict(userId: userId)
+        let reauthorized = h.store.clients.makeClient(forUserId: userId)
+        try await reauthorized.client.auth.setToken(reauthorizedToken)
+        h.store.clients.install(reauthorized, forUserId: userId)
+        OAuthRefreshTokenCache.save(refreshToken: reauthorizedToken.refreshToken, for: userId, in: h.refreshKeychain)
+
+        gate.open()
+        return (h, await call.result)
+    }
+
+    @Test("A refresh that succeeds after re-authorization can't overwrite or delete the new token")
+    func refreshSucceedingAfterReauthorizationIsDiscarded() async throws {
+        let (h, result) = try await reauthorizeDuringRefresh(bridgeStatus: 200, bridgeJSON: freshBridgeJSON)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+
+        if case .success = result {
+            Issue.record("Expected the stale client's call to fail")
+        }
+        #expect(h.tokenStore.token == reauthorizedToken)
+        // The only save is the re-authorization's own.
+        #expect(h.tokenStore.saves == 1)
+        #expect(h.tokenStore.deletes == 0)
+        #expect(h.cachedRefreshToken() == "refresh-reauthorized")
+        #expect(!h.account.needsReauth)
+    }
+
+    @Test("A rejection of the pre-re-authorization refresh token doesn't sign the new session out")
+    func rejectionAfterReauthorizationIsDiscarded() async throws {
+        let (h, result) = try await reauthorizeDuringRefresh(bridgeStatus: 400, bridgeJSON: invalidGrantJSON)
+        defer { h.defaults.removePersistentDomain(forName: h.suite) }
+
+        if case .success = result {
+            Issue.record("Expected the stale client's call to fail")
+        }
+        #expect(h.tokenStore.token == reauthorizedToken)
+        #expect(h.tokenStore.deletes == 0)
+        #expect(h.cachedRefreshToken() == "refresh-reauthorized")
+        #expect(!h.account.needsReauth)
+        #expect(h.defaults.string(forKey: AccountStore.lastSessionExpiredLoginKey) == nil)
     }
 }
