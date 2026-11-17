@@ -117,13 +117,23 @@ struct LiveEventShareBar: View {
 
 /// "1:23" until `deadline`, ticking once a second — and only while it is on
 /// screen: each visible banner owns its own `TimelineView`, so there is no
-/// shared timer and nothing runs when no countdown is shown.
+/// shared timer and nothing runs when no countdown is shown. On a
+/// pre-mounted page that isn't the visible one
+/// (`liveEventCountdownsRunning == false`) it shows a static value instead
+/// and doesn't tick at all.
 struct LiveEventCountdown: View {
     let deadline: Date
 
+    @Environment(\.liveEventCountdownsRunning) private var isRunning
+
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            Text(Self.format(deadline.timeIntervalSince(context.date)))
+        if isRunning {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text(Self.format(deadline.timeIntervalSince(context.date)))
+                    .monospacedDigit()
+            }
+        } else {
+            Text(Self.format(deadline.timeIntervalSinceNow))
                 .monospacedDigit()
         }
     }
@@ -136,6 +146,12 @@ struct LiveEventCountdown: View {
         }
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
+}
+
+extension EnvironmentValues {
+    /// False while the banners' chat page isn't the visible one. Set by
+    /// `LiveEventsBannerArea`; read by `LiveEventCountdown`.
+    @Entry var liveEventCountdownsRunning: Bool = true
 }
 
 extension Double {

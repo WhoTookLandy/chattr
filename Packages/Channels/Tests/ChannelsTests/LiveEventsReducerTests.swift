@@ -31,7 +31,8 @@ struct LiveEventsReducerTests {
         id: String = "poll-1",
         votes: [Int?] = [nil, nil],
         status: String? = nil,
-        broadcasterId: String? = nil
+        broadcasterId: String? = nil,
+        startedAt: Date? = nil
     ) throws -> EventSubPoll {
         let choices = votes.enumerated().map { index, v in
             let votesField = v.map { #", "votes": \#($0), "channel_points_votes": 0, "bits_votes": 0"# } ?? ""
@@ -49,7 +50,7 @@ struct LiveEventsReducerTests {
             "bits_voting": { "is_enabled": false, "amount_per_vote": 0 },
             "channel_points_voting": { "is_enabled": true, "amount_per_vote": 10 },
             \(statusField)
-            "started_at": "\(iso(t0))"
+            "started_at": "\(iso(startedAt ?? t0))"
         }
         """
         return try decoder.decode(EventSubPoll.self, from: Data(json.utf8))
@@ -60,7 +61,8 @@ struct LiveEventsReducerTests {
         points: [Int?] = [nil, nil],
         status: String? = nil,
         winner: String? = nil,
-        locksAt: Date? = nil
+        locksAt: Date? = nil,
+        startedAt: Date? = nil
     ) throws -> EventSubPrediction {
         let colors = ["blue", "pink", "blue"]
         let outcomes = points.enumerated().map { index, p in
@@ -80,7 +82,7 @@ struct LiveEventsReducerTests {
             "title": "Win the next fight?",
             "outcomes": [\(outcomes)],
             \(extra)
-            "started_at": "\(iso(t0))"
+            "started_at": "\(iso(startedAt ?? t0))"
         }
         """
         return try decoder.decode(EventSubPrediction.self, from: Data(json.utf8))
@@ -93,7 +95,8 @@ struct LiveEventsReducerTests {
         progress: Int? = 200,
         goal: Int? = 1000,
         expiresAt: Date? = nil,
-        type: String = "regular"
+        type: String = "regular",
+        startedAt: Date? = nil
     ) throws -> EventSubHypeTrain {
         var extra = ""
         if let total { extra += #""total": \#(total),"# }
@@ -112,7 +115,7 @@ struct LiveEventsReducerTests {
             ],
             \(extra)
             "type": "\(type)",
-            "started_at": "\(iso(t0))"
+            "started_at": "\(iso(startedAt ?? t0))"
         }
         """
         return try decoder.decode(EventSubHypeTrain.self, from: Data(json.utf8))
@@ -215,51 +218,73 @@ struct LiveEventsReducerTests {
         #expect(ChannelSession.broadcasterUserId(from: .hypeTrainBegin(try hypeTrain())) == channelId)
     }
 
-    // MARK: - Helix seed
+    // MARK: - Helix snapshots
 
-    @Test("Helix seed: an active poll carries its deadline; a finished one is not news")
-    func helixPollSeed() throws {
-        func helixPoll(status: String) throws -> TwitchPoll {
-            let json = """
-            {
-                "id": "poll-9", "broadcaster_id": "\(channelId)", "broadcaster_login": "me", "broadcaster_name": "Me",
-                "title": "Snack?",
-                "choices": [{ "id": "a", "title": "Chips", "votes": 3, "channel_points_votes": 0, "bits_votes": 0 }],
-                "bits_voting_enabled": false, "bits_per_vote": 0,
-                "channel_points_voting_enabled": false, "channel_points_per_vote": 0,
-                "status": "\(status)", "duration": 120, "started_at": "\(iso(t0))"
-            }
-            """
-            return try decoder.decode(TwitchPoll.self, from: Data(json.utf8))
+    private func helixPoll(id: String = "poll-9", status: String, votes: Int = 3, startedAt: Date? = nil) throws -> TwitchPoll {
+        let json = """
+        {
+            "id": "\(id)", "broadcaster_id": "\(channelId)", "broadcaster_login": "me", "broadcaster_name": "Me",
+            "title": "Snack?",
+            "choices": [{ "id": "a", "title": "Chips", "votes": \(votes), "channel_points_votes": 0, "bits_votes": 0 }],
+            "bits_voting_enabled": false, "bits_per_vote": 0,
+            "channel_points_voting_enabled": false, "channel_points_per_vote": 0,
+            "status": "\(status)", "duration": 120, "started_at": "\(iso(startedAt ?? t0))"
         }
-        guard case .poll(let p) = try #require(LiveEventUpdate(helixPoll: try helixPoll(status: "ACTIVE"))) else {
+        """
+        return try decoder.decode(TwitchPoll.self, from: Data(json.utf8))
+    }
+
+    private func helixPrediction(id: String = "pred-9", status: String, winner: String? = nil, startedAt: Date? = nil) throws -> TwitchPrediction {
+        let winnerField = winner.map { #""winning_outcome_id": "\#($0)","# } ?? ""
+        let json = """
+        {
+            "id": "\(id)", "broadcaster_id": "\(channelId)", "broadcaster_login": "me", "broadcaster_name": "Me",
+            "title": "Clutch?",
+            "outcomes": [
+                { "id": "y", "title": "Yes", "users": 2, "channel_points": 500, "color": "BLUE" },
+                { "id": "n", "title": "No", "users": 1, "channel_points": 100, "color": "PINK" }
+            ],
+            \(winnerField)
+            "prediction_window": 60, "status": "\(status)", "created_at": "\(iso(startedAt ?? t0))"
+        }
+        """
+        return try decoder.decode(TwitchPrediction.self, from: Data(json.utf8))
+    }
+
+    private func helixHypeTrain(id: String = "train-9", level: Int = 3, total: Int = 4000, expiresAt: Date) throws -> HypeTrainCurrent {
+        let json = """
+        {
+            "id": "\(id)", "broadcaster_user_id": "\(channelId)", "broadcaster_user_login": "me", "broadcaster_user_name": "Me",
+            "total": \(total), "progress": 100, "goal": 2000, "level": \(level),
+            "top_contributions": [],
+            "started_at": "\(iso(t0))", "expires_at": "\(iso(expiresAt))",
+            "type": "golden_kappa", "is_shared_train": false
+        }
+        """
+        return try decoder.decode(HypeTrainCurrent.self, from: Data(json.utf8))
+    }
+
+    @Test("Helix poll snapshot: carries its deadline and its real status")
+    func helixPollSnapshot() throws {
+        guard case .poll(let p) = LiveEventUpdate(helixPoll: try helixPoll(status: "ACTIVE")) else {
             Issue.record("expected .poll"); return
         }
         #expect(p.endsAt == t0.addingTimeInterval(120))
         #expect(p.choices.first?.votes == 3)
-        #expect(LiveEventUpdate(helixPoll: try helixPoll(status: "COMPLETED")) == nil)
+        #expect(p.status == .active)
+        guard case .poll(let done) = LiveEventUpdate(helixPoll: try helixPoll(status: "TERMINATED")) else {
+            Issue.record("expected .poll"); return
+        }
+        #expect(done.status == .terminated)
     }
 
-    @Test("Helix seed: active and locked predictions seed, resolved ones don't")
-    func helixPredictionSeed() throws {
-        func helixPrediction(status: String) throws -> TwitchPrediction {
-            let json = """
-            {
-                "id": "pred-9", "broadcaster_id": "\(channelId)", "broadcaster_login": "me", "broadcaster_name": "Me",
-                "title": "Clutch?",
-                "outcomes": [
-                    { "id": "y", "title": "Yes", "users": 2, "channel_points": 500, "color": "BLUE" },
-                    { "id": "n", "title": "No", "users": 1, "channel_points": 100, "color": "PINK" }
-                ],
-                "prediction_window": 60, "status": "\(status)", "created_at": "\(iso(t0))"
-            }
-            """
-            return try decoder.decode(TwitchPrediction.self, from: Data(json.utf8))
-        }
+    @Test("Helix prediction snapshot: every status maps; active carries its lock time")
+    func helixPredictionSnapshot() throws {
         guard case .prediction(let active) = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "ACTIVE"))) else {
             Issue.record("expected .prediction"); return
         }
         #expect(active.locksAt == t0.addingTimeInterval(60))
+        #expect(active.startedAt == t0)
         #expect(active.outcomes.map(\.color) == ["blue", "pink"])
 
         guard case .prediction(let locked) = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "LOCKED"))) else {
@@ -267,7 +292,25 @@ struct LiveEventsReducerTests {
         }
         #expect(locked.status == .locked)
         #expect(locked.locksAt == nil)
-        #expect(LiveEventUpdate(helixPrediction: try helixPrediction(status: "RESOLVED")) == nil)
+
+        guard case .prediction(let resolved) = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "RESOLVED", winner: "y"))) else {
+            Issue.record("expected .prediction"); return
+        }
+        #expect(resolved.status == .resolved)
+        #expect(resolved.winningOutcomeId == "y")
+        #expect(LiveEventUpdate(helixPrediction: try helixPrediction(status: "SOMETHING_NEW")) == nil)
+    }
+
+    @Test("Helix Hype Train snapshot is an active train with its expiry")
+    func helixHypeTrainSnapshot() throws {
+        let expires = t0.addingTimeInterval(300)
+        guard case .hypeTrain(let train) = LiveEventUpdate(helixHypeTrain: try helixHypeTrain(expiresAt: expires)) else {
+            Issue.record("expected .hypeTrain"); return
+        }
+        #expect(train.status == .active)
+        #expect(train.level == 3)
+        #expect(train.expiresAt == expires)
+        #expect(train.isGoldenKappa)
     }
 
     // MARK: - Reducer
@@ -414,6 +457,214 @@ struct LiveEventsReducerTests {
         old = state
         state.apply(try update(.hypeTrainProgress(hypeTrain(level: 2, progress: 10))), at: t0)
         #expect(state.attentionKind(comparedTo: old) == .hypeTrain)
+    }
+
+    // MARK: - Ordering + tombstones
+
+    @Test("poll: a delayed end for an older poll doesn't replace the active newer one")
+    func pollDelayedEndForOlder() throws {
+        var state = LiveEventsState()
+        let aStart = t0, bStart = t0.addingTimeInterval(300)
+        state.apply(try update(.pollBegin(poll(id: "A", startedAt: aStart))), at: t0)
+        state.apply(try update(.pollBegin(poll(id: "B", startedAt: bStart))), at: bStart)
+        #expect(state.poll?.id == "B")
+
+        #expect(!state.apply(try update(.pollEnd(poll(id: "A", votes: [5, 1], status: "completed", startedAt: aStart))), at: bStart.addingTimeInterval(1)))
+        #expect(state.poll?.id == "B")
+        #expect(state.poll?.status == .active)
+        // Late progress for A can't come back either.
+        #expect(!state.apply(try update(.pollProgress(poll(id: "A", votes: [9, 9], startedAt: aStart))), at: bStart.addingTimeInterval(2)))
+        #expect(state.poll?.id == "B")
+    }
+
+    @Test("poll: after its result is pruned, a duplicate end or late progress doesn't revive it")
+    func pollNoReviveAfterPrune() throws {
+        var state = LiveEventsState()
+        let endedAt = t0.addingTimeInterval(60)
+        state.apply(try update(.pollEnd(poll(id: "A", votes: [2, 1], status: "completed"))), at: endedAt)
+        #expect(state.prune(now: endedAt.addingTimeInterval(LiveEventsState.resultLinger)))
+        #expect(state.poll == nil)
+
+        let later = endedAt.addingTimeInterval(30)
+        #expect(!state.apply(try update(.pollEnd(poll(id: "A", votes: [2, 1], status: "completed"))), at: later))
+        #expect(!state.apply(try update(.pollProgress(poll(id: "A", votes: [3, 1]))), at: later))
+        #expect(state.poll == nil)
+        // A genuinely new poll still shows.
+        #expect(state.apply(try update(.pollBegin(poll(id: "B", startedAt: later))), at: later))
+        #expect(state.poll?.id == "B")
+    }
+
+    @Test("poll: a same-status update with fewer votes is stale and ignored")
+    func pollStaleTally() throws {
+        var state = LiveEventsState()
+        state.apply(try update(.pollProgress(poll(votes: [4, 4]))), at: t0)
+        #expect(!state.apply(try update(.pollProgress(poll(votes: [3, 4]))), at: t0.addingTimeInterval(1)))
+        #expect(state.poll?.totalVotes == 8)
+        #expect(state.apply(try update(.pollProgress(poll(votes: [5, 4]))), at: t0.addingTimeInterval(2)))
+    }
+
+    @Test("prediction: a delayed resolve for an older one doesn't replace the locked newer one; no revival after prune")
+    func predictionOrdering() throws {
+        var state = LiveEventsState()
+        let aStart = t0, bStart = t0.addingTimeInterval(600)
+        state.apply(try update(.predictionBegin(prediction(id: "A", startedAt: aStart))), at: t0)
+        state.apply(try update(.predictionBegin(prediction(id: "B", startedAt: bStart))), at: bStart)
+        state.apply(try update(.predictionLock(prediction(id: "B", points: [10, 20], startedAt: bStart))), at: bStart.addingTimeInterval(60))
+        #expect(state.prediction?.id == "B")
+
+        #expect(!state.apply(try update(.predictionEnd(prediction(id: "A", status: "resolved", winner: "o0", startedAt: aStart))), at: bStart.addingTimeInterval(61)))
+        #expect(state.prediction?.id == "B")
+        #expect(state.prediction?.status == .locked)
+
+        // B resolves, lingers, is pruned; a duplicate resolve can't bring it back.
+        let resolvedAt = bStart.addingTimeInterval(120)
+        state.apply(try update(.predictionEnd(prediction(id: "B", points: [10, 20], status: "resolved", winner: "o1", startedAt: bStart))), at: resolvedAt)
+        state.prune(now: resolvedAt.addingTimeInterval(LiveEventsState.resultLinger))
+        #expect(state.prediction == nil)
+        #expect(!state.apply(try update(.predictionEnd(prediction(id: "B", points: [10, 20], status: "resolved", winner: "o1", startedAt: bStart))), at: resolvedAt.addingTimeInterval(20)))
+        #expect(!state.apply(try update(.predictionProgress(prediction(id: "B", points: [10, 20], startedAt: bStart))), at: resolvedAt.addingTimeInterval(21)))
+        #expect(state.prediction == nil)
+    }
+
+    @Test("hype train: a delayed end for an older train doesn't end the running newer one; no revival after prune")
+    func hypeTrainOrdering() throws {
+        var state = LiveEventsState()
+        let aStart = t0, bStart = t0.addingTimeInterval(3600)
+        state.apply(try update(.hypeTrainBegin(hypeTrain(id: "A", startedAt: aStart))), at: t0)
+        state.apply(try update(.hypeTrainBegin(hypeTrain(id: "B", startedAt: bStart))), at: bStart)
+        #expect(!state.apply(try update(.hypeTrainEnd(hypeTrain(id: "A", progress: nil, goal: nil, startedAt: aStart))), at: bStart.addingTimeInterval(1)))
+        #expect(state.hypeTrain?.id == "B")
+        #expect(state.hypeTrain?.status == .active)
+
+        // A same-level update with a lower total is stale.
+        state.apply(try update(.hypeTrainProgress(hypeTrain(id: "B", level: 2, total: 2000, startedAt: bStart))), at: bStart.addingTimeInterval(5))
+        #expect(!state.apply(try update(.hypeTrainProgress(hypeTrain(id: "B", level: 2, total: 1800, startedAt: bStart))), at: bStart.addingTimeInterval(6)))
+        #expect(!state.apply(try update(.hypeTrainProgress(hypeTrain(id: "B", level: 1, total: 2500, startedAt: bStart))), at: bStart.addingTimeInterval(7)))
+        #expect(state.hypeTrain?.total == 2000)
+
+        let endedAt = bStart.addingTimeInterval(400)
+        state.apply(try update(.hypeTrainEnd(hypeTrain(id: "B", level: 2, total: 2000, progress: nil, goal: nil, startedAt: bStart))), at: endedAt)
+        state.prune(now: endedAt.addingTimeInterval(LiveEventsState.resultLinger))
+        #expect(state.hypeTrain == nil)
+        #expect(!state.apply(try update(.hypeTrainEnd(hypeTrain(id: "B", level: 2, total: 2000, progress: nil, goal: nil, startedAt: bStart))), at: endedAt.addingTimeInterval(30)))
+        #expect(!state.apply(try update(.hypeTrainProgress(hypeTrain(id: "B", level: 2, total: 2100, startedAt: bStart))), at: endedAt.addingTimeInterval(31)))
+        #expect(state.hypeTrain == nil)
+    }
+
+    @Test("tombstones are bounded per kind and don't count as a visible change")
+    func tombstonesBounded() throws {
+        var tombstones = LiveEventTombstones()
+        for i in 0..<(LiveEventTombstones.capacity + 3) {
+            tombstones.insert("p\(i)", kind: .poll)
+        }
+        #expect(!tombstones.contains("p0", kind: .poll))
+        #expect(tombstones.contains("p\(LiveEventTombstones.capacity + 2)", kind: .poll))
+        #expect(!tombstones.contains("p5", kind: .prediction))
+
+        var a = LiveEventsState()
+        let b = a
+        a.tombstones.insert("x", kind: .poll)
+        #expect(a == b)
+    }
+
+    // MARK: - Expiry
+
+    @Test("a locked prediction nothing confirms expires after unconfirmedExpiry; a confirmation pushes it back")
+    func lockedPredictionExpiry() throws {
+        var state = LiveEventsState()
+        let lockedAt = t0.addingTimeInterval(60)
+        state.apply(try update(.predictionLock(prediction(points: [10, 20]))), at: lockedAt)
+        #expect(state.nextPruneDate() == lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry))
+
+        // A Helix check still sees it locked: confirmed, so it stays.
+        let checkedAt = lockedAt.addingTimeInterval(5 * 60)
+        let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(id: "pred-1", status: "LOCKED")))
+        state.reconcile(.prediction, snapshot: snapshot, fetchedAt: checkedAt, now: checkedAt)
+        #expect(state.prediction?.status == .locked)
+        #expect(!state.prune(now: lockedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry)))
+
+        #expect(state.prune(now: checkedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry)))
+        #expect(state.prediction == nil)
+        // And it can't come back on a late duplicate.
+        #expect(!state.apply(try update(.predictionLock(prediction(points: [10, 20]))), at: checkedAt.addingTimeInterval(LiveEventsState.unconfirmedExpiry + 1)))
+    }
+
+    @Test("an active train is dropped overdueGrace after its expires_at")
+    func hypeTrainExpiry() throws {
+        var state = LiveEventsState()
+        let expires = t0.addingTimeInterval(300)
+        state.apply(try update(.hypeTrainProgress(hypeTrain(expiresAt: expires))), at: t0)
+        #expect(state.nextPruneDate() == expires.addingTimeInterval(LiveEventsState.overdueGrace))
+        #expect(!state.prune(now: expires))
+        #expect(state.prune(now: expires.addingTimeInterval(LiveEventsState.overdueGrace)))
+        #expect(state.hypeTrain == nil)
+    }
+
+    // MARK: - Helix reconcile
+
+    @Test("reconcile: a prediction resolved while disconnected concludes the stuck locked one")
+    func reconcileResolvesLocked() throws {
+        var state = LiveEventsState()
+        state.apply(try update(.predictionLock(prediction(id: "pred-9", points: [500, 100]))), at: t0)
+        let now = t0.addingTimeInterval(900)
+        let snapshot = try #require(LiveEventUpdate(helixPrediction: try helixPrediction(status: "RESOLVED", winner: "y")))
+        #expect(state.reconcile(.prediction, snapshot: snapshot, fetchedAt: now, now: now))
+        #expect(state.prediction?.status == .resolved)
+        #expect(state.prediction?.winningOutcomeId == "y")
+        #expect(state.prediction?.concludedAt == now)
+    }
+
+    @Test("reconcile: an event Helix no longer reports is cleared; a newer one replaces it")
+    func reconcileClearsAndReplaces() throws {
+        var state = LiveEventsState()
+        state.apply(try update(.pollBegin(poll(id: "A"))), at: t0)
+        let now = t0.addingTimeInterval(600)
+        #expect(state.reconcile(.poll, snapshot: nil, fetchedAt: now, now: now))
+        #expect(state.poll == nil)
+        // The cleared id stays dead.
+        #expect(!state.apply(try update(.pollProgress(poll(id: "A", votes: [1, 0]))), at: now))
+
+        state.apply(try update(.predictionLock(prediction(id: "old"))), at: t0)
+        let newer = LiveEventUpdate(helixPrediction: try helixPrediction(id: "new", status: "ACTIVE", startedAt: t0.addingTimeInterval(300)))
+        #expect(state.reconcile(.prediction, snapshot: newer, fetchedAt: now, now: now))
+        #expect(state.prediction?.id == "new")
+        #expect(state.prediction?.status == .active)
+    }
+
+    @Test("reconcile: an EventSub update that lands during the fetch isn't undone")
+    func reconcileRespectsInFlightEventSub() throws {
+        var state = LiveEventsState()
+        let fetchedAt = t0
+        // EventSub: poll B begins while the Helix request (which still sees
+        // the older poll A as latest) is in flight.
+        let bStart = t0.addingTimeInterval(1)
+        state.apply(try update(.pollBegin(poll(id: "B", startedAt: bStart))), at: bStart)
+        let stale = LiveEventUpdate(helixPoll: try helixPoll(id: "A", status: "COMPLETED", startedAt: t0.addingTimeInterval(-300)))
+        #expect(!state.reconcile(.poll, snapshot: stale, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(1)))
+        #expect(state.poll?.id == "B")
+
+        // Same for "Helix says nothing is running".
+        #expect(!state.reconcile(.poll, snapshot: nil, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(1)))
+        #expect(state.poll?.id == "B")
+
+        // And an older same-id snapshot can't roll the tally back.
+        state.apply(try update(.pollProgress(poll(id: "B", votes: [5, 5], startedAt: bStart))), at: bStart.addingTimeInterval(2))
+        let older = LiveEventUpdate(helixPoll: try helixPoll(id: "B", status: "ACTIVE", votes: 4, startedAt: bStart))
+        #expect(!state.reconcile(.poll, snapshot: older, fetchedAt: fetchedAt, now: bStart.addingTimeInterval(3)))
+        #expect(state.poll?.totalVotes == 10)
+    }
+
+    @Test("reconcile: a finished event we never showed isn't news; a running one seeds")
+    func reconcileSeed() throws {
+        var state = LiveEventsState()
+        let finished = LiveEventUpdate(helixPoll: try helixPoll(status: "COMPLETED"))
+        #expect(!state.reconcile(.poll, snapshot: finished, fetchedAt: t0, now: t0))
+        #expect(state.poll == nil)
+
+        let running = LiveEventUpdate(helixHypeTrain: try helixHypeTrain(expiresAt: t0.addingTimeInterval(200)))
+        #expect(state.reconcile(.hypeTrain, snapshot: running, fetchedAt: t0, now: t0))
+        #expect(state.hypeTrain?.id == "train-9")
+        #expect(state.hasUnconcludedEvent)
     }
 
     // MARK: - Mailbox

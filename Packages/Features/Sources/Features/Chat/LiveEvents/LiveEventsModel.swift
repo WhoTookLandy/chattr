@@ -18,6 +18,11 @@ import Channels
 /// Countdowns aren't driven from here either: each visible banner runs its
 /// own `TimelineView` (see `LiveEventCountdown`), so there's no global timer
 /// and nothing ticks while no banner is up.
+///
+/// Only the visible chat page does any of this. Neighbouring pages are
+/// pre-mounted, so `LiveEventsBannerArea` runs the feed only while its page
+/// is the active one and `suspend()`s otherwise (no subscription, no
+/// timers, frozen countdowns).
 @MainActor
 @Observable
 final class LiveEventsModel {
@@ -42,7 +47,15 @@ final class LiveEventsModel {
     // MARK: - Feed
 
     /// Drains `session`'s live events until the calling task is cancelled
-    /// (the banner area's `.task` going away), then unsubscribes and resets.
+    /// (the banner area's `.task` going away: the page left the screen or
+    /// the transcript detached), then unsubscribes and suspends.
+    ///
+    /// The banner area runs this only while its page is the visible one.
+    /// Off-screen there is no subscription at all, so ticks cost a
+    /// pre-mounted neighbour page nothing. Coming back subscribes again: the
+    /// session primes the new subscription with its current (pruned) state,
+    /// and `receive` diffs it against what was on screen before, so anything
+    /// that started, locked or ended meanwhile pops open as usual.
     func run(session: ChannelSession) async {
         let subscription = await session.subscribeLiveEvents()
         // AsyncStream iteration ends on task cancellation as well as on
@@ -54,7 +67,7 @@ final class LiveEventsModel {
             }
         }
         await session.unsubscribeLiveEvents(subscription.token)
-        reset()
+        suspend()
     }
 
     /// Applies a new state from the session (or from a local prune).
@@ -142,13 +155,23 @@ final class LiveEventsModel {
         }
     }
 
-    private func reset() {
+    /// The page left the screen: stop every timer (auto-collapse, result
+    /// timeout) and fold any open banner. `state` and `dismissedIds` stay,
+    /// so the next `run` catches up from where the user left off and a
+    /// hidden event stays hidden. Internal for tests.
+    func suspend() {
         collapseTask?.cancel()
         pruneTask?.cancel()
         collapseTask = nil
         pruneTask = nil
-        state = LiveEventsState()
         expanded = nil
+    }
+
+    /// The transcript detached (its session is going away): forget
+    /// everything. The next attach starts clean.
+    func reset() {
+        suspend()
+        state = LiveEventsState()
         dismissedIds = []
     }
 }

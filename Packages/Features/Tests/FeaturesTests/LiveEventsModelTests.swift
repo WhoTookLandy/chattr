@@ -57,6 +57,30 @@ struct LiveEventsModelTests {
         #expect(model.expanded == .poll)
     }
 
+    @Test("suspending (page off-screen) folds the banner but keeps state and dismissals; resuming catches up")
+    func suspendAndCatchUp() {
+        UserDefaults.standard.removeObject(forKey: LiveEventsSettings.pollsKey)
+        let model = LiveEventsModel()
+        model.receive(LiveEventsState(poll: poll(id: "p1")))
+        #expect(model.expanded == .poll)
+
+        model.suspend()
+        #expect(model.expanded == nil)
+        #expect(model.state.poll?.id == "p1")
+
+        // Back on screen: the poll ended meanwhile, which is news.
+        model.receive(LiveEventsState(poll: poll(id: "p1", votes: [2, 1], status: .completed)))
+        #expect(model.expanded == .poll)
+
+        // A dismissal survives a suspend; only a detach (reset) forgets it.
+        model.dismiss(.poll)
+        model.suspend()
+        #expect(model.isDismissed("p1"))
+        model.reset()
+        #expect(!model.isDismissed("p1"))
+        #expect(model.state.isEmpty)
+    }
+
     @Test("a disabled kind never pops open")
     func disabledKind() {
         LiveEventsSettings.setEnabled(false, for: .poll)

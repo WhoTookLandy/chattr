@@ -174,13 +174,17 @@ public actor ChannelSession {
     // Live events (polls / predictions / Hype Train) — see
     // `ChannelSession+LiveEvents.swift`.
 
-    /// Current live events, reduced off-main from EventSub + the Helix seed.
+    /// Current live events, reduced off-main from EventSub + Helix reconciles.
     var liveEvents = LiveEventsState()
     /// Latest-value mailboxes of the banner consumers.
     var liveEventSubscribers: [UUID: LiveEventsSubscription] = [:]
     /// The non-blocking live-topic subscribe + Helix seed kicked off by
-    /// `start()` on the account's own channel. Cancelled by `stop()`.
+    /// `start()` on the account's own channel, followed by the periodic
+    /// Helix check. Cancelled by `stop()`.
     var liveEventsTask: Task<Void, Never>?
+    /// One Helix reconcile at a time (start, reconnect and the periodic
+    /// check can overlap).
+    var liveEventsReconcileInFlight = false
     /// Set first thing in `stop()`. A live-topic subscribe that lands after
     /// it deletes its own subscription instead of recording it.
     var isStopped = false
@@ -311,7 +315,17 @@ public actor ChannelSession {
         // authorizes those topics for the broadcaster's token alone), and
         // off the critical path like the restrictions fetch above.
         if channelId == accountUserId {
-            liveEventsTask = Task { [weak self] in await self?.startLiveEvents() }
+            liveEventsTask = Task { [weak self] in
+                await self?.startLiveEvents()
+                // Periodic Helix check while an event is unfinished (see
+                // `liveEventsVerifyInterval`). `self` is re-bound each round,
+                // so the sleeping loop never keeps the session alive.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: ChannelSession.liveEventsVerifyInterval)
+                    guard !Task.isCancelled, let self else { return }
+                    await self.verifyLiveEvents()
+                }
+            }
         }
 
         // NOTE: We deliberately do NOT iterate `client.eventSub.events` here.

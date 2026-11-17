@@ -74,6 +74,11 @@ public struct LivePoll: Sendable, Equatable, Identifiable {
     /// purpose: comparing against Twitch's `ended_at` would bake device clock
     /// skew into the linger.
     public var concludedAt: Date?
+    /// Local receipt time of the last update (EventSub or a Helix
+    /// reconcile) that confirmed this event. An unconcluded event that
+    /// nothing has confirmed for `LiveEventsState.unconfirmedExpiry` is
+    /// dropped: the backstop for an end event lost while the socket was down.
+    public var confirmedAt: Date?
 
     public init(
         id: String,
@@ -82,7 +87,8 @@ public struct LivePoll: Sendable, Equatable, Identifiable {
         startedAt: Date? = nil,
         endsAt: Date? = nil,
         status: Status = .active,
-        concludedAt: Date? = nil
+        concludedAt: Date? = nil,
+        confirmedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -91,6 +97,7 @@ public struct LivePoll: Sendable, Equatable, Identifiable {
         self.endsAt = endsAt
         self.status = status
         self.concludedAt = concludedAt
+        self.confirmedAt = confirmedAt
     }
 
     public var totalVotes: Int { choices.reduce(0) { $0 + max(0, $1.votes) } }
@@ -153,29 +160,40 @@ public struct LivePrediction: Sendable, Equatable, Identifiable {
     public let id: String
     public var title: String
     public var outcomes: [Outcome]
+    /// Twitch's start time. Orders two different predictions, so a delayed
+    /// end for an old one can't replace the one running now.
+    public var startedAt: Date?
     /// When predictions close (active only).
     public var locksAt: Date?
     public var status: Status
     public var winningOutcomeId: String?
     /// Local receipt time of the resolve / cancel. See `LivePoll.concludedAt`.
     public var concludedAt: Date?
+    /// See `LivePoll.confirmedAt`. A locked prediction gets no EventSub
+    /// traffic until it resolves, so this is the lock or the last Helix
+    /// check. It is what stops a "Locked" banner from sticking forever.
+    public var confirmedAt: Date?
 
     public init(
         id: String,
         title: String,
         outcomes: [Outcome],
+        startedAt: Date? = nil,
         locksAt: Date? = nil,
         status: Status = .active,
         winningOutcomeId: String? = nil,
-        concludedAt: Date? = nil
+        concludedAt: Date? = nil,
+        confirmedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
         self.outcomes = outcomes
+        self.startedAt = startedAt
         self.locksAt = locksAt
         self.status = status
         self.winningOutcomeId = winningOutcomeId
         self.concludedAt = concludedAt
+        self.confirmedAt = confirmedAt
     }
 
     public var totalPoints: Int { outcomes.reduce(0) { $0 + max(0, $1.points) } }
@@ -207,6 +225,8 @@ public struct LiveHypeTrain: Sendable, Equatable, Identifiable {
     }
 
     public let id: String
+    /// Twitch's start time. Orders two different trains.
+    public var startedAt: Date?
     public var level: Int
     /// Points contributed so far, across all levels.
     public var total: Int?
@@ -221,9 +241,12 @@ public struct LiveHypeTrain: Sendable, Equatable, Identifiable {
     public var isGoldenKappa: Bool
     /// Local receipt time of the end. See `LivePoll.concludedAt`.
     public var concludedAt: Date?
+    /// See `LivePoll.confirmedAt`.
+    public var confirmedAt: Date?
 
     public init(
         id: String,
+        startedAt: Date? = nil,
         level: Int,
         total: Int? = nil,
         progress: Int? = nil,
@@ -231,9 +254,11 @@ public struct LiveHypeTrain: Sendable, Equatable, Identifiable {
         expiresAt: Date? = nil,
         status: Status = .active,
         isGoldenKappa: Bool = false,
-        concludedAt: Date? = nil
+        concludedAt: Date? = nil,
+        confirmedAt: Date? = nil
     ) {
         self.id = id
+        self.startedAt = startedAt
         self.level = level
         self.total = total
         self.progress = progress
@@ -242,6 +267,7 @@ public struct LiveHypeTrain: Sendable, Equatable, Identifiable {
         self.status = status
         self.isGoldenKappa = isGoldenKappa
         self.concludedAt = concludedAt
+        self.confirmedAt = confirmedAt
     }
 
     /// 0…1 progress through the current level; nil when Twitch didn't send
@@ -254,10 +280,18 @@ public struct LiveHypeTrain: Sendable, Equatable, Identifiable {
 
 /// Everything live in one channel right now. At most one of each kind —
 /// Twitch only runs one poll, one prediction and one Hype Train at a time.
+///
+/// Equality covers what the banners show (the three events). The reducer's
+/// bookkeeping (`tombstones`) is left out on purpose: recording a finished
+/// id never counts as a change, so it never publishes and never re-renders
+/// a banner.
 public struct LiveEventsState: Sendable, Equatable {
     public var poll: LivePoll?
     public var prediction: LivePrediction?
     public var hypeTrain: LiveHypeTrain?
+
+    /// Ids of recently finished events, per kind. See `LiveEventTombstones`.
+    var tombstones = LiveEventTombstones()
 
     public init(poll: LivePoll? = nil, prediction: LivePrediction? = nil, hypeTrain: LiveHypeTrain? = nil) {
         self.poll = poll
@@ -266,4 +300,50 @@ public struct LiveEventsState: Sendable, Equatable {
     }
 
     public var isEmpty: Bool { poll == nil && prediction == nil && hypeTrain == nil }
+
+    public static func == (lhs: LiveEventsState, rhs: LiveEventsState) -> Bool {
+        lhs.poll == rhs.poll && lhs.prediction == rhs.prediction && lhs.hypeTrain == rhs.hypeTrain
+    }
+}
+
+/// A small, bounded memory of event ids that are over: ended, archived,
+/// replaced by a newer event, expired, or cleared by a Helix reconcile. The
+/// reducer rejects any later update for one of these ids unless it is the
+/// event currently shown, so a delayed or duplicated `end`, or a late
+/// `progress`, can never bring a finished event back.
+///
+/// Twitch runs one event of each kind at a time, so the last few ids per
+/// kind cover any realistic reordering. The oldest falls off first.
+struct LiveEventTombstones: Sendable {
+    static let capacity = 8
+
+    private var poll: [String] = []
+    private var prediction: [String] = []
+    private var hypeTrain: [String] = []
+
+    func contains(_ id: String, kind: LiveEventKind) -> Bool {
+        ids(kind).contains(id)
+    }
+
+    mutating func insert(_ id: String, kind: LiveEventKind) {
+        var list = ids(kind)
+        guard !list.contains(id) else { return }
+        list.append(id)
+        if list.count > Self.capacity {
+            list.removeFirst(list.count - Self.capacity)
+        }
+        switch kind {
+        case .poll: poll = list
+        case .prediction: prediction = list
+        case .hypeTrain: hypeTrain = list
+        }
+    }
+
+    private func ids(_ kind: LiveEventKind) -> [String] {
+        switch kind {
+        case .poll: return poll
+        case .prediction: return prediction
+        case .hypeTrain: return hypeTrain
+        }
+    }
 }

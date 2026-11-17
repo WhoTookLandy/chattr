@@ -25,11 +25,18 @@ private let logger = AppLogger.make("Channels.LiveEvents")
 /// ## Flow
 ///
 /// `start()` (own channel only) → `startLiveEvents()` subscribes the ten
-/// topics concurrently and seeds an already-running poll / prediction from
-/// Helix, off the critical path. Events arrive through the normal router
-/// inbox; `handle(event:)` diverts them here before the chat pipeline, so
-/// they never enter the ring and never wake a transcript. The reduced state
-/// is posted to each banner's latest-value `LiveEventsSubscription`.
+/// topics concurrently and seeds an already-running poll / prediction /
+/// train from Helix, off the critical path. Events arrive through the normal
+/// router inbox; `handle(event:)` diverts them here before the chat
+/// pipeline, so they never enter the ring and never wake a transcript. The
+/// reduced state is posted to each banner's latest-value
+/// `LiveEventsSubscription`.
+///
+/// EventSub alone can leave a banner stale (an end or resolve missed while
+/// the socket was down), so `reconcileLiveEvents()` re-reads Helix after
+/// every EventSub reconnect and every `liveEventsVerifyInterval` while an
+/// event is unfinished. The reducer's tombstones and ordering rules keep a
+/// late or duplicated event from undoing either.
 extension ChannelSession {
 
     // MARK: - Subscriber API
@@ -83,9 +90,18 @@ extension ChannelSession {
 
     // MARK: - Startup (own channel only)
 
+    /// How often the session re-checks Helix while a poll, prediction or
+    /// train is unfinished. EventSub sends nothing between a prediction's
+    /// lock and its resolve, so this is what confirms a locked prediction is
+    /// still locked (or catches a resolve EventSub dropped). One request per
+    /// kind per interval, own channel only, and nothing at all while no
+    /// event is running.
+    static let liveEventsVerifyInterval: Duration = .seconds(5 * 60)
+
     /// Subscribes the live-event topics and seeds from Helix. Never throws:
     /// a token that predates the scopes gets 403s, logged at info, and the
-    /// banners simply never appear.
+    /// banners simply never appear. `start()` follows it with a
+    /// `verifyLiveEvents()` every `liveEventsVerifyInterval`.
     func startLiveEvents() async {
         await withTaskGroup(of: Void.self) { group in
             for topic in EventSubTopics.liveEventSubscriptions(broadcasterID: channelId) {
@@ -93,8 +109,17 @@ extension ChannelSession {
                 let label = topic.label
                 group.addTask { await self.subscribeToLiveEventTopic(subscription, label: label) }
             }
-            group.addTask { await self.seedLiveEvents() }
+            // A poll / prediction / train already running when the session
+            // started has no `begin` coming: the reconcile seeds it.
+            group.addTask { await self.reconcileLiveEvents() }
         }
+    }
+
+    /// The periodic check: reconciles with Helix only while something is
+    /// unfinished, so a quiet channel costs no requests.
+    func verifyLiveEvents() async {
+        guard liveEvents.hasUnconcludedEvent else { return }
+        await reconcileLiveEvents()
     }
 
     private func subscribeToLiveEventTopic(_ subscription: EventSubSubscription, label: String) async {
@@ -110,24 +135,50 @@ extension ChannelSession {
         }
     }
 
-    /// A poll or prediction already running when the session started has
-    /// no `begin` event coming — fetch it. Applied only into an empty slot,
-    /// so a slower Helix answer never overwrites fresher EventSub state.
-    private func seedLiveEvents() async {
-        if let page = try? await client.api.fetchPollsPage(broadcasterID: channelId, first: 1),
-           let poll = page.data.first,
-           let update = LiveEventUpdate(helixPoll: poll),
-           liveEvents.poll == nil,
-           !isStopped {
-            applyLiveEvent(update)
+    // MARK: - Helix reconcile
+
+    /// Brings `liveEvents` in line with what Helix says is the channel's
+    /// latest poll, prediction and Hype Train. Runs at start (the seed),
+    /// after an EventSub reconnect (anything that began, ended or resolved
+    /// while the socket was down) and periodically while an event is
+    /// unfinished. Own channel only; a no-op elsewhere, after `stop()`, or
+    /// while another reconcile is in flight.
+    ///
+    /// Each kind goes through `LiveEventsState.reconcile`, which can replace
+    /// or clear a stored event but never undoes an EventSub update that
+    /// landed while the request was in flight. A failed request leaves that
+    /// kind alone: no answer is not the same as "nothing running".
+    public func reconcileLiveEvents() async {
+        guard channelId == accountUserId, !isStopped, !liveEventsReconcileInFlight else { return }
+        liveEventsReconcileInFlight = true
+        defer { liveEventsReconcileInFlight = false }
+
+        let pollFetchedAt = Date()
+        if let page = try? await client.api.fetchPollsPage(broadcasterID: channelId, first: 1) {
+            reconcileLiveEvent(.poll, snapshot: page.data.first.map(LiveEventUpdate.init(helixPoll:)), fetchedAt: pollFetchedAt)
         }
-        if let page = try? await client.api.fetchPredictionsPage(broadcasterID: channelId, first: 1),
-           let prediction = page.data.first,
-           let update = LiveEventUpdate(helixPrediction: prediction),
-           liveEvents.prediction == nil,
-           !isStopped {
-            applyLiveEvent(update)
+        let predictionFetchedAt = Date()
+        if let page = try? await client.api.fetchPredictionsPage(broadcasterID: channelId, first: 1) {
+            reconcileLiveEvent(.prediction, snapshot: page.data.first.flatMap(LiveEventUpdate.init(helixPrediction:)), fetchedAt: predictionFetchedAt)
         }
+        let trainFetchedAt = Date()
+        do {
+            let status = try await client.api.fetchHypeTrainStatus(forBroadcasterID: channelId)
+            reconcileLiveEvent(.hypeTrain, snapshot: status?.current.map(LiveEventUpdate.init(helixHypeTrain:)), fetchedAt: trainFetchedAt)
+        } catch {
+            logger.info("Hype Train status fetch failed for #\(self.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func reconcileLiveEvent(_ kind: LiveEventKind, snapshot: LiveEventUpdate?, fetchedAt: Date) {
+        guard !isStopped else { return }
+        let now = Date()
+        let pruned = liveEvents.prune(now: now)
+        let changed = liveEvents.reconcile(kind, snapshot: snapshot, fetchedAt: fetchedAt, now: now)
+        if pruned || changed {
+            publishLiveEvents()
+        }
+        requestPollDeadlineIfNeeded()
     }
 
     /// TwitchKit's EventSub poll model has no `ends_at`, so a poll that

@@ -257,7 +257,7 @@ public struct ChatScreen: View {
             VStack(spacing: 0) {
                 ChatWelcomeOverlay(channel: channel, tabId: tabId)
                 if channelId == account.userId {
-                    LiveEventsBannerArea(chatModel: chatModel)
+                    LiveEventsBannerArea(chatModel: chatModel, tabId: tabId)
                         .padding(.top, 8)
                 }
             }

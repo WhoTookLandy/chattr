@@ -14,31 +14,64 @@ import Channels
 /// re-renders these few banners and nothing else. From `chatModel` it reads
 /// just `attachState` (which changes on attach / detach, never per message)
 /// to know when the session is there to subscribe to.
+///
+/// ## Visible page only
+///
+/// The pager pre-mounts the neighbouring chat pages, and they stay
+/// attached, so attachment alone doesn't mean anyone is looking. This view
+/// reads `ChatTabsModel.activeTabId` itself (like `ChatWelcomeOverlay` and
+/// `StreamHeaderView`) so a swipe re-runs only this small body, never
+/// `ChatScreen` or the transcript. Off-screen it holds no feed subscription
+/// and runs no timers (`LiveEventsModel.suspend()`), and its countdowns
+/// stop ticking. When the page becomes visible again it re-subscribes and
+/// catches up from the session's current state.
 struct LiveEventsBannerArea: View {
     let chatModel: ChatTranscriptModel
+    /// The pager tab; nil outside the pager (always the visible page).
+    let tabId: UUID?
 
+    @Environment(\.chatTabs) private var chatTabs
     @State private var model = LiveEventsModel()
 
     @AppStorage(LiveEventsSettings.pollsKey) private var showPolls = true
     @AppStorage(LiveEventsSettings.predictionsKey) private var showPredictions = true
     @AppStorage(LiveEventsSettings.hypeTrainKey) private var showHypeTrain = true
 
+    private var isActive: Bool {
+        guard let tabId else { return true }
+        return chatTabs?.activeTabId == tabId
+    }
+
+    /// What the feed task keys on: it runs only while both hold.
+    private struct FeedKey: Equatable {
+        let isAttached: Bool
+        let isActive: Bool
+    }
+
     var body: some View {
         let isAttached = chatModel.attachState == .attached
+        let active = isActive
         VStack(spacing: 6) {
             ForEach(LiveEventKind.allCases, id: \.self) { kind in
                 banner(for: kind)
             }
         }
         .padding(.horizontal, 12)
+        // Off-screen: freeze the countdowns (no per-second TimelineView).
+        .environment(\.liveEventCountdownsRunning, active)
         .animation(.snappy(duration: 0.25), value: model.state)
         .animation(.snappy(duration: 0.25), value: model.expanded)
         .animation(.snappy(duration: 0.25), value: model.dismissedIds)
-        // Subscribe once the transcript is attached (that's when its session
-        // is known); re-runs on detach / re-attach. Cancelling ends
-        // `model.run`, which unsubscribes and resets.
-        .task(id: isAttached) {
-            guard isAttached, let session = chatModel.liveEventsSession else { return }
+        // Subscribe while the transcript is attached (that's when its
+        // session is known) AND this page is the visible one. A change to
+        // either cancels the running feed, which unsubscribes and suspends.
+        .task(id: FeedKey(isAttached: isAttached, isActive: active)) {
+            guard isAttached, let session = chatModel.liveEventsSession else {
+                // Detached: the session is going away, start clean next time.
+                model.reset()
+                return
+            }
+            guard active else { return }
             await model.run(session: session)
         }
     }
