@@ -126,6 +126,8 @@ public struct ChatScreen: View {
     /// String here is identifiable already (each root id is unique) so
     /// we wrap it minimally for the API.
     @State private var viewingThreadRootId: ThreadRootID?
+    /// Tapped message whose author's card is showing.
+    @State private var userCardTarget: UserCardTarget?
 
     /// True while the in-chat settings sheet (chat modes + preferences)
     /// is presented. Opened from the compose bar's gear button.
@@ -223,6 +225,11 @@ public struct ChatScreen: View {
                     connectionStatus: connectionStatus,
                     rowContent: { line in chatRow(for: line) },
                     rowInputs: rowInputs,
+                    onLineTapped: { line in
+                        // Only real chat messages have an author to show.
+                        guard line.kind == .message, !line.authorUserId.isEmpty else { return }
+                        userCardTarget = UserCardTarget(line: line)
+                    },
                     showReportConfirmation: $showReportConfirmation
                 )
             }
@@ -287,6 +294,49 @@ public struct ChatScreen: View {
         // wrapper. `.sheet(item:)` ties presentation to a non-nil value
         // AND passes the unwrapped value into the content closure
         // automatically.
+        // User card: a short sheet over a still-usable chat; drag up for
+        // bio + this user's recent messages here.
+        .sheet(item: $userCardTarget) { target in
+            let row = chatRow(for: target.line)
+            UserCardSheet(
+                line: target.line,
+                badges: row.badgeEntries,
+                account: account,
+                accountStore: accountStore,
+                recentLines: chatModel.transcriptSnapshot().lines.filter {
+                    $0.authorUserId == target.line.authorUserId && $0.kind == .message
+                },
+                rowContent: { chatRow(for: $0) },
+                onReply: { chatModel.beginReply(to: target.line) },
+                onBlock: target.line.authorUserId == account.userId ? nil : {
+                    Task {
+                        await blockStore?.block(
+                            userId: target.line.authorUserId,
+                            login: target.line.authorUserLogin,
+                            displayName: target.line.authorDisplayName,
+                            reason: .other
+                        )
+                    }
+                },
+                onReport: target.line.authorUserId == account.userId ? nil : { reason in
+                    Task {
+                        await blockStore?.block(
+                            userId: target.line.authorUserId,
+                            login: target.line.authorUserLogin,
+                            displayName: target.line.authorDisplayName,
+                            reason: reason
+                        )
+                        showReportConfirmation = true
+                        reportConfirmationDismiss?.cancel()
+                        reportConfirmationDismiss = Task { @MainActor in
+                            try? await Task.sleep(for: .seconds(2))
+                            guard !Task.isCancelled else { return }
+                            showReportConfirmation = false
+                        }
+                    }
+                }
+            )
+        }
         .sheet(item: $viewingThreadRootId) { root in
             ThreadView(
                 rootMessageId: root.id,

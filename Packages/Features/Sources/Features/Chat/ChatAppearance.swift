@@ -79,7 +79,7 @@ public struct ChatAppearance: Equatable, Sendable {
     /// small, dimmed and line-capped, with box-drawing decoration stripped —
     /// so a StreamElements shoutout banner takes a few quiet lines instead of
     /// six loud ones. Distinct from Hide Known Bots, which drops them.
-    public var compactBots: Bool = true
+    public var compactBots: Bool = false
 
     public init(
         textSizePoints: Double = ChatAppearance.defaultTextSizePoints,
@@ -88,7 +88,7 @@ public struct ChatAppearance: Equatable, Sendable {
         animatedEmotes: Bool = true,
         edgeToEdge: Bool = false,
         loginNameDisplay: LoginNameDisplay = .displayFirst,
-        compactBots: Bool = true
+        compactBots: Bool = false
     ) {
         self.textSizePoints = textSizePoints
         // Derive the hot-path values once — see `font` / `imageScale`.

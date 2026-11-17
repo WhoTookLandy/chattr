@@ -60,6 +60,9 @@ struct ComposeBar: View {
     @AppStorage(StreamHeaderView.expandedKey) private var videoVisible = false
     @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
     @Environment(\.chatTabs) private var chatTabs
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    #endif
 
     /// The open tab showing this channel — for "Close Chat".
     private var tabId: UUID? {
@@ -287,10 +290,22 @@ struct ComposeBar: View {
             // the bottom of the pill as the field grows multi-line, rather
             // than floating to the vertical center of a tall field.
             HStack(alignment: .bottom, spacing: 2) {
-                TextField(textFieldPrompt, text: $composeText, axis: .vertical)
+                // ⋯ lives inside the pill now (leading), a quiet glyph like
+                // the emote button — one surface instead of a pill plus a
+                // floating circle.
+                moreMenu
+
+                // Single-line: Return sends (no send button), and the keyboard
+                // stays up for the next message. Chat messages are one line
+                // on Twitch anyway.
+                TextField(textFieldPrompt, text: $composeText)
                     .textFieldStyle(.plain)
-                    .lineLimit(1...5)
                     .focused($focused)
+                    .submitLabel(.send)
+                    .onSubmit {
+                        Task { await sendDraft() }
+                        focused = true
+                    }
                     // Forward every text change to the parent, which hands
                     // it to `DraftStorage.scheduleSave` — debounced (~400ms),
                     // so a burst of typing costs one UserDefaults write, and
@@ -299,7 +314,7 @@ struct ComposeBar: View {
                     .onChange(of: composeText) { _, newValue in
                         onDraftChange(newValue)
                     }
-                    .padding(.leading, 16)
+                    .padding(.leading, 2)
                     .padding(.vertical, 9)
                     .accessibilityLabel("Message input")
                     .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
@@ -317,7 +332,7 @@ struct ComposeBar: View {
                         // diameter as the send button's 30pt disc — the two
                         // trailing controls match in size even though only
                         // send is filled.
-                        .font(.system(size: 17, weight: .regular))
+                        .font(.system(size: 20, weight: .regular))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.secondary)
                         // Borderless grey glyph (no fill) — styled like the
@@ -328,43 +343,12 @@ struct ComposeBar: View {
                         // this and send are the most-tapped controls in the
                         // app) around the unchanged 30pt visual disc.
                         .frame(width: 30, height: 30)
-                        .background(Color.emoteButton, in: Circle())
                         .frame(width: 44, height: 44)
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Emotes")
 
-                // Send — only once there's text. The single filled/tinted
-                // shape in the bar; `.glassProminent` reads as a control
-                // sitting on the pill, matching the iMessage send affordance.
-                if hasDraft {
-                    Button {
-                        Task { await sendDraft() }
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                            // Flat orange circle (Color.sendButton, not the
-                            // blue app accent) — the single warm CTA in the
-                            // bar, mirroring the Claude composer's send
-                            // affordance. An explicit Circle (not
-                            // `.glassProminent`, whose ~44pt min height made
-                            // the button hang below the emote) so the inner
-                            // 30pt disc and the emote share one 40pt frame and
-                            // sit perfectly level under `.bottom` alignment.
-                            // 44pt outer frame to match the emote button —
-                            // HIG-minimum touch target, unchanged 30pt disc.
-                            .frame(width: 30, height: 30)
-                            .background(Color.sendButton, in: Circle())
-                            .frame(width: 44, height: 44)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isSending)
-                    .transition(.blurReplace)
-                    .accessibilityLabel("Send message")
-                }
             }
             // Trailing inset keeps the emote/send off the pill's right edge.
             .padding(.trailing, 5)
@@ -378,8 +362,6 @@ struct ComposeBar: View {
             // change it causes). Value-scoped so unrelated re-renders don't
             // animate.
             .animation(.snappy(duration: 0.2), value: hasDraft)
-
-            moreMenu
           }
         }
     }
@@ -457,20 +439,31 @@ struct ComposeBar: View {
             if let tabId {
                 Divider()
                 Button(role: .destructive) {
+                    #if os(iOS)
+                    // Closing the chat also stops its stream (otherwise it
+                    // would carry on in the mini player).
+                    if playback?.channel?.channelLoginName == channelLoginName {
+                        playback?.stop()
+                    }
+                    #endif
                     chatTabs?.close(tabId: tabId)
                 } label: {
                     Label("Close Chat", systemImage: "xmark")
                 }
             }
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.secondary)
+            // A filled "+" disc, iMessage-style: reads as a button that opens
+            // more options, where a bare ⋯ read as decoration.
+            Image(systemName: "plus")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 30, height: 30)
+                .background(Color.emoteButton, in: Circle())
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
-        .glassEffect(.regular.interactive(), in: Circle())
-        .accessibilityLabel("More chat actions")
+        .padding(.leading, 4)
+        .accessibilityLabel("More options")
     }
 
     private var channelURL: URL? {

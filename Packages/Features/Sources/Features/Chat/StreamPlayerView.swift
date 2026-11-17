@@ -16,24 +16,20 @@ import WebKit
 /// to native as `tap`, which toggles chattr's chrome instead. Taps on real
 /// buttons inside the page (the mature-content "Start Watching" gate, the
 /// "click to unmute" prompt) pass through untouched.
-struct StreamPlayerView: UIViewRepresentable {
-    let channelLogin: String
-    let controller: StreamPlayerController
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(controller: controller)
-    }
-
-    func makeUIView(context: Context) -> WKWebView {
+enum TwitchWebPlayer {
+    /// Builds the player web view for `login`. Owned by `WebStreamEngine`
+    /// (and through it `PlaybackCenter`), so it survives leaving the chat.
+    @MainActor
+    static func makeWebView(login: String, coordinator: Coordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
 
         let content = WKUserContentController()
-        content.add(WeakScriptHandler(context.coordinator), name: Self.handlerName)
+        content.add(WeakScriptHandler(coordinator), name: handlerName)
         content.addUserScript(WKUserScript(
-            source: Self.bridgeScript,
+            source: bridgeScript,
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
         ))
@@ -49,28 +45,19 @@ struct StreamPlayerView: UIViewRepresentable {
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
-        webView.navigationDelegate = context.coordinator
-        controller.webView = webView
-
-        context.coordinator.loadedLogin = channelLogin
-        webView.load(URLRequest(url: Self.playerURL(channelLogin)))
+        webView.navigationDelegate = coordinator
+        webView.load(URLRequest(url: playerURL(login)))
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.loadedLogin != channelLogin else { return }
-        context.coordinator.loadedLogin = channelLogin
-        controller.reset()
-        webView.load(URLRequest(url: Self.playerURL(channelLogin)))
-    }
-
-    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+    @MainActor
+    static func teardown(_ webView: WKWebView) {
         // Stop audio immediately — a torn-down page can otherwise keep
         // playing until the web process notices.
         webView.evaluateJavaScript("document.querySelectorAll('video').forEach(v=>v.pause())")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: handlerName)
         webView.stopLoading()
-        coordinator.controller.webView = nil
+        webView.removeFromSuperview()
     }
 
     // MARK: - Page
@@ -162,7 +149,6 @@ struct StreamPlayerView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let controller: StreamPlayerController
-        var loadedLogin: String?
 
         init(controller: StreamPlayerController) {
             self.controller = controller

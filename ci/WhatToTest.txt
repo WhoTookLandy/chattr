@@ -1,0 +1,24 @@
+Watch while you chat
+
+NEW
+• Streams play right inside chat. Tap the video for controls, the title, tags and Subscribe; swipe down on it to hide it.
+• Mini player: back out of a chat and the stream keeps playing in a floating player across the app. Tap it to return, × or fling it down to stop, drag it to another corner.
+• Audio only (headphones button on the video, or More → Audio Only): chat takes the whole screen while the stream keeps playing as audio.
+• Native video player (You → Video, experimental): Apple's player with picture-in-picture, fullscreen and a max-quality setting. If it can't load a stream, chattr switches to Twitch's web player.
+• Jump between open chats from the "1 / N" chip on the video. Close a chat from the + menu next to the message box.
+• Home → Live now lists every live channel you follow (no more "See all").
+• Tap any chat message to see that user's card: badges, join date, bio and their recent messages (drag it up). Reply, block or report from there.
+• Message bar: press Return to send, and tap the + for more options. Tap the chat to put the keyboard away.
+• Bots look like everyone else again (no more greyed-out messages). Compact bots is still an option in Filters.
+• Followers-only, slow mode and other chat restrictions now show in the message box.
+
+FIXED
+• The app freezing after tapping back from a chat (for real this time).
+
+PLEASE TEST
+1. Back out of a playing chat: does the mini player appear without the stream restarting?
+2. Tap the mini player, then back out again a few times.
+3. Audio only, with and without the native player turned on.
+4. A mature channel: if the native player falls back to the web player, does "Start Watching" appear and work?
+5. Tap back from a chat, several times and across different chats: no freezes?
+6. Swipe in from the left edge to go back while a video is playing.

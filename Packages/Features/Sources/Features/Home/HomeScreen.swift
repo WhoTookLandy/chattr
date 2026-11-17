@@ -11,7 +11,7 @@ import NukeUI
 /// Search).
 ///
 ///   - **Live** — who you follow that's on now (`HomeContent`): category
-///     chips, featured cards, compact rows, "See all" → `ChannelListScreen`.
+///     chips, two featured cards, then every other live channel as rows.
 ///   - **Following** — every followed channel, live first, offline ones with
 ///     "Streamed 2 days ago" (`FollowingList`).
 ///   - **Chats** — your open chats (`OpenChatsList`); tapping one pushes the
@@ -98,11 +98,19 @@ public struct HomeScreen: View {
                    let uuid = UUID(uuidString: savedId),
                    chatTabs.tabs.contains(where: { $0.id == uuid }) {
                     chatTabs.activeTabId = uuid
+                    chatTabs.isPresented = true
                     section = .chats
                 }
             }
+            // Persist the chat that's open on screen (nil once popped), so
+            // "resume last chat" restores what the user was actually in.
             .onChange(of: chatTabs?.activeTabId) { _, newValue in
-                persistedActiveTabId = newValue?.uuidString
+                if chatTabs?.isPresented == true {
+                    persistedActiveTabId = newValue?.uuidString
+                }
+            }
+            .onChange(of: chatTabs?.isPresented) { _, presented in
+                persistedActiveTabId = presented == true ? chatTabs?.activeTabId?.uuidString : nil
             }
         }
         // Live data whenever Home appears (tab switches included).
@@ -163,12 +171,12 @@ public struct HomeScreen: View {
         Binding(
             get: {
                 guard let chatTabs else { return false }
-                return chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
+                return chatTabs.isPresented && chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
             },
             set: { presented in
-                if !presented {
-                    chatTabs?.activeTabId = nil
-                }
+                // Only the flag — never touch activeTabId here (see
+                // ChatTabsModel.isPresented for the freeze this caused).
+                chatTabs?.isPresented = presented
             }
         )
     }
@@ -228,11 +236,6 @@ struct HomeContent: View {
         }
     }
 
-    /// Streams shown in the Live now preview, after the featured cards.
-    /// Six ≈ two cards + four rows — enough to answer "anything good on?"
-    /// without burying the rest of the app.
-    private static let liveDisplayCap = 6
-
     /// Leading streams that get the full-width card treatment.
     private static let featuredCount = 2
 
@@ -261,8 +264,10 @@ struct HomeContent: View {
         return liveStreams.filter { $0.gameName == activeCategory }
     }
 
-    private var displayedStreams: ArraySlice<TwitchStream> {
-        filteredStreams.prefix(Self.liveDisplayCap)
+    /// Every live followed channel (in the selected category). No preview
+    /// cap + "See all": the feed is the full list.
+    private var displayedStreams: [TwitchStream] {
+        filteredStreams
     }
 
     // MARK: - Live now
@@ -276,8 +281,7 @@ struct HomeContent: View {
                 if !categories.isEmpty {
                     categoryChips
                 }
-                let shown = Array(displayedStreams)
-                ForEach(Array(shown.enumerated()), id: \.element.userId) { index, stream in
+                ForEach(Array(displayedStreams.enumerated()), id: \.element.userId) { index, stream in
                     Button {
                         onStreamTap(stream)
                     } label: {
@@ -302,23 +306,17 @@ struct HomeContent: View {
             HStack(alignment: .firstTextBaseline) {
                 sectionHeader("Live now")
                 Spacer()
-                // The single gateway to the full browse screen (Following —
-                // Live/All segments, search, sorting). A header link, the
-                // standard iOS "See all" placement, instead of a trailing
-                // list row that read as just another stream.
-                NavigationLink(value: HomeRoute.allFollows) {
-                    HStack(spacing: 2) {
-                        Text(liveStreams.count > Self.liveDisplayCap
-                             ? "See all \(liveStreams.count)"
-                             : "See all")
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.accentColor)
+                // How many are live. The whole list is right here, so a
+                // count replaces the old "See all" link.
+                if !liveStreams.isEmpty {
+                    Text(displayedStreams.count == liveStreams.count
+                         ? "\(liveStreams.count) live"
+                         : "\(displayedStreams.count) of \(liveStreams.count)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .textCase(nil)
                 }
-                .buttonStyle(.plain)
-                .textCase(nil)
             }
         }
     }

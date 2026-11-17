@@ -34,6 +34,9 @@ struct ChatTranscript: View {
     /// change makes the list reconfigure rows already on screen — see
     /// `ChatRowInputs`.
     let rowInputs: ChatRowInputs
+    /// A message was tapped (opens the user card). Taps on links inside a
+    /// message still go to the link.
+    var onLineTapped: (ChatLine) -> Void = { _ in }
     /// Parent-owned: written by the report flow's row callbacks (built in
     /// ChatScreen), read by the confirmation pill overlay here.
     @Binding var showReportConfirmation: Bool
@@ -186,7 +189,8 @@ struct ChatTranscript: View {
                 // when it flushes them (re-pin or pill tap).
                 unreadCount: $unreadWhileScrolledUp,
                 scrollToBottomToken: scrollToBottomToken,
-                extendsToTop: appearance.edgeToEdge
+                extendsToTop: appearance.edgeToEdge,
+                onLineTapped: onLineTapped
             )
             .ignoresSafeArea(edges: appearance.edgeToEdge ? .top : [])
         }

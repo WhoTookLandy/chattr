@@ -56,6 +56,24 @@ public struct AppShell: View {
 
     @State private var navigation = AppNavigation()
 
+    #if os(iOS)
+    /// The single stream player: chat headers drive it; when its chat is
+    /// left it keeps playing in `MiniPlayerOverlay`.
+    @State private var playback = PlaybackCenter()
+
+    /// A chat is on screen (Home tab with the pager pushed) — the stream
+    /// shows in its header there, so no mini player.
+    private var chatOnScreen: Bool {
+        navigation.selectedTab == .home
+            && navigation.chatTabs.isPresented
+            && !navigation.chatTabs.tabs.isEmpty
+    }
+
+    private var showsMiniPlayer: Bool {
+        playback.isPlaying && !chatOnScreen
+    }
+    #endif
+
     /// Subscription tokens for the per-tab mention watchers installed in
     /// `onOpen`, keyed by tab id, one entry per channel in the tab. Held in
     /// a reference type (not view `@State` value) so the long-stored
@@ -148,6 +166,21 @@ public struct AppShell: View {
         // `navigation` reference (not a per-body closure), so this env value
         // compares equal across body passes and doesn't churn its readers.
         .environment(\.openChannel, OpenChannelAction(navigation))
+        #if os(iOS)
+        .environment(\.playback, playback)
+        // Stream keeps playing after leaving its chat: a floating player
+        // over every tab. Tap → back to that chat; × or fling down → stop.
+        .overlay {
+            if showsMiniPlayer {
+                MiniPlayerOverlay(center: playback) { channel in
+                    navigation.openChannel(channel)
+                }
+            }
+        }
+        .animation(.snappy(duration: 0.3), value: showsMiniPlayer)
+        // Sign-out / account switch: nothing keeps playing for the old account.
+        .onDisappear { playback.stop() }
+        #endif
         #if canImport(UIKit)
         .task(id: account.profileImageURL) {
             profileIcon = await ProfileTabIcon.load(urlString: account.profileImageURL)

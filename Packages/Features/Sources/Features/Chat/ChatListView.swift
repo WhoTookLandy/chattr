@@ -49,10 +49,14 @@ struct ChatListView: UIViewControllerRepresentable {
     /// effect: `.hard` cutoff when the list stops at the safe-area edge,
     /// system-default soft dissolve when content runs underneath glass.
     var extendsToTop: Bool = false
+    /// A message row was tapped (with the keyboard down — a tap while
+    /// typing just dismisses the keyboard).
+    var onLineTapped: (ChatLine) -> Void = { _ in }
 
     func makeUIViewController(context: Context) -> ChatListViewController {
         let vc = ChatListViewController()
         vc.rowContent = rowContent
+        vc.onLineTapped = onLineTapped
         vc.onAtBottomChanged = { atBottom in
             // Avoid mutating SwiftUI state during the UIKit layout pass.
             // Task { @MainActor } defers past the current synchronous
@@ -74,6 +78,7 @@ struct ChatListView: UIViewControllerRepresentable {
         // so cells built after this call use current state.
         vc.rowContent = rowContent
         vc.extendsToTop = extendsToTop
+        vc.onLineTapped = onLineTapped
         vc.update(
             changes: changes,
             snapshot: snapshot,

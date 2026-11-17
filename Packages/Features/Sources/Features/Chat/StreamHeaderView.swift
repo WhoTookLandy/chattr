@@ -57,7 +57,15 @@ struct StreamHeaderView: View {
     @State private var chromeInteraction = 0
 
     #if os(iOS)
-    @State private var player = StreamPlayerController()
+    /// App-wide player (survives leaving the chat → mini player).
+    @Environment(\.playback) private var playback
+    /// Stand-in so overlay bindings have something to read in previews /
+    /// before the center is injected.
+    @State private var fallbackPlayer = StreamPlayerController()
+
+    private var player: StreamPlayerController {
+        playback?.controller ?? fallbackPlayer
+    }
     #endif
 
     private var stream: TwitchStream? {
@@ -102,7 +110,51 @@ struct StreamHeaderView: View {
         .onChange(of: isActive) { _, active in
             if !active { chromeVisible = false }
         }
+        #if os(iOS)
+        // The visible chat decides what plays. Re-evaluated whenever
+        // anything that shapes playback changes.
+        .task(id: playbackKey) { syncPlayback() }
+        .onAppear { if isActive { wirePlayerCallbacks() } }
+        .onChange(of: isActive) { _, active in
+            if active { wirePlayerCallbacks() }
+        }
+        #endif
     }
+
+    #if os(iOS)
+    private var playbackKey: String {
+        "\(isActive)|\(isExpanded)|\(stream != nil)|\(status != nil)|\(audioOnly)|\(useNativePlayer)|\(maxQuality.rawValue)"
+    }
+
+    /// Only the active page acts (pages leaving — swiped away or popped —
+    /// do nothing, so a popped chat's stream carries on into the mini
+    /// player).
+    private func syncPlayback() {
+        guard isActive, let playback else { return }
+        if isExpanded, let stream {
+            playback.play(
+                channel,
+                title: stream.title,
+                profileImageURL: profileImageURL,
+                // Audio-only needs the native engine (see isAudioOnlyActive).
+                native: useNativePlayer || audioOnly,
+                audioOnly: audioOnly,
+                quality: maxQuality
+            )
+        } else if status != nil, playback.isPlaying {
+            // Video hidden here, or this channel is offline: whatever was
+            // playing (this stream, or another chat's) stops. Waits for
+            // `status` so a not-yet-loaded status doesn't kill the stream
+            // the mini player handed back.
+            playback.stop()
+        }
+    }
+
+    private func wirePlayerCallbacks() {
+        player.onTap = { toggleChrome() }
+        player.onSwipeDown = { setExpanded(false) }
+    }
+    #endif
 
     private var isPlayerPaused: Bool {
         #if os(iOS)
@@ -155,17 +207,15 @@ struct StreamHeaderView: View {
         VStack(alignment: .leading, spacing: 0) {
             playerSurface(stream)
 
-            Button(action: toggleChrome) {
-                infoRow(stream)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, chromeVisible ? 8 : 10)
-            .accessibilityHint(chromeVisible ? "Hides stream controls" : "Shows stream controls")
-
+            // At rest it's just the video and chat. A tap on the video brings
+            // in name · category · viewers, the title, tags and actions.
             if chromeVisible {
                 VStack(alignment: .leading, spacing: 10) {
+                    Button(action: toggleChrome) {
+                        infoRow(stream)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Hides stream controls")
                     if !tags.isEmpty {
                         // Indented to the text column, under the title.
                         tagRow.padding(.leading, 42)
@@ -173,6 +223,7 @@ struct StreamHeaderView: View {
                     ChannelActionRow(channel: channel, isFollowing: isFollowing, style: .compact)
                 }
                 .padding(.horizontal, 12)
+                .padding(.top, 10)
                 .padding(.bottom, 10)
                 .simultaneousGesture(TapGesture().onEnded { touchChrome() })
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -248,31 +299,15 @@ struct StreamHeaderView: View {
         // Black status-bar strip, so the video reads as starting at the
         // top of the screen (like Twitch) instead of under a grey band.
         .background { Color.black.ignoresSafeArea(edges: .top) }
-        #if os(iOS)
-        .onAppear {
-            player.onTap = { toggleChrome() }
-            player.onSwipeDown = { setExpanded(false) }
-        }
-        #endif
     }
 
-    /// The mounted player — web or native — for the active page only.
+    /// Where the shared player's video shows — only on the active page,
+    /// and only while it's this channel that's playing.
     @ViewBuilder
     private func playerEngine(audioOnly: Bool) -> some View {
         #if os(iOS)
-        if isActive {
-            if isNativeEngine || (audioOnly && !player.nativeFailed) {
-                NativeStreamPlayerView(
-                    channelLogin: channel.channelLoginName,
-                    quality: maxQuality,
-                    audioOnly: audioOnly,
-                    controller: player
-                )
-                .id("native")
-            } else {
-                StreamPlayerView(channelLogin: channel.channelLoginName, controller: player)
-                    .id("web")
-            }
+        if isActive, let playback, playback.isPlaying(channel.channelId) {
+            PlayerHost(center: playback)
         }
         #endif
     }
