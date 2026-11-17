@@ -168,6 +168,9 @@ struct PlaybackHoldIntentTests {
         controller.togglePlay()
         #expect(!controller.startsPlaying)
         // Native fullscreen / PiP / lock screen plays it: that's intent.
+        // The engine reports state the way the native observer does: the
+        // playing status first, then the play report.
+        controller.update(\.isPaused, to: false)
         controller.noteDidPlay()
         #expect(controller.hasStarted)
         #expect(controller.wantsPlayback)
