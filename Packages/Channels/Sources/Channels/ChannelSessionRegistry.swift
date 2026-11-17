@@ -242,6 +242,26 @@ public final class ChannelSessionRegistry {
     /// next opened fresh.
     public var chatHistoryLimit: Int = 500
 
+    /// Whether the app is in the foreground, from the scene phase. Every
+    /// session this registry builds shares it. See `AppForegroundSignal`.
+    let appForeground = AppForegroundSignal()
+
+    /// The app entered the background (`false`) or became active again
+    /// (`true`). Called by the root view on a scene-phase change. Sessions
+    /// use it to stop background network work: no live-event Helix checks
+    /// while backgrounded (background audio / PiP keep EventSub up), one
+    /// catch-up reconcile on return. Each session is nudged fire-and-forget
+    /// and weakly held, like the reconnect resync, including sessions still
+    /// starting; it re-reads the shared flag, so nudge order doesn't matter.
+    public func setAppInForeground(_ inForeground: Bool) {
+        guard appForeground.set(inForeground) else { return }
+        for session in dispatchTargets.values {
+            Task { [weak session] in
+                await session?.appForegroundDidChange()
+            }
+        }
+    }
+
     public convenience init(accountStore: AccountStore) {
         self.init(dependencies: Dependencies(
             client: { accountStore.client(forUserId: $0) },
@@ -308,7 +328,8 @@ public final class ChannelSessionRegistry {
             emoteIndex: emoteIndex(forAccountUserId: accountUserId, channelId: channelId),
             refreshTokenHandler: {
                 try await refreshTokens(accountUserId, accountLogin)
-            }
+            },
+            appForeground: appForeground
         )
 
         // Register for event routing + ensure the shared dispatcher is live

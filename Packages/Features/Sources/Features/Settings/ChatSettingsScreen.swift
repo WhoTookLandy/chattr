@@ -23,7 +23,7 @@ struct ChatSettingsScreen: View {
                 NavigationLink {
                     ChatFiltersScreen()
                 } label: {
-                    SettingLabel("Filters", systemImage: "line.3.horizontal.decrease.circle", subtitle: "Commands and bots")
+                    SettingLabel("Filters", systemImage: "line.3.horizontal.decrease.circle", subtitle: "Commands, bots, live events")
                 }
                 NavigationLink {
                     EmoteSettingsScreen()

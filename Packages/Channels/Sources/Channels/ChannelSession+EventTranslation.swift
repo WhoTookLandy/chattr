@@ -145,6 +145,13 @@ extension ChannelSession {
         case let .chatClearUserMessages(c):        return c.broadcasterUserId
         case let .chatSettingsUpdate(s):           return s.broadcasterUserId
         case let .moderate(m):                     return m.broadcasterUserId
+        // Live-event banners (see ChannelSession+LiveEvents.swift).
+        case let .pollBegin(p), let .pollProgress(p), let .pollEnd(p):
+            return p.broadcasterUserId
+        case let .predictionBegin(p), let .predictionProgress(p), let .predictionLock(p), let .predictionEnd(p):
+            return p.broadcasterUserId
+        case let .hypeTrainBegin(h), let .hypeTrainProgress(h), let .hypeTrainEnd(h):
+            return h.broadcasterUserId
         // Revocations of ANY subscription type route by the condition's
         // broadcaster id — translate() then keeps only channel.moderate
         // ones. Conditions without the key (e.g. user-scoped types we

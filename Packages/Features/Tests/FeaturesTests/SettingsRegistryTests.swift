@@ -48,6 +48,17 @@ struct SettingsRegistryTests {
         #expect(SettingsRegistry.search("vibration").map(\.id).contains("haptics"))
     }
 
+    @Test("Live-event banner toggles are findable and point at Filters")
+    func liveEventBanners() {
+        #expect(SettingsRegistry.search("vote").map(\.id).contains("livePolls"))
+        #expect(SettingsRegistry.search("bet").map(\.id).contains("livePredictions"))
+        #expect(SettingsRegistry.search("hype train").map(\.id).contains("liveHypeTrain"))
+        let banners = Set(SettingsRegistry.search("banner").map(\.id))
+        #expect(banners.isSuperset(of: ["livePolls", "livePredictions", "liveHypeTrain"]))
+        let byId = Dictionary(uniqueKeysWithValues: SettingsRegistry.entries.map { ($0.id, $0) })
+        #expect(byId["livePolls"]?.breadcrumb == "Chat › Filters")
+    }
+
     @Test("Every term must match")
     func allTermsMustMatch() {
         let ids = SettingsRegistry.search("hide bots").map(\.id)
