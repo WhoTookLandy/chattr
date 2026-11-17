@@ -61,19 +61,34 @@ public final class AccountStore {
         )
     }
 
-    /// Designated init with the seams tests swap out.
+    /// Designated init with the seams tests swap out. `twitchTransport` and
+    /// `tokenStoreFactory` default to the real network and Keychain (see
+    /// `TwitchClientCache`).
     init(
         modelContainer: ModelContainer,
         clientId: String,
         defaults: UserDefaults,
-        bridgeRefresh: BridgeTokenRefresh
+        bridgeRefresh: BridgeTokenRefresh,
+        twitchTransport: any HTTPClient = URLSessionHTTPClient(),
+        tokenStoreFactory: (@Sendable (_ namespace: String) -> any TwitchTokenStore)? = nil
     ) {
         let activity = SessionActivitySignal()
         self.sessionActivity = activity
         self.repository = AccountRepository(modelContainer: modelContainer)
-        self.clients = TwitchClientCache(clientId: clientId, sessionActivity: activity)
+        self.clients = TwitchClientCache(
+            clientId: clientId,
+            sessionActivity: activity,
+            transport: twitchTransport,
+            tokenStoreFactory: tokenStoreFactory
+        )
         self.selection = ActiveAccountSelection(defaults: defaults)
         self.bridgeRefresh = bridgeRefresh
+        // TwitchKit's own 401 refresh goes through the bridge, never Twitch
+        // (see `TwitchKitRefreshInterceptor`). Weak: the cache is ours.
+        clients.refreshHandler = { [weak self] userId in
+            guard let self else { return .unavailable }
+            return await self.answerTwitchKitRefresh(userId: userId)
+        }
     }
 
     // MARK: - Accounts

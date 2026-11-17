@@ -31,6 +31,11 @@ private let logger = AppLogger.make("Accounts.OAuthRefreshTokenCache")
 /// chattr owns, *independent* of TwitchKit's store. Our bridge refresh path
 /// reads it as a fallback so step 6 still has a refresh_token to POST.
 ///
+/// `TwitchKitRefreshInterceptor` now stops steps 3–5: TwitchKit's refresh
+/// goes through the bridge and only a genuinely dead refresh token lets it
+/// log out. The cache stays as a backstop, for stores already wiped by
+/// earlier builds and for anything the interceptor doesn't cover.
+///
 /// ## Trust model
 ///
 /// Same hardware-backed Keychain (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`)

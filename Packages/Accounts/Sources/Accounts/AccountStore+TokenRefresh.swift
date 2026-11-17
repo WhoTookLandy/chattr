@@ -35,6 +35,33 @@ extension AccountStore {
         }
     }
 
+    /// Answers a refresh that TwitchKit's `HelixClient` started after a 401
+    /// (relayed by `TwitchKitRefreshInterceptor`). It runs the same
+    /// single-flight bridge refresh as every other caller, then sorts the
+    /// outcome into what TwitchKit may do with the account's token:
+    ///
+    /// - success → `.refreshed`: TwitchKit stores the token and retries.
+    /// - `AppError.sessionExpired` → `.rejected`: the refresh token is dead
+    ///   and `performRefresh` has already called `forceSignOut`, so the
+    ///   account is `needsReauth` and TwitchKit clearing its store is correct.
+    /// - anything else (bridge 5xx / 408 / 429, network) → `.unavailable`:
+    ///   transient, so the stored token must survive.
+    func answerTwitchKitRefresh(userId: String) async -> TwitchKitRefreshAnswer {
+        let login = repository.login(forUserId: userId) ?? userId
+        do {
+            return .refreshed(try await refreshTokens(userId: userId, login: login))
+        } catch let error as AppError {
+            if case .sessionExpired = error.kind {
+                return .rejected
+            }
+            logger.warning("TwitchKit-initiated refresh failed transiently for @\(login, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return .unavailable
+        } catch {
+            logger.warning("TwitchKit-initiated refresh failed transiently for @\(login, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return .unavailable
+        }
+    }
+
     /// The actual refresh. Only ever called through `tokenRefresher` so at
     /// most one runs per userId at a time.
     private func performRefresh(userId: String, login: String) async throws -> OAuthToken {
@@ -118,26 +145,25 @@ extension AccountStore {
 
     /// Wraps an async throwing operation with one retry-after-refresh-on-auth-failure.
     ///
+    /// TwitchKit's own 401 refresh already goes through the bridge (see
+    /// `TwitchKitRefreshInterceptor`), so this is the second line of defence.
     /// Three error paths trigger a refresh-and-retry:
     ///
-    ///   - `HelixError.unauthorized` — Helix call returned 401 directly. The
-    ///     access token has expired or been revoked. Refresh + retry once.
+    ///   - `HelixError.unauthorized` — the 401 survived TwitchKit's refresh:
+    ///     the bridge was briefly unavailable, or the token lacks a scope.
+    ///     Refresh + retry once.
     ///
-    ///   - `HelixError.oauth(_)` — TwitchKit's *internal* auth-refresh layer
-    ///     intercepted the 401 and tried to call `POST /oauth2/token` itself,
-    ///     but failed because our `TwitchOAuthClient` is constructed without a
-    ///     `client_secret` (the secret lives only on the Vercel bridge to keep
-    ///     it out of the iOS binary). Twitch returns "missing client secret"
-    ///     and TwitchKit wraps that as the `.oauth` case. Same intent as
-    ///     `.unauthorized` — route through our Vercel-bridged refresh and retry.
+    ///   - `HelixError.oauth(_)` — TwitchKit's refresh was answered with a
+    ///     rejection, so the account has already been force-signed-out. The
+    ///     refresh below finds no refresh_token and rethrows
+    ///     `AppError.sessionExpired`. (Before the interceptor this was
+    ///     Twitch's "missing client secret".)
     ///
     ///   - `HelixError.notAuthenticated` — TwitchKit's `TwitchTokenProvider`
-    ///     reports an empty store. This happens *after* a prior auto-refresh
-    ///     failure, because `TwitchTokenProvider.refreshIfNeeded()` calls
-    ///     `logout()` in its catch (wiping its own Keychain entry). The
-    ///     access token IS gone, but our chattr-side `OAuthRefreshTokenCache`
-    ///     still holds the refresh_token — `refreshTokens(userId:login:)` will read
-    ///     it from there and recover transparently.
+    ///     reports an empty store. Builds before the interceptor could leave
+    ///     a store wiped by TwitchKit's `logout()`; our chattr-side
+    ///     `OAuthRefreshTokenCache` still holds the refresh_token, and
+    ///     `refreshTokens(userId:login:)` recovers from it.
     ///
     /// In all three cases, `refreshTokens(userId:login:)` POSTs to the bridge with the
     /// refresh_token and persists the new OAuthToken. Subsequent operation()
@@ -175,8 +201,9 @@ extension AccountStore {
             try await refreshTokens(userId: userId, login: login)
             return try await operation()
         } catch HelixError.oauth(let oauthError) {
-            // TwitchKit's internal auto-refresh fired and failed — likely
-            // "missing client secret" because we don't ship one. Bridge it.
+            // TwitchKit's internal refresh was answered with a rejection
+            // (see TwitchKitRefreshInterceptor). The refresh below confirms
+            // the session is gone and throws `.sessionExpired`.
             logger.info("TwitchKit auto-refresh failed for @\(login) (\(oauthError.message)); refreshing via bridge and retrying")
             try await refreshTokens(userId: userId, login: login)
             return try await operation()
