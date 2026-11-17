@@ -140,30 +140,79 @@ final class StreamPlayerController {
     /// Whether an engine starting now should start playing: the user wants
     /// it (`wantsPlayback`) and nothing holds it. The native engine checks
     /// it when its load finishes; the web engine bakes it into the page's
-    /// `autoplay` parameter, and `noteEngineReady` catches up if it has
-    /// become true while the page loaded.
+    /// `autoplay` parameter, and `noteEngineReady` applies it again, either
+    /// way, if it changed while the page loaded.
     var startsPlaying: Bool { wantsPlayback && !isHeld }
+
+    /// A web page is loading and hasn't posted its first state yet
+    /// (`beginWebEngineLoad` → `noteEngineReady`). Its bridge may not exist
+    /// yet, so a play/pause sent now would be lost: until ready, those
+    /// commands only record intent, and `noteEngineReady` applies it.
+    @ObservationIgnored private(set) var isAwaitingWebEngine = false
+    /// The loading page was built with `autoplay=true`.
+    @ObservationIgnored private var webEngineAutoplays = false
+    /// `noteEngineReady` paused a page that was built to autoplay but whose
+    /// intent turned to paused while it loaded. Until that pause has
+    /// visibly landed, play reports are the page's own autoplay, not the
+    /// user: they're paused again and leave intent alone. Ends at the first
+    /// paused report after such a play (`noteWebState`), or when the user
+    /// or a hold release asks to play (`togglePlay`, `resume`).
+    @ObservationIgnored private(set) var isSettlingWebStartup = false
+    @ObservationIgnored private var didSuppressStartupPlay = false
+
+    /// A web page is about to be built. Returns its `autoplay` — the
+    /// current `startsPlaying` — and holds play/pause commands back until
+    /// the page reports ready.
+    func beginWebEngineLoad() -> Bool {
+        isAwaitingWebEngine = true
+        isSettlingWebStartup = false
+        didSuppressStartupPlay = false
+        webEngineAutoplays = startsPlaying
+        return webEngineAutoplays
+    }
 
     /// The engine reports real frames playing. Engines start playing only
     /// when `startsPlaying`, so every play report is the user's doing — our
     /// control, or one outside it (native fullscreen, PiP window, lock
-    /// screen) — and restores intent. Except while held: then it's paused
-    /// again and intent is left alone; the hold's release decides.
+    /// screen) — and restores intent. Except while held, or while a web
+    /// page's startup autoplay is being undone (`isSettlingWebStartup`):
+    /// then it's paused again and intent is left alone.
     func noteDidPlay() {
         update(\.hasStarted, to: true)
-        if isHeld {
+        if isSettlingWebStartup {
+            didSuppressStartupPlay = true
+            pause()
+        } else if isHeld {
             pause()
         } else {
             wantsPlayback = true
         }
     }
 
-    /// The web page's first state report: it now takes commands. It was
-    /// built with `autoplay` = `startsPlaying` at the time; if that has
-    /// since become true (a hold released before the page loaded, whose
-    /// resume had nothing to reach), start it now. Never pauses.
+    /// The web page's first state report: it now takes commands. Applies
+    /// the CURRENT intent both ways, since play/pause made while it loaded
+    /// were only recorded. Meant to play: start it if it isn't (a hold
+    /// released, or play pressed, while it loaded). Not meant to play:
+    /// pause it — and if it was built to autoplay, its startup play
+    /// reports are that autoplay, not intent (`isSettlingWebStartup`).
     func noteEngineReady(paused: Bool) {
-        if paused, startsPlaying { resume() }
+        isAwaitingWebEngine = false
+        if startsPlaying {
+            if paused { resume() }
+        } else {
+            if webEngineAutoplays { isSettlingWebStartup = true }
+            pause()
+        }
+    }
+
+    /// Every web state report, after `noteEngineReady` and before
+    /// `noteDidPlay`. A paused report following a suppressed startup play
+    /// means the startup pause has landed: from here every play report
+    /// counts as intent again.
+    func noteWebState(paused: Bool) {
+        if paused, isSettlingWebStartup, didSuppressStartupPlay {
+            isSettlingWebStartup = false
+        }
     }
 
     func beginHold() {
@@ -204,6 +253,8 @@ final class StreamPlayerController {
     var isNative: Bool { avPlayer != nil }
 
     func reset() {
+        isAwaitingWebEngine = false
+        isSettlingWebStartup = false
         update(\.isPaused, to: false)
         update(\.isMuted, to: startsMuted)
         update(\.canPictureInPicture, to: false)
@@ -233,6 +284,13 @@ final class StreamPlayerController {
             // Web, or native still loading: the control showed "play" when
             // the engine reported paused, "pause" otherwise.
             wantsPlayback = isPaused
+            if wantsPlayback { isSettlingWebStartup = false }
+            if isAwaitingWebEngine {
+                // Not sent: the page may not take it yet. Show the new
+                // intent; `noteEngineReady` applies it.
+                update(\.isPaused, to: !wantsPlayback)
+                return
+            }
             return run("togglePlay")
         }
         if player.timeControlStatus == .paused {
@@ -247,12 +305,21 @@ final class StreamPlayerController {
     }
 
     func pause() {
-        guard let player = avPlayer else { return run("pause") }
+        guard let player = avPlayer else {
+            // A loading web page gets it from `noteEngineReady`.
+            if isAwaitingWebEngine { return }
+            return run("pause")
+        }
         player.pause()
     }
 
     func resume() {
-        guard let player = avPlayer else { return run("play") }
+        guard let player = avPlayer else {
+            isSettlingWebStartup = false
+            // A loading web page gets it from `noteEngineReady`.
+            if isAwaitingWebEngine { return }
+            return run("play")
+        }
         // Live: resume at the live edge, not where we paused.
         if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
             player.seek(to: CMTimeRangeGetEnd(range))

@@ -214,8 +214,11 @@ enum TwitchWebPlayer {
                     didReportState = true
                     controller.noteEngineReady(paused: paused)
                 }
+                controller.noteWebState(paused: paused)
                 // The page only autoplays when it was built meant to play
-                // (`startsPlaying`), so any play is the user's intent.
+                // (`startsPlaying`), so any play is the user's intent —
+                // except its startup autoplay after intent turned to paused
+                // while it loaded, which `noteDidPlay` undoes instead.
                 if body["playing"] as? Bool == true { controller.noteDidPlay() }
             case "pipStart":
                 controller.pictureInPictureDidStart()

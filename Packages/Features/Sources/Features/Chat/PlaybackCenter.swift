@@ -31,8 +31,10 @@ final class WebStreamEngine: StreamEngine {
         coordinator = TwitchWebPlayer.Coordinator(controller: controller)
         // Loads paused when the user paused or a clip holds it — the page
         // never autoplays against intent (`StreamPlayerController.noteDidPlay`).
+        // Play/pause made while it loads are applied once it reports ready
+        // (`StreamPlayerController.noteEngineReady`).
         webView = TwitchWebPlayer.makeWebView(
-            login: login, autoplay: controller.startsPlaying, coordinator: coordinator
+            login: login, autoplay: controller.beginWebEngineLoad(), coordinator: coordinator
         )
         view = webView
         controller.webView = webView

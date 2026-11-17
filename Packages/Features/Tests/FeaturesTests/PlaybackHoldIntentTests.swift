@@ -78,6 +78,54 @@ struct PlaybackHoldIntentTests {
         #expect(PlaybackCenter.resumesOnRelease(controller))
     }
 
+    @Test("Paused before the web page is ready: its startup autoplay doesn't override the pause")
+    func pauseBeforeWebReadyStaysPaused() {
+        let controller = StreamPlayerController()
+        // The page is built meant to play.
+        #expect(controller.beginWebEngineLoad())
+        #expect(controller.isAwaitingWebEngine)
+        // The user pauses before the bridge exists: recorded, not sent.
+        controller.togglePlay()
+        #expect(!controller.wantsPlayback)
+        #expect(controller.isPaused)
+
+        // Twitch autoplays; the first state report says playing, in the
+        // coordinator's order: ready, state, then the play report.
+        controller.update(\.isPaused, to: false)
+        controller.noteEngineReady(paused: false)
+        #expect(!controller.isAwaitingWebEngine)
+        #expect(controller.isSettlingWebStartup)
+        controller.noteWebState(paused: false)
+        controller.noteDidPlay()
+        #expect(!controller.wantsPlayback)
+
+        // The startup pause lands.
+        controller.update(\.isPaused, to: true)
+        controller.noteWebState(paused: true)
+        #expect(!controller.isSettlingWebStartup)
+        #expect(!controller.wantsPlayback)
+        #expect(!controller.startsPlaying)
+        #expect(!PlaybackCenter.resumesOnRelease(controller))
+
+        // From here a play report is intent again (PiP window, lock screen).
+        controller.noteDidPlay()
+        #expect(controller.wantsPlayback)
+    }
+
+    @Test("Play pressed again before the web page is ready plays once it is")
+    func pauseThenPlayBeforeWebReadyPlays() {
+        let controller = StreamPlayerController()
+        _ = controller.beginWebEngineLoad()
+        controller.togglePlay()
+        controller.togglePlay()
+        #expect(controller.wantsPlayback)
+        #expect(!controller.isPaused)
+        controller.noteEngineReady(paused: false)
+        #expect(!controller.isSettlingWebStartup)
+        controller.noteDidPlay()
+        #expect(controller.wantsPlayback)
+    }
+
     @Test("A buffering pause survives native → web fallback and a clip dismissed before the web player loads")
     func pauseSurvivesFallback() {
         let controller = StreamPlayerController()
