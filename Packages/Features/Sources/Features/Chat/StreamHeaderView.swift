@@ -207,17 +207,15 @@ struct StreamHeaderView: View {
         VStack(alignment: .leading, spacing: 0) {
             playerSurface(stream)
 
-            Button(action: toggleChrome) {
-                infoRow(stream)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, chromeVisible ? 8 : 10)
-            .accessibilityHint(chromeVisible ? "Hides stream controls" : "Shows stream controls")
-
+            // At rest it's just the video and chat. A tap on the video brings
+            // in name · category · viewers, the title, tags and actions.
             if chromeVisible {
                 VStack(alignment: .leading, spacing: 10) {
+                    Button(action: toggleChrome) {
+                        infoRow(stream)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Hides stream controls")
                     if !tags.isEmpty {
                         // Indented to the text column, under the title.
                         tagRow.padding(.leading, 42)
@@ -225,6 +223,7 @@ struct StreamHeaderView: View {
                     ChannelActionRow(channel: channel, isFollowing: isFollowing, style: .compact)
                 }
                 .padding(.horizontal, 12)
+                .padding(.top, 10)
                 .padding(.bottom, 10)
                 .simultaneousGesture(TapGesture().onEnded { touchChrome() })
                 .transition(.opacity.combined(with: .move(edge: .top)))

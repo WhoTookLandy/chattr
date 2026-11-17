@@ -290,6 +290,11 @@ struct ComposeBar: View {
             // the bottom of the pill as the field grows multi-line, rather
             // than floating to the vertical center of a tall field.
             HStack(alignment: .bottom, spacing: 2) {
+                // ⋯ lives inside the pill now (leading), a quiet glyph like
+                // the emote button — one surface instead of a pill plus a
+                // floating circle.
+                moreMenu
+
                 TextField(textFieldPrompt, text: $composeText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
@@ -302,7 +307,7 @@ struct ComposeBar: View {
                     .onChange(of: composeText) { _, newValue in
                         onDraftChange(newValue)
                     }
-                    .padding(.leading, 16)
+                    .padding(.leading, 2)
                     .padding(.vertical, 9)
                     .accessibilityLabel("Message input")
                     .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
@@ -320,7 +325,7 @@ struct ComposeBar: View {
                         // diameter as the send button's 30pt disc — the two
                         // trailing controls match in size even though only
                         // send is filled.
-                        .font(.system(size: 17, weight: .regular))
+                        .font(.system(size: 20, weight: .regular))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.secondary)
                         // Borderless grey glyph (no fill) — styled like the
@@ -330,8 +335,9 @@ struct ComposeBar: View {
                         // 44pt outer frame (Apple HIG minimum touch target;
                         // this and send are the most-tapped controls in the
                         // app) around the unchanged 30pt visual disc.
+                        // Bare glyph — no grey disc; the orange send button
+                        // is the only filled shape in the bar.
                         .frame(width: 30, height: 30)
-                        .background(Color.emoteButton, in: Circle())
                         .frame(width: 44, height: 44)
                         .contentShape(Circle())
                 }
@@ -381,8 +387,6 @@ struct ComposeBar: View {
             // change it causes). Value-scoped so unrelated re-renders don't
             // animate.
             .animation(.snappy(duration: 0.2), value: hasDraft)
-
-            moreMenu
           }
         }
     }
@@ -473,13 +477,14 @@ struct ComposeBar: View {
                 }
             }
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 17, weight: .semibold))
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 20, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.secondary)
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
-        .glassEffect(.regular.interactive(), in: Circle())
+        .padding(.leading, 4)
         .accessibilityLabel("More chat actions")
     }
 
