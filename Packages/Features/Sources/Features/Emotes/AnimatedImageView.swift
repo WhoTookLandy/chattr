@@ -62,6 +62,10 @@ struct AnimatedImageView<Placeholder: View>: View {
 
     @State private var decoded: DecodedAnimation?
     @State private var failed = false
+    /// The key `decoded` / `failed` were loaded for. A reused hosting cell
+    /// can keep this view's @State across lines, so state loaded for a
+    /// different key is never displayed.
+    @State private var loadedKey: LoadKey?
 
     /// Re-decode when the URL, the target pixel size (text-size setting,
     /// display scale) or the playback mode changes.
@@ -80,13 +84,28 @@ struct AnimatedImageView<Placeholder: View>: View {
             maxPixelSize: AnimatedEmoteDecoder.maxPixelSize(
                 for: CGSize(width: width, height: height), scale: displayScale),
             posterOnly: !animate || reduceMotion)
-        content
+        let isCurrent = loadedKey == key
+        // A synchronous NSCache hit renders the final view on the FIRST pass.
+        // Waiting for `.task` meant every animated emote in every new or
+        // reused row drew its placeholder for a frame, then ran a second body
+        // pass — dozens of times a second in a busy chat.
+        let shown = isCurrent ? decoded : Self.cachedAnimation(for: key)
+        content(shown, failed: isCurrent && failed)
             .frame(width: width, height: height)
             .task(id: key) { await load(key) }
     }
 
+    /// The cached decode for `key`, if any. A poster-only view can also use
+    /// an already-decoded full animation (its poster frame is the same one).
+    private static func cachedAnimation(for key: LoadKey) -> DecodedAnimation? {
+        guard let url = key.url else { return nil }
+        let cache = DecodedAnimationCache.shared
+        return cache.decoded(for: url, maxPixelSize: key.maxPixelSize, posterOnly: key.posterOnly)
+            ?? (key.posterOnly ? cache.decoded(for: url, maxPixelSize: key.maxPixelSize, posterOnly: false) : nil)
+    }
+
     @ViewBuilder
-    private var content: some View {
+    private func content(_ decoded: DecodedAnimation?, failed: Bool) -> some View {
         if let decoded {
             if decoded.frameCount > 1 && animate && !reduceMotion {
                 #if canImport(UIKit)
@@ -130,11 +149,12 @@ struct AnimatedImageView<Placeholder: View>: View {
     }
 
     private func load(_ key: LoadKey) async {
-        // Reset for a new key (id-keyed .task re-runs on change).
-        decoded = nil
-        failed = false
+        // Re-appearance with the same key: already showing it.
+        if loadedKey == key, decoded != nil { return }
         guard let url = key.url else {
+            decoded = nil
             failed = true
+            loadedKey = key
             return
         }
 
@@ -142,13 +162,20 @@ struct AnimatedImageView<Placeholder: View>: View {
         // Re-scrolling to a previously-seen animated emote is instant
         // instead of re-running CGImageSource frame extraction on every
         // appearance (the decoded CGImages are immutable + safe to share).
-        // A poster-only view can also use an already-decoded full animation
-        // (its poster frame is the same one).
-        if let cached = DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: key.maxPixelSize, posterOnly: key.posterOnly)
-            ?? (key.posterOnly ? DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: key.maxPixelSize, posterOnly: false) : nil) {
+        // Kept in @State so an NSCache eviction can't blank a visible emote;
+        // the body already drew it from the cache, so this write renders the
+        // same frames (`AnimatedEmoteView.configure` no-ops on them).
+        if let cached = Self.cachedAnimation(for: key) {
             decoded = cached
+            failed = false
+            loadedKey = key
             return
         }
+
+        // Reset for a new key (id-keyed .task re-runs on change).
+        decoded = nil
+        failed = false
+        loadedKey = key
 
         do {
             // Shared, de-duplicated fetch + off-main decode: every row
@@ -202,17 +229,34 @@ struct DecodedAnimation: @unchecked Sendable {
     /// array carries `frames.count + 1` entries — first 0, last 1.0. CA
     /// requires exactly that count for `.discrete` mode and silently falls
     /// back to even spacing (ignoring real frame durations) otherwise.
-    var normalizedKeyTimes: [NSNumber] {
-        guard totalDuration > 0 else { return [] }
+    ///
+    /// Computed once at decode time (off-main): the animation is re-attached
+    /// on every cell display, window move and foreground return, and
+    /// rebuilding up to 121 `NSNumber`s each time was pure churn.
+    let normalizedKeyTimes: [NSNumber]
+
+    /// Frame rate the animation actually needs — the rate of its SHORTEST
+    /// frame, so no frame can be skipped — clamped to 10...60. Handed to
+    /// Core Animation so an emote cycling at 10–30 fps doesn't hold the
+    /// render server at the display's full refresh rate.
+    let peakFrameRate: Float
+
+    private static func keyTimes(for durations: [Double], total: Double) -> [NSNumber] {
+        guard total > 0 else { return [] }
         var times: [NSNumber] = []
         times.reserveCapacity(durations.count + 1)
         var elapsed = 0.0
         for duration in durations {
-            times.append(NSNumber(value: elapsed / totalDuration))
+            times.append(NSNumber(value: elapsed / total))
             elapsed += duration
         }
         times.append(1.0)
         return times
+    }
+
+    private static func peakFrameRate(for durations: [Double]) -> Float {
+        guard let shortest = durations.filter({ $0 > 0 }).min() else { return 60 }
+        return Float(min(60, max(10, (1 / shortest).rounded(.up))))
     }
 
     /// True when both values share the same decoded frame objects — i.e.
@@ -319,6 +363,8 @@ struct DecodedAnimation: @unchecked Sendable {
             self.frames = [chosen]
             self.durations = [0]
             self.totalDuration = 0
+            self.normalizedKeyTimes = []
+            self.peakFrameRate = 60
             self.posterIndex = 0
             return
         }
@@ -340,9 +386,12 @@ struct DecodedAnimation: @unchecked Sendable {
         }
         guard !frames.isEmpty else { return nil }
 
+        let total = durations.reduce(0, +)
         self.frames = frames
         self.durations = durations
-        self.totalDuration = durations.reduce(0, +)
+        self.totalDuration = total
+        self.normalizedKeyTimes = Self.keyTimes(for: durations, total: total)
+        self.peakFrameRate = Self.peakFrameRate(for: durations)
         self.posterIndex = Self.findPosterIndex(in: frames)
     }
 
@@ -517,6 +566,19 @@ actor AnimatedEmoteDecoder {
         return max(16, (pixels + 15) / 16 * 16)
     }
 
+    /// The pixel size a thumbnail decode of `data` at `requested` actually
+    /// produces: ImageIO never upscales, so it's capped at the source's long
+    /// side. Reads only the header properties (no frame decode).
+    static func effectivePixelSize(data: Data, requested: Int) -> Int {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0
+        else { return requested }
+        return min(requested, max(width, height))
+    }
+
     /// The decoded animation for `url` at `maxPixelSize`, from cache or a
     /// shared fetch + decode. `nil` when the bytes aren't decodable.
     func animation(for url: URL, maxPixelSize: Int, posterOnly: Bool = false) async throws -> DecodedAnimation? {
@@ -533,12 +595,30 @@ actor AnimatedEmoteDecoder {
             task = Task.detached(priority: .utility) {
                 let (data, _) = try await ImagePipeline.shared.data(for: ImageRequest(url: url))
                 try Task.checkCancellation()
+                let cache = DecodedAnimationCache.shared
+                // Thumbnails never upscale, so every size bucket at or above
+                // the source's long side decodes to identical frames. Key the
+                // decode on the size actually produced, so chat rows at
+                // different text sizes and the picker's larger cells share
+                // one decode (and one cache entry's memory) instead of each
+                // re-extracting every frame.
+                let effective = AnimatedEmoteDecoder.effectivePixelSize(data: data, requested: maxPixelSize)
+                if effective != maxPixelSize,
+                   let shared = cache.decoded(for: url, maxPixelSize: effective, posterOnly: posterOnly) {
+                    cache.store(shared, for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
+                    return shared
+                }
                 // CPU-bound frame extraction, off the main thread and off
                 // this actor.
-                guard let decoded = DecodedAnimation(data: data, maxPixelSize: maxPixelSize, posterOnly: posterOnly) else {
+                guard let decoded = DecodedAnimation(data: data, maxPixelSize: effective, posterOnly: posterOnly) else {
                     return nil
                 }
-                DecodedAnimationCache.shared.store(decoded, for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
+                cache.store(decoded, for: url, maxPixelSize: effective, posterOnly: posterOnly)
+                if effective != maxPixelSize {
+                    // Alias under the requested bucket too, so the view's
+                    // synchronous lookup finds it.
+                    cache.store(decoded, for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
+                }
                 return decoded
             }
             inFlight[key] = InFlight(task: task, waiters: 1)
@@ -676,6 +756,12 @@ final class AnimatedEmoteView: UIView {
         // which is what frame-based animation (GIF/WebP/APNG) wants.
         keyframes.calculationMode = .discrete
         keyframes.repeatCount = .infinity
+        // Let the render server run this layer at the rate the emote needs
+        // (its shortest frame) rather than the full display refresh. Other
+        // on-screen motion (scrolling) still gets full rate — the system
+        // takes the highest rate anything asks for.
+        let rate = animation.peakFrameRate
+        keyframes.preferredFrameRateRange = CAFrameRateRange(minimum: min(10, rate), maximum: rate, preferred: rate)
         layer.add(keyframes, forKey: Self.animationKey)
     }
 }

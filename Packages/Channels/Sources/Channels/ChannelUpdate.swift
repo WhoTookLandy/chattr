@@ -70,7 +70,13 @@ public enum ChannelUpdate: Sendable {
 /// `line.isHighlighted` covers self-mentions only (the session knows its
 /// account's login); viewer-configured keywords are layered on by each
 /// subscriber with a `HighlightMatcher`.
-public struct NormalizedMessage: Sendable {
+///
+/// A final class rather than a struct: the payload plus line is ~700 bytes
+/// with a couple of dozen refcounted fields, and it is handed on by value
+/// into the ring, every subscriber mailbox, each pattern-match extraction
+/// and every ring snapshot (a tab attach copies all retained rows). As a
+/// class each of those is one retain. Every field is an immutable `let`.
+public final class NormalizedMessage: Sendable {
     public let message: ChatMessage
     public let line: ChatLine
 
@@ -80,7 +86,7 @@ public struct NormalizedMessage: Sendable {
     /// session re-normalizes the row the next time a tab subscribes.
     let emoteGeneration: Int
 
-    public init(message: ChatMessage, line: ChatLine) {
+    public convenience init(message: ChatMessage, line: ChatLine) {
         self.init(message: message, line: line, emoteGeneration: 0)
     }
 

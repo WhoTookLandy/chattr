@@ -42,6 +42,23 @@ final class TranscriptStore {
     /// about one 60 Hz frame. Mutations inside the window ride along.
     static let coalescingWindow: Duration = .milliseconds(15)
 
+    /// The window used while traffic is sustained (the previous flush was
+    /// less than `busyThreshold` ago). Every flush costs a SwiftUI update of
+    /// the transcript, a diffable snapshot copy + apply over the whole
+    /// retained list, and a forced layout of the new self-sizing hosted
+    /// cells — a fixed per-flush cost that dominated main-thread time in big
+    /// channels when it ran every frame. ~20 publishes/s under load is still
+    /// faster than anyone reads, and a quiet channel (or the first message
+    /// after a lull) keeps the one-frame latency. Own sends never wait on
+    /// this: the re-pin pulls `changes(since:)`, which seals immediately.
+    static let busyCoalescingWindow: Duration = .milliseconds(50)
+
+    /// A flush closer than this to the previous one marks the stream busy.
+    static let busyThreshold: Duration = .milliseconds(120)
+
+    /// When the last scheduled flush ran — picks the next window.
+    @ObservationIgnored private var lastFlushAt: ContinuousClock.Instant?
+
     /// Cap = 500 retained lines by default; `resize(toCap:)` applies the
     /// Chat History setting at attach.
     @ObservationIgnored private var buffer = ChatBuffer(cap: 500)
@@ -207,8 +224,14 @@ final class TranscriptStore {
         if empty != isEmpty { isEmpty = empty }
         guard !flushScheduled else { return }
         flushScheduled = true
+        let window: Duration
+        if let lastFlushAt, ContinuousClock.now - lastFlushAt < Self.busyThreshold {
+            window = Self.busyCoalescingWindow
+        } else {
+            window = Self.coalescingWindow
+        }
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.coalescingWindow)
+            try? await Task.sleep(for: window)
             self?.flushPendingChanges()
         }
     }
@@ -218,6 +241,7 @@ final class TranscriptStore {
     /// to flush deterministically instead of sleeping.
     func flushPendingChanges() {
         flushScheduled = false
+        lastFlushAt = ContinuousClock.now
         let head = sealPendingChanges()
         if changeVersion != head { changeVersion = head }
     }

@@ -1,34 +1,16 @@
-Watch while you chat
+Faster and smoother
 
-NEW
-• Settings are reorganised into Appearance, Chat, Video & Device, Accounts & Data and About, with search at the top.
-• Sign in with a code: tap Approve on Twitch (or enter the code at twitch.tv/activate). "Use browser instead" is still there.
-• Landscape: turn the phone sideways while a stream plays for chat beside (or over) the video. Drag the divider to resize chat. Options in Settings → Video & Device → Landscape.
-• Create Clip from the ⋯ menu while a channel is live. Clip links in chat now play inside the app.
-• Polls, predictions and Hype Trains appear as banners at the top of chat on your own channel (Twitch only shares them with the broadcaster). Toggles in Settings → Chat → Filters.
-• Moderators: one-tap timeouts on the user card (1m, 10m, 1h, 1d; edit them from the shield menu), plus Ban, Warn and Unban.
-• If you're timed out, banned or warned, a notice at the top of chat says so (with a countdown) and the message box explains why you can't send.
-• Settings → Video & Device: Picture in Picture (With Sound On / Always / Off), When a Chat Opens (as last left / closed / autoplay muted on Wi-Fi), PiP When Leaving Chat, Keep Screen Awake and Haptic Feedback.
-• Mini player: drag it anywhere and it settles in the nearest corner; pinch to resize.
-• @ mentions: type @ and pick a name from the suggestions.
-• Signed-out "just look around" chat now shows emotes and name colors.
-• The keyboard goes away after you send, and the button left of the message box is now ⋯ (More).
-
-Sign out and back in once to grant the new permissions (moderation, clips, polls and predictions).
-
-FIXED
-• Being signed out out of the blue when Twitch briefly rejected a request: token refreshes now always go through chattr's sign-in server.
-• Tapping the "Latest" pill sometimes tapped the message underneath it.
-• The Live / Offline bar no longer sticks to the top of lists.
+IMPROVED
+• Busy chats use less CPU: new messages are drawn in slightly larger batches when chat is moving fast, so scrolling and typing stay smooth during raids and hype moments. Quiet chats are unchanged.
+• Animated emotes appear straight away when they've been seen before, with no blank flash, and use less battery while they play.
+• Images are stored on disk once instead of twice, so "Clear cache" in Settings now clears everything.
+• Swiping between chats, opening or closing a chat and switching tabs do less work behind the scenes.
+• Faster start: your follows load once instead of twice, global emotes and badges load together, and background emote downloads wait until your chat has loaded.
 
 PLEASE TEST
-1. Settings: search for "pip", "sleep" and "poll" and open each result.
-2. Sign out, then sign in with the code (try Approve on Twitch with the Twitch app installed). Use the app for a while: you should stay signed in.
-3. Rotate to landscape with a stream playing: drag the divider, flip chat sides, open the keyboard, rotate back. The stream shouldn't restart.
-4. Create a clip on a live channel, and tap a clip link in chat.
-5. Picture in Picture on With Sound On: leave the app muted, then unmuted. Then try Keep Screen Awake and Autoplay on Wi-Fi.
-6. Open a clip while a stream plays, leave the app, come back, close the clip: the stream should resume only once you're back.
-7. On your own channel, start a poll or prediction from the Twitch dashboard and watch the banner.
-8. In a channel you moderate (use an alt): time the alt out from its user card and check the banner and countdown on the alt, including after swiping two chats away and back. Try Ban, Warn and Unban.
-9. Type @ and a few letters, tap a name, keep typing.
-10. Turn on PiP When Leaving Chat and back out of a playing chat.
+1. Open a very busy channel and scroll back, then tap "Latest": chat should keep up and stay smooth.
+2. Send a message in a busy chat: it should appear immediately.
+3. Look at animated emotes in chat and in the emote picker, at a couple of text sizes (Settings → Appearance). They should animate at their normal speed.
+4. Swipe between several open chats, then leave a chat with a stream playing: the mini player should appear as before (and hand off to Picture in Picture if that's on).
+5. Quit and reopen the app: your last chat should resume, and the Following list should fill in.
+6. Settings → Accounts & Data → Clear cache, then browse chat: emotes should reload normally.

@@ -135,10 +135,29 @@ public final class FollowsStore {
 
     /// Loads the full follow list only if we don't already have data for this
     /// account. Safe to call from `.task(id:)` which re-fires on account swap.
+    ///
+    /// Coalesced: RootView's launch load and FollowingList's `.task` both
+    /// call this, often before the first full load (follows ÷ 100 Helix
+    /// pages, plus profile lookups) finishes — the second caller awaits the
+    /// in-flight load instead of running a duplicate paginated fetch.
     public func loadAllIfNeeded(account: Account, accountStore: AccountStore) async {
-        guard loadedAllForUserId != account.userId else { return }
-        await loadAll(account: account, accountStore: accountStore)
+        let userId = account.userId
+        guard loadedAllForUserId != userId else { return }
+        if let inFlight = allLoadInFlight, inFlight.userId == userId {
+            await inFlight.task.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.loadAll(account: account, accountStore: accountStore)
+        }
+        allLoadInFlight = (userId, task)
+        await task.value
+        if allLoadInFlight?.task == task { allLoadInFlight = nil }
     }
+
+    /// The `loadAllIfNeeded` load in flight, keyed by account.
+    @ObservationIgnored private var allLoadInFlight: (userId: String, task: Task<Void, Never>)?
 
     /// Force-reload the All list (pull-to-refresh on the All view).
     public func refreshAll(account: Account, accountStore: AccountStore) async {

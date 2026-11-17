@@ -126,8 +126,19 @@ public final class ChannelStatusStore {
                 }
                 statuses = updated
 
-                if includeLastLive {
-                    for id in offline { await refreshLastLive(channelId: id, client: client, account: account, accountStore: accountStore) }
+                if includeLastLive, !offline.isEmpty {
+                    // Concurrently, not one round trip after another: each
+                    // lookup is an independent `/videos` call, and N offline
+                    // chats used to cost N serial requests at launch and on
+                    // every poll. (Main-actor tasks — the work is the network
+                    // wait; `lastLiveFetchedAt` is still claimed before it.)
+                    var lookups: [Task<Void, Never>] = []
+                    for id in offline {
+                        lookups.append(Task {
+                            await self.refreshLastLive(channelId: id, client: client, account: account, accountStore: accountStore)
+                        })
+                    }
+                    for lookup in lookups { await lookup.value }
                 }
             }
         } catch is CancellationError {

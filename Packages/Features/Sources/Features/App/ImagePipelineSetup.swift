@@ -60,6 +60,14 @@ public enum ImagePipelineSetup {
             if let dataCache = try? DataCache(name: "com.chattr.imagecache") {
                 dataCache.sizeLimit = 200 * 1024 * 1024  // 200 MB
                 configuration.dataCache = dataCache
+                // DataCache is the only disk cache. Nuke's default loader
+                // also writes every response into its own 150 MB URLCache,
+                // so each emote/badge/avatar was stored on disk twice (and
+                // Storage's "Clear cache" only emptied one of them). Same
+                // setup as Nuke's own `withDataCache` preset.
+                let sessionConfiguration = DataLoader.defaultConfiguration
+                sessionConfiguration.urlCache = nil
+                configuration.dataLoader = DataLoader(configuration: sessionConfiguration)
             }
 
             // Decompression off the main thread is Nuke's default.

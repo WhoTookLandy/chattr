@@ -220,8 +220,16 @@ public struct RootView: View {
         // an `unauthorized` error which the prefetcher handles
         // silently — the app keeps working, just falls back to
         // fetch-on-first-display.
+        //
+        // Deferred a few seconds: it's pure cache warming (every page of
+        // the endpoint, then hundreds of image downloads), and Nuke's
+        // `.veryLow` priority only orders QUEUED requests — downloads already
+        // running kept their bandwidth while the restored chat's emotes,
+        // badges and history were loading.
         .task(id: activeAccount?.userId) {
-            guard let active = activeAccount else { return }
+            guard activeAccount != nil else { return }
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let active = activeAccount else { return }
             await chatImagePrefetcher.prefetchUserSubscribedEmotes(
                 account: active,
                 accountStore: accountStore

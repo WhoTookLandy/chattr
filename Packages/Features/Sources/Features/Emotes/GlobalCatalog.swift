@@ -93,11 +93,23 @@ public final class GlobalCatalog {
                 try? await Task.sleep(for: Self.retryBaseDelay * (1 << (attempt - 1)))
                 if Task.isCancelled { break }
             }
-            if badges == nil {
-                badges = await fetchBadges(client: client, accountStore: accountStore, account: account)
-            }
-            if emotes == nil {
-                emotes = await fetchEmotes(client: client, accountStore: accountStore, account: account)
+            if badges == nil && emotes == nil {
+                // Both halves needed (first launch, or a stale disk entry):
+                // run the two Helix requests concurrently, saving a full
+                // round trip before the first chat has global badges and
+                // emotes. Main-actor tasks rather than `async let`, which
+                // trips the sending check on the non-Sendable `Account`.
+                let badgeFetch = Task { await self.fetchBadges(client: client, accountStore: accountStore, account: account) }
+                let emoteFetch = Task { await self.fetchEmotes(client: client, accountStore: accountStore, account: account) }
+                badges = await badgeFetch.value
+                emotes = await emoteFetch.value
+            } else {
+                if badges == nil {
+                    badges = await fetchBadges(client: client, accountStore: accountStore, account: account)
+                }
+                if emotes == nil {
+                    emotes = await fetchEmotes(client: client, accountStore: accountStore, account: account)
+                }
             }
             if badges != nil, emotes != nil { break }
         }
