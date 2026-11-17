@@ -1,16 +1,15 @@
-Faster and smoother
+More room for chat in Audio only and Picture in Picture
 
 IMPROVED
-• Busy chats use less CPU: new messages are drawn in slightly larger batches when chat is moving fast, so scrolling and typing stay smooth during raids and hype moments. Quiet chats are unchanged.
-• Animated emotes appear straight away when they've been seen before, with no blank flash, and use less battery while they play.
-• Images are stored on disk once instead of twice, so "Clear cache" in Settings now clears everything.
-• Swiping between chats, opening or closing a chat and switching tabs do less work behind the scenes.
-• Faster start: your follows load once instead of twice, global emotes and badges load together, and background emote downloads wait until your chat has loaded.
+• Audio only no longer shows a bar under the channel name. That bar repeated the name and viewer count, so chat now starts right under the top bar.
+• Pause and Show video are now in the top-right corner, opposite the back button. Touch and hold them for Stop Listening.
+• The channel name at the top shows a headphones icon in Audio only, and a picture-in-picture icon while the stream is in Picture in Picture.
+• Picture in Picture works the same way: no bar, and a "show video here" button in the top-right corner.
 
 PLEASE TEST
-1. Open a very busy channel and scroll back, then tap "Latest": chat should keep up and stay smooth.
-2. Send a message in a busy chat: it should appear immediately.
-3. Look at animated emotes in chat and in the emote picker, at a couple of text sizes (Settings → Appearance). They should animate at their normal speed.
-4. Swipe between several open chats, then leave a chat with a stream playing: the mini player should appear as before (and hand off to Picture in Picture if that's on).
-5. Quit and reopen the app: your last chat should resume, and the Following list should fill in.
-6. Settings → Accounts & Data → Clear cache, then browse chat: emotes should reload normally.
+1. Open a live channel with the video showing, tap the video, then tap the headphones button. The video should disappear, chat should fill the screen and the audio should keep playing.
+2. Use the top-right pause button: the audio should pause and resume, and the icon should switch between pause and play.
+3. Tap the video button in the top-right corner: the video should come back and the top-right buttons should go away.
+4. In Audio only, touch and hold the top-right buttons and choose Stop Listening: the audio should stop and the stream card should collapse.
+5. Swipe down on the video to start Picture in Picture: chat should fill the screen with a "show video here" button in the top-right corner. Tap it and the video should return to the chat.
+6. While listening, swipe to another live chat: the audio should switch to that channel and the top-right buttons should stay. Swipe to an offline chat: the buttons should go away.
