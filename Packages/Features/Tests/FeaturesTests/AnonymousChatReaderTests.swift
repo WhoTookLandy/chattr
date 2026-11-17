@@ -1,4 +1,6 @@
 import Testing
+import ChatModel
+import TwitchKit
 @testable import Features
 
 @MainActor
@@ -50,6 +52,54 @@ struct AnonymousChatReaderTests {
     func userId() throws {
         let line = "@display-name=A;user-id=42;id=m1 :a!a@a.tmi.twitch.tv PRIVMSG #channel :hi"
         #expect(try #require(AnonymousChatReader.parsePrivmsg(line)).userId == "42")
+    }
+
+    @Test("Parses the emotes tag into sorted spans")
+    func emoteSpans() {
+        let spans = AnonymousChatReader.parseEmoteSpans("1902:6-10/25:0-4,12-16")
+        #expect(spans == [
+            .init(id: "25", start: 0, end: 4),
+            .init(id: "1902", start: 6, end: 10),
+            .init(id: "25", start: 12, end: 16),
+        ])
+        #expect(AnonymousChatReader.parseEmoteSpans("").isEmpty)
+    }
+
+    @Test("Builds Twitch emote runs at their positions")
+    func twitchEmoteRuns() {
+        let runs = AnonymousChatReader.runs(
+            text: "Kappa hi Kappa",
+            spans: AnonymousChatReader.parseEmoteSpans("25:0-4,9-13"),
+            emotes: [:]
+        )
+        let emoteNames = runs.compactMap { run -> String? in
+            if case .twitchEmote(_, let name) = run { return name }
+            return nil
+        }
+        #expect(emoteNames == ["Kappa", "Kappa"])
+        #expect(runs.contains(.text("hi")))
+    }
+
+    @Test("Emote positions count unicode scalars, not UTF-16")
+    func scalarPositions() {
+        // 😀 is one scalar (two UTF-16 units); Kappa starts at scalar 2.
+        let runs = AnonymousChatReader.runs(
+            text: "😀 Kappa",
+            spans: AnonymousChatReader.parseEmoteSpans("25:2-6"),
+            emotes: [:]
+        )
+        let names = runs.compactMap { run -> String? in
+            if case .twitchEmote(_, let name) = run { return name }
+            return nil
+        }
+        #expect(names == ["Kappa"])
+    }
+
+    @Test("A Twitch emote reference can be built from an id")
+    func reference() throws {
+        let reference = try #require(AnonymousChatReader.twitchEmoteReference(id: "25"))
+        #expect(reference.id == "25")
+        #expect(reference.format == ["static"])
     }
 
     @Test("Ignores non-PRIVMSG lines")

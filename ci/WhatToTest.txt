@@ -1,6 +1,7 @@
 Watch while you chat
 
 NEW
+• Signed-out "just look around" chat now shows emotes: Twitch, 7TV, BTTV and FFZ, with name colors, using the same chat rows as when signed in.
 • Picture in picture: the video area in chat collapses to a slim bar so chat gets the space; the floating mini player stays out of the way; PiP return button takes you back to the chat.
 • New sign-in screen, plus "just look around": type a channel name to watch its stream and read chat without an account.
 • Replies look cleaner: a thin connector into a one-line quote, no grey box.
