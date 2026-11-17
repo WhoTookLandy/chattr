@@ -43,6 +43,15 @@ final class LiveEventsModel {
 
     @ObservationIgnored private var collapseTask: Task<Void, Never>?
     @ObservationIgnored private var pruneTask: Task<Void, Never>?
+    /// Ownership token of the `run` in charge of the feed and the shared
+    /// timers: each `run` bumps it on entry and keeps its own value, so the
+    /// newest run is the owner. Cancelling a run doesn't stop it
+    /// at once — it can still be suspended in `unsubscribeLiveEvents` when a
+    /// rapid switch away and back starts its replacement — so after every
+    /// suspension a run checks it is still the owner before it applies a
+    /// state or resumes / suspends the timers. A superseded run only cleans
+    /// up its own subscription.
+    @ObservationIgnored private var runOwner: UInt64 = 0
 
     // MARK: - Feed
 
@@ -57,7 +66,16 @@ final class LiveEventsModel {
     /// and `receive` diffs it against what was on screen before, so anything
     /// that started, locked or ended meanwhile pops open as usual.
     func run(session: ChannelSession) async {
+        runOwner &+= 1
+        let owner = runOwner
+
         let subscription = await session.subscribeLiveEvents()
+        // A newer run took over while this one was subscribing: it owns the
+        // timers now, so leave them alone and just drop this subscription.
+        guard runOwner == owner else {
+            await session.unsubscribeLiveEvents(subscription.token)
+            return
+        }
         // `suspend()` cancelled the result timeout. If the primed state
         // equals what is on screen (back within a result's linger, nothing
         // new), `receive` changes nothing, so re-arm it here or the result
@@ -66,12 +84,15 @@ final class LiveEventsModel {
         // AsyncStream iteration ends on task cancellation as well as on
         // `finish()` (unsubscribe / session stop).
         for await _ in subscription.wakeups {
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled, runOwner == owner else { break }
             if let latest = subscription.takeLatest() {
                 receive(latest)
             }
         }
         await session.unsubscribeLiveEvents(subscription.token)
+        // Only the owner suspends: a replacement that started while this
+        // run was unsubscribing has already re-armed its own prune timer.
+        guard runOwner == owner else { return }
         suspend()
     }
 
@@ -82,11 +103,15 @@ final class LiveEventsModel {
         let old = state
         state = new
 
-        if let kind = new.attentionKind(comparedTo: old),
-           LiveEventsSettings.isEnabled(kind),
-           let id = eventId(of: kind),
-           !dismissedIds.contains(id) {
-            expand(kind, for: Self.attentionDuration)
+        // Only banners that would actually show compete for attention: a
+        // disabled or dismissed kind must not mask, say, a poll result that
+        // lands in the same snapshot as a hidden Hype Train level-up.
+        let attention = new.attentionKind(comparedTo: old) { kind in
+            guard LiveEventsSettings.isEnabled(kind), let id = eventId(of: kind) else { return false }
+            return !dismissedIds.contains(id)
+        }
+        if let attention {
+            expand(attention, for: Self.attentionDuration)
         } else if let expanded, eventId(of: expanded) == nil {
             collapse()
         }

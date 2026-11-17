@@ -85,18 +85,55 @@ struct ChannelSessionLiveEventsReconcileTests {
 
     private static let fullPass = ["polls", "predictions", "hypetrain/status"]
 
-    private func makeSession(http: RecordingHelixHTTP, foreground: AppForegroundSignal) -> ChannelSession {
-        let client = TwitchClient(
+    private struct RefreshUnavailable: Error {}
+
+    /// Counts bridge refreshes; the handler itself is supplied per test.
+    private final class RefreshCounter: Sendable {
+        private let count = OSAllocatedUnfairLock(initialState: 0)
+        var value: Int { count.withLock { $0 } }
+        func increment() { count.withLock { $0 += 1 } }
+    }
+
+    /// A sign-in that granted the three live-event scopes.
+    private static let scopedToken = OAuthToken(
+        accessToken: "fixture-token",
+        scope: [
+            TwitchScope.channelReadPolls.rawValue,
+            TwitchScope.channelReadPredictions.rawValue,
+            TwitchScope.channelReadHypeTrain.rawValue,
+        ]
+    )
+
+    private func makeClient(http: RecordingHelixHTTP, token: OAuthToken? = Self.scopedToken) -> TwitchClient {
+        TwitchClient(
             clientId: "test-client",
-            tokenStore: InMemoryTokenStore(token: OAuthToken(accessToken: "fixture-token")),
+            tokenStore: InMemoryTokenStore(token: token),
             httpClient: http
         )
+    }
+
+    private func makeSession(
+        http: RecordingHelixHTTP,
+        foreground: AppForegroundSignal,
+        token: OAuthToken? = Self.scopedToken
+    ) -> ChannelSession {
+        makeSession(client: makeClient(http: http, token: token), foreground: foreground)
+    }
+
+    private func makeSession(
+        client: TwitchClient,
+        foreground: AppForegroundSignal,
+        refreshTokenHandler: @escaping @Sendable () async throws -> Void = {
+            throw RefreshUnavailable()
+        }
+    ) -> ChannelSession {
         // Own channel: the only place live events are fetched.
-        return ChannelSession(
+        ChannelSession(
             client: client,
             channelId: "1",
             channelLoginName: "ch",
             accountUserId: "1",
+            refreshTokenHandler: refreshTokenHandler,
             fetchBackfill: { _, _ in [] },
             appForeground: foreground
         )
@@ -219,5 +256,82 @@ struct ChannelSessionLiveEventsReconcileTests {
         foreground.set(true)
         await session.fetchPollDeadline(pollId: "poll-1")
         #expect(http.requests == ["polls"])
+    }
+
+    // MARK: - Auth: scope pre-check + bridge-refresh retry
+
+    @Test("a sign-in without the live-event scopes sends nothing and never refreshes")
+    func unscopedTokenSendsNothing() async {
+        let http = RecordingHelixHTTP()
+        let refreshes = RefreshCounter()
+        let client = makeClient(http: http, token: OAuthToken(accessToken: "old-token", scope: ["chat:read"]))
+        let session = makeSession(client: client, foreground: AppForegroundSignal()) {
+            refreshes.increment()
+        }
+
+        await session.reconcileLiveEvents()
+        await session.fetchPollDeadline(pollId: "poll-1")
+
+        // No request ever reached `HelixClient`, so its destructive 401
+        // refresh could not run; refreshing never adds a scope, so no
+        // bridge refresh either.
+        #expect(http.requests.isEmpty)
+        #expect(refreshes.value == 0)
+    }
+
+    @Test("a token with no recorded scope list fails closed")
+    func scopelessTokenFailsClosed() async {
+        let http = RecordingHelixHTTP()
+        let session = makeSession(http: http, foreground: AppForegroundSignal(), token: OAuthToken(accessToken: "fixture-token"))
+        await session.reconcileLiveEvents()
+        #expect(http.requests.isEmpty)
+    }
+
+    @Test("no token at the seed: the bridge refresh restores it and the pass still goes out")
+    func missingTokenRefreshesThenFetches() async {
+        let http = RecordingHelixHTTP()
+        let refreshes = RefreshCounter()
+        let client = makeClient(http: http, token: nil)
+        let scoped = Self.scopedToken
+        let session = makeSession(client: client, foreground: AppForegroundSignal()) {
+            refreshes.increment()
+            try await client.auth.tokenProvider.setToken(scoped)
+        }
+
+        await session.reconcileLiveEvents()
+
+        // One refresh (on the poll read); the later kinds find the token.
+        #expect(http.requests == Self.fullPass)
+        #expect(refreshes.value == 1)
+    }
+
+    // MARK: - Foreground transitions
+
+    @Test("both nudges of a background → foreground flip arrive after the flag is back: one catch-up pass")
+    func delayedForegroundNudgesStillCatchUp() async {
+        let http = RecordingHelixHTTP()
+        let foreground = AppForegroundSignal()
+        let session = makeSession(http: http, foreground: foreground)
+
+        // The registry flips the flag twice before either nudge runs.
+        foreground.set(false)
+        foreground.set(true)
+        #expect(foreground.isInForeground)
+
+        // Both delayed nudges land now. The flag reads `true` both times,
+        // as it did before; the transition generation is what moved.
+        await session.appForegroundDidChange()
+        await session.appForegroundDidChange()
+
+        #expect(http.requests == Self.fullPass)
+        #expect(await !session.isLiveEventsReconcilePending)
+    }
+
+    @Test("a nudge with no transition since the last one is a no-op")
+    func repeatedNudgeIsNoOp() async {
+        let http = RecordingHelixHTTP()
+        let session = makeSession(http: http, foreground: AppForegroundSignal())
+        await session.appForegroundDidChange()
+        #expect(http.requests.isEmpty)
     }
 }

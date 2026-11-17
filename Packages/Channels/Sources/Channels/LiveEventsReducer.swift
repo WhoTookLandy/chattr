@@ -426,11 +426,17 @@ extension LiveEventsState {
 
     /// The kind whose banner deserves a moment of attention after moving
     /// from `old` to `self`: it appeared, changed status (locked, resolved,
-    /// ended) or — for a Hype Train — levelled up. Highest priority wins.
+    /// ended) or — for a Hype Train — levelled up. Highest priority wins
+    /// among the kinds `isEligible` accepts: the caller filters out banners
+    /// it won't show (disabled, dismissed) BEFORE the choice, so a hidden
+    /// higher-priority change never masks a visible lower-priority one.
     /// Plain vote / point / progress ticks are NOT attention-worthy, so a
     /// collapsed banner stays collapsed while numbers move.
-    public func attentionKind(comparedTo old: LiveEventsState) -> LiveEventKind? {
-        for kind in LiveEventKind.allCases {
+    public func attentionKind(
+        comparedTo old: LiveEventsState,
+        where isEligible: (LiveEventKind) -> Bool = { _ in true }
+    ) -> LiveEventKind? {
+        for kind in LiveEventKind.allCases where isEligible(kind) {
             switch kind {
             case .hypeTrain:
                 if let new = hypeTrain,
