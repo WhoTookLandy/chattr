@@ -62,7 +62,9 @@ struct DeviceCodeSignInSheet: View {
             model.deactivate()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-            model.activate(pollImmediately: true)
+            // Resumes on the device code's own schedule: polls at once if
+            // the interval already passed while backgrounded, never sooner.
+            model.activate()
         }
     }
 
@@ -129,6 +131,8 @@ struct DeviceCodeSignInSheet: View {
             status(symbol: "hand.raised.fill", tint: .orange, "Sign-in was declined on Twitch")
         case .failed(let message):
             status(symbol: "exclamationmark.triangle.fill", tint: .red, message)
+        case .browserRequired(let message):
+            status(symbol: "safari.fill", tint: .orange, message)
         }
     }
 
@@ -162,14 +166,20 @@ struct DeviceCodeSignInSheet: View {
                 primaryButton("Get a new code", systemImage: "arrow.clockwise") { model.requestNewCode() }
             case .failed:
                 primaryButton("Try again", systemImage: "arrow.clockwise") { model.retry() }
+            case .browserRequired:
+                // The device flow can't work for this client, so the
+                // browser flow becomes the primary action.
+                primaryButton("Continue in browser", systemImage: "safari") { model.useBrowserInstead() }
             case .requestingCode, .waiting, .signingIn, .done:
                 primaryButton("Approve on Twitch", systemImage: "arrow.up.forward.app") { approveOnTwitch() }
                     .disabled(model.phase != .waiting || model.prompt == nil)
             }
 
-            Button("Use browser instead") { model.useBrowserInstead() }
-                .font(.callout)
-                .disabled(model.phase == .signingIn || model.phase == .done)
+            if !isBrowserRequired {
+                Button("Use browser instead") { model.useBrowserInstead() }
+                    .font(.callout)
+                    .disabled(model.phase == .signingIn || model.phase == .done)
+            }
         }
     }
 
@@ -186,9 +196,14 @@ struct DeviceCodeSignInSheet: View {
 
     private var isTerminal: Bool {
         switch model.phase {
-        case .expired, .denied: true
+        case .expired, .denied, .browserRequired: true
         default: false
         }
+    }
+
+    private var isBrowserRequired: Bool {
+        if case .browserRequired = model.phase { return true }
+        return false
     }
 
     private func copyCode() {

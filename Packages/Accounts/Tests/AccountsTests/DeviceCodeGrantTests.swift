@@ -66,12 +66,39 @@ private final class DeviceCodeStubURLProtocol: URLProtocol, @unchecked Sendable 
     }
 }
 
-/// Records every requested sleep instead of sleeping.
-private final class SleepRecorder: Sendable {
-    private let recorded = OSAllocatedUnfairLock<[Duration]>(initialState: [])
-    var durations: [Duration] { recorded.withLock { $0 } }
+/// A fake clock: `sleep` records the duration and advances `now` by it
+/// instead of sleeping, so pacing is checked exactly and instantly.
+private final class TestClock: Sendable {
+    private struct State: Sendable {
+        var now: Date
+        var sleeps: [Duration] = []
+    }
+    private let state: OSAllocatedUnfairLock<State>
+
+    init(start: Date = Date(timeIntervalSince1970: 1_000_000)) {
+        state = OSAllocatedUnfairLock(initialState: State(now: start))
+    }
+
+    var durations: [Duration] { state.withLock { $0.sleeps } }
+    var current: Date { state.withLock { $0.now } }
+
+    func advance(by seconds: TimeInterval) {
+        state.withLock { $0.now = $0.now.addingTimeInterval(seconds) }
+    }
+
+    var now: @Sendable () -> Date {
+        { [state] in state.withLock { $0.now } }
+    }
+
     var sleep: @Sendable (Duration) async throws -> Void {
-        { [recorded] duration in recorded.withLock { $0.append(duration) } }
+        { [state] duration in
+            let seconds = TimeInterval(duration.components.seconds)
+                + TimeInterval(duration.components.attoseconds) / 1e18
+            state.withLock {
+                $0.sleeps.append(duration)
+                $0.now = $0.now.addingTimeInterval(seconds)
+            }
+        }
     }
 }
 
@@ -147,8 +174,16 @@ struct DeviceCodeGrantTests {
 
     @Test("start() maps a 4xx to a terminal rejection carrying Twitch's message")
     func startRejected() async throws {
+        let (grant, _, _) = Self.grant(device: [(json: #"{"status":400,"message":"invalid scope requested"}"#, status: 400)])
+        await #expect(throws: DeviceCodeGrant.Failure.rejected("invalid scope requested")) {
+            try await grant.start()
+        }
+    }
+
+    @Test("start() maps a client rejection to clientAuthenticationFailed")
+    func startClientRejected() async throws {
         let (grant, _, _) = Self.grant(device: [(json: #"{"status":400,"message":"invalid client"}"#, status: 400)])
-        await #expect(throws: DeviceCodeGrant.Failure.rejected("invalid client")) {
+        await #expect(throws: DeviceCodeGrant.Failure.clientAuthenticationFailed("invalid client")) {
             try await grant.start()
         }
     }
@@ -190,8 +225,22 @@ struct DeviceCodeGrantTests {
 
     @Test("An unrecognised 4xx is a terminal rejection")
     func unknownClientErrorRejected() {
-        #expect(throws: DeviceCodeGrant.Failure.rejected("invalid client")) {
-            try DeviceCodeGrant.parseTokenResponse(Data(#"{"status":400,"message":"invalid client"}"#.utf8), status: 400)
+        #expect(throws: DeviceCodeGrant.Failure.rejected("invalid scope requested")) {
+            try DeviceCodeGrant.parseTokenResponse(Data(#"{"status":400,"message":"invalid scope requested"}"#.utf8), status: 400)
+        }
+    }
+
+    @Test("Client-authentication errors while polling are classified for the browser fallback", arguments: [
+        (#"{"error":"invalid_client"}"#, 400, "invalid_client"),
+        (#"{"error":"unauthorized_client"}"#, 400, "unauthorized_client"),
+        (#"{"status":400,"message":"invalid client"}"#, 400, "invalid client"),
+        (#"{"status":400,"message":"missing client secret"}"#, 400, "missing client secret"),
+        (#"{"status":401,"message":"Unauthorized"}"#, 401, "Unauthorized"),
+        ("{}", 401, "HTTP 401"),
+    ] as [(String, Int, String)])
+    func clientAuthenticationFailures(json: String, status: Int, message: String) {
+        #expect(throws: DeviceCodeGrant.Failure.clientAuthenticationFailed(message)) {
+            try DeviceCodeGrant.parseTokenResponse(Data(json.utf8), status: status)
         }
     }
 
@@ -217,55 +266,148 @@ struct DeviceCodeGrantTests {
     @Test("Polls at `interval`, adds 5 s on slow_down, and returns the token")
     func pollingHonoursIntervalAndSlowDown() async throws {
         let (grant, _, tokenURL) = Self.grant(token: [Self.pending, Self.slowDown, Self.pending, Self.success])
-        let sleeps = SleepRecorder()
+        let clock = TestClock()
+        let prompt = Self.prompt(interval: 5)
+        let schedule = DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current)
 
-        let token = try await grant.waitForApproval(Self.prompt(interval: 5), sleep: sleeps.sleep)
+        let token = try await grant.waitForApproval(prompt, schedule: schedule, now: clock.now, sleep: clock.sleep)
 
         #expect(token.accessToken == "dcf-access")
         #expect(token.refreshToken == "dcf-refresh")
-        #expect(sleeps.durations == [.seconds(5), .seconds(5), .seconds(10), .seconds(10)])
+        #expect(clock.durations == [.seconds(5), .seconds(5), .seconds(10), .seconds(10)])
         #expect(DeviceCodeStubURLProtocol.bodies(for: tokenURL).count == 4)
+        #expect(schedule.interval == 10)
     }
 
-    @Test("pollImmediately skips the first sleep")
-    func pollImmediately() async throws {
+    @Test("A slow_down survives a cancelled run: the next run keeps the slower interval")
+    func slowDownPersistsAcrossRuns() async throws {
+        let (grant, _, tokenURL) = Self.grant(token: [Self.slowDown, Self.success])
+        let clock = TestClock()
+        let prompt = Self.prompt(interval: 5)
+        let schedule = DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current)
+
+        // Run 1: one poll (→ slow_down), then paused during the next wait.
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let clockSleep = clock.sleep
+        await #expect(throws: CancellationError.self) {
+            try await grant.waitForApproval(prompt, schedule: schedule, now: clock.now, sleep: { duration in
+                let call = calls.withLock { $0 += 1; return $0 }
+                if call > 1 { throw CancellationError() }
+                try await clockSleep(duration)
+            })
+        }
+        #expect(schedule.interval == 10)
+
+        // Run 2 (e.g. back in the foreground): waits the slowed interval,
+        // not the original 5 s, before polling again.
+        _ = try await grant.waitForApproval(prompt, schedule: schedule, now: clock.now, sleep: clock.sleep)
+
+        #expect(clock.durations == [.seconds(5), .seconds(10)])
+        #expect(DeviceCodeStubURLProtocol.bodies(for: tokenURL).count == 2)
+    }
+
+    @Test("Resuming after the permitted time polls without waiting")
+    func resumeAfterIntervalPollsAtOnce() async throws {
         let (grant, _, _) = Self.grant(token: [Self.success])
-        let sleeps = SleepRecorder()
+        let clock = TestClock()
+        let prompt = Self.prompt(interval: 5)
+        let schedule = DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current)
+        clock.advance(by: 60)
 
-        _ = try await grant.waitForApproval(Self.prompt(), pollImmediately: true, sleep: sleeps.sleep)
+        _ = try await grant.waitForApproval(prompt, schedule: schedule, now: clock.now, sleep: clock.sleep)
 
-        #expect(sleeps.durations.isEmpty)
+        #expect(clock.durations.isEmpty)
+    }
+
+    @Test("A quick resume waits out the rest of the interval instead of polling early")
+    func quickResumeWaitsOutInterval() async throws {
+        let (grant, _, _) = Self.grant(token: [Self.success])
+        let clock = TestClock()
+        let prompt = Self.prompt(interval: 5)
+        let schedule = DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current)
+        clock.advance(by: 2)
+
+        _ = try await grant.waitForApproval(prompt, schedule: schedule, now: clock.now, sleep: clock.sleep)
+
+        #expect(clock.durations == [.seconds(3)])
+    }
+
+    @Test("The schedule records each poll before it goes out and makes slow-downs permanent")
+    func scheduleBookkeeping() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let schedule = DeviceCodePollSchedule(prompt: Self.prompt(interval: 5), issuedAt: start)
+        #expect(schedule.nextPollAt == start.addingTimeInterval(5))
+
+        schedule.recordPoll(at: start.addingTimeInterval(5))
+        #expect(schedule.nextPollAt == start.addingTimeInterval(10))
+
+        #expect(schedule.slowDown(at: start.addingTimeInterval(6)) == 10)
+        #expect(schedule.nextPollAt == start.addingTimeInterval(16))
+
+        schedule.recordPoll(at: start.addingTimeInterval(16))
+        #expect(schedule.interval == 10)
+        #expect(schedule.nextPollAt == start.addingTimeInterval(26))
     }
 
     @Test("Server-reported expiry ends polling with .expired")
     func serverExpiry() async throws {
         let (grant, _, _) = Self.grant(token: [Self.pending, (json: #"{"status":400,"message":"invalid device code"}"#, status: 400)])
-        let sleeps = SleepRecorder()
+        let clock = TestClock()
+        let prompt = Self.prompt()
 
         await #expect(throws: DeviceCodeGrant.Failure.expired) {
-            try await grant.waitForApproval(Self.prompt(), sleep: sleeps.sleep)
+            try await grant.waitForApproval(
+                prompt,
+                schedule: DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current),
+                now: clock.now,
+                sleep: clock.sleep
+            )
         }
-        #expect(sleeps.durations.count == 2)
+        #expect(clock.durations.count == 2)
     }
 
     @Test("Denial ends polling with .denied")
     func denial() async throws {
         let (grant, _, _) = Self.grant(token: [(json: #"{"error":"access_denied"}"#, status: 400)])
+        let clock = TestClock()
+        let prompt = Self.prompt()
         await #expect(throws: DeviceCodeGrant.Failure.denied) {
-            try await grant.waitForApproval(Self.prompt(), sleep: SleepRecorder().sleep)
+            try await grant.waitForApproval(
+                prompt,
+                schedule: DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current),
+                now: clock.now,
+                sleep: clock.sleep
+            )
+        }
+    }
+
+    @Test("invalid_client while polling ends polling with clientAuthenticationFailed")
+    func clientRejectedWhilePolling() async throws {
+        let (grant, _, _) = Self.grant(token: [(json: #"{"error":"invalid_client"}"#, status: 400)])
+        let clock = TestClock()
+        let prompt = Self.prompt()
+        await #expect(throws: DeviceCodeGrant.Failure.clientAuthenticationFailed("invalid_client")) {
+            try await grant.waitForApproval(
+                prompt,
+                schedule: DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current),
+                now: clock.now,
+                sleep: clock.sleep
+            )
         }
     }
 
     @Test("A locally-expired code throws .expired without polling")
     func localExpiry() async throws {
         let (grant, _, tokenURL) = Self.grant(token: [Self.success])
-        let expiresAt = Date(timeIntervalSince1970: 1_000)
+        let clock = TestClock(start: Date(timeIntervalSince1970: 2_000))
+        let prompt = Self.prompt(expiresAt: Date(timeIntervalSince1970: 1_000))
 
         await #expect(throws: DeviceCodeGrant.Failure.expired) {
             try await grant.waitForApproval(
-                Self.prompt(expiresAt: expiresAt),
-                now: { Date(timeIntervalSince1970: 2_000) },
-                sleep: SleepRecorder().sleep
+                prompt,
+                schedule: DeviceCodePollSchedule(prompt: prompt, issuedAt: clock.current),
+                now: clock.now,
+                sleep: clock.sleep
             )
         }
         #expect(DeviceCodeStubURLProtocol.bodies(for: tokenURL).isEmpty)
@@ -274,9 +416,14 @@ struct DeviceCodeGrantTests {
     @Test("Cancellation during the sleep stops polling without a request")
     func cancellationStopsPolling() async throws {
         let (grant, _, tokenURL) = Self.grant(token: [Self.success])
+        let prompt = Self.prompt()
 
         await #expect(throws: CancellationError.self) {
-            try await grant.waitForApproval(Self.prompt(), sleep: { _ in throw CancellationError() })
+            try await grant.waitForApproval(
+                prompt,
+                schedule: DeviceCodePollSchedule(prompt: prompt),
+                sleep: { _ in throw CancellationError() }
+            )
         }
         #expect(DeviceCodeStubURLProtocol.bodies(for: tokenURL).isEmpty)
     }
