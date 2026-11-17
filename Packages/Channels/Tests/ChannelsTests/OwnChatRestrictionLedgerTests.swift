@@ -71,6 +71,33 @@ struct OwnChatRestrictionLedgerTests {
         #expect(ledger.current(at: now) == nil)
     }
 
+    @Test("A send rejection based before the latest self-clear is dropped")
+    func staleRejectionDropped() {
+        var ledger = OwnChatRestrictionLedger()
+        let basis = ledger.generation          // the send starts here
+        ledger.apply(.ownMessagesCleared, now: now)
+        let generation = ledger.generation
+
+        // "Timed out for 30 more seconds" — about the timeout before the clear.
+        #expect(ledger.apply(.rejected(.timedOut(until: now.addingTimeInterval(30))), basis: basis, now: now) == false)
+        #expect(ledger.current(at: now) == .removedByModerator)
+        #expect(ledger.generation == generation)
+    }
+
+    @Test("A send rejection based on or after the latest self-clear refines it")
+    func freshRejectionRefines() {
+        var ledger = OwnChatRestrictionLedger()
+        ledger.apply(.ownMessagesCleared, now: now)
+        let basis = ledger.generation          // the send starts after the clear
+        // Non-clear transitions since the basis don't make it stale.
+        ledger.apply(.rejected(.warned(reason: nil)), now: now)
+
+        let until = now.addingTimeInterval(600)
+        #expect(ledger.apply(.rejected(.timedOut(until: until)), basis: basis, now: now))
+        #expect(ledger.current(at: now) == .timedOut(until: until))
+        #expect(ledger.lastClearGeneration == basis)
+    }
+
     // MARK: - On the session
 
     private struct NullTokenStore: TwitchTokenStore {
@@ -121,5 +148,35 @@ struct OwnChatRestrictionLedgerTests {
 
         await session.handle(event: try clearEvent(target: "me-1"))
         #expect(await session.ownChatRestriction().current() == .removedByModerator)
+    }
+
+    private func chatMessage(id: String, from userId: String) -> ChatMessage {
+        let line = "@id=\(id);room-id=chan-1;user-id=\(userId) :u!u@u.tmi.twitch.tv PRIVMSG #somechannel :hi"
+        return IRCMessageParser.parse(line, channelLogin: "somechannel")!
+    }
+
+    @Test("The session lifts our restriction on our own broadcast message, in stream order")
+    func sessionRecordsOwnEcho() async throws {
+        let session = makeSession()
+        await session.handle(event: try clearEvent(target: "me-1"))
+
+        await session.handle(event: .chatMessage(chatMessage(id: "a", from: "someone-else")))
+        #expect(await session.ownChatRestriction().current() == .removedByModerator)
+
+        await session.handle(event: .chatMessage(chatMessage(id: "b", from: "me-1")))
+        #expect(await session.ownChatRestriction().current() == nil)
+
+        // An echo BEFORE a later clear can't undo that clear.
+        await session.handle(event: try clearEvent(target: "me-1"))
+        #expect(await session.ownChatRestriction().current() == .removedByModerator)
+    }
+
+    @Test("Recording a page signal returns the ledger the page adopts")
+    func recordReturnsLedger() async {
+        let session = makeSession()
+        let before = await session.ownChatRestriction().generation
+        let after = await session.recordOwnChatRestriction(.rejected(.banned), basis: before)
+        #expect(after.current() == .banned)
+        #expect(after.generation > before)
     }
 }

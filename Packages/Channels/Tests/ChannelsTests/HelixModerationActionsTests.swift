@@ -14,11 +14,48 @@ struct HelixModerationActionsTests {
 
     // MARK: - Fixtures
 
-    private struct FixedTokenStore: TwitchTokenStore {
-        func loadToken() async throws -> OAuthToken? { OAuthToken(accessToken: "test-token") }
-        func saveToken(_ token: OAuthToken) async throws {}
-        func deleteToken() async throws {}
+    /// A token store over one fixed token that counts writes and deletes,
+    /// so a test can prove TwitchKit never refreshed (save) or logged out
+    /// (delete) behind a call.
+    private final class FixedTokenStore: TwitchTokenStore, Sendable {
+        private let token: OAuthToken
+        private let saveCount = OSAllocatedUnfairLock(initialState: 0)
+        private let deleteCount = OSAllocatedUnfairLock(initialState: 0)
+
+        init(_ token: OAuthToken) {
+            self.token = token
+        }
+
+        var saves: Int { saveCount.withLock { $0 } }
+        var deletes: Int { deleteCount.withLock { $0 } }
+
+        func loadToken() async throws -> OAuthToken? { token }
+        func saveToken(_ token: OAuthToken) async throws { saveCount.withLock { $0 += 1 } }
+        func deleteToken() async throws { deleteCount.withLock { $0 += 1 } }
     }
+
+    /// No recorded scope list: the action pre-checks can't judge, so the
+    /// request goes out (and the banned lookup stays unknown).
+    private static let plainToken = OAuthToken(accessToken: "test-token")
+
+    /// What a current sign-in carries: a refresh token and the moderation
+    /// scopes.
+    private static let fullyScopedToken = OAuthToken(
+        accessToken: "test-token",
+        refreshToken: "test-refresh",
+        scope: [
+            "moderator:manage:banned_users",
+            "moderator:manage:warnings",
+            "moderator:read:banned_users",
+        ]
+    )
+
+    /// An account signed in before the moderation tools shipped.
+    private static let preModerationToken = OAuthToken(
+        accessToken: "test-token",
+        refreshToken: "test-refresh",
+        scope: ["user:read:chat", "user:write:chat", "moderator:manage:chat_messages"]
+    )
 
     /// Records every request and answers with a canned status + body.
     private final class RecordingHTTPClient: HTTPClient, Sendable {
@@ -56,17 +93,20 @@ struct HelixModerationActionsTests {
         status: Int = 200,
         json: String = "{\"data\":[]}",
         accountUserId: String = "mod-1",
+        token: OAuthToken = HelixModerationActionsTests.plainToken,
         refreshes: RefreshCounter = RefreshCounter()
-    ) -> (HelixChatActions, RecordingHTTPClient) {
+    ) -> (HelixChatActions, RecordingHTTPClient, FixedTokenStore) {
         let http = RecordingHTTPClient(status: status, json: json)
-        let client = TwitchClient(clientId: "test-client", tokenStore: FixedTokenStore(), httpClient: http)
+        let tokenStore = FixedTokenStore(token)
+        let client = TwitchClient(clientId: "test-client", tokenStore: tokenStore, httpClient: http)
         let actions = HelixChatActions(
             client: client,
             channelId: "chan-1",
             accountUserId: accountUserId,
-            authRetry: HelixAuthRetry(refreshTokenHandler: { refreshes.increment() })
+            authRetry: HelixAuthRetry(refreshTokenHandler: { refreshes.increment() }),
+            http: http
         )
-        return (actions, http)
+        return (actions, http, tokenStore)
     }
 
     private func query(_ request: URLRequest) -> [String: String] {
@@ -92,7 +132,7 @@ struct HelixModerationActionsTests {
 
     @Test("Timeout POSTs /moderation/bans with user, duration and reason")
     func timeoutRequest() async throws {
-        let (actions, http) = makeActions(json: banResponse)
+        let (actions, http, _) = makeActions(json: banResponse)
 
         try await actions.banUser(userId: "target-9", durationSeconds: 600, reason: "  spam  ")
 
@@ -109,7 +149,7 @@ struct HelixModerationActionsTests {
 
     @Test("Ban omits duration (permanent) and a blank reason")
     func banRequest() async throws {
-        let (actions, http) = makeActions(json: banResponse)
+        let (actions, http, _) = makeActions(json: banResponse)
 
         try await actions.banUser(userId: "target-9", durationSeconds: nil, reason: "   ")
 
@@ -121,14 +161,14 @@ struct HelixModerationActionsTests {
 
     @Test("A 2xx ban with Twitch's real (undecodable) body still succeeds")
     func banUndecodableBodyIsSuccess() async throws {
-        let (actions, _) = makeActions(json: banResponse)
+        let (actions, _, _) = makeActions(json: banResponse)
         // Would throw HelixError.decodingFailed without the workaround.
         try await actions.banUser(userId: "target-9", durationSeconds: nil, reason: nil)
     }
 
     @Test("A refused ban surfaces Twitch's message")
     func banRefused() async throws {
-        let (actions, _) = makeActions(
+        let (actions, _, _) = makeActions(
             status: 400,
             json: #"{"error":"Bad Request","status":400,"message":"The user specified in the user_id field is already banned."}"#
         )
@@ -141,7 +181,7 @@ struct HelixModerationActionsTests {
 
     @Test("Unban DELETEs /moderation/bans with the user in the query")
     func unbanRequest() async throws {
-        let (actions, http) = makeActions(status: 204, json: "")
+        let (actions, http, _) = makeActions(status: 204, json: "")
 
         try await actions.unbanUser(userId: "target-9")
 
@@ -156,7 +196,7 @@ struct HelixModerationActionsTests {
 
     @Test("Warn POSTs /moderation/warnings with user and trimmed reason")
     func warnRequest() async throws {
-        let (actions, http) = makeActions(json: """
+        let (actions, http, _) = makeActions(json: """
         {"data":[{"broadcaster_id":"chan-1","user_id":"target-9","moderator_id":"mod-1","reason":"be nice"}]}
         """)
 
@@ -173,7 +213,7 @@ struct HelixModerationActionsTests {
 
     @Test("Warn with a blank reason throws before any request")
     func warnBlankReason() async throws {
-        let (actions, http) = makeActions()
+        let (actions, http, _) = makeActions()
         await #expect(throws: (any Error).self) {
             try await actions.warnUser(userId: "target-9", reason: "  ")
         }
@@ -184,7 +224,7 @@ struct HelixModerationActionsTests {
 
     @Test("Ban state: a moderator (not the broadcaster) makes no request — unknown")
     func banStateSkippedForModerators() async {
-        let (actions, http) = makeActions(json: #"{"data":[],"pagination":{}}"#)
+        let (actions, http, _) = makeActions(json: #"{"data":[],"pagination":{}}"#)
 
         let state = await actions.banState(userId: "target-9")
 
@@ -192,13 +232,17 @@ struct HelixModerationActionsTests {
         #expect(http.requests.isEmpty)
     }
 
-    @Test("Ban state: a 401 is unknown and never triggers a token refresh")
-    func banStateUnauthorizedNoRefresh() async {
+    @Test("Ban state: a 401 is unknown — no TwitchKit refresh, no logout, no bridge refresh")
+    func banStateUnauthorizedNoRefresh() async throws {
         let refreshes = RefreshCounter()
-        let (actions, http) = makeActions(
+        // The credential HAS a refresh token, so TwitchKit's HelixClient
+        // would POST /oauth2/token on a 401 (same transport → a second
+        // recorded request), fail, and delete the token.
+        let (actions, http, store) = makeActions(
             status: 401,
-            json: #"{"error":"Unauthorized","status":401,"message":"The ID in broadcaster_id must match the user ID found in the request's OAuth token."}"#,
+            json: #"{"error":"Unauthorized","status":401,"message":"Missing scope: moderation:read or moderator:manage:banned_users"}"#,
             accountUserId: "chan-1",
+            token: Self.fullyScopedToken,
             refreshes: refreshes
         )
 
@@ -206,12 +250,88 @@ struct HelixModerationActionsTests {
 
         #expect(state == nil)
         #expect(http.requests.count == 1)
+        let request = try #require(http.requests.first)
+        #expect(request.url?.host == "api.twitch.tv")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-token")
+        #expect(request.value(forHTTPHeaderField: "Client-Id") == "test-client")
         #expect(refreshes.count == 0)
+        #expect(store.saves == 0)
+        #expect(store.deletes == 0)
+    }
+
+    @Test("Ban state: a 403 is unknown too")
+    func banStateForbiddenIsUnknown() async {
+        let (actions, http, store) = makeActions(
+            status: 403,
+            json: #"{"error":"Forbidden","status":403,"message":"nope"}"#,
+            accountUserId: "chan-1",
+            token: Self.fullyScopedToken
+        )
+
+        #expect(await actions.banState(userId: "target-9") == nil)
+        #expect(http.requests.count == 1)
+        #expect(store.deletes == 0)
+    }
+
+    @Test("Ban state: a token without the scope (or with no scope list) makes no request")
+    func banStateSkippedWithoutScope() async {
+        let (older, olderHTTP, _) = makeActions(accountUserId: "chan-1", token: Self.preModerationToken)
+        #expect(await older.banState(userId: "target-9") == nil)
+        #expect(olderHTTP.requests.isEmpty)
+
+        let (unknown, unknownHTTP, _) = makeActions(accountUserId: "chan-1", token: Self.plainToken)
+        #expect(await unknown.banState(userId: "target-9") == nil)
+        #expect(unknownHTTP.requests.isEmpty)
+    }
+
+    // MARK: - Scope pre-check
+
+    @Test("Ban / timeout / unban / warn without the scope: sign-in-again, no request, token kept")
+    func actionsWithoutScopeNeverHitTwitch() async {
+        let refreshes = RefreshCounter()
+        let (actions, http, store) = makeActions(
+            status: 401,
+            json: #"{"error":"Unauthorized","status":401,"message":"Missing scope"}"#,
+            token: Self.preModerationToken,
+            refreshes: refreshes
+        )
+
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.banUser(userId: "target-9", durationSeconds: 600, reason: nil)
+        }
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.banUser(userId: "target-9", durationSeconds: nil, reason: nil)
+        }
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.unbanUser(userId: "target-9")
+        }
+        await #expect(throws: ModerationActionError.needsSignInAgain) {
+            try await actions.warnUser(userId: "target-9", reason: "be nice")
+        }
+
+        #expect(http.requests.isEmpty)
+        #expect(refreshes.count == 0)
+        #expect(store.saves == 0)
+        #expect(store.deletes == 0)
+    }
+
+    @Test("With the scope granted, the action goes out")
+    func actionsWithScopeProceed() async throws {
+        let (actions, http, _) = makeActions(json: banResponse, token: Self.fullyScopedToken)
+
+        try await actions.banUser(userId: "target-9", durationSeconds: 600, reason: nil)
+
+        #expect(http.requests.count == 1)
+    }
+
+    @Test("The pre-check's error survives the session's error mapping")
+    func preCheckErrorMapsToItself() {
+        #expect(ModerationActionError.from(ModerationActionError.needsSignInAgain) == .needsSignInAgain)
     }
 
     @Test("Ban state: the broadcaster's GET /moderation/banned filtered to the user")
     func banStateRequest() async throws {
-        let (actions, http) = makeActions(json: #"{"data":[],"pagination":{}}"#, accountUserId: "chan-1")
+        let (actions, http, _) = makeActions(json: #"{"data":[],"pagination":{}}"#, accountUserId: "chan-1", token: Self.fullyScopedToken)
 
         let state = await actions.banState(userId: "target-9")
 
@@ -232,10 +352,10 @@ struct HelixModerationActionsTests {
             "moderator_login":"m","moderator_name":"M"}],"pagination":{}}
             """
         }
-        let (banned, _) = makeActions(json: entry(expiresAt: ""), accountUserId: "chan-1")
+        let (banned, _, _) = makeActions(json: entry(expiresAt: ""), accountUserId: "chan-1", token: Self.fullyScopedToken)
         #expect(await banned.banState(userId: "target-9") == .banned)
 
-        let (timedOut, _) = makeActions(json: entry(expiresAt: "2026-11-17T10:10:00Z"), accountUserId: "chan-1")
+        let (timedOut, _, _) = makeActions(json: entry(expiresAt: "2026-11-17T10:10:00Z"), accountUserId: "chan-1", token: Self.fullyScopedToken)
         let state = await timedOut.banState(userId: "target-9")
         guard case .timedOut(let until)? = state else {
             Issue.record("Expected .timedOut, got \(String(describing: state))")

@@ -3,11 +3,14 @@ import Foundation
 /// The signed-in user's own standing in one channel (timed out / banned /
 /// warned), as a pure reducer over the signals that reveal it.
 ///
-/// One copy lives on `ChannelSession` (the account × channel session, which
-/// outlives any one chat page: the pager unmounts pages two swipes away, the
-/// session stays while the tab is open) and one on the page's
-/// `OwnChatRestrictionState`, which restores from the session's copy on
-/// attach. Both run the same events through this reducer, so they agree.
+/// The authoritative copy lives on `ChannelSession` (the account × channel
+/// session, which outlives any one chat page: the pager unmounts pages two
+/// swipes away, the session stays while the tab is open). It sees every
+/// event in one order: self-clears and own echoes in `handle(event:)` as
+/// they arrive, send rejections and dismissals when the page reports them.
+/// A page's `OwnChatRestrictionState` only ever holds a COPY of it, and
+/// adopts a newer copy by `generation` — so nothing a page does can
+/// reorder events against each other.
 ///
 /// Time is absolute: a known timeout stores its end `Date`, never a
 /// remaining count, and `current(at:)` reads an ended timeout as nothing.
@@ -36,6 +39,11 @@ public struct OwnChatRestrictionLedger: Sendable, Equatable {
     /// so an old timeout's end can never lift a newer restriction.
     public private(set) var generation = 0
 
+    /// The generation the latest self-clear produced (0: none yet). A send
+    /// rejection based on an older generation predates that clear — see
+    /// `apply(_:basis:now:)`.
+    public private(set) var lastClearGeneration = 0
+
     public init() {}
 
     /// The restriction in force at `now`: nil once a known timeout ends.
@@ -46,10 +54,22 @@ public struct OwnChatRestrictionLedger: Sendable, Equatable {
 
     /// Applies `event`. Returns whether the in-force restriction (or the
     /// generation) changed.
+    ///
+    /// - Parameter basis: for `.rejected`, the generation of this ledger the
+    ///   sender held when the send STARTED. If a self-clear landed since
+    ///   (`lastClearGeneration > basis`), the rejection describes the
+    ///   restriction before that clear — e.g. "timed out for 30 more
+    ///   seconds" from a timeout a mod has since extended or turned into a
+    ///   ban — so it's dropped rather than allowed to restore a stale
+    ///   deadline over the newer unknown-length state. nil = no basis
+    ///   (applied unconditionally).
     @discardableResult
-    public mutating func apply(_ event: Event, now: Date = .now) -> Bool {
+    public mutating func apply(_ event: Event, basis: Int? = nil, now: Date = .now) -> Bool {
         switch event {
         case .rejected(let restriction):
+            if let basis, basis < lastClearGeneration {
+                return false
+            }
             // A vague "timed out" (no duration) mustn't erase the end time we
             // already hold for the same running timeout.
             if case .timedOut(.none) = restriction,
@@ -66,6 +86,7 @@ public struct OwnChatRestrictionLedger: Sendable, Equatable {
             // send rejection refines it.
             stored = .removedByModerator
             generation &+= 1
+            lastClearGeneration = generation
             return true
 
         case .ownMessageDelivered:

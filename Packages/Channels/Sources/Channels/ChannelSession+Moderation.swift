@@ -74,16 +74,28 @@ extension ChannelSession {
     // MARK: - Own restriction
 
     /// The signed-in user's own standing here, for a chat page to restore on
-    /// attach (see `ownRestriction`).
+    /// attach and to resync from (after our own clear / echo, on reprime).
+    /// See `ownRestriction`.
     public func ownChatRestriction() -> OwnChatRestrictionLedger {
         ownRestriction
     }
 
-    /// Records a signal only the chat page sees (a send rejection, our own
-    /// echo, the user dismissing the banner). Self-clears arrive through
-    /// `handle(event:)` instead and must not be forwarded here.
-    public func recordOwnChatRestriction(_ event: OwnChatRestrictionLedger.Event) {
-        ownRestriction.apply(event)
+    /// Records a signal only the chat page sees (a send rejection, the user
+    /// dismissing the banner) and returns the resulting ledger for the page
+    /// to adopt. Self-clears and own echoes arrive through `handle(event:)`
+    /// instead and must not be forwarded here (tests use it to stand in for
+    /// them).
+    ///
+    /// - Parameter basis: for a send rejection, the ledger generation the
+    ///   page held when the send started; a self-clear since then makes the
+    ///   rejection stale and it's dropped (`OwnChatRestrictionLedger.apply`).
+    @discardableResult
+    public func recordOwnChatRestriction(
+        _ event: OwnChatRestrictionLedger.Event,
+        basis: Int? = nil
+    ) -> OwnChatRestrictionLedger {
+        ownRestriction.apply(event, basis: basis)
+        return ownRestriction
     }
 
     /// Translates a Twitch refusal into `ModerationActionError`; anything

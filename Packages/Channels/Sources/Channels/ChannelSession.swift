@@ -92,9 +92,10 @@ public actor ChannelSession {
     /// The signed-in user's own timeout / ban / warning here. Lives on the
     /// session rather than the chat page because the pager unmounts pages
     /// two swipes away while the session stays; a remounted page restores
-    /// from this on attach. Self-clears are recorded in `handle(event:)`
-    /// (so they're kept even with no page mounted); the page forwards the
-    /// signals only it sees (send rejections, own echo, dismiss). See
+    /// from this on attach. The single authority: self-clears and own
+    /// echoes are recorded in `handle(event:)` (so they're kept even with
+    /// no page mounted); the page reports the signals only it sees (send
+    /// rejections, dismiss) and adopts the result. See
     /// `ChannelSession+Moderation.swift`.
     var ownRestriction = OwnChatRestrictionLedger()
 
@@ -436,6 +437,14 @@ public actor ChannelSession {
         // unmounted. Never per message.
         if case .messagesClearedFromUser(let targetUserId) = channelEvent, targetUserId == accountUserId {
             ownRestriction.apply(.ownMessagesCleared)
+        }
+        // …and one of OUR messages was broadcast, so nothing blocks us any
+        // more. Recorded here (not by the page) so it's ordered against the
+        // clears above. The nil check comes first: while unrestricted —
+        // nearly always — this costs one comparison per message.
+        if ownRestriction.stored != nil, case .message(let message) = channelEvent,
+           message.chatterUserId == accountUserId {
+            ownRestriction.apply(.ownMessageDelivered)
         }
 
         guard let update = normalizer.makeUpdate(for: channelEvent, receivedAt: receivedAt) else { return }

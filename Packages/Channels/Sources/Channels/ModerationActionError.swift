@@ -4,11 +4,13 @@ import TwitchKit
 /// A ban / timeout / unban / warn that Twitch refused, reduced to what the
 /// user card can say about it.
 public enum ModerationActionError: Error, Sendable, Equatable, LocalizedError {
-    /// Still unauthorized AFTER `HelixAuthRetry`'s bridge refresh + retry.
-    /// A freshly refreshed token that's still refused means it lacks the
-    /// scope (`moderator:manage:banned_users` / `moderator:manage:warnings`):
-    /// the account signed in before chattr asked for them, and refreshing
-    /// never adds scopes — only signing in again does.
+    /// The sign-in lacks the scope (`moderator:manage:banned_users` /
+    /// `moderator:manage:warnings`): the account signed in before chattr
+    /// asked for them, and refreshing never adds scopes — only signing in
+    /// again does. Usually thrown BEFORE any request, from the token's
+    /// granted-scope list (`HelixChatActions.requireGrantedScope`); also the
+    /// mapping for a request still unauthorized after `HelixAuthRetry`'s
+    /// bridge refresh + retry (a token with no recorded scope list).
     case needsSignInAgain
     /// Twitch said no and explained why ("The user specified in user_id is
     /// already banned.", "not one of the broadcaster's moderators", …).
@@ -27,6 +29,9 @@ public enum ModerationActionError: Error, Sendable, Equatable, LocalizedError {
     /// action (network, cancellation …) — callers rethrow those unchanged.
     static func from(_ error: any Error) -> ModerationActionError? {
         switch error {
+        case let alreadyMapped as ModerationActionError:
+            // The scope pre-check in `HelixChatActions` throws this directly.
+            return alreadyMapped
         case HelixError.unauthorized, HelixError.oauth, HelixError.notAuthenticated:
             return .needsSignInAgain
         case HelixError.forbidden(let apiError),

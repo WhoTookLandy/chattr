@@ -74,10 +74,11 @@ public enum TwitchSignIn {
     ///   card's moderation row — timeout / ban / unban (POST + DELETE
     ///   `/moderation/bans`) and warn (POST `/moderation/warnings`). Same
     ///   harmless-for-non-mods rationale as the other manage scopes, and the
-    ///   same re-sign-in caveat: on an older token the action still fails
-    ///   unauthorized after the bridge refresh, which
-    ///   `ModerationActionError.needsSignInAgain` turns into a "sign out and
-    ///   back in" message on the card instead of a raw 401.
+    ///   same re-sign-in caveat: an older token lacks them, which
+    ///   `HelixChatActions` detects from the token's granted scopes BEFORE
+    ///   any request (a 401 would make TwitchKit wipe the stored token) and
+    ///   reports as `ModerationActionError.needsSignInAgain` — a "sign out
+    ///   and back in" message on the card.
     public static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,

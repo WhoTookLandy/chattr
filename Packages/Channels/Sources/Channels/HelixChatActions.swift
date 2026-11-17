@@ -19,6 +19,10 @@ struct HelixChatActions: Sendable {
     let channelId: String
     let accountUserId: String
     let authRetry: HelixAuthRetry
+    /// Transport for the one request that must NOT go through TwitchKit's
+    /// `HelixClient` (the banned lookup — see `banState`). Tests pass the
+    /// same recording client the `TwitchClient` uses.
+    var http: any HTTPClient = URLSessionHTTPClient()
 
     /// GET /chat/settings with the shared auth-refresh-and-retry, matching
     /// `send(...)` and the chat.message subscribe.
@@ -134,6 +138,7 @@ struct HelixChatActions: Sendable {
         isolation: isolated (any Actor)? = #isolation
     ) async throws {
         let trimmedReason = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await requireGrantedScope(.moderatorManageBannedUsers)
         do {
             _ = try await authRetry.run(durationSeconds == nil ? "banUser" : "timeoutUser") {
                 try await client.api.banUser(
@@ -154,6 +159,7 @@ struct HelixChatActions: Sendable {
         userId: String,
         isolation: isolated (any Actor)? = #isolation
     ) async throws {
+        try await requireGrantedScope(.moderatorManageBannedUsers)
         try await authRetry.run("unbanUser") {
             try await client.api.unbanUser(
                 broadcasterID: channelId,
@@ -174,6 +180,7 @@ struct HelixChatActions: Sendable {
         guard !trimmed.isEmpty else {
             throw AppError(message: "A warning needs a reason.")
         }
+        try await requireGrantedScope(.moderatorManageWarnings)
         do {
             _ = try await authRetry.run("warnChatUser") {
                 try await client.api.warnChatUser(
@@ -193,19 +200,50 @@ struct HelixChatActions: Sendable {
     /// or timed out here. nil expiry on a found entry = permanent ban.
     ///
     /// Returns nil ("unknown") WITHOUT a request unless the signed-in account
-    /// is the broadcaster: Twitch requires `broadcaster_id` to match the
-    /// token's user for this endpoint, so for an ordinary moderator it always
-    /// answers 401. Deliberately not routed through `authRetry` either — a
-    /// 401 here says nothing about the token's freshness, and treating it as
-    /// one would run a bridge refresh + retry on every card open. Any failure
-    /// is reported as unknown; the card then keeps Unban in its menu.
+    /// is the broadcaster (Twitch requires `broadcaster_id` to match the
+    /// token's user, so a moderator would always get 401) AND the stored
+    /// token's granted scopes include one this endpoint accepts.
+    ///
+    /// Deliberately NOT sent through TwitchKit's `HelixClient`, and not
+    /// through `authRetry` either: on a 401 `HelixClient` runs its own
+    /// `/oauth2/token` refresh, which always fails in chattr (no client
+    /// secret on device) and then `logout()`s — deleting the account's
+    /// Keychain token. A best-effort lookup on every card open must never be
+    /// able to do that. So this is a plain GET with the current access token
+    /// read straight from the store (`TwitchTokenProvider.token()`, which
+    /// never refreshes), and every non-200 — 401 / 403 included — is just
+    /// "unknown"; the card then keeps Unban in its menu.
     func banState(
         userId: String,
         isolation: isolated (any Actor)? = #isolation
     ) async -> UserBanState? {
         guard channelId == accountUserId else { return nil }
+        guard let token = try? await client.auth.tokenProvider.token(),
+              Self.grants(token, anyOf: Self.bannedLookupScopes) else {
+            logger.debug("Banned lookup skipped: no token, or it lacks a scope for GET /moderation/banned")
+            return nil
+        }
+        var components = URLComponents(string: "https://api.twitch.tv/helix/moderation/banned")
+        components?.queryItems = [
+            URLQueryItem(name: "broadcaster_id", value: channelId),
+            URLQueryItem(name: "user_id", value: userId),
+        ]
+        guard let url = components?.url else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(client.clientId, forHTTPHeaderField: "Client-Id")
         do {
-            let page = try await client.api.fetchBannedUsersPage(broadcasterID: channelId, userIDs: [userId])
+            let (data, response) = try await http.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200 else {
+                logger.debug("Banned lookup answered \(status), state unknown")
+                return nil
+            }
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let page = try decoder.decode(BannedLookupResponse.self, from: data)
             guard let entry = page.data.first(where: { $0.userId == userId }) else {
                 return .notBanned
             }
@@ -215,4 +253,51 @@ struct HelixChatActions: Sendable {
             return nil
         }
     }
+
+    // MARK: - Granted scopes
+
+    /// Scopes Twitch accepts for GET /moderation/banned.
+    static let bannedLookupScopes: [TwitchScope] = [.moderationRead, .moderatorManageBannedUsers]
+
+    /// Whether the token's granted scopes include any of `scopes`. A token
+    /// with no recorded scope list counts as NOT granting them.
+    static func grants(_ token: OAuthToken, anyOf scopes: [TwitchScope]) -> Bool {
+        guard let granted = token.scope else { return false }
+        return scopes.contains { granted.contains($0.rawValue) }
+    }
+
+    /// Throws `.needsSignInAgain` before any request when the stored token
+    /// is known to lack `scope` (an account signed in before chattr asked
+    /// for it).
+    ///
+    /// Why not let Twitch answer: a missing scope is a 401, and a 401
+    /// through `HelixClient` triggers TwitchKit's own refresh, which fails in
+    /// chattr and deletes the Keychain token (see `banState`); `authRetry`
+    /// then refreshes via the bridge, retries, gets 401 again, and TwitchKit
+    /// wipes the token a second time. Refreshing never adds a scope, so none
+    /// of that can succeed — checking first keeps the credential intact and
+    /// gives the card its "sign in again" message.
+    ///
+    /// Reads the token without refreshing. Proceeds when the token can't be
+    /// read (the normal `authRetry` recovery handles a wiped store) or
+    /// carries no scope list (nothing to judge by — the request decides).
+    private func requireGrantedScope(_ scope: TwitchScope) async throws {
+        guard let token = try? await client.auth.tokenProvider.token(),
+              let granted = token.scope else { return }
+        guard granted.contains(scope.rawValue) else {
+            logger.notice("\(scope.rawValue, privacy: .public) isn't granted to this sign-in; asking to sign in again")
+            throw ModerationActionError.needsSignInAgain
+        }
+    }
+}
+
+/// The two fields of a GET /moderation/banned entry the lookup reads. Our
+/// own type rather than TwitchKit's `BannedUser`, because the lookup
+/// bypasses `HelixClient` and its decoder.
+private struct BannedLookupResponse: Decodable {
+    struct Entry: Decodable {
+        let userId: String
+        let expiresAt: String?
+    }
+    let data: [Entry]
 }

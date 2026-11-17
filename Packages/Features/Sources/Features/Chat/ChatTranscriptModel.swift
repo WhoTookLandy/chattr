@@ -352,6 +352,10 @@ public final class ChatTranscriptModel {
         if repinsTranscript {
             outgoingSendCount &+= 1
         }
+        // A rejection is reported to THIS session (even if the page detaches
+        // before Twitch answers), against the own-restriction generation
+        // held now — so the ledger can drop it if a self-clear lands first.
+        let restrictionBasis = ownRestriction.sendBasis(for: session)
 
         do {
             let response = try await session.send(canonical, replyParentMessageId: reply?.parentMessageId)
@@ -371,14 +375,14 @@ public final class ChatTranscriptModel {
             // Timed out / banned / warned: the precise state (and the
             // timeout's end) for the banner and the compose bar.
             if let restriction = OwnChatRestriction(dropCode: response.dropReason?.code, message: response.dropReason?.message) {
-                ownRestriction.apply(restriction)
+                ownRestriction.reportSendRejection(restriction, on: session, basis: restrictionBasis)
             }
         } catch HelixError.forbidden(let apiError) {
             // Twitch answers a banned sender with 403 rather than a drop.
             outgoing.failed(pendingId: pendingId, reason: apiError.message, retryText: canonical)
             logger.error("send forbidden: \(apiError.message, privacy: .public)")
             if let restriction = OwnChatRestriction(dropCode: nil, message: apiError.message) {
-                ownRestriction.apply(restriction)
+                ownRestriction.reportSendRejection(restriction, on: session, basis: restrictionBasis)
             }
         } catch {
             // Network blip, unauthorized after refresh-and-retry, … — same
@@ -517,7 +521,8 @@ public final class ChatTranscriptModel {
             applyLiveMessage(normalized)
         case .messagesClearedFromUser(let targetUserId):
             // A mod timed out / banned someone. When that someone is US, the
-            // banner explains why our messages vanished. One string compare
+            // banner explains why our messages vanished (synced from the
+            // session, which recorded the clear first). One string compare
             // per clear event — never per message.
             if !selfChatter.userId.isEmpty, targetUserId == selfChatter.userId {
                 ownRestriction.noteOwnMessagesCleared()
@@ -567,7 +572,8 @@ public final class ChatTranscriptModel {
     private func observeOwnEcho(_ message: ChatMessage) {
         guard selfChatter.wrote(message) else { return }
         // Twitch broadcast one of ours, so whatever restriction we inferred
-        // is over (timeout lapsed, unbanned, warning acknowledged).
+        // is over (timeout lapsed, unbanned, warning acknowledged). The
+        // session recorded that already; while restricted this syncs.
         ownRestriction.noteOwnMessageDelivered()
         if moderation.observeOwnEcho(message, session: attachment.primarySession) {
             logger.info("Detected mod status from echoed badges for #\(self.draftKey, privacy: .public)")
@@ -608,6 +614,11 @@ public final class ChatTranscriptModel {
             kept += 1
         }
         outgoing.pruneLocallySettled()
+        // The live updates this replaces may have included our own clear or
+        // echo (a mailbox overflow drops them) — and the snapshot only
+        // carries rows. The session's ledger saw them all: resync from it
+        // (one actor hop per reprime, adopted by generation).
+        ownRestriction.resync()
         logger.info("ChatTranscriptModel re-primed from \(snapshot.count) session update(s); kept \(kept) local row(s), settled \(settledPendingIds.count) send(s) by echo")
     }
 
