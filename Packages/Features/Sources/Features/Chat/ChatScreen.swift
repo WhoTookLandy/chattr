@@ -135,6 +135,14 @@ public struct ChatScreen: View {
     /// is presented. Opened from the compose bar's gear button.
     @State private var showChatSettings = false
 
+    /// "Create Clip" from the compose bar's ⋯ menu (live channels only).
+    @State private var showCreateClip = false
+
+    /// Opens Twitch clip links tapped in chat in `ClipPlayerSheet` instead
+    /// of Safari. Its `openURLAction` is built once, so installing it in the
+    /// environment never changes the value the chat cells see.
+    @State private var clipLinks = ClipLinkRouter()
+
     // NOTE: compose-bar state (`composeText`, `isSending`, `composeFocused`)
     // lives inside the extracted `ComposeBar` view below — NOT here on
     // ChatScreen. That isolation matters: every keystroke in the
@@ -199,6 +207,7 @@ public struct ChatScreen: View {
         // without writing a `Binding(get:set:)` inline (Swift 5.9+ allows
         // declaring @Bindable inside body for view-scoped projections).
         @Bindable var bindableChatModel = chatModel
+        @Bindable var clipLinkRouter = clipLinks
         // `.safeAreaBar(edge: .bottom)` pins the compose bar below the
         // scrolling content with integrated glass blur (iOS 26). The bar
         // lives INSIDE ChatScreen (not in ChatPagerScreen) because each
@@ -253,7 +262,9 @@ public struct ChatScreen: View {
         // both schemes (see DesignSystem.Color.chatSurface). Applied here
         // (not on the list) so the empty/connecting states and the area
         // behind the glass compose bar share the same surface.
-        .background(Color.chatSurface.ignoresSafeArea())
+        // `ChatSurfaceBackground` turns translucent in the landscape
+        // "chat over video" layout; its own view, so only it re-renders.
+        .background { ChatSurfaceBackground() }
         // "You're timed out / banned / warned here" — directly under the
         // stream header (this bar is applied first, so it sits inside the
         // header's). Self-contained and observes only its own small state,
@@ -270,10 +281,13 @@ public struct ChatScreen: View {
         // Stream context (title, category, live/viewers/uptime, or offline
         // + last live) pinned above the transcript. Its own view reading
         // its own stores, so status refreshes never re-run this body.
+        // On the landscape stage the video moves beside the chat, so the
+        // header collapses — but stays mounted: it keeps driving playback.
         .safeAreaBar(edge: .top) {
             StreamHeaderView(channel: channel, tabId: tabId) {
                 showViewerList = true
             }
+            .hiddenOnLandscapeStage()
         }
         .safeAreaBar(edge: .bottom) {
             composeBarView
@@ -385,6 +399,13 @@ public struct ChatScreen: View {
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showCreateClip) {
+            CreateClipSheet(channel: channel, account: account, accountStore: accountStore)
+        }
+        // A clip link tapped in chat (routed here by `clipLinks`).
+        .sheet(item: $clipLinkRouter.presented) { clip in
+            ClipPlayerSheet(clip: clip)
         }
         // Chat settings entry point: the compose bar's ⋯ menu (see
         // `ComposeBar.moreMenu`). The top-bar gear it replaced competed
@@ -520,6 +541,15 @@ public struct ChatScreen: View {
         // structurally bound to view lifetime via CancellationError, no
         // unstructured Task needed. See the doc-comment on that .task
         // for why.
+        //
+        // Clip links in chat rows (and the sheets above) open in-app. A
+        // stable value — see `clipLinks`.
+        .environment(\.openURL, clipLinks.openURLAction)
+        // Landscape with the stream showing: video beside / under this
+        // whole chat column. Applied last so everything above (transcript,
+        // header, compose bar, sheets, session tasks) keeps one structural
+        // identity across rotation — see `LandscapeStageLayout`.
+        .landscapeStageLayout(channel: channel, tabId: tabId)
     }
 
     /// The compose bar, extracted so we can resolve `@Environment`-derived
@@ -586,7 +616,11 @@ public struct ChatScreen: View {
             },
             // Settings live in the compose bar's ⋯ menu (moved out of the
             // top bar, where the gear competed with the channel pill).
-            onOpenSettings: { showChatSettings = true }
+            onOpenSettings: { showChatSettings = true },
+            createClip: ComposeBar.CreateClipEntry(
+                channelId: channelId,
+                action: { showCreateClip = true }
+            )
         )
         // Write any draft still inside the debounce window when the compose
         // bar leaves (page swiped off, tab closed, account switched).

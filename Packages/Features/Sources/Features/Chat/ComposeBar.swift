@@ -57,6 +57,16 @@ struct ComposeBar: View {
     let onSend: @MainActor (String) async -> Void
     /// Opens the chat settings sheet from the ⋯ menu. nil hides the item.
     let onOpenSettings: (() -> Void)?
+    /// "Create Clip" in the ⋯ menu (shown while the channel is live). nil
+    /// hides it.
+    let createClip: CreateClipEntry?
+
+    /// What the ⋯ menu needs for "Create Clip": whose stream, and what to
+    /// do (the parent presents `CreateClipSheet`).
+    struct CreateClipEntry {
+        let channelId: String
+        let action: () -> Void
+    }
 
     @Environment(\.openURL) private var openURL
     /// Same preference the stream header reads — the ⋯ menu's Show/Hide
@@ -99,9 +109,11 @@ struct ComposeBar: View {
         onDraftChange: @escaping (String) -> Void,
         emoteSectionsProvider: @escaping () -> [EmoteSection],
         onSend: @escaping @MainActor (String) async -> Void,
-        onOpenSettings: (() -> Void)? = nil
+        onOpenSettings: (() -> Void)? = nil,
+        createClip: CreateClipEntry? = nil
     ) {
         self.onOpenSettings = onOpenSettings
+        self.createClip = createClip
         self.channelLoginName = channelLoginName
         self.channelDisplayName = channelDisplayName
         self.replyContext = replyContext
@@ -407,6 +419,10 @@ struct ComposeBar: View {
                 } label: {
                     Label("Chat Settings", systemImage: "gearshape")
                 }
+            }
+            if let createClip {
+                // Live-only; reads status in its own view (see type doc).
+                CreateClipMenuItem(channelId: createClip.channelId, action: createClip.action)
             }
             if hasDraft {
                 Button(role: .destructive) {

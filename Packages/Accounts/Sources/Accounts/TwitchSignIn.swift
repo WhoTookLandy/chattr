@@ -100,6 +100,7 @@ public enum TwitchSignIn {
         .userManageBlockedUsers,
         // Viewer list (GET /chat/chatters) for channels you moderate.
         .moderatorReadChatters,
+        .clipsEdit, // Create Clip (POST /clips); pre-scope tokens get 401 → CreateClipSheet asks to sign in again.
     ]
 
     /// The redirect URI the Vercel bridge 302-redirects back to. Must

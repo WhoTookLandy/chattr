@@ -46,6 +46,8 @@ struct StreamHeaderView: View {
     @Environment(\.chatTabs) private var chatTabs
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
+    /// Landscape: the video is on `LandscapeStreamStage`, not here.
+    @Environment(\.landscapeStage) private var landscapeStage
 
     @AppStorage(Self.expandedKey) private var isExpanded = false
     @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
@@ -133,6 +135,10 @@ struct StreamHeaderView: View {
         .onAppear { if isActive { wirePlayerCallbacks() } }
         .onChange(of: isActive) { _, active in
             if active { wirePlayerCallbacks() }
+        }
+        // Back from the landscape stage, which had taken the callbacks.
+        .onChange(of: landscapeStage.isActive) { _, staged in
+            if !staged, isActive { wirePlayerCallbacks() }
         }
         #endif
     }
@@ -334,7 +340,9 @@ struct StreamHeaderView: View {
     @ViewBuilder
     private func playerEngine(audioOnly: Bool) -> some View {
         #if os(iOS)
-        if isActive, let playback, playback.isPlaying(channel.channelId) {
+        // Not while the landscape stage shows it — the stage's host owns
+        // the (same, re-parented) engine view then.
+        if isActive, !landscapeStage.isActive, let playback, playback.isPlaying(channel.channelId) {
             PlayerHost(center: playback)
         }
         #endif

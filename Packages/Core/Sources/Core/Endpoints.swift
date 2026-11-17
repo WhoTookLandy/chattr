@@ -151,4 +151,32 @@ public enum Endpoints {
             URL(string: "https://api.frankerfacez.com/v1/room/\(login)")!
         }
     }
+
+    // MARK: - Twitch clips
+    //
+    // The clip pages chattr opens or shares. Slugs come from Twitch (chat
+    // links, `POST /clips`) and are validated by `TwitchClipLink`.
+
+    public enum TwitchClips {
+        /// A clip's canonical page — what Share / Open in Twitch use.
+        public static func page(slug: String) -> URL? {
+            var components = URLComponents(string: "https://clips.twitch.tv")
+            components?.path = "/\(slug)"
+            return components?.url
+        }
+
+        /// Twitch's embeddable clip player, loaded top-level in the in-app
+        /// clip sheet. `parent` is required by Twitch but only enforced
+        /// against framing ancestors — same as the live player.
+        public static func embed(slug: String) -> URL? {
+            var components = URLComponents(string: "https://clips.twitch.tv/embed")
+            components?.queryItems = [
+                URLQueryItem(name: "clip", value: slug),
+                URLQueryItem(name: "parent", value: "chattr.app"),
+                URLQueryItem(name: "autoplay", value: "true"),
+                URLQueryItem(name: "muted", value: "false"),
+            ]
+            return components?.url
+        }
+    }
 }
