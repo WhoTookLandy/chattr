@@ -143,14 +143,15 @@ public final class FollowsStore {
     public func loadAllIfNeeded(account: Account, accountStore: AccountStore) async {
         let userId = account.userId
         guard loadedAllForUserId != userId else { return }
-        if let inFlight = allLoadInFlight {
-            if inFlight.userId == userId {
-                await inFlight.task.value
-                return
-            }
-            // Another account's load: it can never commit now (the account
-            // and generation checks in `loadAll`), so stop its requests.
-            inFlight.task.cancel()
+        // Switch accounts NOW, synchronously, as the inline load always did —
+        // not later when the queued task starts. Otherwise a `refreshLive` for
+        // the store's current account in that gap would see no switch, leave
+        // this queued load alone, and then be undone by it. `prepare` also
+        // cancels and drops another account's in-flight load.
+        prepare(forAccountUserId: userId)
+        if let inFlight = allLoadInFlight, inFlight.userId == userId {
+            await inFlight.task.value
+            return
         }
         let task = Task { [weak self] in
             guard let self else { return }
