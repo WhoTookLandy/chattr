@@ -103,7 +103,7 @@ struct ClipPlayerSheet: View {
     /// would start behind the clip; a hold keeps it from starting.
     private func pauseLiveStream() {
         guard liveStreamHold == nil else { return }
-        liveStreamHold = playback?.holdPlayback()
+        liveStreamHold = playback?.holdPlayback(.clip)
     }
 
     /// Resumes only what this sheet paused, and only if it's still the

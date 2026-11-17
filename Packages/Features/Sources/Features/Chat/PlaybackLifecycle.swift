@@ -40,62 +40,26 @@ extension StreamPlayerController {
             || (pip.canStartPictureInPictureAutomaticallyFromInline && pip.isPictureInPicturePossible)
     }
 
-    /// Pauses for the background. The web player is left alone while its
-    /// video is in PiP (started by hand). Returns whether it paused, so the
-    /// stream can resume when the app comes back.
-    func pauseForBackground() -> Bool {
-        if let avPlayer {
-            guard avPlayer.timeControlStatus != .paused else { return false }
-            avPlayer.pause()
-            return true
-        }
-        guard let webView else { return false }
-        webView.evaluateJavaScript(Self.webPauseForBackground)
-        return true
-    }
-
-    /// Undoes `pauseForBackground`: back to the live edge.
-    func resumeAfterBackground() {
-        if avPlayer != nil {
-            if isPaused { togglePlay() }
-            return
-        }
-        webView?.evaluateJavaScript(Self.webResumeAfterBackground)
-    }
-
-    /// Pauses unless in PiP, and remembers that it did (so a video the
-    /// user paused themselves isn't resumed later).
-    private static let webPauseForBackground = """
-    (function () {
-      var v = document.querySelector('video');
-      if (!v || v.paused || v.webkitPresentationMode === 'picture-in-picture') return;
-      window.chattrBackgroundPaused = true;
-      v.pause();
-    })();
-    """
-
-    private static let webResumeAfterBackground = """
-    (function () {
-      if (!window.chattrBackgroundPaused) return;
-      window.chattrBackgroundPaused = false;
-      var v = document.querySelector('video');
-      if (v && v.paused) { v.play(); }
-    })();
-    """
 }
 
 // MARK: - App lifecycle
 
 /// Decides what the stream does when the app leaves the foreground:
 /// continue in picture in picture, keep playing audio (audio-only mode with
-/// sound), or pause — and resumes what it paused on return. Owned by
+/// sound), or pause — and resumes what it paused on return. The pause is
+/// a `.background` hold (`PlaybackCenter.holdPlayback(_:)`), the same
+/// mechanism a clip uses: it also keeps an engine still loading (or
+/// rebuilding) from starting in the background, re-pauses a play reported
+/// while it's out, and on release resumes only if the stream was meant to
+/// be playing and no other hold (a clip) is still out. Owned by
 /// `PlaybackCenter`; selector-based observers unregister themselves when
 /// this object goes away.
 @MainActor
 final class PlaybackLifecycleObserver: NSObject {
     private weak var center: PlaybackCenter?
-    /// This observer paused the stream on the way out.
-    private var pausedForBackground = false
+    /// The hold this observer took on the way out. It lapses on its own if
+    /// the stream stops or the channel changes meanwhile.
+    private var backgroundHold: PlaybackHold?
 
     init(center: PlaybackCenter) {
         self.center = center
@@ -133,24 +97,24 @@ final class PlaybackLifecycleObserver: NSObject {
             // unless it's muted, then there's nothing to hear.
             if center.audioOnly, !controller.nativeFailed, !controller.isMuted { return }
             if controller.continuesInPictureInPicture { return }
-        } else if controller.allowsAutomaticPictureInPicture {
-            // Web player with PiP allowed: leave WebKit's own behaviour.
+        } else if controller.allowsAutomaticPictureInPicture || controller.isPictureInPictureActive {
+            // Web player with PiP allowed, or already in PiP (started by
+            // hand): leave WebKit's own behaviour.
             return
         }
         // Pause what's playing now, and hold an engine that's still loading
         // (or rebuilding) paused when it finishes — otherwise it would
         // start playing in the background.
-        controller.holdsForBackground = true
-        _ = controller.pauseForBackground()
-        pausedForBackground = true
+        if backgroundHold == nil {
+            backgroundHold = center.holdPlayback(.background)
+        }
     }
 
     @objc private func willEnterForeground() {
-        center?.controller.holdsForBackground = false
-        guard pausedForBackground else { return }
-        pausedForBackground = false
-        guard let center, center.isPlaying else { return }
-        center.controller.resumeAfterBackground()
+        guard let hold = backgroundHold else { return }
+        backgroundHold = nil
+        // Resumes at the live edge, only what this hold paused.
+        center?.releaseHold(hold)
     }
 }
 #endif

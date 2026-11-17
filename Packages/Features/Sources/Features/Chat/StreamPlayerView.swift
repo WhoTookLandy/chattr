@@ -20,7 +20,7 @@ enum TwitchWebPlayer {
     /// Builds the player web view for `login`. Owned by `WebStreamEngine`
     /// (and through it `PlaybackCenter`), so it survives leaving the chat.
     @MainActor
-    static func makeWebView(login: String, autoplay: Bool, coordinator: Coordinator) -> WKWebView {
+    static func makeWebView(login: String, autoplay: Bool, muted: Bool = false, coordinator: Coordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = true
@@ -46,7 +46,7 @@ enum TwitchWebPlayer {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
         webView.navigationDelegate = coordinator
-        webView.load(URLRequest(url: playerURL(login, autoplay: autoplay)))
+        webView.load(URLRequest(url: playerURL(login, autoplay: autoplay, muted: muted)))
         return webView
     }
 
@@ -67,15 +67,17 @@ enum TwitchWebPlayer {
     /// `parent` is required by Twitch's player; it's only enforced against
     /// framing ancestors, so any stable domain works for a top-level load.
     /// `autoplay` is the controller's `startsPlaying` when the page is
-    /// built: a stream the user paused (or a clip holds) loads paused, so
-    /// the page never plays on its own against their intent.
-    static func playerURL(_ login: String, autoplay: Bool) -> URL {
+    /// built: a stream the user paused (or a hold keeps paused — a clip,
+    /// the app in the background) loads paused, so the page never plays
+    /// on its own against their intent. `muted` is the controller's
+    /// `startsMuted` (Wi-Fi autoplay, or a rebuild of a muted stream).
+    static func playerURL(_ login: String, autoplay: Bool, muted: Bool = false) -> URL {
         var components = URLComponents(string: "https://player.twitch.tv/")!
         components.queryItems = [
             URLQueryItem(name: "channel", value: login),
             URLQueryItem(name: "parent", value: "chattr.app"),
             URLQueryItem(name: "autoplay", value: autoplay ? "true" : "false"),
-            URLQueryItem(name: "muted", value: "false"),
+            URLQueryItem(name: "muted", value: muted ? "true" : "false"),
             URLQueryItem(name: "playsinline", value: "true"),
         ]
         return components.url!
@@ -203,9 +205,10 @@ enum TwitchWebPlayer {
                 // `paused`) would otherwise re-notify all four, re-running
                 // every view that reads any of them.
                 let paused = body["paused"] as? Bool ?? false
-                // Held (a clip is playing over the stream): the page's
-                // autoplay — the hold began after the page was built with
-                // `autoplay=true` — mustn't start the stream behind the clip.
+                // Held (a clip over the stream, or the app left without
+                // PiP): the page's autoplay — the hold began after the page
+                // was built with `autoplay=true` — mustn't start the stream
+                // behind the clip or in the background.
                 if controller.isHeld, !paused { controller.pause() }
                 controller.update(\.isPaused, to: paused)
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)

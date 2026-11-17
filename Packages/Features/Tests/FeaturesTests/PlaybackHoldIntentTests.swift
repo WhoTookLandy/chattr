@@ -58,10 +58,10 @@ struct PlaybackHoldIntentTests {
 
         controller.update(\.isPaused, to: false)
         controller.togglePlay()
-        controller.beginHold()
+        controller.beginHold(.clip)
         controller.noteDidPlay()
         #expect(!controller.wantsPlayback)
-        controller.endHold(resume: false)
+        controller.endHold(.clip, resume: false)
     }
 
     @Test("Paused before the first frame, then resumed from outside our controls, plays")
@@ -161,7 +161,7 @@ struct PlaybackHoldIntentTests {
         controller.togglePlay()
         // A clip opens: the hold won't resume on release.
         #expect(!PlaybackCenter.resumesOnRelease(controller))
-        controller.beginHold()
+        controller.beginHold(.clip)
         // Native fails; `PlaybackCenter` rebuilds on the web engine, which
         // loads without autoplay.
         controller.reset()
@@ -169,7 +169,7 @@ struct PlaybackHoldIntentTests {
         let url = TwitchWebPlayer.playerURL("x", autoplay: controller.startsPlaying)
         #expect(url.absoluteString.contains("autoplay=false"))
         // The clip is dismissed before the web page has loaded.
-        controller.endHold(resume: false)
+        controller.endHold(.clip, resume: false)
         #expect(!controller.startsPlaying)
 
         // The page comes up paused and stays so.
@@ -183,12 +183,72 @@ struct PlaybackHoldIntentTests {
     func startsPlayingWhenWanted() {
         let controller = StreamPlayerController()
         #expect(controller.startsPlaying)
-        controller.beginHold()
+        controller.beginHold(.clip)
         #expect(!controller.startsPlaying)
-        controller.endHold(resume: true)
+        controller.endHold(.clip, resume: true)
         #expect(controller.startsPlaying)
         controller.noteDidPlay()
         #expect(controller.wantsPlayback)
+    }
+
+    @Test("Clip and background holds stack: nothing starts until the last one goes")
+    func holdsStack() {
+        let controller = StreamPlayerController()
+        controller.beginHold(.clip)
+        controller.beginHold(.background)
+        #expect(controller.isHeld)
+        // The clip is dismissed while the app is still in the background.
+        controller.endHold(.clip, resume: true)
+        #expect(controller.isHeld)
+        #expect(!controller.startsPlaying)
+        let url = TwitchWebPlayer.playerURL("x", autoplay: controller.startsPlaying)
+        #expect(url.absoluteString.contains("autoplay=false"))
+        // A play reported meanwhile is paused again; intent is untouched.
+        controller.noteDidPlay()
+        #expect(controller.wantsPlayback)
+        #expect(controller.isHeld)
+        controller.endHold(.background, resume: true)
+        #expect(!controller.isHeld)
+        #expect(controller.startsPlaying)
+    }
+
+    @Test("Backgrounded while the web page loads: ready keeps it paused, return resumes")
+    func backgroundHoldDuringWebLoad() {
+        let controller = StreamPlayerController()
+        // The page is built meant to play, then the app leaves.
+        #expect(controller.beginWebEngineLoad())
+        controller.beginHold(.background)
+        // Twitch autoplays: undone, and it isn't the user's intent changing.
+        controller.noteEngineReady(paused: false)
+        #expect(controller.isSettlingWebStartup)
+        controller.noteWebState(paused: false)
+        controller.noteDidPlay()
+        #expect(controller.wantsPlayback)
+        // Back in the foreground: the hold resumes it.
+        controller.endHold(.background, resume: true)
+        #expect(controller.startsPlaying)
+        #expect(!controller.isSettlingWebStartup)
+    }
+
+    @Test("A user pause isn't undone by the background hold's release")
+    func backgroundHoldKeepsUserPause() {
+        let controller = StreamPlayerController()
+        controller.togglePlay()
+        #expect(!PlaybackCenter.resumesOnRelease(controller))
+        controller.beginHold(.background)
+        controller.endHold(.background, resume: false)
+        #expect(!controller.startsPlaying)
+    }
+
+    @Test("Start-muted survives a rebuild and reaches the web page URL")
+    func startsMutedThroughRebuild() {
+        let controller = StreamPlayerController()
+        controller.startsMuted = true
+        controller.reset()
+        #expect(controller.isMuted)
+        let url = TwitchWebPlayer.playerURL("x", autoplay: controller.startsPlaying, muted: controller.startsMuted)
+        #expect(url.absoluteString.contains("muted=true"))
+        #expect(url.absoluteString.contains("autoplay=true"))
     }
 }
 

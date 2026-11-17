@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Settings → Video & Device: the in-chat stream player (what happens when
-/// a chat opens, picture in picture, quality) and device behaviour (keeping
-/// the screen awake, haptics).
+/// a chat opens, picture in picture, quality), the landscape layout, and
+/// device behaviour (keeping the screen awake, haptics).
 ///
 /// Adding a setting here: put the control in the matching section, then
 /// register it in `SettingsRegistry.entries` with `in: .videoAndDevice` so
@@ -77,6 +77,22 @@ struct VideoDeviceSettingsScreen: View {
             }
 
             Section {
+                NavigationLink {
+                    LandscapeSettingsScreen()
+                } label: {
+                    SettingLabel(
+                        "Landscape Layout",
+                        systemImage: "rectangle.split.2x1",
+                        subtitle: "Chat beside or over the video when sideways"
+                    )
+                }
+            } header: {
+                Text("Landscape")
+            } footer: {
+                Text("Applies when you turn your phone sideways while a stream is showing.")
+            }
+
+            Section {
                 Toggle(isOn: $keepScreenAwake) {
                     SettingLabel(
                         "Keep Screen Awake",
@@ -94,22 +110,6 @@ struct VideoDeviceSettingsScreen: View {
                 }
             } header: {
                 Text("Device")
-            }
-
-            Section {
-                NavigationLink {
-                    LandscapeSettingsScreen()
-                } label: {
-                    SettingLabel(
-                        "Landscape Layout",
-                        systemImage: "rectangle.split.2x1",
-                        subtitle: "Chat beside or over the video when sideways"
-                    )
-                }
-            } header: {
-                Text("Landscape")
-            } footer: {
-                Text("Applies when you turn your phone sideways while a stream is showing.")
             }
         }
         .navigationTitle("Video & Device")

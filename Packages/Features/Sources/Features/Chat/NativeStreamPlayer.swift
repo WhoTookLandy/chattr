@@ -90,11 +90,6 @@ final class StreamPlayerController {
     /// while the engine loads — and through a fallback rebuild that happens
     /// before it ever played.
     @ObservationIgnored var startsMuted = false
-    /// The app left the foreground and `PlaybackLifecycleObserver` chose to
-    /// pause, possibly while the engine was still loading (no AVPlayer or
-    /// <video> to pause yet). An engine that finishes loading while this is
-    /// set stays paused. Cleared when the app comes back.
-    @ObservationIgnored var holdsForBackground = false
 
     @ObservationIgnored weak var webView: WKWebView?
     @ObservationIgnored var avPlayer: AVPlayer?
@@ -113,13 +108,16 @@ final class StreamPlayerController {
     @ObservationIgnored var onPictureInPictureClosed: (() -> Void)?
     @ObservationIgnored private var isRestoringFromPictureInPicture = false
 
-    /// Something asked the stream to stay paused and will hand it back —
-    /// a clip playing over it (`PlaybackCenter.holdPlayback`). Unlike a
-    /// one-shot pause it outlives engine loading: an engine built or
+    /// What currently asks the stream to stay paused and will hand it back
+    /// (`PlaybackCenter.holdPlayback(_:)`): a clip playing over it, or the
+    /// app in the background without PiP. One mechanism for both. Unlike a
+    /// one-shot pause a hold outlives engine loading: an engine built or
     /// finishing its load while held starts paused (`startsPlaying`), and a
     /// play reported while held is paused again (`noteDidPlay`). Not
-    /// cleared by `reset()`.
-    @ObservationIgnored private(set) var isHeld = false
+    /// cleared by `reset()`, so it survives a same-channel rebuild.
+    @ObservationIgnored private(set) var holds: Set<PlaybackHoldReason> = []
+    /// Any hold is out.
+    var isHeld: Bool { !holds.isEmpty }
 
     /// What the user wants the stream doing: true = playing, false = they
     /// paused it. Explicit intent, separate from `isPaused` (the engine's
@@ -138,7 +136,7 @@ final class StreamPlayerController {
     @ObservationIgnored var wantsPlayback = true
 
     /// Whether an engine starting now should start playing: the user wants
-    /// it (`wantsPlayback`) and nothing holds it. The native engine checks
+    /// it (`wantsPlayback`) and no hold of any kind is out. The native engine checks
     /// it when its load finishes; the web engine bakes it into the page's
     /// `autoplay` parameter, and `noteEngineReady` applies it again, either
     /// way, if it changed while the page loaded.
@@ -225,17 +223,26 @@ final class StreamPlayerController {
         }
     }
 
-    func beginHold() {
-        isHeld = true
+    func beginHold(_ reason: PlaybackHoldReason) {
+        holds.insert(reason)
         pause()
     }
 
-    /// `resume`: the holder paused a stream that was playing (or about to).
-    /// If the engine is still loading there's nothing to resume yet — the
-    /// load starts playback itself now that the hold is gone.
-    func endHold(resume: Bool) {
-        isHeld = false
-        if resume { self.resume() }
+    /// `resume`: this holder paused a stream that was playing (or about
+    /// to). It resumes only once nothing else holds the stream and the user
+    /// still wants it (`startsPlaying`); another hold still out keeps it
+    /// paused, and the last release decides (a hold taken over another
+    /// inherits its resume — see `PlaybackCenter.holdPlayback`). If the engine is still
+    /// loading there's nothing to resume yet — the load applies
+    /// `startsPlaying` itself.
+    func endHold(_ reason: PlaybackHoldReason, resume: Bool) {
+        holds.remove(reason)
+        if resume, startsPlaying { self.resume() }
+    }
+
+    /// Every hold lapses without resuming (the stream stopped or changed).
+    func endAllHolds() {
+        holds.removeAll()
     }
 
     func pictureInPictureDidStart() {
@@ -564,10 +571,15 @@ enum NativePlayer {
                 }
                 .store(in: &subscriptions)
 
-            // Held (a clip is playing over the stream): stay paused until
-            // the holder releases — `endHold(resume:)` starts it then. Paused
-            // by the user while the playlist loaded: leave it paused.
-            if controller.startsPlaying { player.play() }
+            // Held (a clip over the stream, or the app left without PiP
+            // while the playlist resolved): stay paused until the holder
+            // releases — `endHold(_:resume:)` starts it then. Paused by the
+            // user while the playlist loaded: leave it paused.
+            if controller.startsPlaying {
+                player.play()
+            } else {
+                controller.update(\.isPaused, to: true)
+            }
         }
 
         func teardown() {

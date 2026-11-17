@@ -29,12 +29,15 @@ final class WebStreamEngine: StreamEngine {
 
     init(login: String, controller: StreamPlayerController) {
         coordinator = TwitchWebPlayer.Coordinator(controller: controller)
-        // Loads paused when the user paused or a clip holds it — the page
+        // Loads paused when the user paused or a hold is out — the page
         // never autoplays against intent (`StreamPlayerController.noteDidPlay`).
         // Play/pause made while it loads are applied once it reports ready
         // (`StreamPlayerController.noteEngineReady`).
         webView = TwitchWebPlayer.makeWebView(
-            login: login, autoplay: controller.beginWebEngineLoad(), coordinator: coordinator
+            login: login,
+            autoplay: controller.beginWebEngineLoad(),
+            muted: controller.startsMuted,
+            coordinator: coordinator
         )
         view = webView
         controller.webView = webView
@@ -110,8 +113,15 @@ final class PlaybackCenter {
     /// Rebuilding the same channel's engine (native → web fallback, an
     /// engine or audio-only setting) keeps it, so a hold survives that.
     @ObservationIgnored private var generation = 0
-    /// The outstanding `holdPlayback`, if any.
-    @ObservationIgnored private var currentHold: PlaybackHold?
+    /// The outstanding `holdPlayback` per reason (at most one each).
+    @ObservationIgnored private var currentHolds: [PlaybackHoldReason: PlaybackHold] = [:]
+
+    /// Set when a chat opens under "Autoplay on Wi-Fi": the next new
+    /// stream starts muted. Consumed by the next engine build.
+    @ObservationIgnored var startNextStreamMuted = false
+    /// Leaving the app → PiP or a `.background` hold (see
+    /// `PlaybackLifecycleObserver`).
+    @ObservationIgnored private var lifecycle: PlaybackLifecycleObserver?
 
     var isPlaying: Bool { channel != nil }
 
@@ -123,6 +133,7 @@ final class PlaybackCenter {
         controller.onPictureInPictureActiveChange = { [weak self] in
             self?.syncPictureInPictureFlags()
         }
+        lifecycle = PlaybackLifecycleObserver(center: self)
     }
 
     // MARK: Per-channel PiP
@@ -256,6 +267,16 @@ final class PlaybackCenter {
             // A new stream isn't the one that was held.
             advanceGeneration()
         }
+        // A rebuild of the same stream (engine fallback) keeps its mute
+        // state — `isMuted` carries the requested mute even if the old
+        // engine never got as far as an AVPlayer (see `reset()`). Switching
+        // to audio-only unmutes. A new stream starts muted only for autoplay.
+        if sameChannel {
+            controller.startsMuted = controller.isMuted && !entersAudioOnly
+        } else {
+            controller.startsMuted = startNextStreamMuted
+        }
+        startNextStreamMuted = false
         controller.reset()
         self.channel = channel
         syncPictureInPictureFlags()
@@ -283,7 +304,6 @@ final class PlaybackCenter {
         engineKey = nil
         channel = nil
         controller.startsMuted = false
-        controller.holdsForBackground = false
         controller.reset()
         controller.nativeFailed = false
         controller.wantsPlayback = true
@@ -297,40 +317,53 @@ final class PlaybackCenter {
 
     // MARK: Holds
 
-    /// Pause the stream for something playing over it (a clip) and hand
-    /// it back later with `releaseHold`. Explicit intent, not a toggle:
+    /// Pause the stream for `reason` and hand it back later with
+    /// `releaseHold`. The one pause-and-resume mechanism: a clip playing
+    /// over the stream (`.clip`) and the app leaving without PiP
+    /// (`.background`, `PlaybackLifecycleObserver`) both use it. Explicit
+    /// intent, not a toggle:
     ///
     /// - It works while the engine is still loading (no `AVPlayer` yet, or
-    ///   the web page not ready): the load won't start playback while
-    ///   held, so the stream can't come up behind the clip.
-    /// - Returns nil when nothing is playing or another hold is out.
+    ///   the web page not ready): the load won't start playback while any
+    ///   hold is out (`StreamPlayerController.startsPlaying`), so the
+    ///   stream can't come up behind a clip or in the background.
+    /// - Returns nil when nothing is playing or a hold for `reason` is
+    ///   already out. Holds for different reasons stack; the stream
+    ///   resumes only when the last one goes.
     /// - The hold records, as it begins, whether releasing it resumes
     ///   (`resumesOnRelease(_:)`): only if the stream was meant to be
     ///   playing — we resume only what we paused. A user pause, including
     ///   one made while the stream was buffering before its first frame
-    ///   (`StreamPlayerController.wantsPlayback`), is never undone. The
-    ///   hold still keeps the stream from starting behind the clip.
+    ///   (`StreamPlayerController.wantsPlayback`), is never undone. A hold
+    ///   taken while another is out inherits that one's decision: the
+    ///   stream is paused because of the first hold, not the user. The
+    ///   hold still keeps the stream from starting while it's out.
     /// - It's tied to the playback generation: if the stream stops or
     ///   another channel starts meanwhile, the hold lapses and releasing it
     ///   does nothing.
-    func holdPlayback() -> PlaybackHold? {
-        guard isPlaying, currentHold == nil else { return nil }
+    func holdPlayback(_ reason: PlaybackHoldReason) -> PlaybackHold? {
+        guard isPlaying, currentHolds[reason] == nil else { return nil }
+        let resumeOnRelease = currentHolds.isEmpty
+            ? Self.resumesOnRelease(controller)
+            : currentHolds.values.contains { $0.resumeOnRelease }
         let hold = PlaybackHold(
             id: UUID(),
+            reason: reason,
             generation: generation,
-            resumeOnRelease: Self.resumesOnRelease(controller)
+            resumeOnRelease: resumeOnRelease
         )
-        currentHold = hold
-        controller.beginHold()
+        currentHolds[reason] = hold
+        controller.beginHold(reason)
         return hold
     }
 
     func releaseHold(_ hold: PlaybackHold) {
-        guard currentHold == hold, hold.generation == generation else { return }
-        currentHold = nil
+        guard currentHolds[hold.reason] == hold, hold.generation == generation else { return }
+        currentHolds[hold.reason] = nil
         // `wantsPlayback` again: a user pause made during the hold (lock
-        // screen, say) wins over the hold's own resume.
-        controller.endHold(resume: hold.resumeOnRelease && controller.wantsPlayback)
+        // screen, say) wins over the hold's own resume. Another hold still
+        // out keeps the stream paused (`endHold` checks `startsPlaying`).
+        controller.endHold(hold.reason, resume: hold.resumeOnRelease && controller.wantsPlayback)
     }
 
     /// Whether a hold taken now should resume the stream on release: the
@@ -344,10 +377,8 @@ final class PlaybackCenter {
 
     private func advanceGeneration() {
         generation += 1
-        if currentHold != nil {
-            currentHold = nil
-            controller.endHold(resume: false)
-        }
+        currentHolds.removeAll()
+        controller.endAllHolds()
     }
 
     // MARK: Hosts
@@ -386,9 +417,19 @@ extension View {
     }
 }
 
+/// Why the stream is held paused (`PlaybackCenter.holdPlayback(_:)`).
+enum PlaybackHoldReason: Hashable, Sendable {
+    /// A clip is playing over the stream (`ClipPlayerSheet`).
+    case clip
+    /// The app is in the background and the stream can't continue there
+    /// (no PiP, not audio-only with sound — `PlaybackLifecycleObserver`).
+    case background
+}
+
 /// A pause taken with `PlaybackCenter.holdPlayback`.
 struct PlaybackHold: Equatable {
     fileprivate let id: UUID
+    let reason: PlaybackHoldReason
     fileprivate let generation: Int
     /// Decided when the hold began (`PlaybackCenter.resumesOnRelease`).
     let resumeOnRelease: Bool
