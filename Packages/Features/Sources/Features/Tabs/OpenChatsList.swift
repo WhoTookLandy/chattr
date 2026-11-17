@@ -71,10 +71,7 @@ struct OpenChatsList: View {
                 name: tab.displayName,
                 profileImageURL: tab.profileImageURL,
                 stream: stream,
-                open: {
-                    chatTabs.activeTabId = tab.id
-                    chatTabs.isPresented = true
-                },
+                open: { intent in chatTabs.present(tabId: tab.id, intent: intent) },
                 close: { chatTabs.close(tabId: tab.id) }
             )
         }

@@ -70,6 +70,15 @@ public enum TwitchSignIn {
     ///   caveat: older tokens keep the locally cached block list, and
     ///   block/unblock roll back with an unauthorized error until the
     ///   account signs in again.
+    /// - `moderatorManageBannedUsers` / `moderatorManageWarnings`: the user
+    ///   card's moderation row — timeout / ban / unban (POST + DELETE
+    ///   `/moderation/bans`) and warn (POST `/moderation/warnings`). Same
+    ///   harmless-for-non-mods rationale as the other manage scopes, and the
+    ///   same re-sign-in caveat: an older token lacks them, which
+    ///   `HelixChatActions` detects from the token's granted scopes BEFORE
+    ///   any request (a 401 would make TwitchKit wipe the stored token) and
+    ///   reports as `ModerationActionError.needsSignInAgain` — a "sign out
+    ///   and back in" message on the card.
     public static let scopes: [TwitchScope] = [
         .userReadEmail,
         .userReadChat,
@@ -79,6 +88,8 @@ public enum TwitchSignIn {
         .userReadModeratedChannels,
         .moderatorManageChatMessages,
         .moderatorManageChatSettings,
+        .moderatorManageBannedUsers,
+        .moderatorManageWarnings,
         .moderatorReadBlockedTerms,
         .moderatorReadUnbanRequests,
         .moderatorReadBannedUsers,
@@ -89,6 +100,14 @@ public enum TwitchSignIn {
         .userManageBlockedUsers,
         // Viewer list (GET /chat/chatters) for channels you moderate.
         .moderatorReadChatters,
+        // Live poll / prediction / Hype Train banners on your OWN channel —
+        // Twitch authorizes those EventSub topics for the broadcaster only.
+        // Harmless for viewers (they never stream polls); same re-sign-in
+        // caveat as the scopes above: older tokens get a swallowed 403 and
+        // the banners just never appear.
+        .channelReadPolls,
+        .channelReadPredictions,
+        .channelReadHypeTrain,
     ]
 
     /// The redirect URI the Vercel bridge 302-redirects back to. Must

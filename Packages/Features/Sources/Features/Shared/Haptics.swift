@@ -1,0 +1,26 @@
+import SwiftUI
+
+/// Settings → Video & Device → Haptic Feedback. Every haptic in the app goes through
+/// `.appSensoryFeedback(_:trigger:)` so this one switch silences them all.
+enum HapticSettings {
+    /// Default on (the system default for feedback).
+    static let enabledKey = "chattr.device.haptics"
+}
+
+extension View {
+    /// `.sensoryFeedback(_:trigger:)`, gated on the Haptic Feedback
+    /// setting. Use this instead of calling `sensoryFeedback` directly.
+    func appSensoryFeedback<Trigger: Equatable>(_ feedback: SensoryFeedback, trigger: Trigger) -> some View {
+        modifier(AppSensoryFeedback(feedback: feedback, trigger: trigger))
+    }
+}
+
+private struct AppSensoryFeedback<Trigger: Equatable>: ViewModifier {
+    let feedback: SensoryFeedback
+    let trigger: Trigger
+    @AppStorage(HapticSettings.enabledKey) private var enabled = true
+
+    func body(content: Content) -> some View {
+        content.sensoryFeedback(feedback, trigger: trigger) { _, _ in enabled }
+    }
+}

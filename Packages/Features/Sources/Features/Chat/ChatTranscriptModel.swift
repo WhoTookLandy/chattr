@@ -28,6 +28,7 @@ private let signposter = AppLogger.signposter("Features.ChatTranscriptModel")
 ///   - `SelfChatter` — the signed-in user's identity and learned styling.
 ///   - `ChannelModerationState` — mod status (detection, revocation), deletes.
 ///   - `ChatRoomState` — chat restrictions and chat-mode changes.
+///   - `OwnChatRestrictionState` — our own timeout / ban / warning here.
 ///   - `ChatTranscriptDependencies` — settings reads, drafts, the sound.
 /// What stays here is the routing between them: where each session update
 /// goes, and the send / retry / reprime flows that span several of them.
@@ -67,6 +68,12 @@ public final class ChatTranscriptModel {
     private let room: ChatRoomState
     private let dependencies: ChatTranscriptDependencies
 
+    /// Why the signed-in user can't chat here (timed out, banned, warned),
+    /// if anything. Its own `@Observable` so only the banner and the compose
+    /// bar observe it — never the transcript. A `let`, so reaching it
+    /// registers no dependency on this model.
+    let ownRestriction: OwnChatRestrictionState
+
     @ObservationIgnored private var policy = ChatViewerPolicy()
     @ObservationIgnored private var selfChatter = SelfChatter()
 
@@ -88,6 +95,7 @@ public final class ChatTranscriptModel {
         self.attachment = SessionAttachment()
         self.moderation = ChannelModerationState()
         self.room = ChatRoomState()
+        self.ownRestriction = OwnChatRestrictionState()
         self.dependencies = dependencies
     }
 
@@ -109,6 +117,12 @@ public final class ChatTranscriptModel {
     var changeVersion: Int { store.changeVersion }
 
     public var attachState: AttachState { attachment.state }
+
+    /// The attached session, for consumers with their own feed from it — the
+    /// live-event banners (`LiveEventsBannerArea`) subscribe here once
+    /// `attachState` reaches `.attached`. Not observed: read it when
+    /// `attachState` changes.
+    var liveEventsSession: ChannelSession? { attachment.primarySession }
 
     /// Blocked user ids, pushed in by the view (which observes `BlockStore`).
     /// Changing it re-filters the visible lines immediately.
@@ -239,6 +253,12 @@ public final class ChatTranscriptModel {
         if let session = sessions.first {
             await room.prime(from: session)
             guard attachment.isCurrent(epoch) else { return epoch }
+            // Our own timeout / ban lives on the session (it outlives this
+            // page); a remounted page picks up the banner and the remaining
+            // countdown from there.
+            let ownLedger = await session.ownChatRestriction()
+            guard attachment.isCurrent(epoch) else { return epoch }
+            ownRestriction.restore(from: session, ledger: ownLedger)
             moderation.seed(from: session, moderatedChannelIds: moderatedChannelIds)
             seedSelfColor(from: session)
         }
@@ -273,6 +293,7 @@ public final class ChatTranscriptModel {
         // whatever channel this model attaches to next.
         outgoing.cancelFallbacks()
         moderation.cancelSeed()
+        ownRestriction.detachSession()
         let removed = await attachment.tearDown()
         if removed > 0 {
             logger.info("ChatTranscriptModel detached \(removed) subscription(s)")
@@ -341,7 +362,6 @@ public final class ChatTranscriptModel {
         if repinsTranscript {
             outgoingSendCount &+= 1
         }
-
         do {
             let response = try await session.send(canonical, replyParentMessageId: reply?.parentMessageId)
             if response.isSent {
@@ -357,6 +377,19 @@ public final class ChatTranscriptModel {
             let reason = response.dropReason?.message ?? "Twitch didn't broadcast the message."
             outgoing.failed(pendingId: pendingId, reason: reason, retryText: canonical)
             logger.notice("send dropped by Twitch: code=\(response.dropReason?.code ?? "unknown", privacy: .public) reason=\(reason, privacy: .public)")
+            // Timed out / banned / warned: `session.send` already recorded
+            // the precise state (and the timeout's end) unless a newer clear
+            // or echo made it stale; the banner and compose bar sync to it.
+            if OwnChatRestriction(dropCode: response.dropReason?.code, message: response.dropReason?.message) != nil {
+                ownRestriction.syncAfterRejectedSend(on: session)
+            }
+        } catch HelixError.forbidden(let apiError) {
+            // Twitch answers a banned sender with 403 rather than a drop.
+            outgoing.failed(pendingId: pendingId, reason: apiError.message, retryText: canonical)
+            logger.error("send forbidden: \(apiError.message, privacy: .public)")
+            if OwnChatRestriction(dropCode: nil, message: apiError.message) != nil {
+                ownRestriction.syncAfterRejectedSend(on: session)
+            }
         } catch {
             // Network blip, unauthorized after refresh-and-retry, … — same
             // treatment as a drop.
@@ -427,6 +460,9 @@ public final class ChatTranscriptModel {
         }
     }
 
+    /// The session moderation actions target (`ChatTranscriptModel+UserModeration`).
+    var primarySession: ChannelSession? { attachment.primarySession }
+
     /// Forwards a chat-mode change (emote-only, subs-only, followers-only,
     /// slow mode) to the attached channel — see `ChatRoomState.updateSettings`.
     public func updateChatSettings(
@@ -489,7 +525,17 @@ public final class ChatTranscriptModel {
             reprime(with: snapshot)
         case .message(let normalized):
             applyLiveMessage(normalized)
-        case .row, .messageDeleted, .chatCleared, .messagesClearedFromUser:
+        case .messagesClearedFromUser(let targetUserId):
+            // A mod timed out / banned someone. When that someone is US, the
+            // banner explains why our messages vanished (synced from the
+            // session, which recorded the clear first). One string compare
+            // per clear event — never per message.
+            if !selfChatter.userId.isEmpty, targetUserId == selfChatter.userId {
+                ownRestriction.noteOwnMessagesCleared()
+                logger.notice("Own messages cleared by a moderator in #\(self.draftKey, privacy: .public)")
+            }
+            store.ingest(update, policy: policy)
+        case .row, .messageDeleted, .chatCleared:
             store.ingest(update, policy: policy)
         }
     }
@@ -531,6 +577,10 @@ public final class ChatTranscriptModel {
     /// with `reprime`, so an echo seen only in a snapshot still counts.
     private func observeOwnEcho(_ message: ChatMessage) {
         guard selfChatter.wrote(message) else { return }
+        // Twitch broadcast one of ours, so whatever restriction we inferred
+        // is over (timeout lapsed, unbanned, warning acknowledged). The
+        // session recorded that already; while restricted this syncs.
+        ownRestriction.noteOwnMessageDelivered()
         if moderation.observeOwnEcho(message, session: attachment.primarySession) {
             logger.info("Detected mod status from echoed badges for #\(self.draftKey, privacy: .public)")
         }
@@ -570,6 +620,11 @@ public final class ChatTranscriptModel {
             kept += 1
         }
         outgoing.pruneLocallySettled()
+        // The live updates this replaces may have included our own clear or
+        // echo (a mailbox overflow drops them) — and the snapshot only
+        // carries rows. The session's ledger saw them all: resync from it
+        // (one actor hop per reprime, adopted by generation).
+        ownRestriction.resync()
         logger.info("ChatTranscriptModel re-primed from \(snapshot.count) session update(s); kept \(kept) local row(s), settled \(settledPendingIds.count) send(s) by echo")
     }
 

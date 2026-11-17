@@ -78,7 +78,7 @@ struct FollowingList: View {
                 name: channel.broadcasterName,
                 profileImageURL: profileURL,
                 stream: stream,
-                open: { openChannel?(channel: channel, profileImageURL: profileURL) }
+                open: { intent in openChannel?(channel: channel, profileImageURL: profileURL, intent: intent) }
             )
             .listRowBackground(Color.clear)
             .task {

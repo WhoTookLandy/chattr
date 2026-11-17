@@ -105,7 +105,7 @@ public struct ChatAppearance: Equatable, Sendable {
     // MARK: - Storage keys
     //
     // Shared by RootView's @AppStorage (environment injection) and
-    // ChatAppearanceScreen's @AppStorage (the editing controls). Both
+    // AppearanceSettingsScreen's @AppStorage (the editing controls). Both
     // observe the same UserDefaults keys, so edits propagate to every
     // open chat row without any explicit notification plumbing.
 

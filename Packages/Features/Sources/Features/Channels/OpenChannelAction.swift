@@ -39,32 +39,32 @@ public struct OpenChannelAction: Sendable {
     /// Primary entry point — `callAsFunction` lets call sites read as
     /// `openChannel(descriptor)`.
     @MainActor
-    public func callAsFunction(_ channel: ChannelDescriptor) {
-        navigation.openChannel(channel)
+    public func callAsFunction(_ channel: ChannelDescriptor, intent: ChatOpenIntent = .implicit) {
+        navigation.openChannel(channel, intent: intent)
     }
 
     /// Convenience for FollowedChannel call sites (the All view).
     @MainActor
-    public func callAsFunction(channel: FollowedChannel, profileImageURL: URL?) {
+    public func callAsFunction(channel: FollowedChannel, profileImageURL: URL?, intent: ChatOpenIntent = .implicit) {
         navigation.openChannel(ChannelDescriptor(
             platform: .twitch,
             channelId: channel.broadcasterId,
             channelLoginName: channel.broadcasterLogin,
             channelDisplayName: channel.broadcasterName,
             profileImageURL: profileImageURL
-        ))
+        ), intent: intent)
     }
 
     /// Convenience for TwitchStream call sites (the Live view, Home).
     @MainActor
-    public func callAsFunction(stream: TwitchStream, profileImageURL: URL?) {
+    public func callAsFunction(stream: TwitchStream, profileImageURL: URL?, intent: ChatOpenIntent = .implicit) {
         navigation.openChannel(ChannelDescriptor(
             platform: .twitch,
             channelId: stream.userId,
             channelLoginName: stream.userLogin,
             channelDisplayName: stream.userName,
             profileImageURL: profileImageURL
-        ))
+        ), intent: intent)
     }
 }
 

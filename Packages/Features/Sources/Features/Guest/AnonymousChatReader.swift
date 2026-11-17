@@ -1,11 +1,18 @@
 import Foundation
 import Observation
+import ChatModel
+import EmoteSources
+import TwitchKit
 
 /// Read-only Twitch chat without an account — the same anonymous IRC login
 /// (`justinfan…`) twitch.tv itself uses for logged-out viewers. Used by the
 /// signed-out "just looking" mode; signed-in chat goes through EventSub.
 ///
-/// Plain text only: no badges, emotes render as their names. Handles
+/// Messages become regular `ChatLine`s (rendered by `ChatRow`) with
+/// Twitch emotes from IRC's `emotes` tag (images are public, no token)
+/// and 7TV / BTTV / FFZ emotes from `EmoteIndex` (public APIs, keyed by
+/// the channel id IRC sends in ROOMSTATE). No badges: their images need an
+/// authenticated Helix call. Handles
 /// moderation (`CLEARMSG` / `CLEARCHAT`) so removed messages disappear,
 /// and reconnects with backoff after a drop or a server `RECONNECT`.
 @MainActor
@@ -20,7 +27,28 @@ final class AnonymousChatReader {
         let color: String?
         let text: String
         let isAction: Bool
+        /// Sender login (for the row's localized-name display).
+        var login: String = ""
+        /// Twitch emotes from the `emotes` tag: unicode-scalar ranges.
+        var twitchEmotes: [TwitchEmoteSpan] = []
+        /// When Twitch sent it (`tmi-sent-ts`), else when it arrived. Fixed
+        /// per message so re-renders don't move the row's timestamp.
+        var timestamp: Date = .now
     }
+
+    /// `emotes=25:0-4,12-16/1902:6-10` → one span per occurrence.
+    struct TwitchEmoteSpan: Equatable {
+        let id: String
+        /// Inclusive unicode-scalar offsets into the message text.
+        let start: Int
+        let end: Int
+    }
+
+    /// 7TV / BTTV / FFZ emotes for this channel (global + channel), by name.
+    /// Loaded once IRC tells us the channel id; until then, words stay text.
+    private(set) var thirdPartyEmotes: [String: Emote] = [:]
+    private let emoteIndex = EmoteIndex()
+    private var emotesRequested = false
 
     enum Status: Equatable {
         case connecting
@@ -150,7 +178,12 @@ final class AnonymousChatReader {
         case "RECONNECT":
             // Twitch is about to restart this server: hop to a fresh one.
             scheduleReconnect()
-        case "366", "JOIN", "ROOMSTATE":
+        case "ROOMSTATE":
+            markConnected()
+            if let roomId = irc.tags["room-id"], !roomId.isEmpty {
+                loadThirdPartyEmotes(channelId: roomId)
+            }
+        case "366", "JOIN":
             markConnected()
         default:
             break
@@ -183,7 +216,101 @@ final class AnonymousChatReader {
         let color = irc.tags["color"].flatMap { $0.isEmpty ? nil : $0 }
         let userId = irc.tags["user-id"].flatMap { $0.isEmpty ? nil : $0 }
         let id = irc.tags["id"] ?? UUID().uuidString
-        return Message(id: id, userId: userId, author: displayName, color: color, text: text, isAction: isAction)
+        return Message(
+            id: id,
+            userId: userId,
+            author: displayName,
+            color: color,
+            text: text,
+            isAction: isAction,
+            login: login,
+            // A /me body is offset by the ACTION wrapper in the raw text;
+            // positions are only reliable for plain messages.
+            twitchEmotes: isAction ? [] : Self.parseEmoteSpans(irc.tags["emotes"] ?? ""),
+            timestamp: irc.tags["tmi-sent-ts"].flatMap(Double.init)
+                .map { Date(timeIntervalSince1970: $0 / 1000) } ?? .now
+        )
+    }
+
+    static func parseEmoteSpans(_ tag: String) -> [TwitchEmoteSpan] {
+        var spans: [TwitchEmoteSpan] = []
+        for entry in tag.split(separator: "/") {
+            let parts = entry.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let id = String(parts[0])
+            for range in parts[1].split(separator: ",") {
+                let bounds = range.split(separator: "-")
+                guard bounds.count == 2, let start = Int(bounds[0]), let end = Int(bounds[1]), start <= end else { continue }
+                spans.append(TwitchEmoteSpan(id: id, start: start, end: end))
+            }
+        }
+        return spans.sorted { $0.start < $1.start }
+    }
+
+    // MARK: - Rendering
+
+    private func loadThirdPartyEmotes(channelId: String) {
+        guard !emotesRequested else { return }
+        emotesRequested = true
+        let index = emoteIndex
+        let login = channel
+        Task { [weak self] in
+            await index.load(broadcasterId: channelId, broadcasterLogin: login)
+            self?.thirdPartyEmotes = index.snapshot()
+        }
+    }
+
+    /// The message as a regular chat line: Twitch emotes at their tagged
+    /// positions, 7TV / BTTV / FFZ emotes matched by word.
+    func chatLine(for message: Message) -> ChatLine {
+        ChatLine(
+            id: message.id,
+            authorUserId: message.userId ?? "",
+            authorDisplayName: message.author,
+            authorUserLogin: message.login,
+            authorColor: message.color ?? "",
+            runs: Self.runs(text: message.text, spans: message.twitchEmotes, emotes: thirdPartyEmotes),
+            timestamp: message.timestamp
+        )
+    }
+
+    static func runs(text: String, spans: [TwitchEmoteSpan], emotes: [String: Emote]) -> [LineRun] {
+        let scalars = Array(text.unicodeScalars)
+        func words(_ range: Range<Int>) -> [LineRun] {
+            guard !range.isEmpty else { return [] }
+            let piece = String(String.UnicodeScalarView(scalars[range]))
+            return ChatModel.Normalizer.wordRuns(text: piece, emoteSnapshot: emotes)
+        }
+        var runs: [LineRun] = []
+        var cursor = 0
+        for span in spans where span.start >= cursor && span.end < scalars.count {
+            runs += words(cursor..<span.start)
+            let name = String(String.UnicodeScalarView(scalars[span.start...span.end]))
+            if let reference = twitchEmoteReference(id: span.id) {
+                runs.append(.twitchEmote(reference: reference, displayName: name))
+            } else {
+                runs += words(span.start..<(span.end + 1))
+            }
+            cursor = span.end + 1
+        }
+        runs += words(cursor..<scalars.count)
+        return runs
+    }
+
+    /// `EmoteReference` has no public initializer; it decodes from the
+    /// EventSub JSON shape (snake_case), so build it that way. Static
+    /// format only: IRC doesn't say whether an emote is animated, and
+    /// requesting the animated variant of a static emote 404s.
+    private static let referenceDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
+
+    static func twitchEmoteReference(id: String) -> EmoteReference? {
+        let json: [String: Any] = ["id": id, "emote_set_id": "", "format": ["static"]]
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return nil }
+        return try? referenceDecoder.decode(EmoteReference.self, from: data)
     }
 }
 

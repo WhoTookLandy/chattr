@@ -1,7 +1,7 @@
 import SwiftUI
 import Core
 
-/// You → Chat → Emotes. Per-source toggles for the third-party emote
+/// Settings → Chat → Emotes. Per-source toggles for the third-party emote
 /// providers, plus emote playback preferences (Animated Emotes moved
 /// here from Chat Appearance — it's an emote setting, not a text one).
 ///

@@ -104,7 +104,7 @@ struct ViewerListSheet: View {
             unavailable(
                 "Sign in again to see viewers",
                 systemImage: "key",
-                message: "chattr needs one more Twitch permission to show the viewer list. Remove and re-add your account in You → Accounts to grant it."
+                message: "chattr needs one more Twitch permission to show the viewer list. Remove and re-add your account in Settings → Accounts & Data to grant it."
             )
         case .failed:
             unavailable(

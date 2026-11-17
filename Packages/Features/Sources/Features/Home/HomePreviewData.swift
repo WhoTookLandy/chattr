@@ -83,7 +83,7 @@ enum HomePreviewData {
             liveStreams: HomePreviewData.streams,
             profileImageURLs: [:],
             liveLoadState: .loaded,
-            onStreamTap: { _ in }
+            onStreamTap: { _, _ in }
         )
         .navigationTitle("Home")
         .toolbarTitleDisplayMode(.inlineLarge)
@@ -96,7 +96,7 @@ enum HomePreviewData {
             liveStreams: [],
             profileImageURLs: [:],
             liveLoadState: .loaded,
-            onStreamTap: { _ in }
+            onStreamTap: { _, _ in }
         )
         .navigationTitle("Home")
         .toolbarTitleDisplayMode(.inlineLarge)
@@ -109,7 +109,7 @@ enum HomePreviewData {
             liveStreams: [],
             profileImageURLs: [:],
             liveLoadState: .loading,
-            onStreamTap: { _ in }
+            onStreamTap: { _, _ in }
         )
         .navigationTitle("Home")
         .toolbarTitleDisplayMode(.inlineLarge)

@@ -255,3 +255,36 @@ index.resolve(...)` for non-hot paths.
 Always `@MainActor` for view models. SwiftUI body recomputes happen on
 main; mutating from elsewhere either requires explicit hops or trips
 strict-concurrency.
+
+## Settings
+
+The Settings root (`ProfileScreen`, reached from the avatar on Home) is a
+list of categories — Appearance, Chat, Video & Device, Accounts & Data,
+About — each pushing a category screen that owns its controls. Search on
+the root is backed by the static `SettingsRegistry` in `Features/Settings/`.
+
+**Adding a setting:** put the control on the screen that owns it, then add
+one line to `SettingsRegistry.entries`:
+
+```swift
+SettingsEntry("keepScreenAwake", "Keep Screen Awake", keywords: ["sleep", "lock"], in: .videoAndDevice),
+```
+
+Add `to: .filters` (etc.) when it lives on a deeper screen. A brand-new
+screen also needs a `SettingsDestination` case routed in
+`SettingsDestinationView`. Per-channel actions (moderator chat modes) stay
+in the channel's `ChatSettingsSheet`, not in Settings.
+
+**Row conventions** (use `SettingLabel`):
+
+- A toggle whose effect isn't obvious gets a one-line `subtitle`.
+- A setting that depends on another is `.disabled(...)` and passes
+  `disabledReason:` ("Needs Native Video Player on").
+- Section footers explain consequences (when it applies, what it costs),
+  not what the row title already says.
+- Don't repeat the section header in row titles.
+
+**Performance:** read each preference through its own narrow `@AppStorage`
+key (or the injected `ChatAppearance` value for chat rows). Never make chat
+views observe a settings aggregate — flipping one setting must only
+re-render the views that read that key.

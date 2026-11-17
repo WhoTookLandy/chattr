@@ -28,9 +28,20 @@ struct UserCardSheet: View {
     let onReply: (() -> Void)?
     let onBlock: (() -> Void)?
     let onReport: ((UserBlockReason) -> Void)?
+    /// Non-nil when the viewer moderates this channel AND the target is
+    /// neither the viewer nor the broadcaster: shows the one-row
+    /// `UserCardModerationBar` (timeouts, ban, warn, unban).
+    var moderation: ChatTranscriptModel? = nil
 
     /// Height of the resting card — enough for the header and actions.
     static let compactHeight: CGFloat = 230
+
+    /// The resting height, grown by the single moderation row when shown —
+    /// so the chips are reachable without dragging, and the recent messages
+    /// still start right beneath them.
+    private var restingHeight: CGFloat {
+        moderation == nil ? Self.compactHeight : Self.compactHeight + UserCardModerationBar.height + 16
+    }
 
     @State private var user: TwitchUser?
     @Environment(\.colorScheme) private var colorScheme
@@ -42,6 +53,13 @@ struct UserCardSheet: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 actions
+                if let moderation {
+                    UserCardModerationBar(
+                        targetUserId: line.authorUserId,
+                        targetDisplayName: line.authorDisplayName,
+                        chatModel: moderation
+                    )
+                }
                 details
                 recentMessages
             }
@@ -51,10 +69,10 @@ struct UserCardSheet: View {
         }
         .scrollBounceBehavior(.basedOnSize)
         .task(id: line.authorUserId) { await loadUser() }
-        .presentationDetents([.height(Self.compactHeight), .large])
+        .presentationDetents([.height(restingHeight), .large])
         .presentationDragIndicator(.visible)
         // Semi-modal: chat stays scrollable behind the resting card.
-        .presentationBackgroundInteraction(.enabled(upThrough: .height(Self.compactHeight)))
+        .presentationBackgroundInteraction(.enabled(upThrough: .height(restingHeight)))
         .presentationContentInteraction(.resizes)
     }
 

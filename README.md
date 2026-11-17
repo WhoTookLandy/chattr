@@ -19,6 +19,9 @@ moderation tools, and iPad split-view — all deliverable later without rework.
   `recent-messages.robotty.de` (degrades gracefully when unavailable).
 - **Rich events** — sub / resub / gift-sub and raid bubbles, plus message
   deletion and chat-clear handling.
+- **Live event banners** — your own channel's polls, predictions and Hype
+  Trains as collapsible banners at the top of chat (Twitch only shares these
+  with the broadcaster; toggles in You → Chat → Filters).
 - **Highlights** — a sound and visual treatment when you're @-mentioned or a
   keyword you chose appears.
 - **Native feel** — Liquid Glass design language, Dynamic Type, light/dark/system
@@ -47,8 +50,11 @@ Swift Package Manager resolves all dependencies on first build — no extra setu
 
 ### Twitch client ID
 
-The app authenticates with Twitch via OAuth (authorization-code flow with PKCE,
-handled by TwitchKit), so **no client secret is required or stored**. The public
+Sign-in uses Twitch's **Device Code Grant** first (show a code, approve on
+Twitch — in the Twitch app when installed), with the browser authorization-code
+flow as a fallback. Either way **no client secret ships in the app**: the code
+exchange (browser flow) and every token refresh go through the chattr-auth
+bridge, which holds the secret server-side. The public
 client ID lives in [`chattr/chattrApp.swift`](chattr/chattrApp.swift). To run
 against your own Twitch developer app, register one at
 [dev.twitch.tv](https://dev.twitch.tv) and replace `chattrApp.clientId`.
@@ -88,7 +94,7 @@ chattr app target                  ← composition root + DI wiring only
 | **ChatModel** | Display-ready `ChatLine` / `LineRun` model and the `Normalizer` (EventSub & IRC-tag → `ChatLine`). |
 | **Accounts** | Multi-account state — `Account` (SwiftData), `AccountStore`, OAuth flow. |
 | **Channels** | Chat-session lifecycle — `ChannelSession` actor (normalizes each message once and owns the per-channel ring of display-ready rows), `ChannelSessionRegistry`, off-main event routing, badge lookup, backfill, optimistic send. |
-| **Features** | Every SwiftUI screen, grouped by feature folder (`Home`, `Chat`, `Channels`, `Emotes`, `Highlights`, `Filters`, `Settings`, `Tabs`, `App`, `Shared`). |
+| **Features** | Every SwiftUI screen, grouped by feature folder (`Home`, `Chat`, `Channels`, `Emotes`, `Highlights`, `Filters`, `Moderation`, `Settings`, `Tabs`, `App`, `Shared`). |
 
 ### External dependencies
 

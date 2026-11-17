@@ -86,7 +86,9 @@ struct GuestChannelView: View {
                     EmptyView()
                 }
                 ForEach(chat.messages) { message in
-                    messageText(message)
+                    // The same row view as signed-in chat: inline emotes,
+                    // name colors, text-size settings. No badges here.
+                    ChatRow(line: chat.chatLine(for: message), badgeEntries: [])
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }

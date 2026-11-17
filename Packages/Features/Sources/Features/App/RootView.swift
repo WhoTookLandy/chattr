@@ -30,7 +30,7 @@ public struct RootView: View {
     // Chat appearance preferences — read here (the app's root) so one
     // environment injection covers every chat surface at once: live chat,
     // the thread sheet, and the settings screen's preview. @AppStorage
-    // observes the keys via KVO, so ChatAppearanceScreen's writes
+    // observes the keys via KVO, so AppearanceSettingsScreen's writes
     // re-render all of them live.
     @AppStorage(ChatAppearance.textSizePointsKey) private var chatTextSizePoints: Double = ChatAppearance.defaultTextSizePoints
     @AppStorage(ChatAppearance.showTimestampsKey) private var chatShowTimestamps: Bool = false
@@ -278,7 +278,16 @@ public struct RootView: View {
         // background directly): write any debounced compose draft now — the
         // app may be suspended or killed before the ~400ms timer fires, and
         // the compose bar isn't torn down (so its own flush doesn't run).
+        //
+        // Sessions pause background network work (live-event Helix checks)
+        // on `.background` and catch up once on `.active`. `.inactive` (app
+        // switcher, Control Center) changes neither.
         .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active: channelSessionRegistry.setAppInForeground(true)
+            case .background: channelSessionRegistry.setAppInForeground(false)
+            default: break
+            }
             guard phase == .active else {
                 DraftStorage.flushPendingSaves()
                 return

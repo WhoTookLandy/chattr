@@ -5,7 +5,7 @@ import os
 
 private let logger = AppLogger.make("Features.Storage")
 
-/// Profile → Storage. Shows how much disk space chattr's caches occupy and
+/// Settings → Accounts & Data → Storage. Shows how much disk space chattr's caches occupy and
 /// offers a one-tap clear.
 ///
 /// ## What counts as "cache" here

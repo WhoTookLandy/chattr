@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// You → About → What's New. Hand-maintained release notes, newest
+/// Settings → About → What's New. Hand-maintained release notes, newest
 /// first. Add an entry per release — keep notes user-facing ("what can
 /// I do now") rather than commit-log-shaped.
 struct WhatsNewScreen: View {
@@ -21,16 +21,17 @@ struct WhatsNewScreen: View {
             notes: [
                 "Type @ in the message box for name suggestions from the chat.",
                 "The keyboard now drops after you send a message.",
-                "Drag the mini player anywhere (it settles in the nearest corner) and pinch it to resize. Or turn on Picture in Picture When Leaving Chat (You → Video) to use Apple’s floating player instead.",
+                "Drag the mini player anywhere (it settles in the nearest corner) and pinch it to resize. Or turn on PiP When Leaving Chat (Settings → Video & Device) to use Apple’s floating player instead.",
                 "Fixed: tapping the Latest pill sometimes tapped the message under it.",
                 "Picture in picture gives chat the space back, and its return button opens the chat.",
                 "New tab bar: Home, Chats, Activity and Search. Settings are behind your avatar on Home.",
+                "Settings are grouped by topic, and you can search for any setting by name.",
                 "Swipe between Live and Following; long-press any channel for a preview.",
                 "Chats: live first, swipe to close, close all offline chats at once.",
                 "Streams play right inside chat. Tap the video for controls, the title and Subscribe; swipe down to hide it.",
                 "Leave a chat and the stream keeps playing in a floating mini player. Tap it to go back, or × to stop.",
                 "Audio only: listen to the stream while chat takes the whole screen.",
-                "Native video player (You → Video): picture-in-picture, fullscreen and a quality setting.",
+                "Native video player (Settings → Video & Device): picture-in-picture, fullscreen and a quality setting.",
                 "Jump between open chats from the chip on the video, and close a chat from the ⋯ menu.",
                 "Tap a chat message for that user's card: badges, join date, bio and recent messages.",
                 "Press Return to send; tap the chat to put the keyboard away.",

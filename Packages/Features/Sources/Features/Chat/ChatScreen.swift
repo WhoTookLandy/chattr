@@ -246,14 +246,40 @@ public struct ChatScreen: View {
         // scoped to the pill: the `.animation(value:)` used to sit on this
         // whole chain, animating anything in the transcript that changed in
         // the same transaction.
+        //
+        // Below it, the live poll / prediction / Hype Train banners — one
+        // self-contained view owning its own model and feed, so their ticks
+        // never re-run this body or the transcript. Mounted only on the
+        // account's own channel: Twitch authorizes those events for the
+        // broadcaster alone (see `ChannelSession+LiveEvents.swift`), so
+        // anywhere else there is nothing to show and nothing to subscribe.
         .overlay(alignment: .top) {
-            ChatWelcomeOverlay(channel: channel, tabId: tabId)
+            VStack(spacing: 0) {
+                ChatWelcomeOverlay(channel: channel, tabId: tabId)
+                if channelId == account.userId {
+                    LiveEventsBannerArea(chatModel: chatModel, tabId: tabId)
+                        .padding(.top, 8)
+                }
+            }
         }
         // Chat surface color — slightly lifted off pure black/white in
         // both schemes (see DesignSystem.Color.chatSurface). Applied here
         // (not on the list) so the empty/connecting states and the area
         // behind the glass compose bar share the same surface.
         .background(Color.chatSurface.ignoresSafeArea())
+        // "You're timed out / banned / warned here" — directly under the
+        // stream header (this bar is applied first, so it sits inside the
+        // header's). Self-contained and observes only its own small state,
+        // so it costs this body and the transcript nothing; renders no
+        // content (zero height) when there's nothing to say. Other
+        // top-of-chat banners can stack as sibling bars beside it.
+        .safeAreaBar(edge: .top) {
+            OwnChatRestrictionBanner(
+                state: chatModel.ownRestriction,
+                channelLoginName: channelLoginName,
+                tabId: tabId
+            )
+        }
         // Stream context (title, category, live/viewers/uptime, or offline
         // + last live) pinned above the transcript. Its own view reading
         // its own stores, so status refreshes never re-run this body.
@@ -334,7 +360,13 @@ public struct ChatScreen: View {
                             showReportConfirmation = false
                         }
                     }
-                }
+                },
+                // Mods get timeouts / ban / warn — never on themselves or
+                // the broadcaster (Twitch refuses both anyway).
+                moderation: (chatModel.currentUserCanModerate
+                             && target.line.authorUserId != account.userId
+                             && target.line.authorUserId != channelId)
+                    ? chatModel : nil
             )
         }
         .sheet(isPresented: $showViewerList) {
@@ -529,6 +561,8 @@ public struct ChatScreen: View {
             channelDisplayName: channelDisplayName,
             replyContext: chatModel.replyContext,
             chatRestrictions: chatModel.chatRestrictions,
+            // The state object, not its value: only the bar observes it.
+            ownRestriction: chatModel.ownRestriction,
             // Seeded once at construction (see `draftSeed` / `init`), not
             // re-read here — the seed only matters at first mount thanks to
             // ComposeBar's own @State semantics, so reading it on every body

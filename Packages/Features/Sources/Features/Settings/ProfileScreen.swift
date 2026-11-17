@@ -2,52 +2,47 @@ import SwiftUI
 import SwiftData
 import Accounts
 import Core
-import DesignSystem
-import NukeUI
 import os
 
 private let logger = AppLogger.make("Features.Profile")
 
-/// The You tab — entry point for everything user-centric: account
-/// switching, settings, and sign out. Hosted by AppShell's TabView
-/// inside its own NavigationStack; every child screen is a push.
+/// The Settings root (reached from the avatar on Home). Everything
+/// user-centric starts here: the account header, one row per settings
+/// category, search across every setting, and sign out.
 ///
-/// ## Grouping rule
+/// ## Layout
 ///
-/// Sections group by what the user is *thinking about*, not by what the
-/// code touches:
 ///   1. Account header — avatar + display name + @login; tap (or
 ///      long-press for the hot-switch menu) → account switcher.
-///   2. **Chat** — how the transcript looks and behaves: Appearance,
-///      Emotes, Filters, Highlights. Pure navigation rows; each feature
-///      owns ALL its controls on its own page (no lone toggles mixed in
-///      with links — that's how the old Highlight Sound toggle got
-///      separated from the keywords it modified).
-///   3. **Privacy** — Blocked Users. An account-level relationship, not
-///      a chat-display preference.
-///   4. **App** — chattr itself: Theme, Resume Last Chat, Storage.
-///   5. **About** — What's New, Version (the 7-tap dev-tools unlock).
-///   6. Developer (conditional) + destructive sign-out at the bottom.
+///   2. Category rows — Appearance, Chat, Video & Device, Accounts & Data,
+///      then About. Each row shows an icon, the title, and a one-line
+///      summary of what's inside (`SettingsCategory.summary`); each pushes
+///      its category screen, which owns all of its controls. The root holds
+///      no toggles of its own.
+///   3. Destructive sign-out at the bottom, visually apart from everything
+///      else.
+///
+/// ## Search
+///
+/// The search field matches setting titles and keywords across every
+/// category (`SettingsRegistry.search`) and replaces the category list with
+/// results while there's a query. Tapping a result pushes the screen that
+/// holds that setting — the same screen browsing would reach, routed by
+/// `SettingsDestinationView`. To make a new setting findable, add one line
+/// to `SettingsRegistry.entries`.
+///
+/// ## Performance
+///
+/// This screen and its category screens read preferences through narrow
+/// `@AppStorage` keys only. Nothing here is observed by chat views, so
+/// browsing or searching settings never re-renders a transcript; flipping a
+/// setting re-renders exactly the views that read that key.
 public struct ProfileScreen: View {
     private let account: Account
     private let accountStore: AccountStore
     /// Twitch client id, used by the account switcher's "Add Account".
     private let clientId: String
 
-    /// Stored as the enum directly — `AppearanceMode` is `RawRepresentable`
-    /// over `String`, which `@AppStorage` supports natively (same pattern as
-    /// `ChatAppearanceScreen`'s `loginNameDisplay`). A drifted/unknown raw
-    /// value falls back to the `.system` default, so the explicit
-    /// `?? .system` guard the old `String`-backed mirror needed is gone.
-    @AppStorage(AppearanceMode.storageKey) private var appearanceMode: AppearanceMode = .system
-    /// Whether visiting the Chats tab re-pushes the chat that was open
-    /// when the scene was torn down. Read by HomeScreen's scene
-    /// restoration; default on (resume) matches pre-toggle behavior.
-    @AppStorage("chattr.resumeLastChatOnLaunch") private var resumeLastChatOnLaunch = true
-    @AppStorage(StreamHeaderView.expandedKey) private var showVideoInChat = false
-    @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
-    @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
-    @AppStorage(PlayerSettings.systemPictureInPictureKey) private var systemPictureInPicture = false
     @State private var isSigningOut = false
     @State private var showingSignOutConfirm = false
     @State private var errorMessage: String?
@@ -55,37 +50,20 @@ public struct ProfileScreen: View {
     /// Whether the account-switcher sheet is presented.
     @State private var showingAccountSwitcher = false
 
+    /// The search field's text. Results are derived from it in `body` —
+    /// a cheap filter over the static registry, nothing cached or observed.
+    @State private var searchText = ""
+
     /// All signed-in accounts — drives the header's long-press hot-switch
     /// menu. Same sort as RootView/switcher (newest first).
     @Query(sort: \Account.addedAt, order: .reverse)
     private var accounts: [Account]
 
-    /// 7-tap counter on the version footer (release builds' dev-tools
-    /// unlock). Session-scoped on purpose — partial taps don't persist.
-    @State private var versionTapCount = 0
-
-    /// Whether the Developer section is visible in release builds.
-    /// Toggled by 7 taps on the version footer; persisted so the user
-    /// doesn't re-unlock every launch. DEBUG builds bypass this.
-    @AppStorage("chattr.devToolsUnlocked") private var devToolsUnlocked = false
-
-    private var showDeveloperSection: Bool {
-        #if DEBUG
-        return true
-        #else
-        return devToolsUnlocked
-        #endif
-    }
-
-    /// "1.2 (34)" — the first thing support asks for. Reads the app
-    /// bundle (Bundle.main is the host app at runtime, not the Features
-    /// package bundle). Shown as the detail of the About → Version row,
-    /// which is also the 7-tap dev-tools unlock target.
-    private var versionString: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-        return "\(version) (\(build))"
-    }
+    /// Categories shown in the main group; About sits in its own section
+    /// below, apart from the preferences.
+    private static let preferenceCategories: [SettingsCategory] = [
+        .appearance, .chat, .videoAndDevice, .accountsAndData,
+    ]
 
     public init(account: Account, accountStore: AccountStore, clientId: String) {
         self.account = account
@@ -94,222 +72,14 @@ public struct ProfileScreen: View {
     }
 
     public var body: some View {
+        let isSearching = !searchText.trimmingCharacters(in: .whitespaces).isEmpty
         Form {
-            // Account header — full-width banner-style row at the top of the
-            // form. Uses `.listRowInsets` to remove the standard Form padding
-            // so the header reads as a hero element, not a regular settings row.
-            Section {
-                // Tappable header → account switcher. The chevron signals
-                // "there's more here." Plain button style so the row keeps
-                // its custom layout instead of taking the system blue
-                // tint treatment.
-                Button {
-                    showingAccountSwitcher = true
-                } label: {
-                    HStack {
-                        AccountRow(account: account, style: .banner)
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .buttonStyle(.plain)
-                // Long-press hot-switch: jump straight to another account
-                // without the sheet round-trip. Tap stays "open the
-                // switcher" (discoverable); the menu is the power-user
-                // accelerator. Expired accounts route to the switcher,
-                // which owns the re-authorize flow.
-                .contextMenu {
-                    ForEach(accounts) { other in
-                        if other.userId == account.userId {
-                            // Current account — checkmark, inert.
-                            Button {} label: {
-                                Label(other.displayName, systemImage: "checkmark")
-                            }
-                            .disabled(true)
-                        } else if other.needsReauth {
-                            Button {
-                                showingAccountSwitcher = true
-                            } label: {
-                                Label("\(other.displayName) — expired", systemImage: "clock.badge.exclamationmark")
-                            }
-                        } else {
-                            Button {
-                                accountStore.selectAccount(other)
-                            } label: {
-                                Label(other.displayName, systemImage: "person.crop.circle")
-                            }
-                        }
-                    }
-                    Divider()
-                    Button {
-                        showingAccountSwitcher = true
-                    } label: {
-                        Label("Manage Accounts…", systemImage: "person.2")
-                    }
-                }
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
-            }
-
-            // Chat — how the transcript looks and behaves. Pure
-            // navigation rows: every control lives on its feature's own
-            // page (mixed altitudes — a lone toggle among links — read
-            // as clutter and made features hard to find).
-            Section {
-                NavigationLink {
-                    ChatAppearanceScreen(currentUserLogin: account.login)
-                } label: {
-                    Label("Appearance", systemImage: "textformat.size")
-                }
-                NavigationLink {
-                    EmoteSettingsScreen()
-                } label: {
-                    Label("Emotes", systemImage: "face.smiling")
-                }
-                NavigationLink {
-                    ChatFiltersScreen()
-                } label: {
-                    Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
-                }
-                NavigationLink {
-                    HighlightKeywordsScreen()
-                } label: {
-                    Label("Highlights", systemImage: "sparkles")
-                }
-            } header: {
-                Text("Chat")
-            } footer: {
-                Text("How chat looks, which emotes show, what gets hidden, and the words that light up a message.")
-            }
-
-            // Privacy — who you don't want to hear from. Separate from
-            // Chat: blocking is an account-level relationship, not a
-            // display preference.
-            Section {
-                NavigationLink {
-                    BlockedUsersScreen()
-                } label: {
-                    Label("Blocked Users", systemImage: "hand.raised")
-                }
-            } header: {
-                Text("Privacy")
-            }
-
-            // Video — the in-chat stream player.
-            Section {
-                Toggle(isOn: $showVideoInChat) {
-                    Label("Show Video in Chat", systemImage: "play.rectangle")
-                }
-                Toggle(isOn: $useNativePlayer) {
-                    Label("Native Video Player", systemImage: "play.tv")
-                }
-                Toggle(isOn: $systemPictureInPicture) {
-                    Label("Picture in Picture When Leaving Chat", systemImage: "pip")
-                }
-                if useNativePlayer {
-                    Picker(selection: $maxQuality) {
-                        ForEach(PlayerQuality.allCases) { quality in
-                            Text(quality.label).tag(quality)
-                        }
-                    } label: {
-                        Label("Max Quality", systemImage: "dial.medium")
-                    }
-                }
-            } header: {
-                Text("Video")
-            } footer: {
-                Text("The native player uses Apple's video player for smoother picture-in-picture and quality control. It's experimental: it relies on an unofficial Twitch interface, and if it can't load a stream chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video. With Picture in Picture When Leaving Chat on, backing out of a playing chat moves the video into Apple's floating window (drag, resize, stash it at the edge, and it follows you out of the app); otherwise it stays in chattr's mini player. PiP works best with the native player.")
-            }
-
-            // App — preferences about chattr itself rather than chat
-            // content. Theme stays inline (three exclusive options;
-            // one-tap beats a page round-trip).
-            Section {
-                Picker(selection: $appearanceMode) {
-                    ForEach(AppearanceMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                } label: {
-                    Label("Theme", systemImage: "circle.lefthalf.filled")
-                }
-                Toggle(isOn: $resumeLastChatOnLaunch) {
-                    Label("Resume Last Chat", systemImage: "arrow.uturn.forward")
-                }
-                NavigationLink {
-                    StorageSettingsScreen()
-                } label: {
-                    Label("Storage", systemImage: "internaldrive")
-                }
-            } header: {
-                Text("App")
-            } footer: {
-                Text("Resume drops you straight back into the chat you had open. Theme follows your device's appearance when set to System.")
-            }
-
-            // About — version as a proper row (copy-friendly, and the
-            // 7-tap dev-tools unlock target) instead of a floating
-            // footer at the very bottom of the form.
-            Section {
-                NavigationLink {
-                    WhatsNewScreen()
-                } label: {
-                    Label("What's New", systemImage: "megaphone")
-                }
-                HStack {
-                    Label("Version", systemImage: "info.circle")
-                    Spacer()
-                    Text(versionString)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    versionTapCount += 1
-                    if versionTapCount >= 7 {
-                        versionTapCount = 0
-                        devToolsUnlocked.toggle()
-                    }
-                }
-            } header: {
-                Text("About")
-            }
-
-            // Developer tools — always visible in DEBUG; in release builds
-            // hidden behind 7 taps on the version footer (the classic),
-            // persisted via `devToolsUnlocked`.
-            if showDeveloperSection {
-                Section {
-                    NavigationLink {
-                        DevLogView()
-                    } label: {
-                        Label("Recent Logs", systemImage: "doc.text.magnifyingglass")
-                    }
-                } header: {
-                    Text("Developer")
-                } footer: {
-                    Text("Live view of chattr's runtime logs (from OSLogStore). Useful for diagnosing why something didn't work.")
-                }
-            }
-
-            // Sign-out lives at the bottom — destructive actions stay
-            // visually separated from positive controls (theme picker
-            // above) so the user can't muscle-memory into one when
-            // intending the other.
-            Section {
-                Button(role: .destructive) {
-                    showingSignOutConfirm = true
-                } label: {
-                    Label("Sign out @\(account.login)", systemImage: "rectangle.portrait.and.arrow.right")
-                        // The destructive role reddens the title but the
-                        // icon keeps the app tint — force the whole label
-                        // red so the row reads as one destructive unit.
-                        .foregroundStyle(.red)
-                }
-                .disabled(isSigningOut)
-            } footer: {
-                Text("You'll need to authorize chattr with Twitch again to use this account.")
+            if isSearching {
+                searchResults
+            } else {
+                accountHeader
+                categories
+                signOutSection
             }
 
             if let errorMessage {
@@ -320,12 +90,11 @@ public struct ProfileScreen: View {
                 }
             }
         }
-        // Subtle confirmation when the 7th tap lands (either direction).
-        .sensoryFeedback(.success, trigger: devToolsUnlocked)
-        .navigationTitle("You")
+        .searchable(text: $searchText, placement: Self.searchPlacement, prompt: "Search Settings")
+        .autocorrectionDisabled()
+        .navigationTitle("Settings")
         // `.inlineLarge` keeps the title in the toolbar (no big drop-down
-        // title) — consistent with the ChannelListScreen treatment. Saves
-        // ~60pt of vertical space vs the default large-title mode.
+        // title) — consistent with the ChannelListScreen treatment.
         .toolbarTitleDisplayMode(.inlineLarge)
         .sheet(isPresented: $showingAccountSwitcher) {
             AccountSwitcherView(accountStore: accountStore, clientId: clientId)
@@ -344,6 +113,144 @@ public struct ProfileScreen: View {
         }
     }
 
+    /// Always-visible field under the title on iOS, so search is
+    /// discoverable without pulling the list down.
+    private static var searchPlacement: SearchFieldPlacement {
+        #if os(iOS)
+        return .navigationBarDrawer(displayMode: .always)
+        #else
+        return .automatic
+        #endif
+    }
+
+    // MARK: - Sections
+
+    /// Full-width banner-style row at the top. `.listRowInsets` removes the
+    /// standard Form padding so it reads as a hero element.
+    private var accountHeader: some View {
+        Section {
+            // Tappable header → account switcher. The chevron signals
+            // "there's more here." Plain button style so the row keeps its
+            // custom layout instead of the tint treatment.
+            Button {
+                showingAccountSwitcher = true
+            } label: {
+                HStack {
+                    AccountRow(account: account, style: .banner)
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+            // Long-press hot-switch: jump straight to another account
+            // without the sheet round-trip. Expired accounts route to the
+            // switcher, which owns the re-authorize flow.
+            .contextMenu {
+                ForEach(accounts) { other in
+                    if other.userId == account.userId {
+                        Button {} label: {
+                            Label(other.displayName, systemImage: "checkmark")
+                        }
+                        .disabled(true)
+                    } else if other.needsReauth {
+                        Button {
+                            showingAccountSwitcher = true
+                        } label: {
+                            Label("\(other.displayName) — expired", systemImage: "clock.badge.exclamationmark")
+                        }
+                    } else {
+                        Button {
+                            accountStore.selectAccount(other)
+                        } label: {
+                            Label(other.displayName, systemImage: "person.crop.circle")
+                        }
+                    }
+                }
+                Divider()
+                Button {
+                    showingAccountSwitcher = true
+                } label: {
+                    Label("Manage Accounts…", systemImage: "person.2")
+                }
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+        }
+    }
+
+    @ViewBuilder
+    private var categories: some View {
+        Section {
+            ForEach(Self.preferenceCategories) { category in
+                categoryLink(category)
+            }
+        }
+        Section {
+            categoryLink(.about)
+        }
+    }
+
+    private func categoryLink(_ category: SettingsCategory) -> some View {
+        NavigationLink {
+            destination(.category(category))
+        } label: {
+            SettingsCategoryRow(category: category)
+        }
+    }
+
+    @ViewBuilder
+    private var searchResults: some View {
+        let results = SettingsRegistry.search(searchText)
+        if results.isEmpty {
+            Section {
+                ContentUnavailableView.search(text: searchText)
+            }
+        } else {
+            Section {
+                ForEach(results) { entry in
+                    NavigationLink {
+                        destination(entry.destination)
+                    } label: {
+                        SettingsSearchResultRow(entry: entry)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sign-out lives at the bottom — destructive actions stay visually
+    /// separated from everything else so the user can't muscle-memory into
+    /// it.
+    private var signOutSection: some View {
+        Section {
+            Button(role: .destructive) {
+                showingSignOutConfirm = true
+            } label: {
+                Label("Sign out @\(account.login)", systemImage: "rectangle.portrait.and.arrow.right")
+                    // The destructive role reddens the title but the icon
+                    // keeps the app tint — force the whole label red so the
+                    // row reads as one destructive unit.
+                    .foregroundStyle(.red)
+            }
+            .disabled(isSigningOut)
+        } footer: {
+            Text("You'll need to authorize chattr with Twitch again to use this account.")
+        }
+    }
+
+    private func destination(_ destination: SettingsDestination) -> some View {
+        SettingsDestinationView(
+            destination: destination,
+            account: account,
+            accountStore: accountStore,
+            clientId: clientId
+        )
+    }
+
+    // MARK: - Sign out
+
     /// Drop the SwiftData Account row + tear down keychain entries. The
     /// `@Query` in RootView reacts and re-renders SignInView automatically
     /// — no manual dismiss needed because the whole navigation stack
@@ -357,7 +264,7 @@ public struct ProfileScreen: View {
         let login = account.login
         do {
             try await accountStore.remove(account: account)
-            logger.notice("Signed out @\(login, privacy: .public) from Profile")
+            logger.notice("Signed out @\(login, privacy: .public) from Settings")
         } catch {
             logger.error("Sign out had an error: \(error.localizedDescription, privacy: .public)")
             errorMessage = "Sign out: \(error.localizedDescription)"

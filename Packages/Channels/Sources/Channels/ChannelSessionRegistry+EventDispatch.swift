@@ -109,6 +109,14 @@ extension ChannelSessionRegistry {
             Task { [weak session] in
                 await session?.resyncAfterReconnect()
             }
+            // Live-event banners: a poll / prediction / train that began,
+            // ended or resolved while the socket was down has no EventSub
+            // event coming, so re-read them from Helix. A no-op except on
+            // the account's own channel. Separate task: it must not wait
+            // behind the rustlog gap-fill.
+            Task { [weak session] in
+                await session?.reconcileLiveEvents()
+            }
         }
     }
 

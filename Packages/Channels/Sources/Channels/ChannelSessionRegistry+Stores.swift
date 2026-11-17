@@ -33,7 +33,7 @@ extension ChannelSessionRegistry {
         return new
     }
 
-    /// The third-party providers the user has enabled (You → Chat →
+    /// The third-party providers the user has enabled (Settings → Chat →
     /// Emotes). Read at index construction, so a toggle change applies
     /// the next time a channel's index is built (channel reopen) — same
     /// at-attach lifecycle as the chat filters and highlight keywords.
