@@ -84,8 +84,22 @@ struct StreamHeaderView: View {
     }
     #endif
 
-    private var stream: TwitchStream? {
+    /// What the status polls say right now. Decides what plays.
+    private var liveStream: TwitchStream? {
         ChannelStatusStore.liveStream(for: channel.channelId, status: channelStatus, follows: followsStore)
+    }
+
+    /// What the header shows: `liveStream`, or — while this channel's
+    /// engine plays on through a single poll that left it out — the stream
+    /// as last seen (`PlaybackCenter.stream(for:live:)`), so the video
+    /// doesn't drop to the offline card and back.
+    private var stream: TwitchStream? {
+        let live = liveStream
+        #if os(iOS)
+        return playback?.stream(for: channel.channelId, live: live) ?? live
+        #else
+        return live
+        #endif
     }
 
     private var status: ChannelStatusStore.Status? {
@@ -101,7 +115,7 @@ struct StreamHeaderView: View {
     }
 
     private var channelURL: URL? {
-        URL(string: "https://www.twitch.tv/\(channel.channelLoginName)")
+        Endpoints.TwitchWeb.channel(login: channel.channelLoginName)
     }
 
     var body: some View {
@@ -131,9 +145,25 @@ struct StreamHeaderView: View {
             if !active { chromeVisible = false }
         }
         #if os(iOS)
-        // The visible chat decides what plays. Re-evaluated whenever
-        // anything that shapes playback changes.
+        // The visible chat decides what plays. Re-evaluated at once
+        // whenever anything that shapes playback changes on this page…
         .task(id: playbackKey) { syncPlayback() }
+        // …but a page BECOMING the visible one waits to see that the pager
+        // settled on it. `activeTabId` is written while the finger is still
+        // down, so a wobble across the midpoint or a fling over several
+        // pages would otherwise tear down and build an engine per page
+        // passed. Leaving again cancels the wait.
+        .task(id: isActive) {
+            guard isActive else { return }
+            try? await Task.sleep(for: Self.activationSettle)
+            guard !Task.isCancelled else { return }
+            syncPlayback()
+        }
+        // The playing stream dropped out of a poll: keep its surfaces up
+        // until a second reading agrees (`syncPlayback`).
+        .onChange(of: liveStream) { previous, current in
+            if current == nil, let previous { playback?.noteWentOffline(previous) }
+        }
         .onAppear { if isActive { wirePlayerCallbacks() } }
         .onChange(of: isActive) { _, active in
             if active { wirePlayerCallbacks() }
@@ -150,8 +180,23 @@ struct StreamHeaderView: View {
     }
 
     #if os(iOS)
+    /// How long a page has to stay the visible one before it takes over
+    /// playback — about the length of the pager's snap.
+    private static let activationSettle: Duration = .milliseconds(250)
+
+    /// Everything on this page that shapes playback. Not `isActive`:
+    /// becoming the visible page has its own, settled task (see `body`).
     private var playbackKey: String {
-        "\(isActive)|\(isExpanded)|\(stream != nil)|\(status != nil)|\(audioOnly)|\(useNativePlayer)|\(maxQuality.rawValue)"
+        "\(isExpanded)|\(liveStream != nil)|\(statusReadingKey)|\(audioOnly)|\(useNativePlayer)|\(maxQuality.rawValue)"
+    }
+
+    /// Whether the status has loaded and, while it says offline, which
+    /// reading said so — each further offline reading re-runs
+    /// `syncPlayback`, which is how a second one confirms the first.
+    private var statusReadingKey: String {
+        guard let status else { return "none" }
+        guard liveStream == nil else { return "live" }
+        return String(status.fetchedAt.timeIntervalSinceReferenceDate)
     }
 
     /// Only the active page acts (pages leaving — swiped away or popped —
@@ -159,17 +204,24 @@ struct StreamHeaderView: View {
     /// player).
     private func syncPlayback() {
         guard isActive, let playback else { return }
-        if isExpanded, let stream {
+        if isExpanded, let liveStream {
             playback.play(
                 channel,
-                title: stream.title,
+                title: liveStream.title,
                 profileImageURL: profileImageURL,
                 // Audio-only needs the native engine (see isAudioOnlyActive).
                 native: useNativePlayer || audioOnly,
                 audioOnly: audioOnly,
                 quality: maxQuality
             )
-        } else if status != nil, playback.isPlaying {
+            playback.noteLive(liveStream)
+        } else if let status, playback.isPlaying {
+            // One poll that leaves this (playing) stream out doesn't stop
+            // it; a second one does.
+            if isExpanded, playback.isPlaying(channel.channelId),
+               !playback.offlineReadingConfirmed(at: status.fetchedAt) {
+                return
+            }
             // Video hidden here, or this channel is offline: whatever was
             // playing (this stream, or another chat's) stops. Waits for
             // `status` so a not-yet-loaded status doesn't kill the stream
@@ -212,10 +264,12 @@ struct StreamHeaderView: View {
     /// the web player can't play hidden — it needs a visible, full-size
     /// surface to autoplay and to show its "Start Watching" gate. So if the
     /// native engine fails, audio-only falls back to the normal video
-    /// layout. Not available off iOS (no player there).
+    /// layout — and so it does when the native path is switched off
+    /// (`PlayerSettings.isNativePlaybackEnabled`). Not available off iOS
+    /// (no player there).
     private var isAudioOnlyActive: Bool {
         #if os(iOS)
-        audioOnly && !player.nativeFailed
+        audioOnly && PlayerSettings.isNativePlaybackEnabled && !player.nativeFailed
         #else
         false
         #endif
@@ -333,6 +387,16 @@ struct StreamHeaderView: View {
 
             playerEngine(audioOnly: false)
 
+            #if os(iOS)
+            // The native player is waiting on the network: starting up, or
+            // stalled mid-stream on a frozen frame.
+            if isActive, player.isBuffering {
+                ProgressView()
+                    .tint(.white)
+                    .allowsHitTesting(false)
+            }
+            #endif
+
             if chromeVisible {
                 playerOverlay(stream)
                     .transition(.opacity)
@@ -394,7 +458,7 @@ struct StreamHeaderView: View {
     /// Stream thumbnail: what neighbouring pages show, and what sits under
     /// the player until it paints its first frame.
     private func poster(_ stream: TwitchStream) -> some View {
-        LazyImage(url: StreamFormatting.thumbnailURL(stream.thumbnailUrl, width: 640, height: 360)) { state in
+        LazyImage(request: StreamFormatting.thumbnailRequest(stream.thumbnailUrl, width: 640, height: 360)) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else {
@@ -442,9 +506,13 @@ struct StreamHeaderView: View {
                     Spacer()
                     pageIndicator
                     #if os(iOS)
-                    glyphButton("headphones", label: "Audio only") {
-                        chromeVisible = false
-                        withAnimation(.snappy(duration: 0.25)) { audioOnly = true }
+                    // Audio-only is the native engine's; not offered while
+                    // that's switched off.
+                    if PlayerSettings.isNativePlaybackEnabled {
+                        glyphButton("headphones", label: "Audio only") {
+                            chromeVisible = false
+                            withAnimation(.snappy(duration: 0.25)) { audioOnly = true }
+                        }
                     }
                     #endif
                     if let channelURL {
@@ -570,7 +638,7 @@ struct StreamHeaderView: View {
     }
 
     private var subsURL: URL? {
-        URL(string: "https://www.twitch.tv/subs/\(channel.channelLoginName)")
+        Endpoints.TwitchWeb.subscribe(login: channel.channelLoginName)
     }
 
     private func openSubs() {
@@ -811,18 +879,24 @@ struct ChatNavBarAutoHider: View {
     #endif
 
     private var hidesBar: Bool {
-        guard isExpanded, !audioOnly,
+        // Audio-only (while the native engine it needs is available) shows
+        // a slim bar, not a video.
+        guard isExpanded, !(audioOnly && PlayerSettings.isNativePlaybackEnabled),
               let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
               let channelId = chatTabs.tabs.first(where: { $0.id == visibleId })?.channels.first?.channelId
         else { return false }
+        let live = ChannelStatusStore.liveStream(for: channelId, status: channelStatus, follows: followsStore)
         #if os(iOS)
         // In PiP the header is a slim bar, not a video — keep the nav bar.
         if playback?.controller.isPictureInPictureActive == true,
            playback?.isPlaying(channelId) == true {
             return false
         }
+        // Same stream the header shows, including one playing on through
+        // a single offline reading.
+        if let playback { return playback.stream(for: channelId, live: live) != nil }
         #endif
-        return ChannelStatusStore.liveStream(for: channelId, status: channelStatus, follows: followsStore) != nil
+        return live != nil
     }
 
     var body: some View {

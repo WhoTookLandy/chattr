@@ -78,18 +78,25 @@ struct LandscapeStageLayout: ViewModifier {
     /// not in picture in picture.
     private var stageActive: Bool {
         guard isLandscape, isExpanded, !isAudioOnlyActive, !isPictureInPictureActive else { return false }
-        return ChannelStatusStore.liveStream(
+        let live = ChannelStatusStore.liveStream(
             for: channel.channelId,
             status: channelStatus,
             follows: followsStore
-        ) != nil
+        )
+        #if os(iOS)
+        // Same stream the header shows, including one playing on through
+        // a single offline reading (`PlaybackCenter.stream(for:live:)`).
+        if let playback { return playback.stream(for: channel.channelId, live: live) != nil }
+        #endif
+        return live != nil
     }
 
     /// Mirrors `StreamHeaderView.isAudioOnlyActive`: audio-only needs the
-    /// native engine; if it failed, the video layout comes back.
+    /// native engine; if it failed or is switched off, the video layout
+    /// comes back.
     private var isAudioOnlyActive: Bool {
         #if os(iOS)
-        audioOnly && !(playback?.controller.nativeFailed ?? false)
+        audioOnly && PlayerSettings.isNativePlaybackEnabled && !(playback?.controller.nativeFailed ?? false)
         #else
         false
         #endif

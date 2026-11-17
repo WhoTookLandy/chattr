@@ -1,4 +1,5 @@
 import SwiftUI
+import Core
 #if os(iOS)
 import UIKit
 import AVKit
@@ -24,6 +25,19 @@ enum PlayerSettings {
     /// picture-in-picture window instead of the in-app mini player. Off by
     /// default; the mini player stays as the fallback when PiP can't start.
     static let systemPictureInPictureKey = "chattr.player.systemPiPOnLeave"
+    /// Kill switch for the native path. Set, nothing resolves a playlist
+    /// through `TwitchHLS`: every stream plays in Twitch's web player and
+    /// audio-only (which needs the native engine) isn't offered. No
+    /// Settings row writes it — it's for turning the unofficial endpoint
+    /// off without shipping a build (a launch argument, managed
+    /// configuration, or a remote flag written to this key).
+    static let nativePlaybackDisabledKey = "chattr.player.nativeDisabled"
+
+    /// The one read of the kill switch. `PlaybackCenter.play` decides the
+    /// engine with it; the views use it only to stop offering audio-only.
+    static var isNativePlaybackEnabled: Bool {
+        !UserDefaults.standard.bool(forKey: nativePlaybackDisabledKey)
+    }
 }
 
 /// Resolution cap for the native player. `auto` lets AVPlayer adapt freely.
@@ -63,8 +77,19 @@ enum PlayerQuality: String, CaseIterable, Identifiable {
 @MainActor
 @Observable
 final class StreamPlayerController {
-    var isPaused = false
+    var isPaused = false {
+        didSet {
+            guard isPaused != oldValue else { return }
+            onPausedChange?()
+        }
+    }
+    /// `isPaused` changed — `PlaybackCenter` keeps Now Playing and its
+    /// long-pause unload in step.
+    @ObservationIgnored var onPausedChange: (() -> Void)?
     var isMuted = false
+    /// The native player is waiting on the network: starting up, stalled
+    /// mid-stream, or between tries after a failure.
+    var isBuffering = false
     var canPictureInPicture = false
     /// The stream is in the system picture-in-picture window. The chat
     /// header gives its video area back to chat, and the mini player
@@ -106,6 +131,20 @@ final class StreamPlayerController {
     @ObservationIgnored var onSwipeDown: (() -> Void)?
     /// Native engine failed — `PlaybackCenter` rebuilds on the web engine.
     @ObservationIgnored var onNativeFailure: (() -> Void)?
+    /// Whether a failing native engine has nothing to fall back to right
+    /// now (audio-only with the app in the background, where the web
+    /// player can't play). It then keeps trying instead of giving up.
+    @ObservationIgnored var staysOnNativeEngine: (() -> Bool)?
+    /// The native engine saw the broadcast end — its playlist closed, or
+    /// Twitch says the channel is offline. `PlaybackCenter` stops.
+    @ObservationIgnored var onStreamEnded: (() -> Void)?
+    /// Play was asked for with no engine to play it: `PlaybackCenter`
+    /// unloads one after a long pause, and builds it again on this.
+    @ObservationIgnored var onResumeRequested: (() -> Void)?
+    /// Audio-only is playing the full stream because Twitch offered no
+    /// audio rendition — the video nobody sees is kept as small as it goes
+    /// (`applyQualityLimits`).
+    @ObservationIgnored var playsVideoHidden = false
     /// PiP's "return to app" button — go back to this stream's chat.
     @ObservationIgnored var onRestoreFromPictureInPicture: (() -> Void)?
     /// PiP was closed with its × (not restored) — nothing left on screen.
@@ -305,9 +344,11 @@ final class StreamPlayerController {
         // so the play/pause control matches what a tap flips (`togglePlay`).
         update(\.isPaused, to: !wantsPlayback)
         update(\.isMuted, to: startsMuted)
+        update(\.isBuffering, to: false)
         update(\.canPictureInPicture, to: false)
         update(\.isPictureInPictureActive, to: false)
         update(\.hasStarted, to: false)
+        playsVideoHidden = false
     }
 
     /// Writes `value` only when it differs. Observation notifies on every
@@ -338,6 +379,9 @@ final class StreamPlayerController {
                 wantsPlayback.toggle()
                 if wantsPlayback { webStartupSettleDeadline = nil }
                 update(\.isPaused, to: !wantsPlayback)
+                // No engine at all (unloaded after a long pause): the
+                // owner builds it again. One that's loading ignores this.
+                if wantsPlayback { onResumeRequested?() }
                 return
             }
             // Web, ready: the control showed "play" when the page reported
@@ -373,11 +417,31 @@ final class StreamPlayerController {
             if isAwaitingWebEngine { return }
             return run("play")
         }
-        // Live: resume at the live edge, not where we paused.
+        // Live: resume at the live edge, not where we paused — less the
+        // offset the item keeps from it (`liveOffset`). At the very end of
+        // the seekable range nothing is buffered yet, and the player
+        // stalls the moment it starts.
         if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
-            player.seek(to: CMTimeRangeGetEnd(range))
+            let liveEdge = CMTimeRangeGetEnd(range)
+            player.seek(to: CMTimeMaximum(range.start, CMTimeSubtract(liveEdge, Self.liveOffset)))
         }
         player.play()
+    }
+
+    /// How far behind the live edge the native player sits
+    /// (`AVPlayerItem.configuredTimeOffsetFromLive`): about three of
+    /// Twitch's two-second segments, enough buffer to play without
+    /// stalling.
+    static let liveOffset = CMTime(seconds: 6, preferredTimescale: 600)
+
+    /// Lock screen / Control Center play and pause (`StreamNowPlaying`):
+    /// the user's intent, exactly like `togglePlay`.
+    func remotePlay() {
+        if isPaused { togglePlay() }
+    }
+
+    func remotePause() {
+        if !isPaused { togglePlay() }
     }
 
     func toggleMute() {
@@ -393,6 +457,8 @@ final class StreamPlayerController {
         }
         player.isMuted.toggle()
         update(\.isMuted, to: player.isMuted)
+        // Muted mixes with other audio; with sound it's the only one.
+        PlaybackAudioSession.shared.setMuted(player.isMuted)
     }
 
     func togglePictureInPicture() {
@@ -431,7 +497,22 @@ final class StreamPlayerController {
 
     func applyQuality(_ quality: PlayerQuality) {
         preferredQuality = quality
-        avPlayer?.currentItem?.preferredMaximumResolution = quality.maximumResolution
+        if let item = avPlayer?.currentItem { applyQualityLimits(to: item) }
+    }
+
+    /// Everything that limits the variant AVPlayer may pick for `item`:
+    /// the user's cap, cellular, a power-saving or hot device, and video
+    /// nobody sees (`PlaybackLimits`). Applied to each new item, and again
+    /// through `applyQuality` when any of those change.
+    func applyQualityLimits(to item: AVPlayerItem) {
+        let limits = PlaybackLimits.resolve(
+            quality: preferredQuality,
+            deviceIsConstrained: PlaybackLimits.deviceIsConstrained,
+            videoIsHidden: playsVideoHidden
+        )
+        item.preferredMaximumResolution = limits.maximumResolution
+        item.preferredMaximumResolutionForExpensiveNetworks = limits.maximumResolutionOnExpensiveNetworks
+        item.preferredPeakBitRate = limits.peakBitRate
     }
 
     private func run(_ command: String) {
@@ -446,10 +527,17 @@ final class StreamPlayerController {
 /// web client ID), then the usher playlist signed with it.
 ///
 /// Not an official third-party API — Twitch can change or block it at any
-/// time, which is why the native player is opt-in and falls back to the
-/// web player on any failure.
+/// time, which is why the native player is opt-in, falls back to the web
+/// player when it keeps failing, and can be switched off altogether
+/// (`PlayerSettings.isNativePlaybackEnabled`). The native engine reaches it
+/// only through `StreamPlaylistResolving`.
 enum TwitchHLS {
-    struct Unavailable: Error {}
+    /// The resolver the native engine uses unless it's handed another.
+    struct Resolver: StreamPlaylistResolving {
+        func playlist(login: String, audioOnly: Bool) async throws -> StreamPlaylist {
+            try await TwitchHLS.playlist(login: login, audioOnly: audioOnly)
+        }
+    }
 
     private static let webClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
@@ -473,8 +561,8 @@ enum TwitchHLS {
         let data: DataField?
     }
 
-    static func playlistURL(login: String, audioOnly: Bool = false) async throws -> URL {
-        var request = URLRequest(url: URL(string: "https://gql.twitch.tv/gql")!)
+    static func playlist(login: String, audioOnly: Bool = false) async throws -> StreamPlaylist {
+        var request = URLRequest(url: Endpoints.TwitchPlayer.playbackAccessToken)
         request.httpMethod = "POST"
         request.setValue(webClientID, forHTTPHeaderField: "Client-ID")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -486,10 +574,15 @@ enum TwitchHLS {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let token = try JSONDecoder().decode(Response.self, from: data).data?.streamPlaybackAccessToken
-        else { throw Unavailable() }
+              let fields = try JSONDecoder().decode(Response.self, from: data).data
+        else { throw StreamPlaylistError.unavailable }
+        // Answered, but with no token: a channel that doesn't exist, or
+        // one Twitch won't play for this client.
+        guard let token = fields.streamPlaybackAccessToken else { throw StreamPlaylistError.forbidden }
 
-        var components = URLComponents(string: "https://usher.ttvnw.net/api/channel/hls/\(login.lowercased()).m3u8")!
+        guard let playlistURL = Endpoints.TwitchPlayer.livePlaylist(login: login),
+              var components = URLComponents(url: playlistURL, resolvingAgainstBaseURL: false)
+        else { throw StreamPlaylistError.unavailable }
         components.queryItems = [
             URLQueryItem(name: "sig", value: token.signature),
             URLQueryItem(name: "token", value: token.value),
@@ -501,23 +594,28 @@ enum TwitchHLS {
             URLQueryItem(name: "supported_codecs", value: "avc1"),
             URLQueryItem(name: "p", value: String(Int.random(in: 1_000_000...9_999_999))),
         ]
-        guard let url = components.url else { throw Unavailable() }
-        guard audioOnly else { return url }
+        guard let url = components.url else { throw StreamPlaylistError.unavailable }
+        guard audioOnly else { return StreamPlaylist(url: url, isAudioOnlyRendition: false) }
         // Audio-only: pick the `audio_only` variant out of the master
         // playlist. If Twitch didn't offer one, the full stream still plays.
-        return (try? await audioOnlyVariant(in: url)) ?? url
+        if let variant = try await audioOnlyVariant(in: url) {
+            return StreamPlaylist(url: variant, isAudioOnlyRendition: true)
+        }
+        return StreamPlaylist(url: url, isAudioOnlyRendition: false)
     }
 
+    /// nil when the master playlist lists no audio-only variant, or
+    /// couldn't be read at all (the player then loads it itself). Throws
+    /// only for what Twitch's status says outright: offline, or refused.
     private static func audioOnlyVariant(in master: URL) async throws -> URL? {
-        let (data, _) = try await URLSession.shared.data(from: master)
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
-        for (index, line) in lines.enumerated()
-        where line.hasPrefix("#EXT-X-STREAM-INF") && line.contains("audio_only") {
-            guard index + 1 < lines.count else { return nil }
-            return URL(string: lines[index + 1], relativeTo: master)?.absoluteURL
+        guard let (data, response) = try? await URLSession.shared.data(from: master) else { return nil }
+        switch (response as? HTTPURLResponse)?.statusCode {
+        case 404: throw StreamPlaylistError.offline
+        case 401, 403: throw StreamPlaylistError.forbidden
+        default: break
         }
-        return nil
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        return HLSMasterPlaylist.audioOnlyVariant(in: text, relativeTo: master)
     }
 }
 
@@ -540,11 +638,35 @@ enum NativePlayer {
         static func key(_ login: String, _ audioOnly: Bool) -> String {
             "\(login)|\(audioOnly)"
         }
-        private var loadTask: Task<Void, Never>?
-        private var subscriptions: Set<AnyCancellable> = []
+        /// How long a stalled player gets to recover by itself before the
+        /// playlist is resolved again.
+        static let stallPatience: Duration = .seconds(10)
 
-        init(controller: StreamPlayerController) {
+        private let resolver: any StreamPlaylistResolving
+        private var login = ""
+        private var audioOnly = false
+        private weak var playerView: PlayerLayerView?
+        /// Between `load` and `teardown`.
+        private var isLoaded = false
+
+        private var loadTask: Task<Void, Never>?
+        private var stallTask: Task<Void, Never>?
+        private var recovery = PlaybackRecovery()
+        /// Bumped for each item and each failure, so a late report from an
+        /// item that was replaced (or already counted as failed) is dropped.
+        private var itemGeneration = 0
+        /// When the player last went to paused; nil while it isn't.
+        private var pausedAt: ContinuousClock.Instant?
+        private var resumesAfterInterruption = false
+
+        /// Audio session and device state, for the engine's whole life.
+        private var subscriptions: Set<AnyCancellable> = []
+        private var playerSubscriptions: Set<AnyCancellable> = []
+        private var itemSubscriptions: Set<AnyCancellable> = []
+
+        init(controller: StreamPlayerController, resolver: any StreamPlaylistResolving = TwitchHLS.Resolver()) {
             self.controller = controller
+            self.resolver = resolver
         }
 
         @objc func tapped() { controller.onTap?() }
@@ -553,59 +675,87 @@ enum NativePlayer {
         func load(login: String, audioOnly: Bool, quality: PlayerQuality, into view: PlayerLayerView) {
             teardown()
             loadedKey = Self.key(login, audioOnly)
+            self.login = login
+            self.audioOnly = audioOnly
+            playerView = view
+            isLoaded = true
+            recovery = PlaybackRecovery()
             controller.preferredQuality = quality
             controller.reset()
+            observeSessionAndDevice()
+            resolveAndStart(after: nil)
+        }
 
-            loadTask = Task { [weak self, weak view] in
+        // MARK: Resolve, start, retry
+
+        /// Resolves the playlist (after `delay`, for a retry) and starts
+        /// it — on the player that's already there, if one is.
+        private func resolveAndStart(after delay: Duration?) {
+            loadTask?.cancel()
+            // A report that was already on its way to the main queue when
+            // the engine was torn down must not start it again.
+            guard isLoaded else { return }
+            let resolver = self.resolver
+            let login = self.login
+            let audioOnly = self.audioOnly
+            loadTask = Task { [weak self] in
+                if let delay {
+                    try? await Task.sleep(for: delay)
+                    guard !Task.isCancelled else { return }
+                }
                 do {
-                    let url = try await TwitchHLS.playlistURL(login: login, audioOnly: audioOnly)
-                    guard !Task.isCancelled, let self, let view else { return }
-                    self.start(url: url, in: view)
+                    let playlist = try await resolver.playlist(login: login, audioOnly: audioOnly)
+                    guard !Task.isCancelled, let self else { return }
+                    // Before the player exists: one started first brings
+                    // the session up in whatever category it was left in,
+                    // and a muted autoplay would cut the user's music.
+                    await PlaybackAudioSession.shared.activate(muted: self.controller.isMuted)
+                    guard !Task.isCancelled else { return }
+                    self.start(playlist)
                 } catch {
                     guard !Task.isCancelled else { return }
-                    self?.controller.onNativeFailure?()
+                    self?.playbackFailed(error)
                 }
             }
         }
 
-        private func start(url: URL, in view: PlayerLayerView) {
-            let session = AVAudioSession.sharedInstance()
-            try? session.setCategory(.playback, mode: .moviePlayback)
-            try? session.setActive(true)
+        private func start(_ playlist: StreamPlaylist) {
+            guard isLoaded, let view = playerView else { return }
+            controller.playsVideoHidden = audioOnly && !playlist.isAudioOnlyRendition
 
-            let item = AVPlayerItem(url: url)
-            item.preferredMaximumResolution = controller.preferredQuality.maximumResolution
-            let player = AVPlayer(playerItem: item)
-            if controller.startsMuted {
-                player.isMuted = true
-            }
-            controller.update(\.isMuted, to: player.isMuted)
-            view.playerLayer.player = player
-            controller.avPlayer = player
+            let item = AVPlayerItem(url: playlist.url)
+            // Hold a fixed distance behind the live edge. Left alone, each
+            // stall adds its length to the delay for good, and chat runs
+            // further and further ahead of the video.
+            item.automaticallyPreservesTimeOffsetFromLive = true
+            item.configuredTimeOffsetFromLive = StreamPlayerController.liveOffset
+            controller.applyQualityLimits(to: item)
+            observeItem(item)
 
-            if AVPictureInPictureController.isPictureInPictureSupported(),
-               let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
-                pip.canStartPictureInPictureAutomaticallyFromInline = true
-                pip.delegate = self
-                controller.pictureInPicture = pip
-                controller.update(\.canPictureInPicture, to: true)
-            }
+            let player: AVPlayer
+            if let existing = controller.avPlayer {
+                // A retry: the same player (and PiP controller), a fresh
+                // playlist.
+                player = existing
+                player.replaceCurrentItem(with: item)
+            } else {
+                player = AVPlayer(playerItem: item)
+                // `isMuted` is the mute asked for: `startsMuted` on a first
+                // start (`reset()` mirrors it, `toggleMute` keeps both in
+                // step while loading), the stream's own after a rebuild.
+                player.isMuted = controller.isMuted
+                view.playerLayer.player = player
+                controller.avPlayer = player
 
-            player.publisher(for: \.timeControlStatus)
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] status in
-                    guard let self else { return }
-                    self.controller.update(\.isPaused, to: status == .paused)
-                    if status == .playing { self.controller.noteDidPlay() }
+                if AVPictureInPictureController.isPictureInPictureSupported(),
+                   let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
+                    pip.canStartPictureInPictureAutomaticallyFromInline = true
+                    pip.delegate = self
+                    controller.pictureInPicture = pip
+                    controller.update(\.canPictureInPicture, to: true)
                 }
-                .store(in: &subscriptions)
-
-            item.publisher(for: \.status)
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] status in
-                    if status == .failed { self?.controller.onNativeFailure?() }
-                }
-                .store(in: &subscriptions)
+                observePlayer(player)
+            }
 
             // Held (a clip over the stream, or the app left without PiP
             // while the playlist resolved): stay paused until the holder
@@ -615,20 +765,263 @@ enum NativePlayer {
                 player.play()
             } else {
                 controller.update(\.isPaused, to: true)
+                controller.update(\.isBuffering, to: false)
             }
         }
 
-        func teardown() {
-            loadTask?.cancel()
-            loadTask = nil
-            subscriptions.removeAll()
+        private func observePlayer(_ player: AVPlayer) {
+            player.publisher(for: \.timeControlStatus)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] status in
+                    guard let self else { return }
+                    self.controller.update(\.isPaused, to: status == .paused)
+                    self.controller.update(\.isBuffering, to: status == .waitingToPlayAtSpecifiedRate)
+                    if status == .paused {
+                        if self.pausedAt == nil { self.pausedAt = ContinuousClock.now }
+                    } else {
+                        self.pausedAt = nil
+                    }
+                    if status == .playing {
+                        self.stallTask?.cancel()
+                        self.stallTask = nil
+                        self.controller.noteDidPlay()
+                    }
+                }
+                .store(in: &playerSubscriptions)
+
+            // Every way the mute changes lands here — our control, and the
+            // fullscreen player's own.
+            player.publisher(for: \.isMuted)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    // The player's value now, not the one delivered: two
+                    // quick toggles would otherwise replay the first.
+                    guard let self, let player = self.controller.avPlayer else { return }
+                    self.controller.update(\.isMuted, to: player.isMuted)
+                    PlaybackAudioSession.shared.setMuted(player.isMuted)
+                }
+                .store(in: &playerSubscriptions)
+        }
+
+        private func observeItem(_ item: AVPlayerItem) {
+            itemSubscriptions.removeAll()
+            itemGeneration += 1
+            let generation = itemGeneration
+            let notifications = NotificationCenter.default
+
+            item.publisher(for: \.status)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self, weak item] status in
+                    guard let self, generation == self.itemGeneration, status == .failed else { return }
+                    self.playbackFailed(item?.error)
+                }
+                .store(in: &itemSubscriptions)
+
+            notifications.publisher(for: .AVPlayerItemFailedToPlayToEndTime, object: item)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] notification in
+                    guard let self, generation == self.itemGeneration else { return }
+                    self.playbackFailed(notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? any Error)
+                }
+                .store(in: &itemSubscriptions)
+
+            notifications.publisher(for: .AVPlayerItemPlaybackStalled, object: item)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self, generation == self.itemGeneration else { return }
+                    self.playbackStalled()
+                }
+                .store(in: &itemSubscriptions)
+
+            // A live playlist only ends when the broadcast does.
+            notifications.publisher(for: .AVPlayerItemDidPlayToEndTime, object: item)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self, generation == self.itemGeneration else { return }
+                    self.controller.onStreamEnded?()
+                }
+                .store(in: &itemSubscriptions)
+        }
+
+        /// A stall usually clears by itself once the buffer refills. One
+        /// that hasn't after `stallPatience` is treated like a failure: a
+        /// fresh playlist, with the same backoff.
+        private func playbackStalled() {
+            guard stallTask == nil else { return }
+            stallTask = Task { [weak self] in
+                try? await Task.sleep(for: Coordinator.stallPatience)
+                guard !Task.isCancelled, let self else { return }
+                self.stallTask = nil
+                // Still waiting, and still meant to play: a pause (the
+                // user's, or a hold's) in the meantime ends the matter.
+                guard self.controller.startsPlaying,
+                      self.controller.avPlayer?.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                else { return }
+                self.playbackFailed(nil)
+            }
+        }
+
+        /// A resolve failed, the item failed, or a stall never cleared.
+        /// Tries again with backoff (`PlaybackRecovery`) before giving the
+        /// stream to the web player.
+        private func playbackFailed(_ error: (any Error)?) {
+            // One failure per item, however many of its observers report it.
+            itemGeneration += 1
+            itemSubscriptions.removeAll()
+            stallTask?.cancel()
+            stallTask = nil
+
+            if let refusal = error as? StreamPlaylistError, refusal == .offline {
+                controller.onStreamEnded?()
+                return
+            }
+            let staysNative = controller.staysOnNativeEngine?() ?? false
+            switch recovery.step(after: error, staysNative: staysNative) {
+            case .retry(let delay):
+                controller.update(\.isBuffering, to: true)
+                resolveAndStart(after: delay)
+            case .giveUp:
+                controller.onNativeFailure?()
+            }
+        }
+
+        // MARK: Audio session and device
+
+        private func observeSessionAndDevice() {
+            let notifications = NotificationCenter.default
+
+            notifications.publisher(for: AVAudioSession.interruptionNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] notification in self?.audioSessionInterrupted(notification) }
+                .store(in: &subscriptions)
+
+            notifications.publisher(for: AVAudioSession.routeChangeNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] notification in self?.audioRouteChanged(notification) }
+                .store(in: &subscriptions)
+
+            notifications.publisher(for: AVAudioSession.mediaServicesWereResetNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.mediaServicesWereReset() }
+                .store(in: &subscriptions)
+
+            // Low Power Mode or heat changed: the caps go through the same
+            // path as a quality change.
+            notifications.publisher(for: .NSProcessInfoPowerStateDidChange)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.reapplyQuality() }
+                .store(in: &subscriptions)
+
+            notifications.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.reapplyQuality() }
+                .store(in: &subscriptions)
+        }
+
+        private func reapplyQuality() {
+            controller.applyQuality(controller.preferredQuality)
+        }
+
+        /// Meant to play, and not sitting paused since before whatever just
+        /// happened. The system's own pause for an interruption or a route
+        /// change can land a moment before its notification does, so a
+        /// pause that fresh counts as "was playing".
+        private var wasPlayingJustNow: Bool {
+            guard controller.startsPlaying else { return false }
+            guard let pausedAt else { return true }
+            return ContinuousClock.now - pausedAt < .seconds(2)
+        }
+
+        private func audioSessionInterrupted(_ notification: Notification) {
+            guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw)
+            else { return }
+            switch type {
+            case .began:
+                // The system pauses the player. Only what was playing
+                // comes back afterwards.
+                resumesAfterInterruption = wasPlayingJustNow
+            case .ended:
+                let resumes = resumesAfterInterruption
+                resumesAfterInterruption = false
+                let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                guard resumes, AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume)
+                else { return }
+                reactivateAndResume()
+            @unknown default:
+                break
+            }
+        }
+
+        /// Brings the session back up, then resumes at the live edge — if
+        /// that's still wanted: the user may have paused, or a hold begun,
+        /// while the interruption lasted.
+        private func reactivateAndResume() {
+            Task { [weak self] in
+                guard let muted = self?.controller.isMuted else { return }
+                await PlaybackAudioSession.shared.activate(muted: muted)
+                guard let self, self.isLoaded,
+                      self.controller.avPlayer != nil, self.controller.startsPlaying
+                else { return }
+                self.controller.resume()
+            }
+        }
+
+        private func audioRouteChanged(_ notification: Notification) {
+            guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable,
+                  let player = controller.avPlayer
+            else { return }
+            if player.isMuted {
+                // Nothing audible moved to the speaker: a silent stream the
+                // system paused along with the route carries on.
+                if wasPlayingJustNow { player.play() }
+            } else {
+                // Headphones (or a speaker) gone: stay quiet until the user
+                // says otherwise, like any pause of theirs — no hold
+                // release or interruption end restarts it out loud.
+                controller.wantsPlayback = false
+                player.pause()
+            }
+        }
+
+        /// The media server restarted: the player, its item and the PiP
+        /// controller are dead and the session is back to its defaults.
+        /// Build them again with the mute and intent the stream had.
+        private func mediaServicesWereReset() {
+            PlaybackAudioSession.shared.invalidate()
+            controller.pictureInPictureEndedAmbiguously()
+            controller.update(\.canPictureInPicture, to: false)
+            discardPlayer()
+            resolveAndStart(after: nil)
+        }
+
+        private func discardPlayer() {
+            stallTask?.cancel()
+            stallTask = nil
+            itemGeneration += 1
+            playerSubscriptions.removeAll()
+            itemSubscriptions.removeAll()
+            pausedAt = nil
             if let player = controller.avPlayer {
                 player.pause()
                 player.replaceCurrentItem(with: nil)
-                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             }
+            playerView?.playerLayer.player = nil
             controller.avPlayer = nil
             controller.pictureInPicture = nil
+        }
+
+        /// The audio session is left as it is: `PlaybackCenter` takes it
+        /// down when native playback stops, not when one engine replaces
+        /// another on a channel change.
+        func teardown() {
+            isLoaded = false
+            loadTask?.cancel()
+            loadTask = nil
+            subscriptions.removeAll()
+            resumesAfterInterruption = false
+            discardPlayer()
         }
     }
 }

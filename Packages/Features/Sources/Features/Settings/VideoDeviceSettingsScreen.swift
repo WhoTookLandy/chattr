@@ -16,6 +16,11 @@ struct VideoDeviceSettingsScreen: View {
     @AppStorage(PlayerSettings.systemPictureInPictureKey) private var pictureInPictureLeavingChat = false
     @AppStorage(PlaybackPreferences.keepScreenAwakeKey) private var keepScreenAwake = false
     @AppStorage(HapticSettings.enabledKey) private var hapticsEnabled = true
+    /// The native path's kill switch (`PlayerSettings.isNativePlaybackEnabled`).
+    /// Observed so the rows follow it; nothing here writes it.
+    @AppStorage(PlayerSettings.nativePlaybackDisabledKey) private var nativePlaybackDisabled = false
+
+    private var nativePlaybackEnabled: Bool { !nativePlaybackDisabled }
 
     var body: some View {
         Form {
@@ -45,9 +50,11 @@ struct VideoDeviceSettingsScreen: View {
                     SettingLabel(
                         "Native Video Player",
                         systemImage: "play.tv",
-                        subtitle: "Experimental: picture-in-picture and quality control"
+                        subtitle: "Experimental: picture-in-picture and quality control",
+                        disabledReason: nativePlaybackEnabled ? nil : "Not available right now"
                     )
                 }
+                .disabled(!nativePlaybackEnabled)
                 Picker(selection: $maxQuality) {
                     ForEach(PlayerQuality.allCases) { quality in
                         Text(quality.label).tag(quality)
@@ -56,10 +63,10 @@ struct VideoDeviceSettingsScreen: View {
                     SettingLabel(
                         "Max Quality",
                         systemImage: "dial.medium",
-                        disabledReason: useNativePlayer ? nil : "Needs Native Video Player on"
+                        disabledReason: useNativePlayer && nativePlaybackEnabled ? nil : "Needs Native Video Player on"
                     )
                 }
-                .disabled(!useNativePlayer)
+                .disabled(!useNativePlayer || !nativePlaybackEnabled)
                 Picker(selection: $pictureInPicture) {
                     ForEach(PictureInPictureMode.allCases) { mode in
                         Text(mode.label).tag(mode)

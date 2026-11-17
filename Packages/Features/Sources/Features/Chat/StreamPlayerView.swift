@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import Core
 import UIKit
 import WebKit
 
@@ -25,15 +26,7 @@ enum TwitchWebPlayer {
         config.allowsInlineMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-
-        let content = WKUserContentController()
-        content.add(WeakScriptHandler(coordinator), name: handlerName)
-        content.addUserScript(WKUserScript(
-            source: bridgeScript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true
-        ))
-        config.userContentController = content
+        config.userContentController = WKUserContentController()
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
@@ -45,18 +38,67 @@ enum TwitchWebPlayer {
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
-        webView.navigationDelegate = coordinator
+        attach(coordinator, to: webView)
         webView.load(URLRequest(url: playerURL(login, autoplay: autoplay, muted: muted)))
         return webView
     }
 
+    /// Points a player web view a previous page has finished with
+    /// (`quiesce`) at another channel, instead of building a new one: the
+    /// `WKWebView` and its content process are the expensive part of a
+    /// channel change. `coordinator` is the new page's; the old page's
+    /// late messages don't reach it as its own (`Coordinator.pageID`).
     @MainActor
-    static func teardown(_ webView: WKWebView) {
+    static func navigate(
+        _ webView: WKWebView,
+        to login: String,
+        autoplay: Bool,
+        muted: Bool,
+        coordinator: Coordinator
+    ) {
+        // The previous channel's last frame would sit over the new
+        // channel's poster until the navigation commits. The coordinator
+        // shows the view again then.
+        webView.alpha = 0
+        attach(coordinator, to: webView)
+        webView.load(URLRequest(url: playerURL(login, autoplay: autoplay, muted: muted)))
+    }
+
+    /// Makes `coordinator` the one that hears from the pages `webView`
+    /// loads from here on, each stamped with its `pageID`.
+    @MainActor
+    private static func attach(_ coordinator: Coordinator, to webView: WKWebView) {
+        let content = webView.configuration.userContentController
+        content.removeScriptMessageHandler(forName: handlerName)
+        content.removeAllUserScripts()
+        content.add(WeakScriptHandler(coordinator), name: handlerName)
+        content.addUserScript(WKUserScript(
+            source: "window.chattrPage = \(coordinator.pageID);",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        content.addUserScript(WKUserScript(
+            source: bridgeScript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+        webView.navigationDelegate = coordinator
+    }
+
+    /// Ends the current page without giving up the web view: silences it
+    /// and stops it reporting.
+    @MainActor
+    static func quiesce(_ webView: WKWebView) {
         // Stop audio immediately — a torn-down page can otherwise keep
         // playing until the web process notices.
         webView.evaluateJavaScript("document.querySelectorAll('video').forEach(v=>v.pause())")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: handlerName)
         webView.stopLoading()
+    }
+
+    @MainActor
+    static func teardown(_ webView: WKWebView) {
+        quiesce(webView)
         webView.removeFromSuperview()
     }
 
@@ -72,7 +114,7 @@ enum TwitchWebPlayer {
     /// on its own against their intent. `muted` is the controller's
     /// `startsMuted` (Wi-Fi autoplay, or a rebuild of a muted stream).
     static func playerURL(_ login: String, autoplay: Bool, muted: Bool = false) -> URL {
-        var components = URLComponents(string: "https://player.twitch.tv/")!
+        var components = URLComponents(url: Endpoints.TwitchPlayer.embed, resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "channel", value: login),
             URLQueryItem(name: "parent", value: "chattr.app"),
@@ -87,10 +129,19 @@ enum TwitchWebPlayer {
     ///   - swallows taps on the video surface → posts `{type:"tap"}`
     ///   - posts `{type:"state", …}` whenever the <video> changes
     ///   - exposes `window.chattrPlayer` for the native controls
+    ///
+    /// Every message carries the page's stamp (`window.chattrPage`, set by
+    /// `attach`) so a reused web view's previous page can't be mistaken for
+    /// the one loading.
     static let bridgeScript = """
     (function () {
       if (window.chattrPlayer) return;
-      var post = function (m) { try { webkit.messageHandlers.chattr.postMessage(m); } catch (e) {} };
+      var post = function (m) {
+        try {
+          if (window.chattrPage !== undefined) { m.page = window.chattrPage; }
+          webkit.messageHandlers.chattr.postMessage(m);
+        } catch (e) {}
+      };
       var video = function () { return document.querySelector('video'); };
       var passThrough = function (t) {
         return t && t.closest && t.closest('button, a, input, select, [role="button"], [role="menu"], [role="dialog"]');
@@ -193,12 +244,27 @@ enum TwitchWebPlayer {
         /// The page has posted its first state (one coordinator per page).
         private var didReportState = false
 
+        /// Stamps this coordinator's page (`attach`). A web view reused
+        /// for another channel can still deliver the previous page's
+        /// messages — its last state report, the pause from `quiesce` —
+        /// after the new coordinator is listening; taken as the new page's
+        /// first report they would end its startup sequence
+        /// (`noteEngineReady`) before it had loaded.
+        let pageID: Int
+        private static var lastPageID = 0
+
         init(controller: StreamPlayerController) {
             self.controller = controller
+            Coordinator.lastPageID += 1
+            pageID = Coordinator.lastPageID
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+            // Unstamped messages pass: dropping them would leave the
+            // player deaf if the stamp script ever failed to run.
+            if let page = body["page"] as? Int, page != pageID { return }
+            reveal(message.webView)
             switch type {
             case "tap":
                 controller.onTap?()
@@ -250,6 +316,17 @@ enum TwitchWebPlayer {
             default:
                 break
             }
+        }
+
+        /// The new page has replaced the old one: show the web view again
+        /// (`TwitchWebPlayer.navigate` hid it).
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            reveal(webView)
+        }
+
+        private func reveal(_ webView: WKWebView?) {
+            guard let webView, webView.alpha != 1 else { return }
+            webView.alpha = 1
         }
 
         /// Keep the player page in place: anything that tries to navigate

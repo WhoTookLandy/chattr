@@ -1,6 +1,7 @@
 import SwiftUI
 import TwitchKit
 import Core
+import Nuke
 import NukeUI
 
 /// The video half of a landscape chat page: the stream (or its poster on
@@ -38,12 +39,19 @@ struct LandscapeStreamStage: View {
         return chatTabs?.activeTabId == tabId
     }
 
+    /// Same derivation as `StreamHeaderView.stream`, including a stream
+    /// still playing through a single offline reading.
     private var stream: TwitchStream? {
-        ChannelStatusStore.liveStream(for: channel.channelId, status: channelStatus, follows: followsStore)
+        let live = ChannelStatusStore.liveStream(for: channel.channelId, status: channelStatus, follows: followsStore)
+        #if os(iOS)
+        return playback?.stream(for: channel.channelId, live: live) ?? live
+        #else
+        return live
+        #endif
     }
 
     private var channelURL: URL? {
-        URL(string: "https://www.twitch.tv/\(channel.channelLoginName)")
+        Endpoints.TwitchWeb.channel(login: channel.channelLoginName)
     }
 
     /// In the "over video" layout the chat covers one side, so the picture
@@ -69,6 +77,14 @@ struct LandscapeStreamStage: View {
                 ZStack {
                     poster(stream)
                     playerEngine
+                    #if os(iOS)
+                    // The native player is waiting on the network.
+                    if isActive, let player, player.isBuffering {
+                        ProgressView()
+                            .tint(.white)
+                            .allowsHitTesting(false)
+                    }
+                    #endif
                 }
                 .aspectRatio(16 / 9, contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: videoAlignment)
@@ -126,7 +142,11 @@ struct LandscapeStreamStage: View {
         player.onTap = { toggleChrome() }
         // Swipe down on the video → picture in picture, or hide the video
         // when PiP isn't available — same as portrait.
-        player.onSwipeDown = {
+        // Weak: the player stores this closure, so holding the player in
+        // it would keep the controller (and its `PlaybackCenter`) alive
+        // past sign-out.
+        player.onSwipeDown = { [weak player] in
+            guard let player else { return }
             if player.canPictureInPicture {
                 chromeVisible = false
                 player.togglePictureInPicture()
@@ -160,7 +180,7 @@ struct LandscapeStreamStage: View {
     }
 
     private func poster(_ stream: TwitchStream) -> some View {
-        LazyImage(url: StreamFormatting.thumbnailURL(stream.thumbnailUrl, width: 1280, height: 720)) { state in
+        LazyImage(request: StreamFormatting.thumbnailRequest(stream.thumbnailUrl, width: 1280, height: 720)) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else {
