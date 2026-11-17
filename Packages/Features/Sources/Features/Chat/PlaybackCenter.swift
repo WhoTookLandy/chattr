@@ -29,7 +29,16 @@ final class WebStreamEngine: StreamEngine {
 
     init(login: String, controller: StreamPlayerController) {
         coordinator = TwitchWebPlayer.Coordinator(controller: controller)
-        webView = TwitchWebPlayer.makeWebView(login: login, muted: controller.startsMuted, coordinator: coordinator)
+        // Loads paused when the user paused or a hold is out — the page
+        // never autoplays against intent (`StreamPlayerController.noteDidPlay`).
+        // Play/pause made while it loads are applied once it reports ready
+        // (`StreamPlayerController.noteEngineReady`).
+        webView = TwitchWebPlayer.makeWebView(
+            login: login,
+            autoplay: controller.beginWebEngineLoad(),
+            muted: controller.startsMuted,
+            coordinator: coordinator
+        )
         view = webView
         controller.webView = webView
     }
@@ -100,11 +109,19 @@ final class PlaybackCenter {
 
     @ObservationIgnored private var lastQuality: PlayerQuality = .auto
 
+    /// Bumped when WHAT plays changes: a different channel, or stop.
+    /// Rebuilding the same channel's engine (native → web fallback, an
+    /// engine or audio-only setting) keeps it, so a hold survives that.
+    @ObservationIgnored private var generation = 0
+    /// The outstanding `holdPlayback` per reason (at most one each).
+    @ObservationIgnored private var currentHolds: [PlaybackHoldReason: PlaybackHold] = [:]
+
     /// Set when a chat opens under "Autoplay on Wi-Fi": the next new
     /// stream starts muted. Consumed by the next engine build.
     @ObservationIgnored var startNextStreamMuted = false
-    /// Leaving the app → PiP or pause (see `PlaybackLifecycleObserver`).
-    @ObservationIgnored private var lifecycle: PlaybackLifecycleObserver?
+    /// Leaving the app → PiP or a `.background` hold (see
+    /// `PlaybackLifecycleObserver`).
+    @ObservationIgnored private(set) var lifecycle: PlaybackLifecycleObserver?
 
     var isPlaying: Bool { channel != nil }
 
@@ -113,7 +130,104 @@ final class PlaybackCenter {
             guard let self else { return }
             self.fallBackToWeb(quality: self.lastQuality)
         }
+        controller.onPictureInPictureActiveChange = { [weak self] in
+            self?.syncPictureInPictureFlags()
+            self?.yieldBackgroundHoldToPictureInPicture()
+        }
         lifecycle = PlaybackLifecycleObserver(center: self)
+    }
+
+    // MARK: Per-channel PiP
+
+    /// One observable flag per channel with a mounted reader
+    /// (`pictureInPictureFlag(for:)`). Not observed itself: reading the
+    /// dictionary registers no dependency, only reading a flag's
+    /// `isActive` does.
+    @ObservationIgnored private var pictureInPictureFlags: [String: ChannelPictureInPictureFlag] = [:]
+    /// Mounted views holding each channel's flag
+    /// (`retainsPictureInPictureFlag(for:in:)`). A flag goes once its last
+    /// holder unmounts, so channels visited once don't keep one for the
+    /// app's lifetime.
+    @ObservationIgnored private var pictureInPictureFlagOwners: [String: Int] = [:]
+    /// The channel whose flag is currently set, if any.
+    @ObservationIgnored private var pictureInPictureChannelID: String?
+
+    /// Whether `channelId`'s stream is in the PiP window, as a value only
+    /// that channel's readers observe. `controller.isPictureInPictureActive`
+    /// is one global flag: every pre-mounted chat page reading it would
+    /// re-render on any PiP transition. A PiP start or stop here writes at
+    /// most two flags — the channel leaving PiP and the one entering — so
+    /// only the affected page re-evaluates.
+    ///
+    /// Read from `body`: allocates only the first time a channel is asked
+    /// for. Readers keep it with `retainsPictureInPictureFlag(for:in:)`.
+    func pictureInPictureFlag(for channelId: String) -> ChannelPictureInPictureFlag {
+        if let flag = pictureInPictureFlags[channelId] { return flag }
+        let flag = ChannelPictureInPictureFlag()
+        flag.isActive = pictureInPictureChannelID == channelId
+        pictureInPictureFlags[channelId] = flag
+        return flag
+    }
+
+    /// A view reading `channelId`'s flag mounted. Refcount, like
+    /// `claim` / `release` for hosts.
+    func retainPictureInPictureFlag(for channelId: String) {
+        _ = pictureInPictureFlag(for: channelId)
+        pictureInPictureFlagOwners[channelId, default: 0] += 1
+    }
+
+    /// A view reading `channelId`'s flag unmounted. With no holder left the
+    /// flag is queued for dropping on the next main-actor turn
+    /// (`drainPendingEvictions`), not here: a remount (or a pager window
+    /// shift) runs the new view's `body` — reading the existing flag —
+    /// before the old view's disappear and the new one's appear. Dropping
+    /// it in between would leave the new view observing a flag that's no
+    /// longer written.
+    func releasePictureInPictureFlag(for channelId: String) {
+        guard let owners = pictureInPictureFlagOwners[channelId] else { return }
+        guard owners <= 1 else {
+            pictureInPictureFlagOwners[channelId] = owners - 1
+            return
+        }
+        pictureInPictureFlagOwners[channelId] = nil
+        let wasIdle = pendingFlagEvictions.isEmpty
+        pendingFlagEvictions.insert(channelId)
+        // One drain per turn, however many flags were released in it.
+        guard wasIdle else { return }
+        Task { @MainActor [weak self] in
+            self?.drainPendingEvictions()
+        }
+    }
+
+    /// Channels whose flag lost its last holder, awaiting
+    /// `drainPendingEvictions`.
+    @ObservationIgnored private var pendingFlagEvictions: Set<String> = []
+
+    /// Drops each queued flag that's still unowned; a flag retained again
+    /// since its release (a remount) stays. Scheduled by
+    /// `releasePictureInPictureFlag`; tests call it directly instead of
+    /// relying on task timing.
+    func drainPendingEvictions() {
+        let pending = pendingFlagEvictions
+        pendingFlagEvictions.removeAll()
+        for channelId in pending where pictureInPictureFlagOwners[channelId] == nil {
+            pictureInPictureFlags[channelId] = nil
+        }
+    }
+
+    /// Flags held by mounted views — for tests.
+    var pictureInPictureFlagCount: Int { pictureInPictureFlags.count }
+
+    private func syncPictureInPictureFlags() {
+        let current = controller.isPictureInPictureActive ? channel?.channelId : nil
+        guard current != pictureInPictureChannelID else { return }
+        if let previous = pictureInPictureChannelID {
+            pictureInPictureFlags[previous]?.isActive = false
+        }
+        pictureInPictureChannelID = current
+        if let current {
+            pictureInPictureFlags[current]?.isActive = true
+        }
     }
 
     /// Play `channel` (or keep playing it if it already is). Rebuilds the
@@ -147,7 +261,13 @@ final class PlaybackCenter {
         }
 
         engine?.teardown()
-        if !sameChannel { controller.nativeFailed = false }
+        if !sameChannel {
+            controller.nativeFailed = false
+            // A new stream starts out meant to play.
+            controller.wantsPlayback = true
+            // A new stream isn't the one that was held.
+            advanceGeneration()
+        }
         // A rebuild of the same stream (engine fallback) keeps its mute
         // state — `isMuted` carries the requested mute even if the old
         // engine never got as far as an AVPlayer (see `reset()`). Switching
@@ -160,6 +280,7 @@ final class PlaybackCenter {
         startNextStreamMuted = false
         controller.reset()
         self.channel = channel
+        syncPictureInPictureFlags()
         engineKey = key
         engine = useNative
             ? NativeStreamEngine(login: channel.channelLoginName, audioOnly: audioOnly, quality: quality, controller: controller)
@@ -178,19 +299,98 @@ final class PlaybackCenter {
     }
 
     func stop() {
+        advanceGeneration()
         engine?.teardown()
         engine = nil
         engineKey = nil
         channel = nil
         controller.startsMuted = false
-        controller.holdsForBackground = false
+        controller.wantsPlayback = true
         controller.reset()
         controller.nativeFailed = false
+        syncPictureInPictureFlags()
         hostRevision += 1
     }
 
     func isPlaying(_ channelId: String) -> Bool {
         channel?.channelId == channelId
+    }
+
+    // MARK: Holds
+
+    /// Pause the stream for `reason` and hand it back later with
+    /// `releaseHold`. The one pause-and-resume mechanism: a clip playing
+    /// over the stream (`.clip`) and the app leaving without PiP
+    /// (`.background`, `PlaybackLifecycleObserver`) both use it. Explicit
+    /// intent, not a toggle:
+    ///
+    /// - It works while the engine is still loading (no `AVPlayer` yet, or
+    ///   the web page not ready): the load won't start playback while any
+    ///   hold is out (`StreamPlayerController.startsPlaying`), so the
+    ///   stream can't come up behind a clip or in the background.
+    /// - Returns nil when nothing is playing or a hold for `reason` is
+    ///   already out. Holds for different reasons stack; the stream
+    ///   resumes only when the last one goes.
+    /// - The hold records, as it begins, whether releasing it resumes
+    ///   (`resumesOnRelease(_:)`): only if the stream was meant to be
+    ///   playing — we resume only what we paused. A user pause, including
+    ///   one made while the stream was buffering before its first frame
+    ///   (`StreamPlayerController.wantsPlayback`), is never undone. A hold
+    ///   taken while another is out inherits that one's decision: the
+    ///   stream is paused because of the first hold, not the user. The
+    ///   hold still keeps the stream from starting while it's out.
+    /// - It's tied to the playback generation: if the stream stops or
+    ///   another channel starts meanwhile, the hold lapses and releasing it
+    ///   does nothing.
+    func holdPlayback(_ reason: PlaybackHoldReason) -> PlaybackHold? {
+        guard isPlaying, currentHolds[reason] == nil else { return nil }
+        let resumeOnRelease = currentHolds.isEmpty
+            ? Self.resumesOnRelease(controller)
+            : currentHolds.values.contains { $0.resumeOnRelease }
+        let hold = PlaybackHold(
+            id: UUID(),
+            reason: reason,
+            generation: generation,
+            resumeOnRelease: resumeOnRelease
+        )
+        currentHolds[reason] = hold
+        controller.beginHold(reason)
+        return hold
+    }
+
+    func releaseHold(_ hold: PlaybackHold) {
+        guard currentHolds[hold.reason] == hold, hold.generation == generation else { return }
+        currentHolds[hold.reason] = nil
+        // `wantsPlayback` again: a user pause made during the hold (lock
+        // screen, say) wins over the hold's own resume. Another hold still
+        // out keeps the stream paused (`endHold` checks `startsPlaying`).
+        controller.endHold(hold.reason, resume: hold.resumeOnRelease && controller.wantsPlayback)
+    }
+
+    /// Whether a hold taken now should resume the stream on release: the
+    /// user means it to play (`wantsPlayback`), and it isn't sitting paused
+    /// after having started (a pause from outside our controls — PiP
+    /// window, lock screen — that `wantsPlayback` didn't see). A stream
+    /// still loading toward autoplay resumes; one the user paused doesn't.
+    static func resumesOnRelease(_ controller: StreamPlayerController) -> Bool {
+        controller.wantsPlayback && !(controller.hasStarted && controller.isPaused)
+    }
+
+    /// PiP started while a `.background` hold is out: the app left before
+    /// the web page's `pipStart` arrived (the cached PiP flag lagged), so
+    /// the lifecycle observer took a hold. PiP owns playback now — drop the
+    /// hold without resuming, so a play from the PiP window isn't paused
+    /// again. The observer's copy lapses (`releaseHold` ignores it).
+    private func yieldBackgroundHoldToPictureInPicture() {
+        guard controller.isPictureInPictureActive, currentHolds[.background] != nil else { return }
+        currentHolds[.background] = nil
+        controller.endHold(.background, resume: false)
+    }
+
+    private func advanceGeneration() {
+        generation += 1
+        currentHolds.removeAll()
+        controller.endAllHolds()
     }
 
     // MARK: Hosts
@@ -208,6 +408,43 @@ final class PlaybackCenter {
         hostStack.removeAll { $0 == hostID }
         if activeHostID == hostID { activeHostID = hostStack.last }
     }
+}
+
+/// "This channel's stream is in the PiP window", observable per channel
+/// (`PlaybackCenter.pictureInPictureFlag(for:)`). Written only by
+/// `PlaybackCenter`, and only when the value changes.
+@MainActor
+@Observable
+final class ChannelPictureInPictureFlag {
+    fileprivate(set) var isActive = false
+}
+
+extension View {
+    /// Keeps `channelId`'s PiP flag (`PlaybackCenter.pictureInPictureFlag(for:)`)
+    /// alive while this view is mounted. Appear / disappear only — no
+    /// observation, nothing per render.
+    func retainsPictureInPictureFlag(for channelId: String, in center: PlaybackCenter?) -> some View {
+        onAppear { center?.retainPictureInPictureFlag(for: channelId) }
+            .onDisappear { center?.releasePictureInPictureFlag(for: channelId) }
+    }
+}
+
+/// Why the stream is held paused (`PlaybackCenter.holdPlayback(_:)`).
+enum PlaybackHoldReason: Hashable, Sendable {
+    /// A clip is playing over the stream (`ClipPlayerSheet`).
+    case clip
+    /// The app is in the background and the stream can't continue there
+    /// (no PiP, not audio-only with sound — `PlaybackLifecycleObserver`).
+    case background
+}
+
+/// A pause taken with `PlaybackCenter.holdPlayback`.
+struct PlaybackHold: Equatable {
+    fileprivate let id: UUID
+    let reason: PlaybackHoldReason
+    fileprivate let generation: Int
+    /// Decided when the hold began (`PlaybackCenter.resumesOnRelease`).
+    let resumeOnRelease: Bool
 }
 
 private struct PlaybackCenterKey: EnvironmentKey {

@@ -100,6 +100,7 @@ public enum TwitchSignIn {
         .userManageBlockedUsers,
         // Viewer list (GET /chat/chatters) for channels you moderate.
         .moderatorReadChatters,
+        .clipsEdit, // Create Clip (POST /clips); pre-scope tokens get 401 → CreateClipSheet asks to sign in again.
         // Live poll / prediction / Hype Train banners on your OWN channel —
         // Twitch authorizes those EventSub topics for the broadcaster only.
         // Harmless for viewers (they never stream polls); same re-sign-in

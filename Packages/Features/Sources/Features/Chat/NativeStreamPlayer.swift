@@ -69,7 +69,20 @@ final class StreamPlayerController {
     /// The stream is in the system picture-in-picture window. The chat
     /// header gives its video area back to chat, and the mini player
     /// stays out of the way, while this is true.
-    var isPictureInPictureActive = false
+    ///
+    /// Global — every reader re-renders on each PiP transition. Per-page
+    /// views (one per pre-mounted chat page) read
+    /// `PlaybackCenter.pictureInPictureFlag(for:)` instead, which only
+    /// changes for the page whose stream is in PiP.
+    private(set) var isPictureInPictureActive = false {
+        didSet {
+            guard isPictureInPictureActive != oldValue else { return }
+            onPictureInPictureActiveChange?()
+        }
+    }
+    /// `isPictureInPictureActive` changed — `PlaybackCenter` keeps its
+    /// per-channel PiP flags in step.
+    @ObservationIgnored var onPictureInPictureActiveChange: (() -> Void)?
     /// Flips once real frames are playing.
     var hasStarted = false
     /// The native player couldn't get a playlist / failed to play — the
@@ -81,11 +94,6 @@ final class StreamPlayerController {
     /// while the engine loads — and through a fallback rebuild that happens
     /// before it ever played.
     @ObservationIgnored var startsMuted = false
-    /// The app left the foreground and `PlaybackLifecycleObserver` chose to
-    /// pause, possibly while the engine was still loading (no AVPlayer or
-    /// <video> to pause yet). An engine that finishes loading while this is
-    /// set stays paused. Cleared when the app comes back.
-    @ObservationIgnored var holdsForBackground = false
 
     @ObservationIgnored weak var webView: WKWebView?
     @ObservationIgnored var avPlayer: AVPlayer?
@@ -103,6 +111,168 @@ final class StreamPlayerController {
     /// PiP was closed with its × (not restored) — nothing left on screen.
     @ObservationIgnored var onPictureInPictureClosed: (() -> Void)?
     @ObservationIgnored private var isRestoringFromPictureInPicture = false
+
+    /// What currently asks the stream to stay paused and will hand it back
+    /// (`PlaybackCenter.holdPlayback(_:)`): a clip playing over it, or the
+    /// app in the background without PiP. One mechanism for both. Unlike a
+    /// one-shot pause a hold outlives engine loading: an engine built or
+    /// finishing its load while held starts paused (`startsPlaying`), and a
+    /// play reported while held is paused again (`noteDidPlay`). Not
+    /// cleared by `reset()`, so it survives a same-channel rebuild.
+    @ObservationIgnored private(set) var holds: Set<PlaybackHoldReason> = []
+    /// Any hold is out.
+    var isHeld: Bool { !holds.isEmpty }
+
+    /// What the user wants the stream doing: true = playing, false = they
+    /// paused it. Explicit intent, separate from `isPaused` (the engine's
+    /// report), because a stream buffering before its first frame isn't
+    /// "paused" yet — a user pause in that window would otherwise look like
+    /// "about to autoplay" to `PlaybackCenter.holdPlayback`.
+    ///
+    /// Set by `togglePlay` (the user's play/pause control), and back to
+    /// true whenever the engine reports playing (`noteDidPlay`), so a
+    /// resume from outside our controls (native fullscreen, PiP window,
+    /// lock screen) counts too. That's sound because no engine starts
+    /// playing on its own: each starts paused unless `startsPlaying`. Our
+    /// own `pause()`/`resume()` (holds) never touch it. Reset per stream by
+    /// `PlaybackCenter`. Not observed: nothing renders from it, so changing
+    /// it invalidates no view.
+    @ObservationIgnored var wantsPlayback = true
+
+    /// Whether an engine starting now should start playing: the user wants
+    /// it (`wantsPlayback`) and no hold of any kind is out. The native engine checks
+    /// it when its load finishes; the web engine bakes it into the page's
+    /// `autoplay` parameter, and `noteEngineReady` applies it again, either
+    /// way, if it changed while the page loaded.
+    var startsPlaying: Bool { wantsPlayback && !isHeld }
+
+    /// A web page is loading and hasn't posted its first state yet
+    /// (`beginWebEngineLoad` → `noteEngineReady`). Its bridge may not exist
+    /// yet, so a play/pause sent now would be lost: until ready, those
+    /// commands only record intent, and `noteEngineReady` applies it.
+    @ObservationIgnored private(set) var isAwaitingWebEngine = false
+    /// The loading page was built with `autoplay=true`.
+    @ObservationIgnored private var webEngineAutoplays = false
+    /// `noteEngineReady` paused a page that was built to autoplay but whose
+    /// intent turned to paused while it loaded. Until that pause has
+    /// visibly landed, play reports are the page's own autoplay, not the
+    /// user: they're paused again and leave intent alone. Ends at the first
+    /// paused report after such a play (`noteWebState`), when the user or a
+    /// hold release asks to play (`togglePlay`, `resume`), or after
+    /// `webStartupSettleWindow` at the latest. The time bound matters when
+    /// the page's first report is already paused: Twitch may never autoplay
+    /// at all, and without it a later genuine play (PiP window, lock
+    /// screen) would be swallowed forever.
+    var isSettlingWebStartup: Bool {
+        guard let deadline = webStartupSettleDeadline else { return false }
+        return ContinuousClock.now < deadline
+    }
+    /// How long a page's startup autoplay can still arrive after it's ready.
+    @ObservationIgnored var webStartupSettleWindow: Duration = .seconds(5)
+    @ObservationIgnored private var webStartupSettleDeadline: ContinuousClock.Instant?
+    @ObservationIgnored private var didSuppressStartupPlay = false
+
+    /// A web page is about to be built. Returns its `autoplay` — the
+    /// current `startsPlaying` — and holds play/pause commands back until
+    /// the page reports ready.
+    func beginWebEngineLoad() -> Bool {
+        isAwaitingWebEngine = true
+        webStartupSettleDeadline = nil
+        didSuppressStartupPlay = false
+        webEngineAutoplays = startsPlaying
+        return webEngineAutoplays
+    }
+
+    /// The engine reports real frames playing. Engines start playing only
+    /// when `startsPlaying`, so every play report is the user's doing — our
+    /// control, or one outside it (native fullscreen, PiP window, lock
+    /// screen) — and restores intent. Except while held, or while a web
+    /// page's startup autoplay is being undone (`isSettlingWebStartup`):
+    /// then it's paused again and intent is left alone.
+    func noteDidPlay() {
+        update(\.hasStarted, to: true)
+        // A hold wins over settling: its pause is PiP-aware, so a web video
+        // WebKit is handing to picture in picture as the app leaves isn't
+        // stopped before `pipStart` arrives and releases the background hold.
+        if isHeld {
+            if isSettlingWebStartup { didSuppressStartupPlay = true }
+            pauseForHold()
+        } else if isSettlingWebStartup {
+            didSuppressStartupPlay = true
+            pause()
+        } else {
+            wantsPlayback = true
+        }
+    }
+
+    /// The web page's first state report: it now takes commands. Applies
+    /// the CURRENT intent both ways, since play/pause made while it loaded
+    /// were only recorded. Meant to play: start it if it isn't (a hold
+    /// released, or play pressed, while it loaded). Not meant to play:
+    /// pause it — and if it was built to autoplay, its startup play
+    /// reports are that autoplay, not intent (`isSettlingWebStartup`).
+    func noteEngineReady(paused: Bool) {
+        isAwaitingWebEngine = false
+        if startsPlaying {
+            if paused { resume() }
+        } else {
+            // Startup suppression is only for a USER pause. A hold alone
+            // re-pauses play reports itself (PiP-aware) for as long as it's
+            // out; once it's released — including by `pipStart` handing the
+            // video to PiP — play reports must count as intent again.
+            if webEngineAutoplays, !wantsPlayback {
+                webStartupSettleDeadline = ContinuousClock.now + webStartupSettleWindow
+            }
+            // Held: the hold's pause is PiP-aware, so a video WebKit is
+            // handing to picture in picture as the app leaves isn't stopped.
+            if isHeld { pauseForHold() } else { pause() }
+        }
+    }
+
+    /// Every web state report, after `noteEngineReady` and before
+    /// `noteDidPlay`. A paused report following a suppressed startup play
+    /// means the startup pause has landed: from here every play report
+    /// counts as intent again.
+    func noteWebState(paused: Bool) {
+        if paused, isSettlingWebStartup, didSuppressStartupPlay {
+            webStartupSettleDeadline = nil
+        }
+    }
+
+    func beginHold(_ reason: PlaybackHoldReason) {
+        holds.insert(reason)
+        pauseForHold()
+    }
+
+    /// Pauses for the holds that are out. With a `.background` hold on the
+    /// web player the page pauses only if the video isn't in (or entering)
+    /// picture in picture: `isPictureInPictureActive` comes from the page's
+    /// async `pipStart` message and can lag the app leaving, and an
+    /// unconditional pause would stop the video WebKit is handing to PiP.
+    /// (`PlaybackCenter` drops the hold once `pipStart` arrives.)
+    func pauseForHold() {
+        guard avPlayer == nil, holds.contains(.background) else { return pause() }
+        // A loading web page gets it from `noteEngineReady`.
+        if isAwaitingWebEngine { return }
+        run("pauseUnlessPictureInPicture")
+    }
+
+    /// `resume`: this holder paused a stream that was playing (or about
+    /// to). It resumes only once nothing else holds the stream and the user
+    /// still wants it (`startsPlaying`); another hold still out keeps it
+    /// paused, and the last release decides (a hold taken over another
+    /// inherits its resume — see `PlaybackCenter.holdPlayback`). If the engine is still
+    /// loading there's nothing to resume yet — the load applies
+    /// `startsPlaying` itself.
+    func endHold(_ reason: PlaybackHoldReason, resume: Bool) {
+        holds.remove(reason)
+        if resume, startsPlaying { self.resume() }
+    }
+
+    /// Every hold lapses without resuming (the stream stopped or changed).
+    func endAllHolds() {
+        holds.removeAll()
+    }
 
     func pictureInPictureDidStart() {
         isPictureInPictureActive = true
@@ -129,7 +299,11 @@ final class StreamPlayerController {
     var isNative: Bool { avPlayer != nil }
 
     func reset() {
-        update(\.isPaused, to: false)
+        isAwaitingWebEngine = false
+        webStartupSettleDeadline = nil
+        // Until the new engine reports, show the intent its load applies,
+        // so the play/pause control matches what a tap flips (`togglePlay`).
+        update(\.isPaused, to: !wantsPlayback)
         update(\.isMuted, to: startsMuted)
         update(\.canPictureInPicture, to: false)
         update(\.isPictureInPictureActive, to: false)
@@ -151,17 +325,59 @@ final class StreamPlayerController {
         refreshAutomaticPictureInPicture()
     }
 
+    /// The user's play/pause control — records their intent
+    /// (`wantsPlayback`) as well as acting on it.
     func togglePlay() {
-        guard let player = avPlayer else { return run("togglePlay") }
-        if player.timeControlStatus == .paused {
-            // Live: resume at the live edge, not where we paused.
-            if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
-                player.seek(to: CMTimeRangeGetEnd(range))
+        guard let player = avPlayer else {
+            if isAwaitingWebEngine || webView == nil {
+                // An engine still loading: a web page not ready yet, or the
+                // native playlist still resolving (no AVPlayer, no page).
+                // Nothing reports state yet, so flip the intent and show
+                // it; the load applies it (`noteEngineReady`, or the native
+                // load's `startsPlaying` check).
+                wantsPlayback.toggle()
+                if wantsPlayback { webStartupSettleDeadline = nil }
+                update(\.isPaused, to: !wantsPlayback)
+                return
             }
-            player.play()
+            // Web, ready: the control showed "play" when the page reported
+            // paused, "pause" otherwise.
+            wantsPlayback = isPaused
+            if wantsPlayback { webStartupSettleDeadline = nil }
+            return run("togglePlay")
+        }
+        if player.timeControlStatus == .paused {
+            wantsPlayback = true
+            resume()
         } else {
+            // Includes `.waitingToPlayAtSpecifiedRate`: buffering before
+            // the first frame, which is still a pause the user asked for.
+            wantsPlayback = false
             player.pause()
         }
+    }
+
+    func pause() {
+        guard let player = avPlayer else {
+            // A loading web page gets it from `noteEngineReady`.
+            if isAwaitingWebEngine { return }
+            return run("pause")
+        }
+        player.pause()
+    }
+
+    func resume() {
+        guard let player = avPlayer else {
+            webStartupSettleDeadline = nil
+            // A loading web page gets it from `noteEngineReady`.
+            if isAwaitingWebEngine { return }
+            return run("play")
+        }
+        // Live: resume at the live edge, not where we paused.
+        if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+            player.seek(to: CMTimeRangeGetEnd(range))
+        }
+        player.play()
     }
 
     func toggleMute() {
@@ -380,7 +596,7 @@ enum NativePlayer {
                 .sink { [weak self] status in
                     guard let self else { return }
                     self.controller.update(\.isPaused, to: status == .paused)
-                    if status == .playing { self.controller.update(\.hasStarted, to: true) }
+                    if status == .playing { self.controller.noteDidPlay() }
                 }
                 .store(in: &subscriptions)
 
@@ -391,13 +607,14 @@ enum NativePlayer {
                 }
                 .store(in: &subscriptions)
 
-            if controller.holdsForBackground {
-                // The app left while the playlist resolved and this stream
-                // may not play in the background: stay paused until it comes
-                // back (`PlaybackLifecycleObserver` resumes at the live edge).
-                controller.update(\.isPaused, to: true)
-            } else {
+            // Held (a clip over the stream, or the app left without PiP
+            // while the playlist resolved): stay paused until the holder
+            // releases — `endHold(_:resume:)` starts it then. Paused by the
+            // user while the playlist loaded: leave it paused.
+            if controller.startsPlaying {
                 player.play()
+            } else {
+                controller.update(\.isPaused, to: true)
             }
         }
 

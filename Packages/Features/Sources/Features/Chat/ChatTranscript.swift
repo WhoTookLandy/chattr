@@ -38,6 +38,10 @@ struct ChatTranscript: View {
     /// change makes the list reconfigure rows already on screen — see
     /// `ChatRowInputs`.
     let rowInputs: ChatRowInputs
+    /// Link handler for the rows (clip links open in-app). Must be a STABLE
+    /// value (`ClipLinkRouter.openURLAction`): the list stores it once and
+    /// installs it in every hosted cell.
+    let openURL: OpenURLAction
     /// A message was tapped (opens the user card). Taps on links inside a
     /// message still go to the link.
     var onLineTapped: (ChatLine) -> Void = { _ in }
@@ -195,6 +199,7 @@ struct ChatTranscript: View {
                 snapshot: { chatModel.transcriptSnapshot() },
                 rowContent: { line in rowContent(line) },
                 rowInputs: rowInputs,
+                openURL: openURL,
                 isAtBottom: $isAtBottom,
                 // The controller owns the unread tally: it is the one holding
                 // messages back while the user reads scrollback, so it counts
@@ -247,6 +252,7 @@ struct ChatTranscript: View {
                     // row construction stay in one place (same as the UIKit
                     // collection-view cell provider above).
                     rowContent(line)
+                        .environment(\.openURL, openURL)
                         .id(line.id)
                 }
             }

@@ -30,6 +30,8 @@ struct SettingsDestinationView: View {
             ChatFiltersScreen()
         case .emotes:
             EmoteSettingsScreen()
+        case .landscape:
+            LandscapeSettingsScreen()
         case .blockedUsers:
             BlockedUsersScreen()
         case .storage:

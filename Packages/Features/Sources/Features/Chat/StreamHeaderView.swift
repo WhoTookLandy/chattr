@@ -46,6 +46,8 @@ struct StreamHeaderView: View {
     @Environment(\.chatTabs) private var chatTabs
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
+    /// Landscape: the video is on `LandscapeStreamStage`, not here.
+    @Environment(\.landscapeStage) private var landscapeStage
 
     @AppStorage(Self.expandedKey) private var isExpanded = false
     @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
@@ -134,6 +136,14 @@ struct StreamHeaderView: View {
         .onChange(of: isActive) { _, active in
             if active { wirePlayerCallbacks() }
         }
+        // Callback ownership follows `landscapeStage.isActive`: while the
+        // stage shows, it alone wires them (see `wirePlayerCallbacks`);
+        // when it goes (portrait, PiP, video hidden) the header takes them
+        // back.
+        .onChange(of: landscapeStage.isActive) { _, staged in
+            if !staged, isActive { wirePlayerCallbacks() }
+        }
+        .retainsPictureInPictureFlag(for: channel.channelId, in: playback)
         #endif
     }
 
@@ -166,7 +176,13 @@ struct StreamHeaderView: View {
         }
     }
 
+    /// Single owner: while the landscape stage shows, the stage owns the
+    /// player's tap / swipe callbacks and this (hidden) header must not
+    /// overwrite them — e.g. opening a chat already in landscape, or a
+    /// pre-mounted neighbour becoming the visible page, fires this header's
+    /// `onAppear` / `onChange(isActive)` alongside the stage's.
     private func wirePlayerCallbacks() {
+        guard !landscapeStage.isActive else { return }
         player.onTap = { toggleChrome() }
         // Swipe down on the video → picture in picture (keeps watching
         // while you scroll chat or leave the app). Without PiP support,
@@ -334,7 +350,9 @@ struct StreamHeaderView: View {
     @ViewBuilder
     private func playerEngine(audioOnly: Bool) -> some View {
         #if os(iOS)
-        if isActive, let playback, playback.isPlaying(channel.channelId) {
+        // Not while the landscape stage shows it — the stage's host owns
+        // the (same, re-parented) engine view then.
+        if isActive, !landscapeStage.isActive, let playback, playback.isPlaying(channel.channelId) {
             PlayerHost(center: playback)
         }
         #endif
@@ -440,10 +458,12 @@ struct StreamHeaderView: View {
         }
     }
 
-    /// This page's stream is the one in the PiP window.
+    /// This page's stream is the one in the PiP window. Per-channel flag
+    /// (`PlaybackCenter.pictureInPictureFlag(for:)`), so a PiP transition
+    /// re-renders only this channel's header, not every pre-mounted page's.
     private var isPictureInPictureActive: Bool {
         #if os(iOS)
-        player.isPictureInPictureActive && (playback?.isPlaying(channel.channelId) ?? false)
+        playback?.pictureInPictureFlag(for: channel.channelId).isActive ?? false
         #else
         false
         #endif

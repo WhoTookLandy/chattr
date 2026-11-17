@@ -20,7 +20,7 @@ enum TwitchWebPlayer {
     /// Builds the player web view for `login`. Owned by `WebStreamEngine`
     /// (and through it `PlaybackCenter`), so it survives leaving the chat.
     @MainActor
-    static func makeWebView(login: String, muted: Bool = false, coordinator: Coordinator) -> WKWebView {
+    static func makeWebView(login: String, autoplay: Bool, muted: Bool = false, coordinator: Coordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.allowsPictureInPictureMediaPlayback = true
@@ -46,7 +46,7 @@ enum TwitchWebPlayer {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
         webView.navigationDelegate = coordinator
-        webView.load(URLRequest(url: playerURL(login, muted: muted)))
+        webView.load(URLRequest(url: playerURL(login, autoplay: autoplay, muted: muted)))
         return webView
     }
 
@@ -66,12 +66,17 @@ enum TwitchWebPlayer {
 
     /// `parent` is required by Twitch's player; it's only enforced against
     /// framing ancestors, so any stable domain works for a top-level load.
-    static func playerURL(_ login: String, muted: Bool = false) -> URL {
+    /// `autoplay` is the controller's `startsPlaying` when the page is
+    /// built: a stream the user paused (or a hold keeps paused — a clip,
+    /// the app in the background) loads paused, so the page never plays
+    /// on its own against their intent. `muted` is the controller's
+    /// `startsMuted` (Wi-Fi autoplay, or a rebuild of a muted stream).
+    static func playerURL(_ login: String, autoplay: Bool, muted: Bool = false) -> URL {
         var components = URLComponents(string: "https://player.twitch.tv/")!
         components.queryItems = [
             URLQueryItem(name: "channel", value: login),
             URLQueryItem(name: "parent", value: "chattr.app"),
-            URLQueryItem(name: "autoplay", value: "true"),
+            URLQueryItem(name: "autoplay", value: autoplay ? "true" : "false"),
             URLQueryItem(name: "muted", value: muted ? "true" : "false"),
             URLQueryItem(name: "playsinline", value: "true"),
         ]
@@ -170,7 +175,12 @@ enum TwitchWebPlayer {
           var v = video(); if (!v || !v.webkitSetPresentationMode) return;
           v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture');
         },
-        pause: function () { var v = video(); if (v) { v.pause(); } }
+        pause: function () { var v = video(); if (v) { v.pause(); } },
+        // A background hold: leave a video that's in (or entering) PiP alone.
+        pauseUnlessPictureInPicture: function () {
+          var v = video(); if (v && v.webkitPresentationMode !== 'picture-in-picture') { v.pause(); }
+        },
+        play: function () { var v = video(); if (v) { v.play(); } }
       };
     })();
     """
@@ -180,6 +190,8 @@ enum TwitchWebPlayer {
     @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let controller: StreamPlayerController
+        /// The page has posted its first state (one coordinator per page).
+        private var didReportState = false
 
         init(controller: StreamPlayerController) {
             self.controller = controller
@@ -196,15 +208,25 @@ enum TwitchWebPlayer {
                 // `update` skips unchanged values: one changed field (say,
                 // `paused`) would otherwise re-notify all four, re-running
                 // every view that reads any of them.
-                controller.update(\.isPaused, to: body["paused"] as? Bool ?? false)
+                let paused = body["paused"] as? Bool ?? false
+                // Held (a clip over the stream, or the app left without
+                // PiP): the page's autoplay — the hold began after the page
+                // was built with `autoplay=true` — mustn't start the stream
+                // behind the clip or in the background.
+                if controller.isHeld, !paused { controller.pauseForHold() }
+                controller.update(\.isPaused, to: paused)
                 controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
-                if body["playing"] as? Bool == true { controller.update(\.hasStarted, to: true) }
-                // The <video> appeared after the app left and chose to pause
-                // (see `PlaybackLifecycleObserver`): pause it now.
-                if controller.holdsForBackground, body["paused"] as? Bool == false {
-                    _ = controller.pauseForBackground()
+                if !didReportState {
+                    didReportState = true
+                    controller.noteEngineReady(paused: paused)
                 }
+                controller.noteWebState(paused: paused)
+                // The page only autoplays when it was built meant to play
+                // (`startsPlaying`), so any play is the user's intent —
+                // except its startup autoplay after intent turned to paused
+                // while it loaded, which `noteDidPlay` undoes instead.
+                if body["playing"] as? Bool == true { controller.noteDidPlay() }
             case "pipStart":
                 controller.pictureInPictureDidStart()
             case "pipEnd":

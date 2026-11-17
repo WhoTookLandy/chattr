@@ -27,6 +27,11 @@ final class ChatListViewController: UIViewController {
 
     var rowContent: ((ChatLine) -> ChatRow)?
 
+    /// `openURL` for every hosted row (clip links open in-app). Set once by
+    /// the representable at creation and never replaced, so every cell sees
+    /// the same value and nothing reconfigures because of it.
+    var openURLAction = OpenURLAction { _ in .systemAction }
+
     /// UIKit → SwiftUI callback for tailing state (set by the representable).
     var onAtBottomChanged: ((Bool) -> Void)?
 
@@ -282,8 +287,13 @@ final class ChatListViewController: UIViewController {
             // `==` compares its badges and which callbacks are present
             // (`ChatRow.Affordances`), so a reconfigure that only adds
             // `onDelete` (mod status learned) re-renders like any other.
-            cell.contentConfiguration = UIHostingConfiguration { rowContent(line) }
-                .margins(.all, 0)   // ChatRow + section insets own the spacing
+            // Each hosting configuration is its own SwiftUI root and doesn't
+            // inherit the chat screen's `openURL`; hand it the stored one.
+            let openURL = self.openURLAction
+            cell.contentConfiguration = UIHostingConfiguration {
+                rowContent(line).environment(\.openURL, openURL)
+            }
+            .margins(.all, 0)   // ChatRow + section insets own the spacing
             cell.backgroundConfiguration = .clear()
         }
         dataSource = UICollectionViewDiffableDataSource<Section, String>(
