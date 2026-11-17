@@ -386,6 +386,10 @@ public final class FollowsStore {
     /// CancellationError is treated as benign and leaves state intact (view
     /// tear-down / `.task(id:)` re-fire).
     private func loadAll(account: Account, accountStore: AccountStore) async {
+        // A load cancelled before it started (an account switch got there
+        // first) must not run `prepare`: it would switch the store back to
+        // its stale account and wipe the newer one's state.
+        guard !Task.isCancelled else { return }
         prepare(forAccountUserId: account.userId)
 
         // Only the newest full load may commit. A load that outlived an
