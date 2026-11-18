@@ -14,8 +14,9 @@ import Accounts
 /// Polling only runs while this sheet is on screen and the app is in the
 /// foreground: appear / foreground → `activate`, disappear / background →
 /// `deactivate` (see `DeviceCodeSignInModel`).
-struct DeviceCodeSignInSheet: View {
-    let model: DeviceCodeSignInModel
+struct DeviceCodeSignInSheet<Signed>: View {
+    let model: DeviceCodeFlowModel<Signed>
+    var text: DeviceCodeSheetText = .chattrSignIn
 
     @Environment(\.openURL) private var openURL
     /// Bumped on every copy: drives the haptic and the "Copied" flash.
@@ -26,7 +27,7 @@ struct DeviceCodeSignInSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 28) {
-                    Text("Approve chattr on Twitch with this code.")
+                    Text(text.instructions)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -41,7 +42,7 @@ struct DeviceCodeSignInSheet: View {
                 .padding(.vertical, 16)
                 .frame(maxWidth: .infinity)
             }
-            .navigationTitle("Sign in with Twitch")
+            .navigationTitle(text.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -169,14 +170,14 @@ struct DeviceCodeSignInSheet: View {
             case .browserRequired:
                 // The device flow can't work for this client, so the
                 // browser flow becomes the primary action.
-                primaryButton("Continue in browser", systemImage: "safari") { model.useBrowserInstead() }
+                primaryButton(text.fallbackRequired, systemImage: "safari") { model.useBrowserInstead() }
             case .requestingCode, .waiting, .signingIn, .done:
                 primaryButton("Approve on Twitch", systemImage: "arrow.up.forward.app") { approveOnTwitch() }
                     .disabled(model.phase != .waiting || model.prompt == nil)
             }
 
             if !isBrowserRequired {
-                Button("Use browser instead") { model.useBrowserInstead() }
+                Button(text.fallback) { model.useBrowserInstead() }
                     .font(.callout)
                     .disabled(model.phase == .signingIn || model.phase == .done)
             }
@@ -220,4 +221,21 @@ struct DeviceCodeSignInSheet: View {
         copyCode()
         openURL(prompt.verificationURL)
     }
+}
+
+/// The words that differ between the sheet's uses.
+struct DeviceCodeSheetText {
+    var title: String
+    var instructions: String
+    /// The secondary "do it another way" button.
+    var fallback: String
+    /// The same, as the primary action once the code flow can't work.
+    var fallbackRequired: String
+
+    static let chattrSignIn = DeviceCodeSheetText(
+        title: "Sign in with Twitch",
+        instructions: "Approve chattr on Twitch with this code.",
+        fallback: "Use browser instead",
+        fallbackRequired: "Continue in browser"
+    )
 }

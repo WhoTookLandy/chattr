@@ -84,6 +84,7 @@ enum SettingsRegistry {
         SettingsEntry("landscapeChatOpacity", "Chat Background", keywords: ["landscape", "opacity", "transparency", "translucent", "overlay"], in: .videoAndDevice, to: .landscape),
         SettingsEntry("landscapeResetWidth", "Reset Chat Width", keywords: ["landscape", "divider", "resize", "chat width"], in: .videoAndDevice, to: .landscape),
         SettingsEntry("pipLeavingChat", "PiP When Leaving Chat", keywords: ["picture in picture", "mini player", "floating", "back", "resize", "drag"], in: .videoAndDevice),
+        SettingsEntry("twitchWebSession", "Twitch.tv Session", keywords: ["ads", "ad-free", "ad free", "adblock", "commercials", "turbo", "subscription", "subscriber", "sign in", "log in"], in: .videoAndDevice),
 
         SettingsEntry("keepScreenAwake", "Keep Screen Awake", keywords: ["sleep", "lock", "auto-lock", "idle", "display", "dim", "battery"], in: .videoAndDevice),
         SettingsEntry("haptics", "Haptic Feedback", keywords: ["vibration", "vibrate", "haptics", "taptic"], in: .videoAndDevice),

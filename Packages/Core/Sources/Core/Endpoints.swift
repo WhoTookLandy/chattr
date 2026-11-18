@@ -57,6 +57,10 @@ public enum Endpoints {
 
         /// POST the device_code (grant_type=device_code) to poll for tokens.
         public static let token = URL(string: "https://id.twitch.tv/oauth2/token")!
+
+        /// GET with `Authorization: OAuth <token>` → the token's login,
+        /// client ID and remaining lifetime.
+        public static let validate = URL(string: "https://id.twitch.tv/oauth2/validate")!
     }
 
     // MARK: - Twitch native emote CDN
