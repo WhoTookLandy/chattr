@@ -241,10 +241,13 @@ public struct AppShell: View {
             guard let intent else { return }
             pendingIntent = nil
             intentTask?.cancel()
+            // Read here, not in the task: the account row can be deleted
+            // before the task runs.
+            let accountUserId = account.userId
             intentTask = Task {
                 await navigation.handle(intent) { login in
                     let channel = try await ChannelLoginResolver.resolve(
-                        login: login, account: account, accountStore: accountStore
+                        login: login, accountUserId: accountUserId, accountStore: accountStore
                     )
                     // The lookup is a network round trip. If this shell went
                     // away meanwhile (account switch, sign-out), opening the

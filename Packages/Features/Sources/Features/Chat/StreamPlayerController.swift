@@ -374,7 +374,10 @@ final class StreamPlayerController {
     }
 
     func remotePause() {
-        if !isPaused { togglePlay() }
+        guard isPaused else { return togglePlay() }
+        // Already paused, but possibly by a hold rather than the user:
+        // record the intent, or releasing the hold would resume it.
+        if wantsPlayback { wantsPlayback = false }
     }
 
     func toggleMute() {

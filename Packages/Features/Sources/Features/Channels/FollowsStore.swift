@@ -519,6 +519,9 @@ public final class FollowsStore {
 
             repeat {
                 let page = try await dependencies.followedChannelsPage(userId, cursor)
+                // A load cancelled while the request was out must not go on
+                // to commit, even when the request itself succeeded.
+                try Task.checkCancellation()
                 // A swap to another account (via either load path) wiped the
                 // store mid-request, or a newer load took over; don't commit
                 // this page into it.
@@ -579,10 +582,11 @@ public final class FollowsStore {
             }
             logger.info("All-channels load cancelled — leaving existing data intact")
         } catch {
-            // Keep what we fetched visible (the footer offers Retry for the
-            // rest), matching the pre-throttle per-page-commit behavior.
+            // A first load keeps what it fetched visible (the footer offers
+            // Retry for the rest). A refresh never shows a partial result:
+            // the list it started with, cached or loaded, stays as it was.
             guard allLoadGeneration == generation else { return }
-            if accumulated.count > channels.count {
+            if commitsProgressively, accumulated.count > channels.count {
                 channels = accumulated
                 recomputeSortedAllChannels()
             }

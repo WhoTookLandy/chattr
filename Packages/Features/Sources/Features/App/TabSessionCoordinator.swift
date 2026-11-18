@@ -231,9 +231,20 @@ final class TabSessionCoordinator {
             ) else { continue }
             await session.unsubscribe(entry.token)
         }
+        // A watcher is installed exactly when an acquire succeeded, so these
+        // are the channels this tab holds a reference to.
+        let acquired = Set((watchTokens[tab.id] ?? []).map { $0.channelId })
         watchTokens[tab.id] = nil
         for channel in tab.channels {
-            await registry.release(accountUserId: accountUserId, channelId: channel.channelId)
+            if acquired.contains(channel.channelId) {
+                await registry.release(accountUserId: accountUserId, channelId: channel.channelId)
+            } else {
+                // Never acquired (the acquire failed or was cancelled). The
+                // registry's count is shared per channel, so a release here
+                // would take another tab's reference. Its chat page may
+                // still have built a session, which nothing else would end.
+                await registry.releaseUnowned(accountUserId: accountUserId, channelId: channel.channelId)
+            }
         }
     }
 

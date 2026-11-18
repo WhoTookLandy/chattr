@@ -269,7 +269,7 @@ struct TabSessionCoordinatorTests {
         #expect(shell.gate.requested == Array(TabSessionCoordinator.acquireRetryDelays.prefix(2)))
     }
 
-    @Test("Closing the tab ends its retries before the release")
+    @Test("Closing a tab whose acquire never succeeded ends its retries and releases no reference")
     func closingStopsRetries() async {
         let shell = makeShell()
         shell.registry.acquireFails = true
@@ -281,14 +281,17 @@ struct TabSessionCoordinatorTests {
         #expect(shell.registry.acquireAttempts == 2)
 
         shell.navigation.chatTabs.close(tabId: tabId)
-        // `onClose` cancels the retry and waits for it to end, then releases.
+        // `onClose` cancels the retry and waits for it to end. The tab
+        // never acquired the channel, so it has no reference to release (a
+        // `release` would take one from another tab on the same channel);
+        // it only discards a session nobody owns.
         await waitUntil { !shell.registry.log.isEmpty }
         shell.registry.acquireFails = false
         shell.gate.advance()
         await drain()
 
         #expect(shell.registry.acquireAttempts == 2)
-        #expect(shell.registry.log == ["release \(channel.channelId)"])
+        #expect(shell.registry.log == ["releaseUnowned \(channel.channelId)"])
         #expect(shell.coordinator.watcherCount(forTab: tabId) == 0)
     }
 

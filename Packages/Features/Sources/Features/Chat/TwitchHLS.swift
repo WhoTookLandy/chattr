@@ -53,6 +53,11 @@ enum TwitchHLS {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
+        // Refused outright: not worth asking again, unlike an answer that
+        // made no sense.
+        if let status = (response as? HTTPURLResponse)?.statusCode, status == 401 || status == 403 {
+            throw StreamPlaylistError.forbidden
+        }
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let fields = try JSONDecoder().decode(Response.self, from: data).data
         else { throw StreamPlaylistError.unavailable }

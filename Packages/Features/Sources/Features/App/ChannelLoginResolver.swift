@@ -12,13 +12,17 @@ enum ChannelLoginResolver {
 
     /// Throws what the Helix call throws (`HelixError.notFound` when no
     /// channel has that login).
+    ///
+    /// Takes the account's id rather than the `Account`: the lookup runs on
+    /// a task that can outlive the row, and a deleted `@Model` must not be
+    /// read.
     static func resolve(
         login: String,
-        account: Account,
+        accountUserId: String,
         accountStore: AccountStore
     ) async throws -> ChannelDescriptor {
-        let client = accountStore.client(for: account)
-        let user = try await accountStore.withTokenRefresh(for: account) { [login] in
+        let client = accountStore.client(forUserId: accountUserId)
+        let user = try await accountStore.withTokenRefresh(forUserId: accountUserId) { [login] in
             try await client.api.fetchUser(login: login)
         }
         return ChannelDescriptor(
