@@ -83,9 +83,15 @@ struct ChatPagerScreen: View {
     /// free-standing glass over the transcript instead of sitting on a bar.
     @Environment(\.chatAppearance) private var appearance
 
-    init(account: Account, accountStore: AccountStore) {
+    /// False when the pager is the detail column of the split Chats layout
+    /// (iPad, unfolded foldable): the open-chats list sits beside the chat,
+    /// so the tab bar stays reachable instead of the screen going immersive.
+    private let hidesTabBar: Bool
+
+    init(account: Account, accountStore: AccountStore, hidesTabBar: Bool = true) {
         self.account = account
         self.accountStore = accountStore
+        self.hidesTabBar = hidesTabBar
     }
 
     var body: some View {
@@ -125,7 +131,7 @@ struct ChatPagerScreen: View {
         // back chevron is the way out. (`.tabBar` visibility control is
         // iOS-only; macOS has no tab bar to hide.)
         #if os(iOS)
-        .toolbar(.hidden, for: .tabBar)
+        .toolbar(hidesTabBar ? .hidden : .automatic, for: .tabBar)
         // Audio-only / PiP controls, opposite the back button. Always
         // present (the control renders nothing when there's no condensed
         // stream) so the bar never gains or loses an item — see

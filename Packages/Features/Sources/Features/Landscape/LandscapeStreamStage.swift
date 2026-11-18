@@ -213,7 +213,7 @@ struct LandscapeStreamStage: View {
 
             VStack(spacing: 0) {
                 HStack(alignment: .top, spacing: 8) {
-                    glyphButton("chevron.left", label: "Back") { dismiss() }
+                    glyphButton("chevron.left", label: "Back") { leaveChat() }
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 5) {
                             Text(channel.channelDisplayName)
@@ -313,6 +313,17 @@ struct LandscapeStreamStage: View {
             .shadow(color: .black.opacity(0.55), radius: 3)
             .frame(width: 40, height: 40)
             .contentShape(Rectangle())
+    }
+
+    /// Back out of the chat. Clearing `isPresented` pops the pushed pager in
+    /// the stack layout and empties the detail column in the split layout,
+    /// where the pager is a column root and `dismiss()` has nothing to end.
+    private func leaveChat() {
+        if let chatTabs {
+            chatTabs.isPresented = false
+        } else {
+            dismiss()
+        }
     }
 
     private func glyphButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {

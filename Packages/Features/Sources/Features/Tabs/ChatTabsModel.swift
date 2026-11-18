@@ -126,10 +126,14 @@ public final class ChatTabsModel {
     /// Flags `tabId` as carrying an unseen mention. No-ops for the active
     /// tab (the user is looking at it) and for unknown ids (a stale watcher
     /// firing after its tab closed).
-    public func markMention(tabId: UUID) {
+    ///
+    /// `chatsTabSelected` is false while another app tab is showing. In the
+    /// split layout the tab bar stays visible with a chat presented, so
+    /// "presented and active" alone no longer means "on screen".
+    public func markMention(tabId: UUID, chatsTabSelected: Bool = true) {
         // Only skip the chat the user is actually looking at — the active
         // tab of a popped pager is off screen, so its pings still count.
-        guard !(isPresented && tabId == activeTabId),
+        guard !(chatsTabSelected && isPresented && tabId == activeTabId),
               !mentionedTabIds.contains(tabId),
               tabs.contains(where: { $0.id == tabId }) else { return }
         mentionedTabIds.insert(tabId)
@@ -140,6 +144,14 @@ public final class ChatTabsModel {
     /// body reads `mentionedTabIds` (the Chats tab badge) — so an unguarded
     /// remove re-ran the root `TabView` on every chat swipe, and an
     /// unguarded insert on every repeat ping in a background tab.
+    /// The presented chat came back on screen without `isPresented`
+    /// changing (returning to the Chats tab in the split layout): clear its
+    /// ping, as presenting it would have.
+    public func acknowledgePresentedMention() {
+        guard isPresented, let activeTabId else { return }
+        clearMention(activeTabId)
+    }
+
     private func clearMention(_ tabId: UUID) {
         guard mentionedTabIds.contains(tabId) else { return }
         mentionedTabIds.remove(tabId)
