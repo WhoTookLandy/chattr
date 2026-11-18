@@ -585,6 +585,8 @@ public struct ChatScreen: View {
             chatRestrictions: chatModel.chatRestrictions,
             // The state object, not its value: only the bar observes it.
             ownRestriction: chatModel.ownRestriction,
+            // Mods and the broadcaster skip slow mode: no countdown ring.
+            slowModeExempt: chatModel.currentUserCanModerate,
             // Seeded once at construction (see `draftSeed` / `init`), not
             // re-read here — the seed only matters at first mount thanks to
             // ComposeBar's own @State semantics, so reading it on every body

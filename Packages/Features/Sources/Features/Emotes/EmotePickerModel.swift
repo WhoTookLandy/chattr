@@ -6,7 +6,7 @@ import os
 /// A single emote as the picker renders it — unifying Twitch native
 /// emotes (`TwitchEmote`) and third-party emotes (`EmoteSources.Emote`)
 /// behind one shape so the grid doesn't care where each came from.
-public struct PickerEmote: Identifiable, Hashable, Sendable {
+public struct PickerEmote: Identifiable, Hashable, Sendable, Codable {
     /// Source-prefixed unique id (e.g. "7tv-01F…", "twitch-25") so ids
     /// don't collide across providers.
     public let id: String

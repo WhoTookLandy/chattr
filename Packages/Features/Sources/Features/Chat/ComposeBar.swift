@@ -19,8 +19,13 @@ import UIKit
 /// `onSend` is async so a second submit is ignored while one is in flight.
 ///
 /// Single-line input: Twitch chat has no newlines, so Return sends
-/// (`.submitLabel(.send)` + `.onSubmit`) and there is no send button. The
-/// pill holds the ⋯ menu, the field and the emote button.
+/// (`.submitLabel(.send)` + `.onSubmit`) and there is no send button.
+///
+/// Layout: a glass pill (field + emote button) with the ⋯ menu in its own
+/// glass circle on the right. Above it sits ONE context slot, so the bar
+/// is never more than two rows tall. In priority order it shows @mention
+/// suggestions, the reply quote card, or (while focused) your recent
+/// emotes. During a slow-mode wait a countdown ring joins the pill.
 struct ComposeBar: View {
     let channelLoginName: String
     let channelDisplayName: String
@@ -41,6 +46,9 @@ struct ComposeBar: View {
     /// Read only in this body, so a change re-renders the bar and nothing
     /// else. nil (previews, tests) = never restricted.
     let ownRestriction: OwnChatRestrictionState?
+    /// Moderators and the broadcaster skip slow mode, so they get no
+    /// countdown after sending.
+    let slowModeExempt: Bool
     /// Tapped on the chip's X — dismisses the reply attachment without
     /// sending. The parent (`ChatScreen`) calls `chatModel.cancelReply()`.
     let onCancelReply: () -> Void
@@ -96,6 +104,16 @@ struct ComposeBar: View {
     @State private var mentionPool: [MentionAutocomplete.Candidate]?
     @Environment(\.colorScheme) private var colorScheme
 
+    /// This channel's recently used emotes (newest first), loaded on
+    /// appear and updated as you insert emotes.
+    @State private var recentEmotes: [PickerEmote] = []
+    /// The slow-mode wait after your last send. nil when none is running.
+    @State private var cooldown: SlowModeCooldown?
+
+    /// Emotes the quick row shows. Seven plus the "all emotes" button fit
+    /// the narrowest iPhone, so the row hugs its content and never scrolls.
+    private static let recentRowCount = 7
+
     /// Custom init that seeds `composeText`'s @State with the persisted
     /// draft. SwiftUI's `@State` semantics ensure the seed value is
     /// only used at first mount for a given view identity — subsequent
@@ -109,6 +127,7 @@ struct ComposeBar: View {
         replyContext: ChatTranscriptModel.ReplyContext?,
         chatRestrictions: ChatRestrictions?,
         ownRestriction: OwnChatRestrictionState? = nil,
+        slowModeExempt: Bool = false,
         seedDraft: String,
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
@@ -126,6 +145,7 @@ struct ComposeBar: View {
         self.replyContext = replyContext
         self.chatRestrictions = chatRestrictions
         self.ownRestriction = ownRestriction
+        self.slowModeExempt = slowModeExempt
         self.onCancelReply = onCancelReply
         self.onDraftChange = onDraftChange
         self.emoteSectionsProvider = emoteSectionsProvider
@@ -135,50 +155,104 @@ struct ComposeBar: View {
     }
 
     var body: some View {
-        // Computed once per body: the strip, its visibility check and the
-        // animation value all read it, and each evaluation lowercases and
-        // scans the whole chatter pool.
-        let suggestions = mentionSuggestions
-        VStack(spacing: 6) {
-            // Active restrictions (followers-only, slow mode…) ride in the
-            // field's placeholder instead of a strip that cost a row.
+        // Computed once per body: the slot choice and its animation value
+        // both read it, and each evaluation lowercases and scans the whole
+        // chatter pool.
+        let slot = contextSlot(mentions: mentionSuggestions)
+        // One container for the slot and the bar so their glass shapes
+        // blend and morph as one surface family.
+        GlassEffectContainer(spacing: 8) {
+            VStack(spacing: 8) {
+                // Active restrictions (followers-only, slow mode…) ride in
+                // the field's placeholder instead of a strip that cost a row.
+                switch slot {
+                case .mentions(let suggestions):
+                    mentionStrip(suggestions)
+                case .reply(let reply):
+                    replyCard(reply)
+                case .recentEmotes:
+                    recentEmoteRow
+                case .none:
+                    EmptyView()
+                }
 
-            if let reply = replyContext {
-                replyChip(reply)
+                inputRow
             }
-
-            if !suggestions.isEmpty {
-                mentionStrip(suggestions)
-            }
-
-            inputRow
         }
         .padding(.horizontal)
         // Tight vertical padding — every point here is a point taken from
         // the transcript. The field's own internal padding plus the
         // safe-area gap below keep the bar comfortable at 4pt.
         .padding(.vertical, 4)
-        // Animate the chip's appearance/disappearance. We trigger on
-        // `replyContext != nil` (not the full context value) because
-        // we only want the animation on chip appear/disappear, NOT on
-        // mid-compose target switches (long-press another message to
-        // reply to it instead). The chip's content updates in place
-        // without an animation — which feels right for "I changed my
-        // mind about who to reply to."
-        //
-        // `ReplyContext` is fully `Equatable` (all stored fields are
-        // String), so we could use `value: replyContext` if we wanted
-        // the chip to animate when the target changes. Not chosen
-        // today — feels jumpier.
-        .animation(.snappy(duration: 0.2), value: replyContext != nil)
-        .animation(.snappy(duration: 0.2), value: suggestions.isEmpty)
+        // A soft fade of the chat surface behind the bar, so messages
+        // scrolling under the glass dim before they reach it and don't
+        // fight the draft for legibility. Never takes touches.
+        .background(alignment: .bottom) {
+            LinearGradient(
+                stops: [
+                    .init(color: Color.chatSurface.opacity(0), location: 0),
+                    .init(color: Color.chatSurface.opacity(0.55), location: 0.45),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .padding(.top, -12)
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
+        }
+        // Animate the slot switching between kinds only. Keyed on the
+        // kind, not the content, so changing your reply target mid-compose
+        // or narrowing the mention list updates in place without a jump.
+        .animation(.snappy(duration: 0.2), value: slot.kind)
+        .onAppear {
+            recentEmotes = RecentEmotes.load(channel: channelLoginName)
+        }
+        // Clear the countdown when it runs out, which also drops the ring.
+        .task(id: cooldown) {
+            guard let cooldown else { return }
+            try? await Task.sleep(for: .seconds(max(0, cooldown.endsAt.timeIntervalSinceNow)))
+            guard !Task.isCancelled else { return }
+            self.cooldown = nil
+        }
         // Emote picker. Stays open while you tap (so you can stack
         // several emotes); inserts each emote's name into the composer.
         .sheet(isPresented: $showingEmotePicker) {
-            EmotePickerView(sections: pickerSections) { name in
-                insertEmote(name)
+            EmotePickerView(sections: pickerSections) { emote in
+                insertEmote(emote)
             }
         }
+    }
+
+    // MARK: - Context slot
+
+    /// What the single row above the bar shows. Mentions win because
+    /// they're short-lived and need a tap; the reply card comes back as
+    /// soon as the mention is finished.
+    private enum ContextSlot {
+        case none
+        case mentions([MentionAutocomplete.Candidate])
+        case reply(ChatTranscriptModel.ReplyContext)
+        case recentEmotes
+
+        enum Kind: Equatable { case none, mentions, reply, recentEmotes }
+
+        var kind: Kind {
+            switch self {
+            case .none: .none
+            case .mentions: .mentions
+            case .reply: .reply
+            case .recentEmotes: .recentEmotes
+            }
+        }
+    }
+
+    private func contextSlot(mentions: [MentionAutocomplete.Candidate]) -> ContextSlot {
+        if !mentions.isEmpty { return .mentions(mentions) }
+        if let replyContext { return .reply(replyContext) }
+        // Recent emotes only while typing is possible: focused, not
+        // blocked, and there is something to show.
+        if focused, !isSendBlocked, !recentEmotes.isEmpty { return .recentEmotes }
+        return .none
     }
 
     /// Append a tapped emote's name to the draft, ensuring a single
@@ -186,8 +260,9 @@ struct ComposeBar: View {
     /// next token / emote doesn't fuse to it). Chat emotes are
     /// whitespace-delimited tokens, so the spacing is load-bearing —
     /// "KappaPride" is a different (or non-existent) emote vs
-    /// "Kappa Pride".
-    private func insertEmote(_ name: String) {
+    /// "Kappa Pride". Also moves it to the front of the recent row.
+    private func insertEmote(_ emote: PickerEmote) {
+        let name = emote.name
         if composeText.isEmpty || composeText.hasSuffix(" ") {
             composeText += "\(name) "
         } else {
@@ -196,6 +271,46 @@ struct ComposeBar: View {
         // onChange(of: composeText) fires from the mutation above, so
         // the draft persists automatically — no explicit onDraftChange
         // call needed here.
+        recentEmotes = RecentEmotes.record(emote, channel: channelLoginName)
+    }
+
+    /// Opens the full picker with a fresh snapshot of the sections.
+    private func openEmotePicker() {
+        pickerSections = emoteSectionsProvider()
+        showingEmotePicker = true
+    }
+
+    /// The quick-emote row: your recent emotes in this channel on one glass
+    /// strip, then a button for the full picker. Hugs its content.
+    private var recentEmoteRow: some View {
+        HStack(spacing: 2) {
+            ForEach(recentEmotes.prefix(Self.recentRowCount)) { emote in
+                Button {
+                    insertEmote(emote)
+                } label: {
+                    EmoteCell(emote: emote, size: 30)
+                        .frame(width: 38, height: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Insert \(emote.name)")
+            }
+            Button {
+                openEmotePicker()
+            } label: {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, height: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("All emotes")
+        }
+        .padding(4)
+        .glassEffect(.regular, in: .rect(cornerRadius: 16, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     /// Build a human-readable comma-joined label of the active
@@ -234,24 +349,24 @@ struct ComposeBar: View {
         return "\(minutes / (60 * 24))d"
     }
 
-    /// "Replying to @author: snippet" chip with an X button. Tinted
-    /// with the accent color at low opacity so it reads as informative,
-    /// not alarming. Uses `arrowshape.turn.up.left.fill` to mirror the
-    /// long-press menu icon — visual continuity between "I chose
-    /// Reply" and "I'm now in reply mode."
+    /// The reply quote card: who you're replying to and what they said, on
+    /// its own glass card in the context slot, with an X to cancel. Uses
+    /// `arrowshape.turn.up.left.fill` to mirror the long-press menu icon,
+    /// so "I chose Reply" and "I'm now replying" look connected.
     @ViewBuilder
-    private func replyChip(_ reply: ChatTranscriptModel.ReplyContext) -> some View {
-        HStack(spacing: 8) {
+    private func replyCard(_ reply: ChatTranscriptModel.ReplyContext) -> some View {
+        HStack(spacing: 10) {
             Image(systemName: "arrowshape.turn.up.left.fill")
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Color.accentColor)
-                .imageScale(.small)
+                .imageScale(.medium)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Replying to \(reply.parentAuthorDisplayName)")
-                    .font(.caption.weight(.semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
                 Text(reply.parentSnippet)
-                    .font(.caption2)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -263,26 +378,20 @@ struct ComposeBar: View {
                 Image(systemName: "xmark.circle.fill")
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.secondary)
-                    .imageScale(.medium)
+                    .font(.system(size: 22))
                     // Inner padding grows the tap target toward the 44pt HIG
-                    // minimum (the bare glyph was ~20pt); the negative outer
-                    // padding below cancels the layout growth so the chip
-                    // keeps its compact height. Net: bigger hit area, same
-                    // visual.
-                    .padding(12)
+                    // minimum; the negative outer padding below cancels the
+                    // layout growth so the card keeps its compact height.
+                    .padding(11)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .padding(-12)
+            .padding(-11)
             .accessibilityLabel("Cancel reply")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.accentColor.opacity(0.12))
-        )
-        // Subtle transition so the chip appearing isn't jarring.
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: .rect(cornerRadius: 16, style: .continuous))
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
@@ -326,27 +435,23 @@ struct ComposeBar: View {
         !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// The compose pill: a single glass surface holding the text field,
-    /// the always-present emote button, and the send button (which only
-    /// appears once there's a draft). One unified pill — not three
-    /// separate glass shapes — so the bar reads calm; the only filled
-    /// shape is the prominent send button, which carries the
-    /// call-to-action signal (axiom-design Liquid Glass guidance).
+    /// True while a slow-mode wait from your last send is still running.
+    private var isCoolingDown: Bool {
+        cooldown?.isActive(at: .now) ?? false
+    }
+
+    /// The bar: a glass pill holding the field, the emote button and (during
+    /// a slow-mode wait) the countdown ring, with the ⋯ menu in its own
+    /// glass circle on the right. No send button: Return sends. Both shapes
+    /// sit in the body's `GlassEffectContainer`, so they blend as one
+    /// surface family.
     @ViewBuilder
     private var inputRow: some View {
-        GlassEffectContainer(spacing: 6) {
-          // Pill + the ⋯ actions circle beside it (same container, so the
-          // two glass shapes blend as one surface family).
-          HStack(alignment: .bottom, spacing: 8) {
-            // `.bottom` alignment so the trailing buttons stay pinned to
-            // the bottom of the pill as the field grows multi-line, rather
-            // than floating to the vertical center of a tall field.
+        // `.bottom` alignment so the trailing controls stay pinned to the
+        // bottom of the pill as the field grows multi-line, rather than
+        // floating to the vertical center of a tall field.
+        HStack(alignment: .bottom, spacing: 8) {
             HStack(alignment: .bottom, spacing: 2) {
-                // ⋯ lives inside the pill now (leading), a quiet glyph like
-                // the emote button — one surface instead of a pill plus a
-                // floating circle.
-                moreMenu
-
                 // Single-line: Return sends (no send button). Chat messages
                 // are one line on Twitch anyway. The keyboard drops after a
                 // send so the chat gets the screen back (TestFlight feedback);
@@ -357,6 +462,15 @@ struct ComposeBar: View {
                     .focused($focused)
                     .submitLabel(.send)
                     .onSubmit {
+                        // Mid-cooldown Twitch would drop the message: keep
+                        // the draft and the keyboard, and buzz instead.
+                        if isCoolingDown {
+                            focused = true
+                            #if os(iOS)
+                            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                            #endif
+                            return
+                        }
                         Task { await sendDraft() }
                         focused = false
                     }
@@ -369,37 +483,25 @@ struct ComposeBar: View {
                         onDraftChange(newValue)
                         updateMentionPool(for: newValue)
                     }
-                    .padding(.leading, 2)
-                    .padding(.vertical, 9)
+                    .padding(.leading, 14)
+                    .padding(.vertical, 11)
                     // Twitch would drop the message anyway; the prompt
                     // says why. A timeout re-enables itself when it ends.
                     .disabled(isSendBlocked)
                     .accessibilityLabel("Message input")
                     .accessibilityHint("Type a chat message to send to \(channelDisplayName)")
 
-                // Emote-picker button — always present, pinned right.
-                // Borderless glyph (no glass circle of its own): it sits
-                // *on* the pill glass, keeping a single surface. Snapshots
-                // the sections (built on demand) and presents the grid.
+                // Emote-picker button — always present. Borderless glyph
+                // (no glass of its own): it sits *on* the pill glass.
                 Button {
-                    pickerSections = emoteSectionsProvider()
-                    showingEmotePicker = true
+                    openEmotePicker()
                 } label: {
                     Image(systemName: "face.smiling")
-                        // 28pt so the glyph's circle reads at the same
-                        // diameter as the send button's 30pt disc — the two
-                        // trailing controls match in size even though only
-                        // send is filled.
                         .font(.system(size: 20, weight: .regular))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.secondary)
-                        // Borderless grey glyph (no fill) — styled like the
-                        // mic icon in the Claude composer: a quiet control
-                        // sitting directly on the pill, leaving the orange
-                        // send circle as the only filled shape in the bar.
-                        // 44pt outer frame (Apple HIG minimum touch target;
-                        // this and send are the most-tapped controls in the
-                        // app) around the unchanged 30pt visual disc.
+                        // 44pt touch target (Apple HIG minimum) around the
+                        // 30pt visual glyph.
                         .frame(width: 30, height: 30)
                         .frame(width: 44, height: 44)
                         .contentShape(Circle())
@@ -407,16 +509,20 @@ struct ComposeBar: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Emotes")
 
+                if let cooldown {
+                    SlowModeRing(cooldown: cooldown)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
             }
-            // Trailing inset keeps the emote/send off the pill's right edge.
-            .padding(.trailing, 5)
-            // The pill's single glass surface. Fixed continuous radius
-            // (NOT a Capsule): a capsule's radius is always half its
-            // height, so once the field grows multi-line (lineLimit 1...5)
-            // the corners balloon into an over-rounded blob. A constant
-            // 24pt radius stays pill-ish at one line and tidy as it grows.
-            .glassEffect(.regular, in: .rect(cornerRadius: 24, style: .continuous))
-          }
+            // Trailing inset keeps the controls off the pill's right edge.
+            .padding(.trailing, 2)
+            .animation(.snappy(duration: 0.2), value: cooldown == nil)
+            // Fixed continuous radius (NOT a Capsule): a capsule's radius is
+            // always half its height, so if the field grows taller the
+            // corners balloon. 22pt reads as a pill at one line.
+            .glassEffect(.regular, in: .rect(cornerRadius: 22, style: .continuous))
+
+            moreMenu
         }
     }
 
@@ -512,18 +618,17 @@ struct ComposeBar: View {
                 }
             }
         } label: {
-            // ⋯ on a filled disc: the standard iOS "more" glyph, but on a
-            // button-shaped disc. A bare ⋯ read as decoration; a "+" read as
-            // "add/attach" rather than "more options" (TestFlight feedback).
+            // ⋯ in its own interactive glass circle beside the pill, the
+            // same height as the pill so the bar reads as one row. A "+"
+            // read as "add/attach" rather than "more options" (TestFlight
+            // feedback), so it stays the standard ellipsis.
             Image(systemName: "ellipsis")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 30, height: 30)
-                .background(Color.emoteButton, in: Circle())
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
+                .glassEffect(.regular.interactive(), in: Circle())
         }
-        .padding(.leading, 4)
         .accessibilityLabel("More options")
     }
 
@@ -589,6 +694,7 @@ struct ComposeBar: View {
             .trimmingCharacters(in: .whitespaces)
         guard !draft.isEmpty else { return }
         guard !isSending else { return }
+        guard !isCoolingDown else { return }
 
         isSending = true
         defer { isSending = false }
@@ -599,14 +705,50 @@ struct ComposeBar: View {
         composeText = ""
 
         await onSend(draft)
+
+        // Start the slow-mode wait from when the send went out.
+        if !slowModeExempt, let seconds = chatRestrictions?.slowModeSeconds, seconds > 0 {
+            cooldown = SlowModeCooldown(startedAt: .now, seconds: seconds)
+        }
+    }
+}
+
+/// The slow-mode countdown ring in the compose pill: a draining arc with
+/// the seconds left in the middle. Ticks on its own timeline so only the
+/// ring re-renders while it counts.
+private struct SlowModeRing: View {
+    let cooldown: SlowModeCooldown
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.2)) { context in
+            let fraction = cooldown.fractionRemaining(at: context.date)
+            let seconds = cooldown.remaining(at: context.date)
+            ZStack {
+                Circle()
+                    .stroke(.quaternary, lineWidth: 3)
+                Circle()
+                    .trim(from: 0, to: fraction)
+                    .stroke(Color.orange, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 0.2), value: fraction)
+                Text("\(seconds)")
+                    .font(.caption2.weight(.bold))
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+            }
+            .frame(width: 26, height: 26)
+            .frame(width: 36, height: 44)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Slow mode")
+            .accessibilityValue("\(seconds) seconds until you can send")
+        }
     }
 }
 
 #if DEBUG
 // Live design harness for the compose bar. Pinned to the bottom over the
 // chat surface so it reads like the real `.safeAreaBar` placement. The
-// TextField is interactive in the canvas — type to watch the orange send
-// button fade in next to the emote glyph.
+// TextField is interactive in the canvas; Return sends.
 #Preview("Compose bar – empty") {
     VStack(spacing: 0) {
         Spacer()

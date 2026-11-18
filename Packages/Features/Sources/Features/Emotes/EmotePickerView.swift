@@ -12,11 +12,11 @@ import NukeUI
 /// picker open, so the user can stack several emotes in one message —
 /// the standard emote-picker pattern (Discord/Slack). "Done" closes it.
 ///
-/// The selected name is appended via the `onSelect` callback; the
+/// The selected emote is handed to the `onSelect` callback; the
 /// compose bar owns the actual text mutation.
 struct EmotePickerView: View {
     let sections: [EmoteSection]
-    let onSelect: (String) -> Void
+    let onSelect: (PickerEmote) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
@@ -139,7 +139,7 @@ struct EmotePickerView: View {
                         LazyVGrid(columns: columns, spacing: 8) {
                             ForEach(section.emotes) { emote in
                                 Button {
-                                    onSelect(emote.name)
+                                    onSelect(emote)
                                 } label: {
                                     EmoteCell(emote: emote)
                                 }
@@ -170,16 +170,17 @@ struct EmotePickerView: View {
 /// Always a still. A grid of hundreds of cells would otherwise decode
 /// every animation it scrolled past — up to 120 frames each, at a larger
 /// size than chat uses — through the cache chat's visible emotes live in.
-private struct EmoteCell: View {
+struct EmoteCell: View {
     let emote: PickerEmote
+    var size: CGFloat = 40
 
     var body: some View {
         EmoteImageView(
             url: emote.imageURL,
             isAnimated: emote.isAnimated,
-            width: 40, height: 40,
+            width: size, height: size,
             accessibilityLabel: emote.name,
-            boxSize: CGSize(width: 40, height: 40),
+            boxSize: CGSize(width: size, height: size),
             animate: false
         ) { image in
             image
