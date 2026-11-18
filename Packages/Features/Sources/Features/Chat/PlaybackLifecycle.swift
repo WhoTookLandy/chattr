@@ -105,7 +105,7 @@ final class PlaybackLifecycleObserver: NSObject {
 
         // The native engine, loaded or still resolving its playlist (no
         // AVPlayer yet, so `controller.isNative` is still false).
-        if center.engine is NativeStreamEngine {
+        if center.engine?.kind == .native {
             // Audio-only: listening with the screen off is the point —
             // unless it's muted, then there's nothing to hear.
             if center.audioOnly, !controller.nativeFailed, !controller.isMuted { return }

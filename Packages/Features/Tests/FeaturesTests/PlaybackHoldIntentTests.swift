@@ -7,7 +7,8 @@ import Core
 /// (`PlaybackCenter.resumesOnRelease`). Driven through the controller's
 /// state and its user-facing `togglePlay` — with no engine attached
 /// (`avPlayer`/`webView` nil) the commands are no-ops, so only the intent
-/// bookkeeping runs.
+/// bookkeeping runs. Where a `PlaybackCenter` plays, its engine is a
+/// `FakeStreamEngine`: a native engine still resolving its playlist.
 @MainActor
 @Suite("Playback hold intent")
 struct PlaybackHoldIntentTests {
@@ -47,7 +48,7 @@ struct PlaybackHoldIntentTests {
 
     @Test("Native playlist still loading: pause then play updates the control and intent")
     func pauseThenPlayWhileNativeLoads() {
-        let center = PlaybackCenter()
+        let center = FakeStreamEngines().center()
         center.play(
             Self.channel, title: "x", profileImageURL: nil,
             native: true, audioOnly: false, quality: .auto
@@ -72,7 +73,7 @@ struct PlaybackHoldIntentTests {
 
     @Test("Clip, then background, then the clip released in the background: stays paused until the app returns")
     func clipReleasedWhileBackgroundedStaysPaused() {
-        let center = PlaybackCenter()
+        let center = FakeStreamEngines().center()
         center.play(
             Self.channel, title: "x", profileImageURL: nil,
             native: true, audioOnly: false, quality: .auto
@@ -105,7 +106,7 @@ struct PlaybackHoldIntentTests {
         // The page-side pause a background hold sends skips a video in PiP.
         #expect(TwitchWebPlayer.bridgeScript.contains("pauseUnlessPictureInPicture"))
 
-        let center = PlaybackCenter()
+        let center = FakeStreamEngines().center()
         center.play(
             Self.channel, title: "x", profileImageURL: nil,
             native: true, audioOnly: false, quality: .auto

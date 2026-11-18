@@ -96,7 +96,11 @@ struct LandscapeStageLayout: ViewModifier {
     /// comes back.
     private var isAudioOnlyActive: Bool {
         #if os(iOS)
-        audioOnly && PlayerSettings.isNativePlaybackEnabled && !(playback?.controller.nativeFailed ?? false)
+        StreamPlaybackPolicy.audioOnlyInEffect(
+            audioOnly: audioOnly,
+            nativePlaybackEnabled: PlayerSettings.isNativePlaybackEnabled,
+            nativeFailed: playback?.controller.nativeFailed ?? false
+        )
         #else
         false
         #endif

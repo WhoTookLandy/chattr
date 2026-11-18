@@ -53,7 +53,11 @@ enum CondensedStreamMode: Equatable {
         playback: PlaybackCenter?
     ) -> Self? {
         guard let channelId, isExpanded, isLive, let playback else { return nil }
-        if audioOnly, PlayerSettings.isNativePlaybackEnabled, !playback.controller.nativeFailed {
+        if StreamPlaybackPolicy.audioOnlyInEffect(
+            audioOnly: audioOnly,
+            nativePlaybackEnabled: PlayerSettings.isNativePlaybackEnabled,
+            nativeFailed: playback.controller.nativeFailed
+        ) {
             return .audioOnly
         }
         if playback.controller.isPictureInPictureActive, playback.isPlaying(channelId) {
