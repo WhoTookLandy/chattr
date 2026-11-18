@@ -19,7 +19,7 @@ private let logger = AppLogger.make("Features.ChatTabsModel")
 ///     which tabs exist). Pure SwiftUI state.
 ///
 /// Close-X behavior: removes the tab from `tabs` and fires the `onClose`
-/// callback. AppShell wires that callback to call
+/// callback. `TabSessionCoordinator` wires that callback to call
 /// `registry.release(accountUserId:channelId:)` for each channel in the tab.
 /// Sessions that are still referenced by other tabs survive (ref-count >
 /// 0 after the release); orphaned sessions are torn down. The user's
@@ -196,7 +196,8 @@ public final class ChatTabsModel {
     /// it closed, or the model was torn down, before the scheduled open got
     /// its turn, or no `onOpen` was wired. The tab holds no refcount then,
     /// but its mounted chat page may already have created the channel's
-    /// session; AppShell wires this to `registry.releaseUnowned(...)` so
+    /// session; `TabSessionCoordinator` wires this to the registry's
+    /// `releaseUnowned(...)` so
     /// that session doesn't outlive the tab.
     public var onDiscard: (@MainActor @Sendable (ChatTab) async -> Void)?
 

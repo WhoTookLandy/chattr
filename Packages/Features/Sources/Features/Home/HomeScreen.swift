@@ -27,18 +27,21 @@ public struct HomeScreen: View {
     @Environment(\.followsStore) private var followsStore
     @Environment(\.openChannel) private var openChannel
 
-    @State private var path: [HomeRoute] = []
+    /// The Home stack. Owned by AppNavigation, so a link can push Settings.
+    @Binding private var path: [HomeRoute]
 
     public init(
         account: Account,
         accountStore: AccountStore,
         clientId: String,
-        section: Binding<HomeSection>
+        section: Binding<HomeSection>,
+        path: Binding<[HomeRoute]>
     ) {
         self.account = account
         self.accountStore = accountStore
         self.clientId = clientId
         self._section = section
+        self._path = path
     }
 
     public var body: some View {
@@ -145,7 +148,7 @@ public struct HomeScreen: View {
 }
 
 /// Navigation routes Home can push.
-enum HomeRoute: Hashable {
+public enum HomeRoute: Hashable {
     case allFollows
     case profile
 }
