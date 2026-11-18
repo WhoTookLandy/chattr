@@ -318,6 +318,30 @@ struct TabSessionCoordinatorTests {
         #expect(!shell.registry.log.contains("releaseUnowned \(channel.channelId)"))
     }
 
+    @Test("Closing a tab whose acquire failed leaves another tab's reference to the same channel alone")
+    func failedTabDoesNotReleaseAnotherTabsReference() async {
+        let shell = makeShell()
+        let channel = makeChannel("one")
+        // Tab A's acquire fails; tab B's, for the same channel, succeeds.
+        shell.registry.failingAttempts = [1]
+        let tabA = ChatTab(channel: channel)
+        let tabB = ChatTab(channel: channel)
+        shell.navigation.chatTabs.open(tabA)
+        await waitUntil { shell.registry.acquireAttempts == 1 }
+        shell.navigation.chatTabs.open(tabB)
+        await waitUntil { shell.coordinator.watcherCount(forTab: tabB.id) == 1 }
+
+        shell.navigation.chatTabs.close(tabId: tabA.id)
+        await waitUntil { shell.registry.log.contains("releaseUnowned (channel.channelId)") }
+        await drain()
+
+        // The fake drops a session on `release`, as the registry does when
+        // the last reference goes: B's is still there, with its watcher.
+        #expect(!shell.registry.log.contains("release (channel.channelId)"))
+        #expect(shell.registry.sessions[channel.channelId] != nil)
+        #expect(shell.coordinator.watcherCount(forTab: tabB.id) == 1)
+    }
+
     // MARK: - Close and discard
 
     @Test("Closing a tab removes its watcher before releasing the session")
