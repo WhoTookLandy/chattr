@@ -332,12 +332,12 @@ struct TabSessionCoordinatorTests {
         await waitUntil { shell.coordinator.watcherCount(forTab: tabB.id) == 1 }
 
         shell.navigation.chatTabs.close(tabId: tabA.id)
-        await waitUntil { shell.registry.log.contains("releaseUnowned (channel.channelId)") }
+        await waitUntil { shell.registry.log.contains("releaseUnowned \(channel.channelId)") }
         await drain()
 
         // The fake drops a session on `release`, as the registry does when
         // the last reference goes: B's is still there, with its watcher.
-        #expect(!shell.registry.log.contains("release (channel.channelId)"))
+        #expect(!shell.registry.log.contains("release \(channel.channelId)"))
         #expect(shell.registry.sessions[channel.channelId] != nil)
         #expect(shell.coordinator.watcherCount(forTab: tabB.id) == 1)
     }
