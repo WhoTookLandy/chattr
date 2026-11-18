@@ -47,4 +47,9 @@ struct FollowsRosterCache: Sendable {
             version: Self.version
         )
     }
+
+    /// Drops the roster of an account that was removed.
+    func remove(forAccountUserId accountUserId: String) async {
+        await cache.remove(key: Self.key(forAccountUserId: accountUserId))
+    }
 }

@@ -100,6 +100,10 @@ public struct AppShell: View {
     /// when the shell goes away. Started and stopped below.
     @State private var tabSessions = TabSessionCoordinator()
 
+    /// The link being handled (see `pendingIntent`), so a shell that goes
+    /// away mid-lookup can call it off.
+    @State private var intentTask: Task<Void, Never>?
+
     /// A link's destination, handed down by `RootView` and taken (and
     /// cleared) here.
     @Binding private var pendingIntent: NavigationIntent?
@@ -236,11 +240,17 @@ public struct AppShell: View {
         .onChange(of: pendingIntent, initial: true) { _, intent in
             guard let intent else { return }
             pendingIntent = nil
-            Task {
+            intentTask?.cancel()
+            intentTask = Task {
                 await navigation.handle(intent) { login in
-                    try await ChannelLoginResolver.resolve(
+                    let channel = try await ChannelLoginResolver.resolve(
                         login: login, account: account, accountStore: accountStore
                     )
+                    // The lookup is a network round trip. If this shell went
+                    // away meanwhile (account switch, sign-out), opening the
+                    // channel would acquire a session nothing releases.
+                    try Task.checkCancellation()
+                    return channel
                 }
             }
         }
@@ -331,6 +341,7 @@ public struct AppShell: View {
         // took `userId` as a String back when it was started.
         .onDisappear {
             logger.notice("AppShell disappearing; tearing down chat tabs")
+            intentTask?.cancel()
             let releases = navigation.chatTabs.tearDown()
             tabSessions.stop(after: releases)
         }

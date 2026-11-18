@@ -301,17 +301,22 @@ public struct RootView: View {
         // and effectively run in parallel anyway.
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
+            // Resolved before suspending: `followsStore` is the store of
+            // whichever account is current when it is read, and after an
+            // account switch that is no longer this task's account.
+            let store = followsStore
             await accountStore.refreshTokensIfExpiringSoon(for: active)
             // The refresh is a network round trip. An account switch during
             // it cancels this task, and `refreshLive` (unlike
             // `loadAllIfNeeded`) would switch the store back to `active`.
             guard !Task.isCancelled else { return }
-            await followsStore.refreshLive(account: active, accountStore: accountStore)
+            await store.refreshLive(account: active, accountStore: accountStore)
         }
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
+            let store = followsStore
             await accountStore.refreshTokensIfExpiringSoon(for: active)
-            await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
+            await store.loadAllIfNeeded(account: active, accountStore: accountStore)
         }
         // Foregrounding: live status goes stale while backgrounded. Non-forced
         // — FollowsStore's staleness throttle skips it after a quick

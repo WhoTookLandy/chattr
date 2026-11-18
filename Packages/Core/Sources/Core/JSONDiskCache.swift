@@ -77,6 +77,11 @@ public actor JSONDiskCache {
         }
     }
 
+    /// Deletes the file for `key`, if there is one.
+    public func remove(key: String) {
+        try? FileManager.default.removeItem(at: fileURL(for: key))
+    }
+
     /// Deletes files in this subdirectory whose modification date is older than `maxAge`.
     public func sweep(maxAge: TimeInterval) {
         guard let urls = try? FileManager.default.contentsOfDirectory(
