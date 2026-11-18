@@ -58,6 +58,10 @@ extension ChannelSession {
 
     // MARK: - Subscriber API
 
+    /// The banner consumers currently subscribed. Read by tests (here and in
+    /// Features) to check that a consumer unsubscribed.
+    var liveEventSubscribers: [UUID: LiveEventsSubscription] { liveEvents.subscribers }
+
     /// Registers a banner consumer, primed with the current state (already
     /// rung — the first wakeup delivers it). Drain `wakeups` /
     /// `takeLatest()`; pass `token` to `unsubscribeLiveEvents(_:)` when done.

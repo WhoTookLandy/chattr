@@ -19,7 +19,7 @@ struct LiveEventsHub {
     private(set) var state = LiveEventsState()
 
     /// Latest-value mailboxes of the banner consumers.
-    private var subscribers: [UUID: LiveEventsSubscription] = [:]
+    private(set) var subscribers: [UUID: LiveEventsSubscription] = [:]
 
     /// Whether this is the signed-in account's own channel: Twitch
     /// authorizes the live-event topics and reads for the broadcaster's
