@@ -180,6 +180,19 @@ struct PlaybackCenterPolicyTests {
         #expect(center.engine is NativeStreamEngine)
         #expect(center.engine?.kind == .native)
         #expect(!center.controller.isNative)
+        // What `FakeStreamEngine` stands in for, checked on the real one
+        // (as `pauseThenPlayWhileNativeLoads` did before it moved to the
+        // fake): still resolving, it reports no page and no pause, and a
+        // tap flips intent and the control.
+        let controller = center.controller
+        #expect(!controller.isAwaitingWebEngine)
+        #expect(!controller.isPaused)
+        controller.togglePlay()
+        #expect(!controller.wantsPlayback)
+        #expect(controller.isPaused)
+        controller.togglePlay()
+        #expect(controller.wantsPlayback)
+        #expect(!controller.isPaused)
     }
 
     @Test("A stream paused by a hold isn't unloaded")

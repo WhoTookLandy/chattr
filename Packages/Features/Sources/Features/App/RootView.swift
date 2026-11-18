@@ -301,22 +301,17 @@ public struct RootView: View {
         // and effectively run in parallel anyway.
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
-            // Captured before any suspension: `followsStore` resolves
-            // against whichever account is active when it is read, and this
-            // task belongs to `active`.
-            let store = followsStore
             await accountStore.refreshTokensIfExpiringSoon(for: active)
             // The refresh is a network round trip. An account switch during
             // it cancels this task, and `refreshLive` (unlike
             // `loadAllIfNeeded`) would switch the store back to `active`.
             guard !Task.isCancelled else { return }
-            await store.refreshLive(account: active, accountStore: accountStore)
+            await followsStore.refreshLive(account: active, accountStore: accountStore)
         }
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
-            let store = followsStore
             await accountStore.refreshTokensIfExpiringSoon(for: active)
-            await store.loadAllIfNeeded(account: active, accountStore: accountStore)
+            await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
         }
         // Foregrounding: live status goes stale while backgrounded. Non-forced
         // — FollowsStore's staleness throttle skips it after a quick
@@ -343,14 +338,13 @@ public struct RootView: View {
             }
             guard let active = activeAccount else { return }
             let activeUserId = active.userId
-            let store = followsStore
             Task {
                 await accountStore.refreshTokensIfExpiringSoon(for: active)
                 // Same hazard as the launch task above, without a task to
                 // cancel: don't hand the store an account that was switched
                 // away from during the refresh.
                 guard activeAccount?.userId == activeUserId else { return }
-                await store.refreshLive(account: active, accountStore: accountStore)
+                await followsStore.refreshLive(account: active, accountStore: accountStore)
             }
         }
         // Create the active account's BlockStore (loads its persisted cache in

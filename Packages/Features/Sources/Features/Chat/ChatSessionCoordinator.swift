@@ -140,8 +140,11 @@ final class ChatSessionCoordinator {
     private func attachSession(_ link: Link) async -> Int {
         // Clear any prior failure so a retry (button or compose-bar
         // self-heal) actually dismisses the error view; a repeat failure
-        // re-sets it below.
-        errorMessage = nil
+        // re-sets it below. Only when there is one: as `@State` on the
+        // screen, writing nil over nil invalidated nothing, and an observed
+        // property may notify on every write — which would re-run
+        // `ChatScreen.body` on each mount's start.
+        if errorMessage != nil { errorMessage = nil }
         // Badge load runs in a sibling .task modifier (see `ChatScreen.body`)
         // — gives us structured-cancellation parity with this session-start
         // task.
