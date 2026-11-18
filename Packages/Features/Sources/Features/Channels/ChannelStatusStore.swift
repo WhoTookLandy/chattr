@@ -67,7 +67,7 @@ public final class ChannelStatusStore {
     /// Pending last-live lookups (see `LastLiveLookupQueue`), and who they
     /// run as — the most recent requester.
     @ObservationIgnored private var lastLiveQueue = LastLiveLookupQueue()
-    @ObservationIgnored private var lastLiveRequester: (accountUserId: String, accountStore: AccountStore)?
+    @ObservationIgnored private var lastLiveRequester: (accountUserId: String, dependencies: Dependencies)?
 
     public init() {}
 
@@ -145,7 +145,23 @@ public final class ChannelStatusStore {
         includeLastLive: Bool = true,
         force: Bool = false
     ) async {
-        let now = Date()
+        await refresh(
+            channelIds: channelIds,
+            accountUserId: account.userId,
+            dependencies: .live(accountStore: accountStore),
+            includeLastLive: includeLastLive,
+            force: force
+        )
+    }
+
+    func refresh(
+        channelIds: [String],
+        accountUserId: String,
+        dependencies: Dependencies,
+        includeLastLive: Bool = true,
+        force: Bool = false
+    ) async {
+        let now = dependencies.now()
         let due = Array(Set(channelIds)).filter { id in
             if let claim = inFlight[id], !claim.isCancelled { return false }
             guard !force, let status = statuses[id] else { return true }
@@ -163,7 +179,7 @@ public final class ChannelStatusStore {
         // the cancelled request finally unwinds.
         await withTaskCancellationHandler {
             await fetchStatuses(
-                for: due, account: account, accountStore: accountStore, includeLastLive: includeLastLive
+                for: due, accountUserId: accountUserId, dependencies: dependencies, includeLastLive: includeLastLive
             )
         } onCancel: {
             claim.cancel()
@@ -172,30 +188,25 @@ public final class ChannelStatusStore {
 
     private func fetchStatuses(
         for due: [String],
-        account: Account,
-        accountStore: AccountStore,
+        accountUserId: String,
+        dependencies: Dependencies,
         includeLastLive: Bool
     ) async {
-        let client = accountStore.client(for: account)
         do {
             for batch in due.chunked(into: 100) {
-                let page = try await accountStore.withTokenRefresh(for: account) {
-                    try await client.api.fetchStreamsPage(userIDs: batch, first: 100)
-                }
+                let page = try await dependencies.streamsPage(accountUserId, batch)
                 try Task.checkCancellation()
                 let live = Dictionary(page.data.map { ($0.userId, $0) }, uniquingKeysWith: { a, _ in a })
                 let offline = batch.filter { live[$0] == nil }
 
                 var infos: [String: TwitchChannel] = [:]
                 if !offline.isEmpty {
-                    let channels = try await accountStore.withTokenRefresh(for: account) {
-                        try await client.api.fetchChannelsInfo(forBroadcasterIDs: offline)
-                    }
+                    let channels = try await dependencies.channelsInfo(accountUserId, offline)
                     try Task.checkCancellation()
                     infos = Dictionary(channels.map { ($0.broadcasterId, $0) }, uniquingKeysWith: { a, _ in a })
                 }
 
-                let fetchedAt = Date()
+                let fetchedAt = dependencies.now()
                 var updated = statuses
                 for id in batch {
                     var status = updated[id] ?? Status(stream: nil, channelInfo: nil, lastLiveAt: nil, fetchedAt: fetchedAt)
@@ -210,7 +221,7 @@ public final class ChannelStatusStore {
                     // Queued, not awaited: each lookup is an independent
                     // `/videos` call, and the statuses above shouldn't wait
                     // on them.
-                    requestLastLive(offline, accountUserId: account.userId, accountStore: accountStore)
+                    requestLastLive(offline, accountUserId: accountUserId, dependencies: dependencies)
                 }
             }
         } catch is CancellationError {
@@ -228,15 +239,23 @@ public final class ChannelStatusStore {
     /// while the channel is known to be live, and for 30 minutes after a
     /// lookup that succeeded.
     public func ensureLastLive(channelId: String, account: Account, accountStore: AccountStore) {
+        ensureLastLive(
+            channelId: channelId,
+            accountUserId: account.userId,
+            dependencies: .live(accountStore: accountStore)
+        )
+    }
+
+    func ensureLastLive(channelId: String, accountUserId: String, dependencies: Dependencies) {
         guard statuses[channelId]?.isLive != true else { return }
-        requestLastLive([channelId], accountUserId: account.userId, accountStore: accountStore)
+        requestLastLive([channelId], accountUserId: accountUserId, dependencies: dependencies)
     }
 
     /// Queues a last-live lookup for each of `channelIds` that isn't fresh,
     /// already waiting or already running.
-    private func requestLastLive(_ channelIds: [String], accountUserId: String, accountStore: AccountStore) {
-        lastLiveRequester = (accountUserId: accountUserId, accountStore: accountStore)
-        let now = Date()
+    private func requestLastLive(_ channelIds: [String], accountUserId: String, dependencies: Dependencies) {
+        lastLiveRequester = (accountUserId: accountUserId, dependencies: dependencies)
+        let now = dependencies.now()
         for id in channelIds {
             if let last = lastLiveFetchedAt[id],
                now.timeIntervalSince(last) < Self.lastLiveStaleness { continue }
@@ -255,13 +274,13 @@ public final class ChannelStatusStore {
                 await self?.lookUpLastLive(
                     channelId: channelId,
                     accountUserId: requester.accountUserId,
-                    accountStore: requester.accountStore
+                    dependencies: requester.dependencies
                 )
             }
         }
     }
 
-    private func lookUpLastLive(channelId: String, accountUserId: String, accountStore: AccountStore) async {
+    private func lookUpLastLive(channelId: String, accountUserId: String, dependencies: Dependencies) async {
         defer {
             lastLiveQueue.finish(channelId)
             startLastLiveLookups()
@@ -269,11 +288,8 @@ public final class ChannelStatusStore {
         // It may have gone live while it waited.
         guard statuses[channelId]?.isLive != true else { return }
         do {
-            let client = accountStore.client(forUserId: accountUserId)
-            let page = try await accountStore.withTokenRefresh(forUserId: accountUserId) {
-                try await client.api.fetchVideosPage(userID: channelId, type: "archive", first: 1)
-            }
-            lastLiveFetchedAt[channelId] = Date()
+            let page = try await dependencies.latestArchivePage(accountUserId, channelId)
+            lastLiveFetchedAt[channelId] = dependencies.now()
             guard let video = page.data.first else { return }
             let end = video.createdAt.addingTimeInterval(Self.seconds(inTwitchDuration: video.duration))
             if statuses[channelId] != nil {
