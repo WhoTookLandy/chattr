@@ -21,6 +21,8 @@ private final class FakeTabSessionRegistry: TabSessionRegistry {
 
     var log: [String] = []
     var acquireFails = false
+    /// Attempt numbers (1-based) that fail even when `acquireFails` is off.
+    var failingAttempts: Set<Int> = []
     private(set) var acquireAttempts = 0
     private(set) var sessions: [String: ChannelSession] = [:]
 
@@ -35,7 +37,7 @@ private final class FakeTabSessionRegistry: TabSessionRegistry {
         channelLoginName: String
     ) async throws -> ChannelSession {
         acquireAttempts += 1
-        if acquireFails { throw AcquireFailure() }
+        if acquireFails || failingAttempts.contains(acquireAttempts) { throw AcquireFailure() }
         log.append("acquire \(channelId)")
         if let existing = sessions[channelId] { return existing }
         let session = ChannelSession(
@@ -293,6 +295,27 @@ struct TabSessionCoordinatorTests {
         #expect(shell.registry.acquireAttempts == 2)
         #expect(shell.registry.log == ["releaseUnowned \(channel.channelId)"])
         #expect(shell.coordinator.watcherCount(forTab: tabId) == 0)
+    }
+
+    @Test("A tab listing a channel twice releases it once per acquire that succeeded")
+    func duplicateChannelReleasesOncePerAcquire() async {
+        let shell = makeShell()
+        let channel = makeChannel("one")
+        // The first acquire fails; the second, for the same channel, succeeds.
+        shell.registry.failingAttempts = [1]
+        let tab = ChatTab(channels: [channel, channel])
+        shell.navigation.chatTabs.open(tab)
+        await waitUntil { shell.coordinator.watcherCount(forTab: tab.id) == 1 }
+
+        shell.navigation.chatTabs.close(tabId: tab.id)
+        await waitUntil { shell.registry.log.contains("release \(channel.channelId)") }
+        await drain()
+
+        // One reference was taken, so one is given back: a second release
+        // would take it from another tab on the same channel.
+        let releases = shell.registry.log.filter { $0 == "release \(channel.channelId)" }
+        #expect(releases.count == 1)
+        #expect(!shell.registry.log.contains("releaseUnowned \(channel.channelId)"))
     }
 
     // MARK: - Close and discard

@@ -231,20 +231,22 @@ final class TabSessionCoordinator {
             ) else { continue }
             await session.unsubscribe(entry.token)
         }
-        // A watcher is installed exactly when an acquire succeeded, so these
-        // are the channels this tab holds a reference to.
-        let acquired = Set((watchTokens[tab.id] ?? []).map { $0.channelId })
-        watchTokens[tab.id] = nil
-        for channel in tab.channels {
-            if acquired.contains(channel.channelId) {
-                await registry.release(accountUserId: accountUserId, channelId: channel.channelId)
-            } else {
-                // Never acquired (the acquire failed or was cancelled). The
-                // registry's count is shared per channel, so a release here
-                // would take another tab's reference. Its chat page may
-                // still have built a session, which nothing else would end.
-                await registry.releaseUnowned(accountUserId: accountUserId, channelId: channel.channelId)
-            }
+        // A watcher is installed exactly when an acquire succeeded, so each
+        // entry is one reference this tab holds: one release per entry. The
+        // registry's count is shared per channel, so releasing a channel the
+        // tab never acquired (or one more time than it did) would take
+        // another tab's reference.
+        let acquired = watchTokens.removeValue(forKey: tab.id) ?? []
+        for entry in acquired {
+            await registry.release(accountUserId: accountUserId, channelId: entry.channelId)
+        }
+        // A channel with no successful acquire may still have a session its
+        // chat page built, which nothing else would end.
+        let acquiredIds = Set(acquired.map { $0.channelId })
+        var discarded: Set<String> = []
+        for channel in tab.channels where !acquiredIds.contains(channel.channelId) {
+            guard discarded.insert(channel.channelId).inserted else { continue }
+            await registry.releaseUnowned(accountUserId: accountUserId, channelId: channel.channelId)
         }
     }
 

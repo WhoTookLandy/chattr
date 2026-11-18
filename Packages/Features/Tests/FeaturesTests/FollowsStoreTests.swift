@@ -265,6 +265,33 @@ struct FollowsStoreTests {
         #expect(store.allLoadProgress == 2)
     }
 
+    @Test("A refresh cancelled while a page request is out does not commit that page when it answers")
+    func cancelledRefreshIgnoresLateSuccess() async throws {
+        let fakes = FollowsFakes()
+        try fakes.script(channels: ["c1", "c2"], for: "a")
+        let store = FollowsStore()
+        await store.loadAllIfNeeded(accountUserId: "a", dependencies: fakes.dependencies())
+        let requestsBefore = fakes.snapshot().channelRequests.count
+
+        let gated = fakes.dependencies(gating: [.channelPage])
+        let refresh = Task { await store.refreshAll(accountUserId: "a", dependencies: gated) }
+        await fakes.channelPages.entries(1)
+        refresh.cancel()
+        // The request was already out and answers anyway, with more to come.
+        fakes.channelPages.resume(.success(try FollowsFixtures.channelPage(["c9"], next: "more")))
+        await refresh.value
+
+        #expect(store.channels.map(\.broadcasterId) == ["c1", "c2"])
+        #expect(store.allLoadState == .loaded)
+        #expect(store.allErrorMessage == nil)
+        // No second page was asked for, and the cancelled result was not saved.
+        #expect(fakes.snapshot().channelRequests.count == requestsBefore + 1)
+        let savedLateResult = fakes.snapshot().rosterSaves.contains { saved in
+            saved.roster.channels.contains { $0.broadcasterId == "c9" }
+        }
+        #expect(!savedLateResult)
+    }
+
     @Test("A failed live refresh keeps the previous streams; a cancelled one also keeps the load state")
     func failedOrCancelledLiveRefreshKeepsStreams() async throws {
         let fakes = FollowsFakes()
