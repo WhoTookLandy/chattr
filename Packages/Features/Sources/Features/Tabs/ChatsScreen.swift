@@ -3,7 +3,9 @@ import Accounts
 import DesignSystem
 
 /// The Chats tab: open chats (`OpenChatsList`), Live first. Tapping one
-/// pushes the full-screen `ChatPagerScreen` (tab bar hidden).
+/// pushes the full-screen `ChatPagerScreen` (tab bar hidden) — or, on a
+/// screen with room for both (iPad, unfolded foldable iPhone), shows it
+/// beside the list in a `NavigationSplitView`.
 ///
 /// The push is driven by `ChatTabsModel.isPresented` — never by
 /// `activeTabId` (see its doc for the back-button freeze that caused).
@@ -39,20 +41,92 @@ struct ChatsScreen: View {
         let inForeground: Bool
     }
 
-    var body: some View {
+    /// Split layout (open chats beside the chat) when the tab has room for
+    /// both: iPad and an unfolded foldable iPhone. Decided from the space the
+    /// tab actually gets rather than size classes — an unfolded foldable
+    /// doesn't reliably report regular/regular the way an iPad does, so a
+    /// size-class gate left it on the phone layout. Folding / unfolding flips
+    /// this live; the open chat carries across because both layouts present
+    /// from `isPresented`.
+    @State private var usesSplitLayout = false
+
+    /// Room for a ~320pt list plus a chat column at least as wide as a phone.
+    private static let splitMinWidth: CGFloat = 700
+    /// Keeps a Plus/Max iPhone in landscape (~930 × ~400pt) on the
+    /// full-width chat and its landscape stream stage.
+    private static let splitMinHeight: CGFloat = 500
+
+    private static func fitsSplit(_ size: CGSize) -> Bool {
+        size.width >= splitMinWidth && size.height >= splitMinHeight
+    }
+
+    /// Compact (iPhone, folded): Messages-style list that pushes the
+    /// full-screen pager.
+    private var stackLayout: some View {
         NavigationStack {
-            OpenChatsList(onShowLive: { navigation.showLive() })
-                .refreshable {
-                    await channelStatus?.refresh(
-                        channelIds: openChannelIds, account: account, accountStore: accountStore, force: true
-                    )
-                }
-                .background(Color.chatSurface.ignoresSafeArea())
-                .navigationTitle("Chats")
-                .toolbar { editMenu }
+            chatsList(highlightsActiveChat: false)
                 .navigationDestination(isPresented: chatIsPresented) {
                     ChatPagerScreen(account: account, accountStore: accountStore)
                 }
+        }
+    }
+
+    /// Roomy (iPad, unfolded): open chats in the sidebar, the pager as the
+    /// detail. `isPresented` keeps meaning "a chat is on screen" — a row tap
+    /// sets it, and with none chosen the detail shows a placeholder — so
+    /// mention clearing, keep-awake, the mini player and resume-last-chat
+    /// behave exactly as in the stack layout.
+    private var splitLayout: some View {
+        NavigationSplitView {
+            chatsList(highlightsActiveChat: true)
+                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 400)
+        } detail: {
+            ChatSplitDetail(account: account, accountStore: accountStore, chatTabs: chatTabs)
+        }
+        .navigationSplitViewStyle(.balanced)
+        #if os(iOS)
+        // NavigationSplitView collapses into a single stack whenever the
+        // horizontal size class is compact — which an unfolded foldable can
+        // report even with tablet-sized room. We only get here once the
+        // measured size fits both columns, so keep it expanded.
+        .environment(\.horizontalSizeClass, .regular)
+        #endif
+    }
+
+    private func chatsList(highlightsActiveChat: Bool) -> some View {
+        OpenChatsList(onShowLive: { navigation.showLive() }, highlightsActiveChat: highlightsActiveChat)
+            .refreshable {
+                await channelStatus?.refresh(
+                    channelIds: openChannelIds, account: account, accountStore: accountStore, force: true
+                )
+            }
+            .background(Color.chatSurface.ignoresSafeArea())
+            .navigationTitle("Chats")
+            .toolbar { editMenu }
+    }
+
+    var body: some View {
+        Group {
+            if usesSplitLayout {
+                splitLayout
+            } else {
+                stackLayout
+            }
+        }
+        // `action` only runs when the Bool flips, so resizes within one
+        // layout (rotation on iPad, Stage Manager drags) don't rebuild it.
+        // Measured on a backdrop that ignores the keyboard: typing in the
+        // chat shrinks the tab's height, which must not flip the layout and
+        // remount the chat mid-message.
+        .background {
+            Color.clear
+                .onGeometryChange(for: Bool.self) { proxy in
+                    Self.fitsSplit(proxy.size)
+                } action: { fits in
+                    usesSplitLayout = fits
+                }
+                .ignoresSafeArea(.keyboard)
+                .allowsHitTesting(false)
         }
         .task(id: StatusPollKey(channelIds: openChannelIds, inForeground: scenePhase != .background)) {
             // Not while backgrounded: background audio and PiP keep the app
@@ -124,5 +198,34 @@ struct ChatsScreen: View {
                 chatTabs?.isPresented = presented
             }
         )
+    }
+}
+
+/// The split layout's detail column: the pager while a chat is presented,
+/// otherwise a placeholder. Its own view so the `activeTabId` /
+/// `isPresented` reads invalidate only this column — not `ChatsScreen`,
+/// whose body also builds the sidebar list.
+private struct ChatSplitDetail: View {
+    let account: Account
+    let accountStore: AccountStore
+    let chatTabs: ChatTabsModel?
+
+    private var showsChat: Bool {
+        guard let chatTabs else { return false }
+        return chatTabs.isPresented && chatTabs.activeTabId != nil && !chatTabs.tabs.isEmpty
+    }
+
+    var body: some View {
+        if showsChat {
+            ChatPagerScreen(account: account, accountStore: accountStore, hidesTabBar: false)
+        } else {
+            ContentUnavailableView {
+                Label("No chat selected", systemImage: "bubble.left.and.bubble.right")
+            } description: {
+                Text("Pick a chat from the list.")
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.chatSurface.ignoresSafeArea())
+        }
     }
 }

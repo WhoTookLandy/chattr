@@ -12,6 +12,9 @@ import DesignSystem
 struct OpenChatsList: View {
     /// The empty state's CTA — switches to Home → Live.
     let onShowLive: () -> Void
+    /// Split layout: the chat sits beside this list, so the row on screen
+    /// is marked as selected.
+    var highlightsActiveChat: Bool = false
 
     @Environment(\.chatTabs) private var chatTabs
     @Environment(\.channelStatus) private var channelStatus
@@ -59,7 +62,9 @@ struct OpenChatsList: View {
                 OpenChatRow(tab: tab, chatTabs: chatTabs)
             }
             .buttonStyle(.plain)
-            .listRowBackground(Color.clear)
+            .listRowBackground(
+                ActiveChatRowHighlight(tabId: tab.id, chatTabs: chatTabs, isEnabled: highlightsActiveChat)
+            )
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 Button(role: .destructive) {
                     chatTabs.close(tabId: tab.id)
@@ -94,5 +99,24 @@ struct OpenChatsList: View {
             }
         }
         return (live.sorted { $0.1 > $1.1 }.map(\.0), offline)
+    }
+}
+
+/// Selection background for a row in the split layout's sidebar. Its own
+/// view so that `activeTabId` (which changes on every pager swipe) is read
+/// here, invalidating one row background instead of the whole list.
+private struct ActiveChatRowHighlight: View {
+    let tabId: UUID
+    let chatTabs: ChatTabsModel
+    /// Off in the stack layout: the row stays clear, and `activeTabId` is
+    /// never read, so pager swipes don't touch the list at all.
+    let isEnabled: Bool
+
+    var body: some View {
+        let isActive = isEnabled && chatTabs.isPresented && chatTabs.activeTabId == tabId
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
     }
 }
