@@ -39,9 +39,13 @@ private let logger = AppLogger.make("Features.DeviceCodeSignInModel")
 /// that was merely *paused* (backgrounded) while its approved response was
 /// in flight may still claim: the device code is spent, that token is the
 /// only way to finish, and nothing else owns the sign-in yet.
+///
+/// Generic over what a sign-in produces (`Signed`): an `Account` for
+/// chattr sign-in (`DeviceCodeSignInModel`), a playback session for
+/// ad-free video (`TwitchPlaybackSignInSheet`).
 @MainActor
 @Observable
-final class DeviceCodeSignInModel {
+final class DeviceCodeFlowModel<Signed> {
 
     enum Phase: Equatable {
         /// Asking Twitch for a code.
@@ -65,7 +69,7 @@ final class DeviceCodeSignInModel {
 
     /// How the sheet ended, reported once to the presenter.
     enum Outcome {
-        case signedIn(Account)
+        case signedIn(Signed)
         case useBrowser
         case cancelled
     }
@@ -75,7 +79,7 @@ final class DeviceCodeSignInModel {
     struct Dependencies {
         var requestCode: @Sendable () async throws -> DeviceCodePrompt
         var waitForApproval: @Sendable (DeviceCodePrompt, DeviceCodePollSchedule) async throws -> OAuthToken
-        var addAccount: @MainActor (OAuthToken) async throws -> Account
+        var addAccount: @MainActor (OAuthToken) async throws -> Signed
         var now: @Sendable () -> Date = { Date() }
     }
 
@@ -104,22 +108,6 @@ final class DeviceCodeSignInModel {
     init(dependencies: Dependencies, onFinish: @escaping (Outcome) -> Void) {
         self.dependencies = dependencies
         self.onFinish = onFinish
-    }
-
-    convenience init(accountStore: AccountStore, clientId: String, onFinish: @escaping (Outcome) -> Void) {
-        let grant = TwitchSignIn.deviceCodeGrant(clientId: clientId)
-        self.init(
-            dependencies: Dependencies(
-                requestCode: { try await grant.start() },
-                waitForApproval: { prompt, schedule in
-                    try await grant.waitForApproval(prompt, schedule: schedule)
-                },
-                addAccount: { token in
-                    try await TwitchSignIn.completeDeviceCodeSignIn(token: token, accountStore: accountStore)
-                }
-            ),
-            onFinish: onFinish
-        )
     }
 
     private var isFinished: Bool { onFinish == nil }
@@ -347,4 +335,25 @@ final class DeviceCodeSignInModel {
     /// The most recent run's task, so tests can wait for a run (including
     /// a stale one) to wind down deterministically.
     var currentWorkForTesting: Task<Void, Never>? { work }
+}
+
+/// The chattr sign-in flavour: approving adds an account.
+typealias DeviceCodeSignInModel = DeviceCodeFlowModel<Account>
+
+extension DeviceCodeFlowModel where Signed == Account {
+    convenience init(accountStore: AccountStore, clientId: String, onFinish: @escaping (Outcome) -> Void) {
+        let grant = TwitchSignIn.deviceCodeGrant(clientId: clientId)
+        self.init(
+            dependencies: Dependencies(
+                requestCode: { try await grant.start() },
+                waitForApproval: { prompt, schedule in
+                    try await grant.waitForApproval(prompt, schedule: schedule)
+                },
+                addAccount: { token in
+                    try await TwitchSignIn.completeDeviceCodeSignIn(token: token, accountStore: accountStore)
+                }
+            ),
+            onFinish: onFinish
+        )
+    }
 }

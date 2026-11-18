@@ -1,6 +1,7 @@
 #if os(iOS)
 import Foundation
 import Core
+import Accounts
 
 /// Resolves a channel's live HLS playlist the way twitch.tv's own web
 /// player does: a playback access token from Twitch's GQL endpoint (public
@@ -11,15 +12,60 @@ import Core
 /// player when it keeps failing, and can be switched off altogether
 /// (`PlayerSettings.isNativePlaybackEnabled`). The native engine reaches it
 /// only through `StreamPlaylistResolving`.
+///
+/// Signed in for ad-free playback (`TwitchPlaybackSession`, or a twitch.tv
+/// website session, `TwitchWebSession`), the token is asked for as that
+/// viewer, so their subscriptions and Turbo apply and ads don't play where
+/// those cover them. Otherwise, or if Twitch won't take the session, it's
+/// asked for logged out.
 enum TwitchHLS {
+    /// Who a playback token is asked for as: a token and the client it was
+    /// issued to, which GQL wants to match.
+    struct Auth: Equatable, Sendable {
+        let token: String
+        let clientId: String
+    }
+
     /// The resolver the native engine uses unless it's handed another.
     struct Resolver: StreamPlaylistResolving {
+        /// Read per playlist, so signing in or out applies to the next
+        /// stream. nil: logged out.
+        var auth: @Sendable () async -> Auth? = { await TwitchHLS.currentAuth() }
+        /// A renewed `Auth` after Twitch rejected one, or nil.
+        var renewAuth: @Sendable (Auth) async -> Auth? = { await TwitchHLS.renewedAuth(after: $0) }
+
         func playlist(login: String, audioOnly: Bool) async throws -> StreamPlaylist {
-            try await TwitchHLS.playlist(login: login, audioOnly: audioOnly)
+            try await TwitchHLS.playlist(login: login, audioOnly: audioOnly, auth: await auth(), renewAuth: renewAuth)
         }
     }
 
-    private static let webClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+    static let webClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+
+    /// The ad-free session to play as: the device-code sign-in first, then
+    /// a twitch.tv website session from the sign-in page fallback.
+    static func currentAuth() async -> Auth? {
+        // A Keychain read: kept off the main actor.
+        let session = await Task.detached(priority: .userInitiated) { TwitchPlaybackSession.current() }.value
+        if let session {
+            return Auth(token: session.accessToken, clientId: session.clientId)
+        }
+        if let web = await TwitchWebSession.current() {
+            return Auth(token: web.token, clientId: webClientID)
+        }
+        return nil
+    }
+
+    /// Only the device-code session can be renewed; a website session
+    /// that's been rejected needs signing in again.
+    static func renewedAuth(after rejected: Auth) async -> Auth? {
+        guard rejected.clientId == TwitchPlaybackSession.clientId,
+              let renewed = await TwitchPlaybackSession.refresh(rejected: rejected.token)
+        else { return nil }
+        return Auth(token: renewed.accessToken, clientId: renewed.clientId)
+    }
+
+    /// GQL said the attached token itself is no good (HTTP 401).
+    private struct AuthRejected: Error {}
 
     private static let query = """
     query PlaybackAccessToken($login: String!) {
@@ -41,29 +87,33 @@ enum TwitchHLS {
         let data: DataField?
     }
 
-    static func playlist(login: String, audioOnly: Bool = false) async throws -> StreamPlaylist {
+    /// The playback access token request for `login`, as `auth` when
+    /// there is one, otherwise logged out under the web client.
+    static func tokenRequest(login: String, auth: Auth?) throws -> URLRequest {
         var request = URLRequest(url: Endpoints.TwitchPlayer.playbackAccessToken)
         request.httpMethod = "POST"
-        request.setValue(webClientID, forHTTPHeaderField: "Client-ID")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let auth, !auth.token.isEmpty {
+            request.setValue(auth.clientId, forHTTPHeaderField: "Client-ID")
+            request.setValue("OAuth \(auth.token)", forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue(webClientID, forHTTPHeaderField: "Client-ID")
+        }
         let body: [String: Any] = [
             "query": query,
             "variables": ["login": login],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        // Refused outright: not worth asking again, unlike an answer that
-        // made no sense.
-        if let status = (response as? HTTPURLResponse)?.statusCode, status == 401 || status == 403 {
-            throw StreamPlaylistError.forbidden
-        }
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let fields = try JSONDecoder().decode(Response.self, from: data).data
-        else { throw StreamPlaylistError.unavailable }
-        // Answered, but with no token: a channel that doesn't exist, or
-        // one Twitch won't play for this client.
-        guard let token = fields.streamPlaybackAccessToken else { throw StreamPlaylistError.forbidden }
+    static func playlist(
+        login: String,
+        audioOnly: Bool = false,
+        auth: Auth? = nil,
+        renewAuth: @Sendable (Auth) async -> Auth? = { _ in nil }
+    ) async throws -> StreamPlaylist {
+        let token = try await accessToken(login: login, auth: auth, renewAuth: renewAuth)
 
         guard let playlistURL = Endpoints.TwitchPlayer.livePlaylist(login: login),
               var components = URLComponents(url: playlistURL, resolvingAgainstBaseURL: false)
@@ -87,6 +137,50 @@ enum TwitchHLS {
             return StreamPlaylist(url: variant, isAudioOnlyRendition: true)
         }
         return StreamPlaylist(url: url, isAudioOnlyRendition: false)
+    }
+
+    /// As `auth`; renewed once if Twitch rejects it; failing that, logged
+    /// out, so a stale session costs ad-free playback, not the stream.
+    /// Signing in again in Settings brings ad-free back.
+    private static func accessToken(
+        login: String,
+        auth: Auth?,
+        renewAuth: @Sendable (Auth) async -> Auth?
+    ) async throws -> (value: String, signature: String) {
+        guard let auth else { return try await requestToken(login: login, auth: nil) }
+        do {
+            return try await requestToken(login: login, auth: auth)
+        } catch is AuthRejected {
+            if let renewed = await renewAuth(auth),
+               let token = try? await requestToken(login: login, auth: renewed) {
+                return token
+            }
+            return try await requestToken(login: login, auth: nil)
+        } catch is StreamPlaylistError {
+            // Twitch answered the session with no token (it may not take
+            // this client's tokens at all): play logged out instead.
+            return try await requestToken(login: login, auth: nil)
+        }
+    }
+
+    private static func requestToken(login: String, auth: Auth?) async throws -> (value: String, signature: String) {
+        let request = try tokenRequest(login: login, auth: auth)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if auth != nil, (response as? HTTPURLResponse)?.statusCode == 401 {
+            throw AuthRejected()
+        }
+        // Refused outright: not worth asking again, unlike an answer that
+        // made no sense.
+        if let status = (response as? HTTPURLResponse)?.statusCode, status == 401 || status == 403 {
+            throw StreamPlaylistError.forbidden
+        }
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let fields = try JSONDecoder().decode(Response.self, from: data).data
+        else { throw StreamPlaylistError.unavailable }
+        // Answered, but with no token: a channel that doesn't exist, or
+        // one Twitch won't play for this client.
+        guard let token = fields.streamPlaybackAccessToken else { throw StreamPlaylistError.forbidden }
+        return (token.value, token.signature)
     }
 
     /// nil when the master playlist lists no audio-only variant, or

@@ -91,6 +91,10 @@ struct VideoDeviceSettingsScreen: View {
                 Text("Autoplay starts the stream muted, and only on Wi-Fi; on cellular the video stays closed. Picture in picture opens automatically with the native player; with \"With Sound On\", a muted or paused stream pauses when you leave instead.\n\nThe native player relies on an unofficial Twitch interface; if it can't load a stream, chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video.")
             }
 
+            #if os(iOS)
+            TwitchWebSessionSection()
+            #endif
+
             Section {
                 NavigationLink {
                     LandscapeSettingsScreen()

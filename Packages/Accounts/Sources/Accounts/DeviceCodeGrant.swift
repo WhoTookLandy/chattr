@@ -182,7 +182,9 @@ public struct DeviceCodeGrant: Sendable {
         self.init(clientId: clientId, rawScopes: scopes.map(\.rawValue), session: session)
     }
 
-    init(
+    /// Raw scope strings, for a client whose scopes `TwitchScope` doesn't
+    /// name (`TwitchPlaybackSession`).
+    public init(
         clientId: String,
         rawScopes: [String],
         deviceEndpoint: URL = Endpoints.TwitchID.device,
