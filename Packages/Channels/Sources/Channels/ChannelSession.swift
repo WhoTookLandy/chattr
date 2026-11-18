@@ -44,7 +44,8 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 ///
 /// The actor composes focused helpers — `ChannelUpdateHub` (ring + buffering
 /// window + subscriber fan-out), `ChannelUpdateNormalizer`,
-/// `ChatRestrictionsCache`, `EventSubTopics`, `HelixChatActions` — and keeps
+/// `ChatRestrictionsCache`, `JoinBackfillWait`, `ReconnectResyncState`,
+/// `LiveEventsHub`, `EventSubTopics`, `HelixChatActions` — and keeps
 /// every piece of mutable state here, in its own isolation domain. Its
 /// methods are split across sibling files by concern:
 ///
@@ -136,11 +137,6 @@ public actor ChannelSession {
     /// socket: the retry task connects before it subscribes again.
     var needsEventSubConnect = false
 
-    /// Set when `rebind(to:)` couldn't subscribe chat on the new client:
-    /// where that gap began. The retry that subscribes it resyncs from here
-    /// (the rebind's own resync ran before chat was back).
-    var chatGapFloor: Date?
-
     /// Send / delete / chat-settings / chat-colour Helix calls. See
     /// `HelixChatActions`.
     ///
@@ -169,25 +165,19 @@ public actor ChannelSession {
 
     // Join backfill state — see `ChannelSession+History.swift`.
 
-    /// Where the join-time history fetch stands. See `JoinBackfill`.
-    var joinBackfill: JoinBackfill = .idle
-    var joinBackfillDeadline: ContinuousClock.Instant?
+    /// Where the join-time history fetch stands, and its deadline. See
+    /// `JoinBackfillWait`.
+    var joinBackfill = JoinBackfillWait()
     var joinBackfillFetch: Task<Void, Never>?
     var joinBackfillTimer: Task<Void, Never>?
     /// `start()`, parked in `finishJoinBackfill` until the history lands or
     /// the deadline passes — whichever wakes it first.
     var joinBackfillWaiter: CheckedContinuation<Void, Never>?
 
-    /// True while a reconnect gap-fill is in flight. Set synchronously at the
-    /// top of `resyncAfterReconnect` (before its first await) so back-to-back
-    /// `.connected` transitions — flapping network, registry resyncing every
-    /// session for the account — never run two rustlog fetches at once.
-    var resyncInFlight = false
-
-    /// A resync was requested while one was in flight: its floor (see
-    /// `resyncAfterReconnect`), kept so exactly one more fetch runs when the
-    /// current one finishes. Coalesces any number of requests.
-    var resyncFollowUpFloor: Date?
+    /// The reconnect gap-fill's bookkeeping: the one fetch in flight, the
+    /// one queued behind it, and the gap a `rebind(to:)` left open when it
+    /// couldn't subscribe chat. See `ReconnectResyncState`.
+    var resync = ReconnectResyncState()
 
     /// When the newest live event arrived (session construction until the
     /// first one). The reconnect gap-fill takes nothing sent before it: older
@@ -202,49 +192,16 @@ public actor ChannelSession {
     /// re-promotion after an unmod/revocation can re-subscribe.
     private var moderationEventsEnabled = false
 
-    // Live events (polls / predictions / Hype Train) — see
-    // `ChannelSession+LiveEvents.swift`.
+    /// Live events (polls / predictions / Hype Train): their reduced state,
+    /// the banner consumers' mailboxes, the foreground gate and the Helix
+    /// reconcile's bookkeeping. They never touch the ring. See
+    /// `LiveEventsHub`; the session drives it from
+    /// `ChannelSession+LiveEvents.swift`.
+    var liveEvents: LiveEventsHub
 
-    /// Current live events, reduced off-main from EventSub + Helix reconciles.
-    var liveEvents = LiveEventsState()
-    /// Latest-value mailboxes of the banner consumers.
-    var liveEventSubscribers: [UUID: LiveEventsSubscription] = [:]
-    /// The non-blocking live-topic subscribe + Helix seed kicked off by
-    /// `start()` on the account's own channel. Cancelled by `stop()`.
-    var liveEventsTask: Task<Void, Never>?
-    /// The periodic Helix check (`liveEventsVerifyInterval`). At most one
-    /// per session, and it exists ONLY while an event is unfinished, the app
-    /// is in the foreground and the session is running — see
-    /// `updateLiveEventsVerification()`. A quiet channel, or a backgrounded
-    /// app (background audio / PiP), has no task and makes no requests.
-    var liveEventsVerifyTask: Task<Void, Never>?
-    /// The registry's shared foreground flag (`AppForegroundSignal`). While
-    /// the app is in the background no live-event Helix request starts:
-    /// EventSub updates still reduce (no network), and coming back
-    /// reconciles once (`appForegroundDidChange()`).
-    let appForeground: AppForegroundSignal
-    /// The foreground transition (`AppForegroundSignal.State.generation`)
-    /// this session last acted on. A repeated or out-of-order nudge is a
-    /// no-op, but a transition the session hasn't seen is never lost — even
-    /// when both nudges of a background → foreground flip arrive after the
-    /// flag is already back to the value the session last acted on.
-    var lastSeenAppForegroundGeneration: UInt64
-    var isAppInForeground: Bool { appForeground.isInForeground }
-    /// The one Helix reconcile pass in flight, if any (start, reconnect,
-    /// foreground and the periodic check can overlap; they never stack).
-    /// Only the pass clears it, when it exits, so non-nil ⇔ a pass is
-    /// running. Backgrounding and `stop()` cancel it.
-    var liveEventsReconcileTask: Task<Void, Never>?
-    /// A reconcile was requested while a pass was in flight: when that pass
-    /// exits (finished or cancelled), one more runs in a fresh task if the
-    /// session can still reconcile. Coalesces any number of requests.
-    var liveEventsReconcilePending = false
-    /// Set first thing in `stop()`. A live-topic subscribe that lands after
-    /// it deletes its own subscription instead of recording it.
+    /// Set first thing in `stop()`. A topic subscribe that lands after it
+    /// deletes its own subscription instead of recording it.
     var isStopped = false
-    /// The poll whose deadline we already asked Helix for (EventSub's poll
-    /// payload in TwitchKit carries no `ends_at`). One fetch per poll.
-    var pollDeadlineRequestedFor: String?
 
     public init(
         client: TwitchClient,
@@ -263,8 +220,10 @@ public actor ChannelSession {
         joinBackfillTimeout: Duration = .seconds(3),
         appForeground: AppForegroundSignal = AppForegroundSignal()
     ) {
-        self.appForeground = appForeground
-        self.lastSeenAppForegroundGeneration = appForeground.state.generation
+        self.liveEvents = LiveEventsHub(
+            isOwnChannel: channelId == accountUserId,
+            appForeground: appForeground
+        )
         self.client = client
         self.channelId = channelId
         self.channelLoginName = channelLoginName
@@ -370,9 +329,7 @@ public actor ChannelSession {
         if channelId == accountUserId {
             // The seed's reconcile arms the periodic Helix check only if it
             // finds something unfinished (`updateLiveEventsVerification`).
-            liveEventsTask = Task { [weak self] in
-                await self?.startLiveEvents()
-            }
+            beginLiveEvents()
         }
 
         // NOTE: We deliberately do NOT iterate `client.eventSub.events` here.
@@ -492,9 +449,8 @@ public actor ChannelSession {
         }
         var remaining = await subscribeTopics(wanted)
         guard !isStopped else { return [] }
-        if let floor = chatGapFloor, !remaining.contains(.chat) {
+        if let floor = resync.takeChatGapFloor(chatSubscribed: !remaining.contains(.chat)) {
             // Chat is subscribed again: fill what was broadcast meanwhile.
-            chatGapFloor = nil
             await resyncAfterReconnect(droppedAt: floor)
             guard !isStopped else { return [] }
         }
@@ -563,11 +519,10 @@ public actor ChannelSession {
         logger.info("Stopping session for #\(self.channelLoginName, privacy: .public)")
         isStopped = true
 
-        liveEventsTask?.cancel()
-        liveEventsTask = nil
-        liveEventsReconcileTask?.cancel()   // the pass clears its own handle
-        updateLiveEventsVerification()   // isStopped: cancels the check
-        finishLiveEventSubscribers()
+        // Same actor turn as the flag above: the live-event startup, the
+        // reconcile pass in flight and the periodic check are cancelled,
+        // and the banner consumers' streams end.
+        liveEvents.stop()
 
         topicRetryTask?.cancel()
         topicRetryTask = nil
@@ -582,7 +537,7 @@ public actor ChannelSession {
         // the registry discards a session stopped mid-start).
         joinBackfillFetch?.cancel()
         joinBackfillFetch = nil
-        joinBackfill = .done   // a fetch that completes anyway is not merged
+        joinBackfill.stop()   // a fetch that completes anyway is not merged
         wakeJoinBackfillWaiter()
 
         // End every subscriber's stream up front: nothing posted from here on

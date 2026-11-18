@@ -10,6 +10,19 @@ extension ChannelSession {
 
     // MARK: - Backfill merge
 
+    /// Commits the backfill merge to the ring, ends the buffering window and
+    /// settles the join wait, whatever state it was in.
+    ///
+    /// Internal (not private) so ChannelsTests can end the buffering window on
+    /// a never-`start()`ed session and drive `resyncAfterReconnect` offline —
+    /// same visibility relaxation as `translate(event:...)`. Production
+    /// commits through `finishJoinBackfill`, which lets `JoinBackfillWait`
+    /// decide the outcome first.
+    func applyBackfill(_ backfill: [BackfillMessage]) {
+        joinBackfill.markApplied()
+        commitJoinBackfill(backfill)
+    }
+
     /// Commits the backfill merge to the ring and ends the buffering window.
     ///
     /// MUST stay synchronous (no `await`): the actor holds its isolation for
@@ -18,13 +31,7 @@ extension ChannelSession {
     /// one atomic step with respect to `handle(event:)`. An `await` here would
     /// reopen the actor and let a live event slip in between "merge" and
     /// "clear" — it would be lost or double-counted.
-    ///
-    /// Internal (not private) so ChannelsTests can end the buffering window on
-    /// a never-`start()`ed session and drive `resyncAfterReconnect` offline —
-    /// same visibility relaxation as `translate(event:...)`. Production's only
-    /// caller remains `start()`.
-    func applyBackfill(_ backfill: [BackfillMessage]) {
-        joinBackfill = .done
+    private func commitJoinBackfill(_ backfill: [BackfillMessage]) {
         let history = normalizer.normalizeHistory(backfill)
         // Join divider: only when there's actually history to separate —
         // an empty backfill (rustlog down, brand-new channel) would put a
@@ -40,29 +47,13 @@ extension ChannelSession {
 
     // MARK: - Join backfill (bounded wait, late merge)
 
-    /// Where the join-time history fetch stands. Every transition happens on
-    /// the actor, so "the deadline passed" and "the history arrived" can't
-    /// both claim the outcome.
-    enum JoinBackfill {
-        /// No fetch started (tests drive `applyBackfill` directly).
-        case idle
-        /// In flight; `start()` may be waiting on it.
-        case fetching
-        /// Landed before `start()` stopped waiting; not yet applied.
-        case arrived([BackfillMessage])
-        /// `start()` gave up waiting and exposed the session; a late arrival
-        /// is merged in by `mergeLateBackfill`.
-        case abandoned
-        /// Applied (on time, late, or as empty).
-        case done
-    }
+    // The state and every transition of the wait live in `JoinBackfillWait`;
+    // the fetch, the deadline timer and the parked `start()` live here.
 
     /// Kicks off the join-history fetch and starts its deadline clock.
     /// Internal (not private) so tests can drive the bounded wait offline.
     func beginJoinBackfill() {
-        guard case .idle = joinBackfill else { return }
-        joinBackfill = .fetching
-        joinBackfillDeadline = ContinuousClock.now + joinBackfillTimeout
+        guard joinBackfill.begin(deadline: ContinuousClock.now + joinBackfillTimeout) else { return }
         let fetch = fetchBackfill
         let login = channelLoginName
         let limit = Self.joinBackfillLimit
@@ -79,15 +70,13 @@ extension ChannelSession {
     /// is exposed on time even when the history service is slow or down.
     /// Internal for the same testing reason as `beginJoinBackfill`.
     func finishJoinBackfill() async {
-        if case .fetching = joinBackfill,
-           let deadline = joinBackfillDeadline,
-           joinBackfillWaiter == nil,       // one waiter (start) — never overwrite one
-           !Task.isCancelled {
+        if let deadline = joinBackfill.deadlineToWaitFor(isCancelled: Task.isCancelled) {
             // A cancelled start (the registry released the key mid-start)
             // must not sit out the deadline: a re-acquire is queued behind
             // this session's teardown.
             await withTaskCancellationHandler {
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    joinBackfill.parkWaiter()
                     joinBackfillWaiter = continuation
                     joinBackfillTimer = Task { [weak self] in
                         do {
@@ -107,49 +96,43 @@ extension ChannelSession {
             joinBackfillFetch?.cancel()
         }
         // Decided in one actor turn: whatever state we find is the outcome.
-        switch joinBackfill {
-        case .arrived(let history):
-            applyBackfill(history)
-        case .fetching:
+        switch joinBackfill.settle() {
+        case .commit(let history):
+            commitJoinBackfill(history)
+        case .openWithoutHistory:
             logger.notice("Join history for #\(self.channelLoginName, privacy: .public) not back after \(self.joinBackfillTimeout, privacy: .public); opening with live chat, will merge history if it lands")
-            applyBackfill([])
-            joinBackfill = .abandoned
-        case .idle:
-            applyBackfill([])
-        case .abandoned, .done:
+            commitJoinBackfill([])
+        case .alreadySettled:
             break
         }
     }
 
     private func joinBackfillArrived(_ history: [BackfillMessage]) {
-        switch joinBackfill {
-        case .fetching:
-            joinBackfill = .arrived(history)
+        switch joinBackfill.historyArrived(history) {
+        case .onTime:
             wakeJoinBackfillWaiter()
-        case .abandoned:
+        case .late:
             mergeLateBackfill(history)
-        case .idle, .arrived, .done:
+        case .unwanted:
             break
         }
     }
 
     /// Test hook: a `finishJoinBackfill` is currently parked.
-    var isWaitingForJoinBackfill: Bool { joinBackfillWaiter != nil }
+    var isWaitingForJoinBackfill: Bool { joinBackfill.isWaiterParked }
 
     /// Test hook: the join history has been applied or merged (or given up
     /// on by `stop()`) — nothing more will come of it.
-    var isJoinBackfillSettled: Bool {
-        if case .done = joinBackfill { return true }
-        return false
-    }
+    var isJoinBackfillSettled: Bool { joinBackfill.isSettled }
 
     /// Resumes a `start()` parked in `finishJoinBackfill`, at most once.
     func wakeJoinBackfillWaiter() {
         joinBackfillTimer?.cancel()
         joinBackfillTimer = nil
-        guard let waiter = joinBackfillWaiter else { return }
+        guard joinBackfill.releaseWaiter() else { return }
+        let waiter = joinBackfillWaiter
         joinBackfillWaiter = nil
-        waiter.resume()
+        waiter?.resume()
     }
 
     /// History that missed the deadline. It's OLDER than every live row the
@@ -159,7 +142,6 @@ extension ChannelSession {
     /// (`mergeBackfill`); because subscribers already hold the live tail,
     /// they get the new ring as one `.reprime` rather than an append.
     private func mergeLateBackfill(_ history: [BackfillMessage]) {
-        joinBackfill = .done
         let missing = ChannelHistoryMerge.missingMessages(history, notIn: hub.snapshot)
         guard !missing.isEmpty else { return }
         let merged = ChannelHistoryMerge.mergeBackfill(
@@ -244,19 +226,17 @@ extension ChannelSession {
         // The initial-backfill window has its own divider + merge path; a
         // resync during it would race `applyBackfill`'s atomic commit.
         guard !hub.backfillPending, !isStopped else { return }
-        let requestFloor = min(lastLiveReceiptAt, droppedAt ?? lastLiveReceiptAt)
-        guard !resyncInFlight else {
-            resyncFollowUpFloor = min(resyncFollowUpFloor ?? requestFloor, requestFloor)
+        // Decided before the first await: either this call fetches, or its
+        // floor is queued behind the fetch in flight.
+        guard let requestFloor = resync.request(lastLiveReceiptAt: lastLiveReceiptAt, droppedAt: droppedAt) else {
             return
         }
-        resyncInFlight = true
-        defer { resyncInFlight = false }
+        defer { resync.finish() }
 
         var next: Date? = requestFloor
         while let gapFloor = next, !isStopped {
             await fillGap(notBefore: gapFloor.addingTimeInterval(-Self.resyncSlack))
-            next = resyncFollowUpFloor
-            resyncFollowUpFloor = nil
+            next = resync.takeFollowUp()
         }
     }
 

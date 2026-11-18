@@ -138,8 +138,7 @@ extension ChannelSessionRegistry {
     /// random delay, so one reconnect isn't N requests to the history
     /// service in the same instant.
     private func resyncSessionsAfterReconnect(accountUserId: String, droppedAt: Date?) {
-        let prefix = "\(accountUserId)/"
-        let accountSessions = sessions.filter { $0.key.hasPrefix(prefix) }.map(\.value)
+        let accountSessions = sessions.filter { $0.key.accountUserId == accountUserId }.map(\.value)
         guard !accountSessions.isEmpty else { return }
         logger.info("EventSub reconnected for account \(accountUserId, privacy: .public) — resyncing \(accountSessions.count) session(s)")
         for session in accountSessions {
@@ -172,7 +171,7 @@ extension ChannelSessionRegistry {
     /// (so events during subscribe + backfill are buffered, not dropped) and
     /// ends synchronously when the key's lifetime does.
     func isRouted(accountUserId: String, channelId: String) -> Bool {
-        router.isRouted(.init(accountUserId: accountUserId, channelId: channelId))
+        router.isRouted(Self.key(accountUserId: accountUserId, channelId: channelId))
     }
 
     // MARK: - Cold-start zombie cleanup

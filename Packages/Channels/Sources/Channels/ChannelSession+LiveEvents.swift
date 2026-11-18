@@ -46,6 +46,14 @@ private let logger = AppLogger.make("Channels.LiveEvents")
 /// reduce, but no Helix request starts). The periodic check is one task
 /// that exists only while something is unfinished; see
 /// `updateLiveEventsVerification()`.
+///
+/// ## Layout
+///
+/// The state, the consumers' mailboxes and every decision (may a request
+/// start, is a reconcile queued, should the periodic check run) live in
+/// `LiveEventsHub`, a value the session owns as `liveEvents`. What stays
+/// here is what needs the actor: the tasks, the topic subscribes and the
+/// Helix reads, which go through the session's `client` and `topics`.
 extension ChannelSession {
 
     // MARK: - Subscriber API
@@ -54,50 +62,28 @@ extension ChannelSession {
     /// rung — the first wakeup delivers it). Drain `wakeups` /
     /// `takeLatest()`; pass `token` to `unsubscribeLiveEvents(_:)` when done.
     public func subscribeLiveEvents() -> LiveEventsSubscription {
-        if liveEvents.prune(now: Date()) {
+        let (subscription, pruned) = liveEvents.subscribe(now: Date())
+        if pruned {
             updateLiveEventsVerification()
-        }
-        let subscription = LiveEventsSubscription(initial: liveEvents)
-        if isStopped {
-            subscription.finish()
-        } else {
-            liveEventSubscribers[subscription.token] = subscription
         }
         return subscription
     }
 
     /// Removes and closes a banner consumer. Idempotent.
     public func unsubscribeLiveEvents(_ token: UUID) {
-        liveEventSubscribers.removeValue(forKey: token)?.finish()
-    }
-
-    func finishLiveEventSubscribers() {
-        for subscription in liveEventSubscribers.values {
-            subscription.finish()
-        }
-        liveEventSubscribers.removeAll()
+        liveEvents.unsubscribe(token)
     }
 
     // MARK: - Reduce + publish
 
-    /// Folds one update into `liveEvents` and posts the result to every
-    /// consumer when it changed. Synchronous — never waits on a consumer.
+    /// Folds one update into the live-event state and posts the result to
+    /// every consumer when it changed. Synchronous — never waits on a
+    /// consumer.
     func applyLiveEvent(_ update: LiveEventUpdate) {
-        let now = Date()
-        let pruned = liveEvents.prune(now: now)
-        let applied = liveEvents.apply(update, at: now)
-        if pruned || applied {
-            publishLiveEvents()
+        if liveEvents.apply(update, now: Date()) {
             updateLiveEventsVerification()
         }
         requestPollDeadlineIfNeeded()
-    }
-
-    private func publishLiveEvents() {
-        let state = liveEvents
-        for subscription in liveEventSubscribers.values {
-            subscription.post(state)
-        }
     }
 
     // MARK: - Startup (own channel only)
@@ -115,6 +101,9 @@ extension ChannelSession {
     /// sends no Helix read at all (`requireLiveEventScope`), each logged at
     /// info, and the banners simply never appear. The seed arms the
     /// periodic check if it finds something unfinished.
+    ///
+    /// Runs in a task of its own, off the critical path (see
+    /// `beginLiveEvents()`).
     func startLiveEvents() async {
         await withTaskGroup(of: Void.self) { group in
             for topic in EventSubTopics.liveEventSubscriptions(broadcasterID: channelId) {
@@ -128,10 +117,20 @@ extension ChannelSession {
         }
     }
 
+    /// Kicks off `startLiveEvents()` without waiting for it. `stop()` and
+    /// `rebind(to:)` cancel the task. Callers check that this is the
+    /// account's own channel first.
+    func beginLiveEvents() {
+        let task: Task<Void, Never> = Task { [weak self] in
+            await self?.startLiveEvents()
+        }
+        liveEvents.startupStarted(task)
+    }
+
     /// The periodic check: reconciles with Helix only while something is
     /// unfinished, so a quiet channel costs no requests.
     func verifyLiveEvents() async {
-        guard liveEvents.hasUnconcludedEvent else { return }
+        guard liveEvents.state.hasUnconcludedEvent else { return }
         await reconcileLiveEvents()
     }
 
@@ -140,31 +139,28 @@ extension ChannelSession {
     /// foreground, and while some event is unfinished. Idempotent and cheap
     /// (it allocates only when it starts the one task), so it is called
     /// after anything that can change one of those: a reduce that changed
-    /// state, the end of a reconcile pass, a scene-phase change and `stop()`.
+    /// state, the end of a reconcile pass and a scene-phase change.
+    /// (`stop()` cancels the check itself, in `LiveEventsHub.stop()`.)
     func updateLiveEventsVerification() {
-        let wanted = channelId == accountUserId
-            && !isStopped
-            && isAppInForeground
-            && liveEvents.hasUnconcludedEvent
-        guard wanted else {
-            liveEventsVerifyTask?.cancel()
-            liveEventsVerifyTask = nil
+        guard liveEvents.wantsVerification else {
+            liveEvents.cancelVerification()
             return
         }
-        guard liveEventsVerifyTask == nil else { return }
+        guard !liveEvents.isVerifying else { return }
         // `self` is re-bound each round, so the sleeping loop never keeps
         // the session alive.
-        liveEventsVerifyTask = Task { [weak self] in
+        let task: Task<Void, Never> = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: ChannelSession.liveEventsVerifyInterval)
                 guard !Task.isCancelled, let self else { return }
                 await self.verifyLiveEvents()
             }
         }
+        liveEvents.verificationStarted(task)
     }
 
     /// Whether the periodic check is armed. Internal for tests.
-    var isVerifyingLiveEvents: Bool { liveEventsVerifyTask != nil }
+    var isVerifyingLiveEvents: Bool { liveEvents.isVerifying }
 
     /// The app moved between foreground and background: the registry
     /// updated the shared `appForeground` flag and nudges every session.
@@ -179,16 +175,15 @@ extension ChannelSession {
     /// that sat past `unconfirmedExpiry` unchecked), then the check re-arms
     /// if something is still unfinished. If the cancelled pass hasn't
     /// exited yet, the request is queued behind it rather than dropped
-    /// (`liveEventsReconcilePending`).
+    /// (`LiveEventsHub.isReconcilePending`).
     public func appForegroundDidChange() async {
-        let foreground = appForeground.state
-        guard foreground.generation != lastSeenAppForegroundGeneration else { return }
-        lastSeenAppForegroundGeneration = foreground.generation
+        guard let transition = liveEvents.takeForegroundTransition() else { return }
         updateLiveEventsVerification()
-        if foreground.isInForeground {
+        switch transition {
+        case .foregrounded:
             await reconcileLiveEvents()
-        } else {
-            liveEventsReconcileTask?.cancel()
+        case .backgrounded:
+            liveEvents.cancelReconcilePass()
         }
     }
 
@@ -207,31 +202,34 @@ extension ChannelSession {
 
     // MARK: - Helix reconcile
 
-    /// Brings `liveEvents` in line with what Helix says is the channel's
-    /// latest poll, prediction and Hype Train. Runs at start (the seed),
-    /// after an EventSub reconnect (anything that began, ended or resolved
-    /// while the socket was down) and periodically while an event is
-    /// unfinished. Own channel only; a no-op elsewhere, after `stop()` and
-    /// while the app is in the background (returning to the foreground
+    /// Brings the live-event state in line with what Helix says is the
+    /// channel's latest poll, prediction and Hype Train. Runs at start (the
+    /// seed), after an EventSub reconnect (anything that began, ended or
+    /// resolved while the socket was down) and periodically while an event
+    /// is unfinished. Own channel only; a no-op elsewhere, after `stop()`
+    /// and while the app is in the background (returning to the foreground
     /// reconciles).
     ///
     /// Exactly one pass runs at a time, in its own task
-    /// (`liveEventsReconcileTask`), so backgrounding and `stop()` can cancel
-    /// it whoever asked for it. A request that arrives while a pass is in
-    /// flight isn't dropped: it marks `liveEventsReconcilePending` and the
-    /// running pass, on exit, starts one more. Returns once no pass is in
-    /// flight (so the request has been served).
+    /// (`LiveEventsHub.reconcileTask`), so backgrounding and `stop()` can
+    /// cancel it whoever asked for it. A request that arrives while a pass
+    /// is in flight isn't dropped: it is queued
+    /// (`LiveEventsHub.isReconcilePending`) and the running pass, on exit,
+    /// starts one more. Returns once no pass is in flight (so the request
+    /// has been served).
     ///
     /// Each kind goes through `LiveEventsState.reconcile`, which can replace
     /// or clear a stored event but never undoes an EventSub update that
     /// landed while the request was in flight. A failed request leaves that
     /// kind alone: no answer is not the same as "nothing running".
     public func reconcileLiveEvents() async {
-        guard canFetchLiveEvents else { return }
-        if liveEventsReconcileTask == nil {
+        switch liveEvents.requestReconcile() {
+        case .refused:
+            return
+        case .startPass:
             startLiveEventsReconcilePass()
-        } else {
-            liveEventsReconcilePending = true
+        case .queued:
+            break
         }
         await waitForLiveEventsReconcile()
     }
@@ -239,30 +237,28 @@ extension ChannelSession {
     /// Waits until no reconcile pass is in flight, including a follow-up
     /// a finishing pass started. Internal for tests.
     func waitForLiveEventsReconcile() async {
-        while let running = liveEventsReconcileTask {
+        while let running = liveEvents.reconcileTask {
             await running.value
         }
     }
 
     /// Whether a reconcile is queued behind the running pass. Internal for
     /// tests.
-    var isLiveEventsReconcilePending: Bool { liveEventsReconcilePending }
+    var isLiveEventsReconcilePending: Bool { liveEvents.isReconcilePending }
 
     /// Own channel, not stopped, app in the foreground: the conditions for
     /// starting ANY live-event Helix request. Re-checked before every fetch,
     /// because each one suspends and any of them can change meanwhile.
-    var canFetchLiveEvents: Bool {
-        channelId == accountUserId && !isStopped && isAppInForeground
-    }
+    var canFetchLiveEvents: Bool { liveEvents.canFetch }
 
     /// Starts a pass in a fresh, uncancelled task. The handle is set before
     /// the task can run (it needs this actor), and only the pass clears it.
     private func startLiveEventsReconcilePass() {
-        liveEventsReconcilePending = false
-        liveEventsReconcileTask = Task { [weak self] in
+        let task: Task<Void, Never> = Task { [weak self] in
             guard let self else { return }
             await self.runLiveEventsReconcilePass()
         }
+        liveEvents.reconcilePassStarted(task)
     }
 
     private func runLiveEventsReconcilePass() async {
@@ -273,11 +269,8 @@ extension ChannelSession {
             // mid-pass. The kinds already reconciled stay applied.
             logger.debug("Live-event reconcile for #\(self.channelLoginName, privacy: .public) stopped early")
         }
-        liveEventsReconcileTask = nil
-        if liveEventsReconcilePending, canFetchLiveEvents {
+        if liveEvents.reconcilePassFinished() {
             startLiveEventsReconcilePass()
-        } else {
-            liveEventsReconcilePending = false
         }
         // Arm or cancel the periodic check once the whole pass is in, never
         // per kind.
@@ -389,18 +382,7 @@ extension ChannelSession {
     }
 
     private func reconcileLiveEvent(_ kind: LiveEventKind, snapshot: LiveEventUpdate?, fetchedAt: Date) {
-        guard !isStopped else { return }
-        let now = Date()
-        // Reconcile FIRST. After a long background nothing has confirmed a
-        // locked prediction for longer than `unconfirmedExpiry`; pruning
-        // first would expire the very event Helix still reports as running.
-        // Reconciling confirms (or restores) it, then the prune only drops
-        // what is really due.
-        let changed = liveEvents.reconcile(kind, snapshot: snapshot, fetchedAt: fetchedAt, now: now)
-        let pruned = liveEvents.prune(now: now)
-        if pruned || changed {
-            publishLiveEvents()
-        }
+        liveEvents.reconcile(kind, snapshot: snapshot, fetchedAt: fetchedAt, now: Date())
         requestPollDeadlineIfNeeded()
     }
 
@@ -409,17 +391,7 @@ extension ChannelSession {
     /// duration. One fetch per poll, fire-and-forget; the result lands as a
     /// `.pollDeadline`, which only ever fills the deadline in.
     private func requestPollDeadlineIfNeeded() {
-        guard let poll = liveEvents.poll,
-              poll.status == .active,
-              poll.endsAt == nil,
-              pollDeadlineRequestedFor != poll.id,
-              !isStopped,
-              // No background network. The foreground reconcile brings the
-              // deadline in its poll snapshot, and this runs again after it.
-              isAppInForeground
-        else { return }
-        pollDeadlineRequestedFor = poll.id
-        let pollId = poll.id
+        guard let pollId = liveEvents.takePollDeadlineRequest() else { return }
         Task { [weak self] in
             await self?.fetchPollDeadline(pollId: pollId)
         }
@@ -432,7 +404,7 @@ extension ChannelSession {
         // Un-mark the poll so the next foreground pass can ask again (its
         // poll snapshot usually brings the deadline anyway).
         guard canFetchLiveEvents, !Task.isCancelled else {
-            if pollDeadlineRequestedFor == pollId { pollDeadlineRequestedFor = nil }
+            liveEvents.pollDeadlineFetchSkipped(pollId: pollId)
             return
         }
         do {

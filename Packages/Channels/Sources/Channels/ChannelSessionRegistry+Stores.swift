@@ -46,7 +46,7 @@ extension ChannelSessionRegistry {
 
     /// Coalesces a burst of publishes into one `emoteTableDidChange()`: the
     /// refresh that runs reads whatever table is current by then.
-    private func scheduleEmoteRefresh(key: String, index: EmoteIndex) {
+    private func scheduleEmoteRefresh(key: SessionKey, index: EmoteIndex) {
         guard emoteRefreshes[key] == nil else { return }
         emoteRefreshes[key] = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
@@ -55,7 +55,7 @@ extension ChannelSessionRegistry {
             // The key may have been released (and re-opened with a fresh
             // index) meanwhile.
             guard self.emoteIndexes[key] === index else { return }
-            await self.dispatchTargets[key]?.emoteTableDidChange()
+            await self.router.session(for: key)?.emoteTableDidChange()
         }
     }
 
@@ -80,9 +80,9 @@ extension ChannelSessionRegistry {
         // The key may have been released (and re-opened with a fresh index)
         // while the providers answered.
         guard emoteIndexes[key] === index else { return }
-        // `dispatchTargets` also holds a session that is still starting; it
+        // The router also holds a session that is still starting; it
         // ignores this until its join backfill is committed.
-        await dispatchTargets[key]?.emoteTableDidChange()
+        await router.session(for: key)?.emoteTableDidChange()
     }
 
     /// The third-party providers the user has enabled (Settings → Chat →
