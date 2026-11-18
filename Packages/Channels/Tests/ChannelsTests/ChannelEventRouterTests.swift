@@ -108,6 +108,46 @@ struct ChannelEventRouterTests {
         #expect(!router.isRouted(key))
     }
 
+    @Test("The table says which session a key routes to, and which keys an account has")
+    func lookUpByKeyAndAccount() {
+        let router = ChannelEventRouter()
+        let one = makeSession(channelId: "1")
+        let two = makeSession(channelId: "2")
+        let theirs = makeSession(channelId: "1")
+        let mineOne = ChannelEventRouter.RouteKey(accountUserId: "me", channelId: "1")
+        let mineTwo = ChannelEventRouter.RouteKey(accountUserId: "me", channelId: "2")
+        // An account id that merely begins with "me" is another account.
+        let theirsOne = ChannelEventRouter.RouteKey(accountUserId: "me2", channelId: "1")
+        router.register(one, for: mineOne)
+        router.register(two, for: mineTwo)
+        router.register(theirs, for: theirsOne)
+
+        #expect(router.session(for: mineOne) === one)
+        #expect(router.session(for: mineTwo) === two)
+        #expect(router.session(for: theirsOne) === theirs)
+        #expect(router.session(for: .init(accountUserId: "me", channelId: "404")) == nil)
+        #expect(Set(router.keys(forAccountUserId: "me")) == [mineOne, mineTwo])
+        #expect(router.keys(forAccountUserId: "me2") == [theirsOne])
+        #expect(router.keys(forAccountUserId: "nobody").isEmpty)
+        #expect(router.sessions.count == 3)
+
+        router.unregister(key: mineOne)
+        router.unregister(key: mineOne)   // nothing routed there any more
+        #expect(router.session(for: mineOne) == nil)
+        #expect(router.keys(forAccountUserId: "me") == [mineTwo])
+        #expect(router.isRouted(theirsOne))
+
+        router.unregister(two)
+        router.unregister(theirs)
+        #expect(router.sessions.isEmpty)
+    }
+
+    @Test("A key reads as account/channel in log lines")
+    func keyDescription() {
+        let key = ChannelEventRouter.RouteKey(accountUserId: "me", channelId: "1")
+        #expect(key.description == "me/1")
+    }
+
     @Test("Events for unrouted channels are dropped without effect")
     func unroutedEventsDropped() throws {
         let router = ChannelEventRouter()

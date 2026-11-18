@@ -24,11 +24,21 @@ import os
 /// The inbox is unbounded because its consumer does bounded CPU work per
 /// event (translate + normalize + append), never I/O — and dropping an
 /// event here would silently lose a message or a moderation action.
+///
+/// The table is also the registry's only record of which session receives a
+/// key's events (`session(for:)`, `keys(forAccountUserId:)`, `sessions`):
+/// the registry keeps no second copy that could drift from what the
+/// dispatcher actually delivers to.
 final class ChannelEventRouter: Sendable {
 
-    struct RouteKey: Hashable, Sendable {
+    /// One account × channel. Also the key of everything
+    /// `ChannelSessionRegistry` holds per session.
+    struct RouteKey: Hashable, Sendable, CustomStringConvertible {
         let accountUserId: String
         let channelId: String
+
+        /// "accountUserId/channelId", for log lines.
+        var description: String { "\(accountUserId)/\(channelId)" }
     }
 
     private struct Route: Sendable {
@@ -72,6 +82,34 @@ final class ChannelEventRouter: Sendable {
         }
         for route in removed {
             route.inbox.finish()
+        }
+    }
+
+    /// Stops routing `key`, whichever session holds it. Buffered events
+    /// still in that session's inbox are delivered first.
+    func unregister(key: RouteKey) {
+        let removed = routes.withLock { routes -> Route? in
+            routes.removeValue(forKey: key)
+        }
+        removed?.inbox.finish()
+    }
+
+    /// The session `key`'s events are delivered to, if any.
+    func session(for key: RouteKey) -> ChannelSession? {
+        routes.withLock { $0[key]?.session }
+    }
+
+    /// The keys routed for one account.
+    func keys(forAccountUserId accountUserId: String) -> [RouteKey] {
+        routes.withLock { routes -> [RouteKey] in
+            routes.keys.filter { $0.accountUserId == accountUserId }
+        }
+    }
+
+    /// Every session currently routed to, in no particular order.
+    var sessions: [ChannelSession] {
+        routes.withLock { routes -> [ChannelSession] in
+            routes.values.map { $0.session }
         }
     }
 

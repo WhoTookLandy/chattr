@@ -100,6 +100,10 @@ public struct RootView: View {
     /// concurrency limits).
     @State private var chatImagePrefetcher = ChatImagePrefetcher()
 
+    /// Where a `chattr://open/...` link wants to go, until the signed-in
+    /// shell takes it (see `AppShell`'s `pendingIntent`).
+    @State private var pendingNavigationIntent: NavigationIntent?
+
     public init(
         accountStore: AccountStore,
         clientId: String,
@@ -148,7 +152,12 @@ public struct RootView: View {
         // of `body` avoids re-running it on every re-evaluation.
         Group {
             if let active = activeAccount {
-                AppShell(account: active, accountStore: accountStore, clientId: clientId)
+                AppShell(
+                    account: active,
+                    accountStore: accountStore,
+                    clientId: clientId,
+                    pendingIntent: $pendingNavigationIntent
+                )
                     // `.id(userId)` forces a fresh AppShell when the active
                     // account changes (switch / add / remove). A new account
                     // means new chat sessions, a new follow list, new
@@ -173,7 +182,18 @@ public struct RootView: View {
         .environment(\.channelSessionRegistry, channelSessionRegistry)
         .environment(\.chatImagePrefetcher, chatImagePrefetcher)
         .environment(\.chatAppearance, chatAppearance)
+        // `chattr://open/...` links. The scheme is shared with the browser
+        // sign-in callback (`chattr://oauth-complete?...`), which is not a
+        // navigation link: `NavigationIntent` yields nil for it and for
+        // anything else it doesn't know. Signed out there is nowhere to
+        // navigate, so the link is dropped rather than kept for later.
+        .onOpenURL { url in
+            guard activeAccount != nil, let intent = NavigationIntent(url: url) else { return }
+            pendingNavigationIntent = intent
+        }
         .onChange(of: activeAccount?.userId) { _, newId in
+            // A link is for the account that was showing when it arrived.
+            pendingNavigationIntent = nil
             // Boundary log for the rendered account. The @AppStorage
             // selection is the single source of truth; AccountStore keeps
             // no in-memory active slot.
@@ -281,17 +301,22 @@ public struct RootView: View {
         // and effectively run in parallel anyway.
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
+            // Resolved before suspending: `followsStore` is the store of
+            // whichever account is current when it is read, and after an
+            // account switch that is no longer this task's account.
+            let store = followsStore
             await accountStore.refreshTokensIfExpiringSoon(for: active)
             // The refresh is a network round trip. An account switch during
             // it cancels this task, and `refreshLive` (unlike
             // `loadAllIfNeeded`) would switch the store back to `active`.
             guard !Task.isCancelled else { return }
-            await followsStore.refreshLive(account: active, accountStore: accountStore)
+            await store.refreshLive(account: active, accountStore: accountStore)
         }
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
+            let store = followsStore
             await accountStore.refreshTokensIfExpiringSoon(for: active)
-            await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
+            await store.loadAllIfNeeded(account: active, accountStore: accountStore)
         }
         // Foregrounding: live status goes stale while backgrounded. Non-forced
         // — FollowsStore's staleness throttle skips it after a quick

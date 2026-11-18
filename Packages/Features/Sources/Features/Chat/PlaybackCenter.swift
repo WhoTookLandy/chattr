@@ -4,114 +4,9 @@ import TwitchKit
 #if os(iOS)
 import UIKit
 import WebKit
-import NukeUI
-import Nuke
 #endif
 
 #if os(iOS)
-
-// MARK: - Engines
-
-/// One live player instance — web (`TwitchWebPlayer`) or native
-/// (`NativePlayer`). Owned by `PlaybackCenter`, never by a view, so the
-/// stream keeps playing while its surface moves between the chat header and
-/// the mini player.
-@MainActor
-protocol StreamEngine: AnyObject {
-    var view: UIView { get }
-    func teardown()
-}
-
-@MainActor
-final class WebStreamEngine: StreamEngine {
-    let view: UIView
-    private let webView: WKWebView
-    private let coordinator: TwitchWebPlayer.Coordinator
-
-    /// `reusing`: the web view of the web engine this one replaces
-    /// (`releaseWebView()`), navigated to `login` instead of a new one
-    /// being built. The startup sequence is the same either way: a new
-    /// coordinator, `beginWebEngineLoad`, then the page's first report.
-    init(login: String, controller: StreamPlayerController, reusing recycled: WKWebView? = nil) {
-        coordinator = TwitchWebPlayer.Coordinator(controller: controller)
-        // Loads paused when the user paused or a hold is out — the page
-        // never autoplays against intent (`StreamPlayerController.noteDidPlay`).
-        // Play/pause made while it loads are applied once it reports ready
-        // (`StreamPlayerController.noteEngineReady`).
-        let autoplay = controller.beginWebEngineLoad()
-        if let recycled {
-            TwitchWebPlayer.navigate(
-                recycled,
-                to: login,
-                autoplay: autoplay,
-                muted: controller.startsMuted,
-                coordinator: coordinator
-            )
-            webView = recycled
-        } else {
-            webView = TwitchWebPlayer.makeWebView(
-                login: login,
-                autoplay: autoplay,
-                muted: controller.startsMuted,
-                coordinator: coordinator
-            )
-        }
-        view = webView
-        controller.webView = webView
-    }
-
-    func teardown() {
-        coordinator.controller.webView = nil
-        TwitchWebPlayer.teardown(webView)
-    }
-
-    /// Ends this page like `teardown`, but keeps the web view for the next
-    /// channel's engine (`init(login:controller:reusing:)`). This engine is
-    /// done after it.
-    func releaseWebView() -> WKWebView {
-        coordinator.controller.webView = nil
-        TwitchWebPlayer.quiesce(webView)
-        return webView
-    }
-}
-
-@MainActor
-final class NativeStreamEngine: StreamEngine {
-    let view: UIView
-    private let playerView = NativePlayer.PlayerLayerView()
-    private let coordinator: NativePlayer.Coordinator
-
-    init(
-        login: String,
-        audioOnly: Bool,
-        quality: PlayerQuality,
-        controller: StreamPlayerController,
-        resolver: any StreamPlaylistResolving = TwitchHLS.Resolver()
-    ) {
-        coordinator = NativePlayer.Coordinator(controller: controller, resolver: resolver)
-        view = playerView
-        playerView.backgroundColor = .clear
-        playerView.playerLayer.videoGravity = .resizeAspect
-
-        let tap = UITapGestureRecognizer(target: coordinator, action: #selector(NativePlayer.Coordinator.tapped))
-        let swipe = UISwipeGestureRecognizer(target: coordinator, action: #selector(NativePlayer.Coordinator.swipedDown))
-        swipe.direction = .down
-        tap.require(toFail: swipe)
-        playerView.addGestureRecognizer(swipe)
-        playerView.addGestureRecognizer(tap)
-
-        controller.hostView = playerView
-        coordinator.load(login: login, audioOnly: audioOnly, quality: quality, into: playerView)
-    }
-
-    func teardown() {
-        coordinator.teardown()
-        playerView.playerLayer.player = nil
-        playerView.removeFromSuperview()
-    }
-}
-
-// MARK: - Playback center
 
 /// The app's single stream player. The chat header asks it to play the
 /// visible channel; when the chat is closed it keeps playing and the
@@ -143,7 +38,8 @@ final class PlaybackCenter {
     /// The `native` the header last asked for — a rebuild after a long
     /// pause (`restoreUnloadedEngine`) asks for the same.
     @ObservationIgnored private var lastNative = false
-    private let playlistResolver: any StreamPlaylistResolving
+    /// How `play` gets its engines (`init`).
+    private let makeEngine: StreamEngineFactory
     private let nowPlaying = StreamNowPlaying()
 
     /// The playing channel's stream as last polled, kept through a poll
@@ -188,8 +84,14 @@ final class PlaybackCenter {
         channel != nil && !controller.isPaused && !(audioOnly && !controller.nativeFailed)
     }
 
-    init(playlistResolver: any StreamPlaylistResolving = TwitchHLS.Resolver()) {
-        self.playlistResolver = playlistResolver
+    /// `makeEngine`: how engines are built. Left out, they are the real
+    /// ones (`realEngines(playlistResolver:)`), the native one resolving
+    /// its playlist through `playlistResolver`.
+    init(
+        playlistResolver: any StreamPlaylistResolving = TwitchHLS.Resolver(),
+        makeEngine: StreamEngineFactory? = nil
+    ) {
+        self.makeEngine = makeEngine ?? PlaybackCenter.realEngines(playlistResolver: playlistResolver)
         controller.onNativeFailure = { [weak self] in
             self?.nativeEngineGaveUp()
         }
@@ -214,6 +116,25 @@ final class PlaybackCenter {
             self?.restoreUnloadedEngine()
         }
         lifecycle = PlaybackLifecycleObserver(center: self)
+    }
+
+    /// The factory `init` uses unless it's handed another: the web player,
+    /// or the native one on `playlistResolver`.
+    static func realEngines(playlistResolver: any StreamPlaylistResolving) -> StreamEngineFactory {
+        return { (request: StreamEngineRequest, controller: StreamPlayerController) -> any StreamEngine in
+            switch request {
+            case .native(let login, let audioOnly, let quality):
+                return NativeStreamEngine(
+                    login: login,
+                    audioOnly: audioOnly,
+                    quality: quality,
+                    controller: controller,
+                    resolver: playlistResolver
+                )
+            case .web(let login, let recycled):
+                return WebStreamEngine(login: login, controller: controller, reusing: recycled)
+            }
+        }
     }
 
     // MARK: Per-channel PiP
@@ -359,7 +280,7 @@ final class PlaybackCenter {
         // The audio session outlives a native engine replaced by another
         // native one (a channel change); the next start reconfigures it.
         // Replaced by the web player, native playback has really stopped.
-        if previous is NativeStreamEngine, !useNative {
+        if previous?.kind == .native, !useNative {
             PlaybackAudioSession.shared.deactivate()
         }
         if !sameChannel {
@@ -388,15 +309,10 @@ final class PlaybackCenter {
         self.channel = channel
         syncPictureInPictureFlags()
         engineKey = key
-        engine = useNative
-            ? NativeStreamEngine(
-                login: channel.channelLoginName,
-                audioOnly: audioOnly,
-                quality: quality,
-                controller: controller,
-                resolver: playlistResolver
-            )
-            : WebStreamEngine(login: channel.channelLoginName, controller: controller, reusing: recycledWebView)
+        let request: StreamEngineRequest = useNative
+            ? .native(login: channel.channelLoginName, audioOnly: audioOnly, quality: quality)
+            : .web(login: channel.channelLoginName, reusing: recycledWebView)
+        engine = makeEngine(request, controller)
         // Re-render hosts so the new engine view gets attached.
         activeHostID = hostStack.last
         hostRevision += 1
@@ -426,14 +342,14 @@ final class PlaybackCenter {
     /// Audio-only on the native engine with the app in the background:
     /// the one place a stream plays where the web player can't.
     private var staysOnNativeEngine: Bool {
-        audioOnly && engine is NativeStreamEngine && (lifecycle?.isInBackground ?? false)
+        audioOnly && engine?.kind == .native && (lifecycle?.isInBackground ?? false)
     }
 
     func stop() {
         advanceGeneration()
         pauseUnloadTask?.cancel()
         pauseUnloadTask = nil
-        let wasNative = engine is NativeStreamEngine
+        let wasNative = engine?.kind == .native
         engine?.teardown()
         engine = nil
         engineKey = nil
@@ -536,7 +452,7 @@ final class PlaybackCenter {
         guard channel != nil, let engine, controller.isPaused,
               !controller.isHeld, !controller.isPictureInPictureActive
         else { return }
-        let wasNative = engine is NativeStreamEngine
+        let wasNative = engine.kind == .native
         engine.teardown()
         self.engine = nil
         // `engineKey` stays: the header asking for this same stream again
@@ -565,7 +481,7 @@ final class PlaybackCenter {
     /// stream that plays with the app in the background: audio-only on the
     /// native engine. Cleared for anything else, and on teardown.
     private func refreshNowPlaying() {
-        guard let channel, audioOnly, engine is NativeStreamEngine else {
+        guard let channel, audioOnly, engine?.kind == .native else {
             nowPlaying.clear()
             return
         }
@@ -675,302 +591,6 @@ final class PlaybackCenter {
     func release(_ hostID: UUID) {
         hostStack.removeAll { $0 == hostID }
         if activeHostID == hostID { activeHostID = hostStack.last }
-    }
-}
-
-/// "This channel's stream is in the PiP window", observable per channel
-/// (`PlaybackCenter.pictureInPictureFlag(for:)`). Written only by
-/// `PlaybackCenter`, and only when the value changes.
-@MainActor
-@Observable
-final class ChannelPictureInPictureFlag {
-    fileprivate(set) var isActive = false
-}
-
-extension View {
-    /// Keeps `channelId`'s PiP flag (`PlaybackCenter.pictureInPictureFlag(for:)`)
-    /// alive while this view is mounted. Appear / disappear only — no
-    /// observation, nothing per render.
-    func retainsPictureInPictureFlag(for channelId: String, in center: PlaybackCenter?) -> some View {
-        onAppear { center?.retainPictureInPictureFlag(for: channelId) }
-            .onDisappear { center?.releasePictureInPictureFlag(for: channelId) }
-    }
-}
-
-/// Why the stream is held paused (`PlaybackCenter.holdPlayback(_:)`).
-enum PlaybackHoldReason: Hashable, Sendable {
-    /// A clip is playing over the stream (`ClipPlayerSheet`).
-    case clip
-    /// The app is in the background and the stream can't continue there
-    /// (no PiP, not audio-only with sound — `PlaybackLifecycleObserver`).
-    case background
-}
-
-/// A pause taken with `PlaybackCenter.holdPlayback`.
-struct PlaybackHold: Equatable {
-    fileprivate let id: UUID
-    let reason: PlaybackHoldReason
-    fileprivate let generation: Int
-    /// Decided when the hold began (`PlaybackCenter.resumesOnRelease`).
-    let resumeOnRelease: Bool
-}
-
-private struct PlaybackCenterKey: EnvironmentKey {
-    static let defaultValue: PlaybackCenter? = nil
-}
-
-extension EnvironmentValues {
-    var playback: PlaybackCenter? {
-        get { self[PlaybackCenterKey.self] }
-        set { self[PlaybackCenterKey.self] = newValue }
-    }
-}
-
-// MARK: - Host
-
-/// A slot the engine's video can be shown in. Several can exist at once
-/// (the chat header and the mini player during a pop); only the active one
-/// (`PlaybackCenter.activeHostID`) holds the view.
-struct PlayerHost: View {
-    let center: PlaybackCenter
-    @State private var id = UUID()
-
-    var body: some View {
-        PlayerHostRepresentable(
-            center: center,
-            isActive: center.activeHostID == id,
-            revision: center.hostRevision
-        )
-        .onAppear { center.claim(id) }
-        .onDisappear { center.release(id) }
-    }
-}
-
-private struct PlayerHostRepresentable: UIViewRepresentable {
-    let center: PlaybackCenter
-    let isActive: Bool
-    let revision: Int
-
-    func makeUIView(context: Context) -> UIView {
-        let container = UIView()
-        container.backgroundColor = .clear
-        container.clipsToBounds = true
-        return container
-    }
-
-    func updateUIView(_ container: UIView, context: Context) {
-        guard isActive, let engineView = center.engine?.view else { return }
-        if engineView.superview !== container {
-            engineView.removeFromSuperview()
-            engineView.frame = container.bounds
-            engineView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            container.addSubview(engineView)
-        }
-    }
-}
-
-// MARK: - Mini player
-
-/// The video tile's resting widths (16:9). Pinching snaps to the nearest.
-enum MiniPlayerSize: String, CaseIterable {
-    case small, medium, large
-
-    static let storageKey = "chattr.miniPlayer.size"
-
-    var width: CGFloat {
-        switch self {
-        case .small: 160
-        case .medium: 208
-        case .large: 288
-        }
-    }
-
-    /// The size whose width is closest to `width`.
-    static func nearest(to width: CGFloat) -> MiniPlayerSize {
-        allCases.min { abs($0.width - width) < abs($1.width - width) } ?? .medium
-    }
-}
-
-/// Floating player shown while a stream keeps playing outside its chat.
-/// Tap → back to the chat; × → stop. Drag it anywhere and it settles in the
-/// nearest corner; fling it down from a bottom corner to stop; pinch the
-/// video to resize. Audio-only streams get a compact pill instead.
-struct MiniPlayerOverlay: View {
-    let center: PlaybackCenter
-    let onOpen: (ChannelDescriptor) -> Void
-
-    @State private var dragOffset: CGSize = .zero
-    @State private var alignment: Alignment = .bottomTrailing
-    @AppStorage(MiniPlayerSize.storageKey) private var size: MiniPlayerSize = .medium
-    /// Live pinch factor, folded into `size` when the pinch ends.
-    @State private var pinchScale: CGFloat = 1
-
-    private static let area = "miniPlayerArea"
-
-    var body: some View {
-        if let channel = center.channel {
-            GeometryReader { geo in
-                Group {
-                    // Native failed → web engine, which can't play hidden:
-                    // show the video tile instead of the audio pill.
-                    if center.audioOnly, !center.controller.nativeFailed {
-                        audioPill(channel)
-                    } else {
-                        videoTile(channel, maxWidth: geo.size.width - 24)
-                            .simultaneousGesture(pinchGesture(maxWidth: geo.size.width - 24))
-                    }
-                }
-                .offset(dragOffset)
-                .gesture(dragGesture(in: geo.size))
-                .padding(.horizontal, 12)
-                // Clear of the tab bar.
-                .padding(.bottom, 64)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: alignment)
-            }
-            .coordinateSpace(.named(Self.area))
-            .transition(.scale(scale: 0.8).combined(with: .opacity))
-            .onAppear {
-                center.controller.onTap = { onOpen(channel) }
-                center.controller.onSwipeDown = nil
-            }
-        }
-    }
-
-    /// Current tile width: the resting size times any pinch in progress,
-    /// kept between the smallest size and the screen.
-    private func tileWidth(maxWidth: CGFloat) -> CGFloat {
-        let lower = MiniPlayerSize.small.width
-        let upper = max(lower, min(maxWidth, MiniPlayerSize.large.width * 1.15))
-        return min(max(size.width * pinchScale, lower), upper)
-    }
-
-    private func videoTile(_ channel: ChannelDescriptor, maxWidth: CGFloat) -> some View {
-        let width = tileWidth(maxWidth: maxWidth)
-        return ZStack(alignment: .topTrailing) {
-            // The engine view never sees touches here: the web player's
-            // scroll view and the native view's own swipe/tap recognizers
-            // were swallowing the drag (TestFlight: "why can't I drag it?").
-            // Taps and drags are handled in SwiftUI instead.
-            PlayerHost(center: center)
-                .background(.black)
-                .allowsHitTesting(false)
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture { onOpen(channel) }
-            closeButton
-                .padding(6)
-        }
-        .frame(width: width, height: width * 9 / 16)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.15), lineWidth: 0.5)
-        }
-        .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(channel.channelDisplayName) mini player")
-        .accessibilityAction(named: "Open chat") { onOpen(channel) }
-    }
-
-    private func audioPill(_ channel: ChannelDescriptor) -> some View {
-        HStack(spacing: 10) {
-            LazyImage(request: ImageRequest.avatar(url: center.profileImageURL, side: 32)) { state in
-                if let image = state.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    Image(systemName: "person.crop.circle.fill")
-                        .resizable()
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 32, height: 32)
-            .clipShape(Circle())
-            VStack(alignment: .leading, spacing: 1) {
-                Text(channel.channelDisplayName)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Label("Audio only", systemImage: "headphones")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Button {
-                center.controller.togglePlay()
-            } label: {
-                Image(systemName: center.controller.isPaused ? "play.fill" : "pause.fill")
-                    .frame(width: 32, height: 32)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(center.controller.isPaused ? "Play" : "Pause")
-            closeButton
-        }
-        .padding(.leading, 8)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
-        .glassEffect(.regular.interactive(), in: Capsule())
-        .contentShape(Capsule())
-        .onTapGesture { onOpen(channel) }
-        // The engine must stay attached somewhere to keep playing smoothly.
-        .background {
-            PlayerHost(center: center)
-                .frame(width: 2, height: 2)
-                .opacity(0.01)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
-    }
-
-    private var closeButton: some View {
-        Button {
-            withAnimation(.snappy) { center.stop() }
-        } label: {
-            Image(systemName: "xmark")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.white)
-                .frame(width: 26, height: 26)
-                .background(.black.opacity(0.55), in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Stop playback")
-    }
-
-    /// Drag anywhere; on release the tile settles in the corner nearest to
-    /// where the finger (plus its momentum) ends up — like system PiP.
-    /// A hard fling down from a bottom corner stops playback.
-    private func dragGesture(in area: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.area))
-            .onChanged { dragOffset = $0.translation }
-            .onEnded { value in
-                withAnimation(.snappy) {
-                    if alignment.vertical == .bottom, value.predictedEndTranslation.height > 160 {
-                        center.stop()
-                    } else {
-                        let end = value.predictedEndLocation
-                        alignment = Alignment(
-                            horizontal: end.x < area.width / 2 ? .leading : .trailing,
-                            vertical: end.y < area.height / 2 ? .top : .bottom
-                        )
-                    }
-                    dragOffset = .zero
-                }
-            }
-    }
-
-    /// Pinch the video to resize; it snaps to the nearest of three sizes,
-    /// remembered across launches.
-    private func pinchGesture(maxWidth: CGFloat) -> some Gesture {
-        MagnifyGesture()
-            .onChanged { pinchScale = $0.magnification }
-            .onEnded { value in
-                let lower = MiniPlayerSize.small.width
-                let upper = max(lower, min(maxWidth, MiniPlayerSize.large.width * 1.15))
-                let target = min(max(size.width * value.magnification, lower), upper)
-                withAnimation(.snappy) {
-                    size = MiniPlayerSize.nearest(to: target)
-                    pinchScale = 1
-                }
-            }
     }
 }
 #endif

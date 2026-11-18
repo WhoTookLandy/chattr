@@ -446,6 +446,31 @@ struct ChannelSessionRegistryLifecycleTests {
         #expect(!activity.hasActiveSessions)
     }
 
+    @Test("releaseAll matches the whole account id, not ids that begin with it")
+    func releaseAllMatchesWholeAccountId() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+
+        let mine = try await openChannel(registry, fake, account: "1", channel: "5", startIndex: 0)
+        let theirs = try await openChannel(registry, fake, account: "12", channel: "5", startIndex: 1)
+
+        await registry.releaseAll(forAccountUserId: "1")
+
+        #expect(await fake.wasStopped(mine))
+        #expect(!(await fake.wasStopped(theirs)))
+        #expect(registry.existingSession(accountUserId: "1", channelId: "5") == nil)
+        #expect(registry.existingSession(accountUserId: "12", channelId: "5") === theirs)
+        #expect(!registry.isRouted(accountUserId: "1", channelId: "5"))
+        #expect(registry.isRouted(accountUserId: "12", channelId: "5"))
+        #expect(!activity.hasActiveSessions(forAccount: "1"))
+        #expect(activity.hasActiveSessions(forAccount: "12"))
+
+        await registry.release(accountUserId: "12", channelId: "5")
+        #expect(await fake.wasStopped(theirs))
+        #expect(!activity.hasActiveSessions)
+    }
+
     // MARK: - Unowned sessions (built by session(...) alone)
 
     @Test("release tears down a session nothing acquired, without touching activity")

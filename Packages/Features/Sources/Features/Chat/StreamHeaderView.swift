@@ -199,35 +199,55 @@ struct StreamHeaderView: View {
         return String(status.fetchedAt.timeIntervalSinceReferenceDate)
     }
 
-    /// Only the active page acts (pages leaving — swiped away or popped —
-    /// do nothing, so a popped chat's stream carries on into the mini
-    /// player).
+    /// Carries out what `StreamPlaybackPolicy` decides for this page. Only
+    /// the active page acts (pages leaving — swiped away or popped — do
+    /// nothing, so a popped chat's stream carries on into the mini player).
     private func syncPlayback() {
         guard isActive, let playback else { return }
-        if isExpanded, let liveStream {
+        switch playbackPolicy(for: playback).decision {
+        case .play(let request):
             playback.play(
                 channel,
-                title: liveStream.title,
+                title: request.stream.title,
                 profileImageURL: profileImageURL,
-                // Audio-only needs the native engine (see isAudioOnlyActive).
-                native: useNativePlayer || audioOnly,
-                audioOnly: audioOnly,
-                quality: maxQuality
+                native: request.native,
+                audioOnly: request.audioOnly,
+                quality: request.quality
             )
-            playback.noteLive(liveStream)
-        } else if let status, playback.isPlaying {
+            playback.noteLive(request.stream)
+        case .stopIfOfflineConfirmed(let readingAt):
             // One poll that leaves this (playing) stream out doesn't stop
             // it; a second one does.
-            if isExpanded, playback.isPlaying(channel.channelId),
-               !playback.offlineReadingConfirmed(at: status.fetchedAt) {
-                return
-            }
-            // Video hidden here, or this channel is offline: whatever was
-            // playing (this stream, or another chat's) stops. Waits for
-            // `status` so a not-yet-loaded status doesn't kill the stream
-            // the mini player handed back.
+            if playback.offlineReadingConfirmed(at: readingAt) { playback.stop() }
+        case .stop:
             playback.stop()
+        case .leaveAlone:
+            break
         }
+    }
+
+    /// This page's state, as the playback decision reads it.
+    private func playbackPolicy(for playback: PlaybackCenter) -> StreamPlaybackPolicy {
+        let playing: StreamPlaybackPolicy.Playing
+        if playback.isPlaying(channel.channelId) {
+            playing = .thisChannel
+        } else if playback.isPlaying {
+            playing = .anotherChannel
+        } else {
+            playing = .nothing
+        }
+        return StreamPlaybackPolicy(
+            isActivePage: isActive,
+            isExpanded: isExpanded,
+            liveStream: liveStream,
+            statusFetchedAt: status?.fetchedAt,
+            audioOnly: audioOnly,
+            prefersNativePlayer: useNativePlayer,
+            quality: maxQuality,
+            isNativePlaybackEnabled: PlayerSettings.isNativePlaybackEnabled,
+            nativeFailed: playback.controller.nativeFailed,
+            playing: playing
+        )
     }
 
     /// Single owner: while the landscape stage shows, the stage owns the
@@ -260,16 +280,18 @@ struct StreamHeaderView: View {
         #endif
     }
 
-    /// Audio-only needs the native engine (Twitch's audio-only rendition);
-    /// the web player can't play hidden — it needs a visible, full-size
-    /// surface to autoplay and to show its "Start Watching" gate. So if the
-    /// native engine fails, audio-only falls back to the normal video
-    /// layout — and so it does when the native path is switched off
-    /// (`PlayerSettings.isNativePlaybackEnabled`). Not available off iOS
-    /// (no player there).
+    /// Listen-only is what this page actually gets
+    /// (`StreamPlaybackPolicy.audioOnlyInEffect`): not after the native
+    /// engine it needs has failed, nor with the native path switched off —
+    /// the header then shows the normal video layout. Not available off
+    /// iOS (no player there).
     private var isAudioOnlyActive: Bool {
         #if os(iOS)
-        audioOnly && PlayerSettings.isNativePlaybackEnabled && !player.nativeFailed
+        StreamPlaybackPolicy.audioOnlyInEffect(
+            audioOnly: audioOnly,
+            nativePlaybackEnabled: PlayerSettings.isNativePlaybackEnabled,
+            nativeFailed: player.nativeFailed
+        )
         #else
         false
         #endif

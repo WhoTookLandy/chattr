@@ -35,8 +35,7 @@ extension ChannelSession {
 
         // Background work that would go on subscribing with the old client.
         retryTopics([])
-        liveEventsTask?.cancel()
-        liveEventsTask = nil
+        liveEvents.cancelStartup()
 
         let oldTopics = topics
         let oldIds = activeSubscriptionIds
@@ -80,16 +79,14 @@ extension ChannelSession {
         }
         guard !isStopped else { return oldClient }
         // If chat has to be retried, that retry resyncs from the same floor.
-        chatGapFloor = failed.contains(.chat) ? gapFloor : nil
+        resync.rebound(chatFailed: failed.contains(.chat), gapFloor: gapFloor)
         retryTopics(failed)
 
         if hadModerationEvents {
             await enableModerationEvents()
         }
         if channelId == accountUserId, !isStopped {
-            liveEventsTask = Task { [weak self] in
-                await self?.startLiveEvents()
-            }
+            beginLiveEvents()
         }
         await resyncAfterReconnect(droppedAt: gapFloor)
         return oldClient

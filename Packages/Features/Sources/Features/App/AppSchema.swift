@@ -1,12 +1,6 @@
-//
-//  AppSchema.swift
-//  chattr
-//
-
 import Accounts
 import Channels
 import Core
-import Features
 import Foundation
 import SwiftData
 
@@ -50,10 +44,10 @@ import SwiftData
 /// `Account` and `JoinedChannel` haven't changed since V1, so every version
 /// still references the live types; freeze them here the first time they
 /// change.
-enum AppSchemaV1: VersionedSchema {
-    static let versionIdentifier = Schema.Version(1, 0, 0)
+public enum AppSchemaV1: VersionedSchema {
+    public static let versionIdentifier = Schema.Version(1, 0, 0)
 
-    static var models: [any PersistentModel.Type] {
+    public static var models: [any PersistentModel.Type] {
         // `PersistedChatTab` resolves to the frozen nested copy below.
         [Account.self, JoinedChannel.self, PersistedChatTab.self]
     }
@@ -80,25 +74,25 @@ enum AppSchemaV1: VersionedSchema {
 
 /// V2: chat tabs are per-account. Adds `PersistedChatTab.accountUserId`
 /// (`String`, default `""`).
-enum AppSchemaV2: VersionedSchema {
-    static let versionIdentifier = Schema.Version(2, 0, 0)
+public enum AppSchemaV2: VersionedSchema {
+    public static let versionIdentifier = Schema.Version(2, 0, 0)
 
-    static var models: [any PersistentModel.Type] {
+    public static var models: [any PersistentModel.Type] {
         // The live `Features.PersistedChatTab`.
         [Account.self, JoinedChannel.self, PersistedChatTab.self]
     }
 }
 
 /// The schema the app's container is built with. Bump when adding a version.
-typealias AppSchemaLatest = AppSchemaV2
+public typealias AppSchemaLatest = AppSchemaV2
 
 /// Migration plan for the SwiftData store.
-enum AppMigrationPlan: SchemaMigrationPlan {
-    static var schemas: [any VersionedSchema.Type] {
+public enum AppMigrationPlan: SchemaMigrationPlan {
+    public static var schemas: [any VersionedSchema.Type] {
         [AppSchemaV1.self, AppSchemaV2.self]
     }
 
-    static var stages: [MigrationStage] {
+    public static var stages: [MigrationStage] {
         [migrateV1toV2]
     }
 

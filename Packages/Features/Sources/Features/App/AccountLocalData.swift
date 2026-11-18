@@ -6,8 +6,8 @@ import os
 private let logger = AppLogger.make("Features.AccountLocalData")
 
 /// Per-account state that Features keeps outside the `Account` row: the
-/// persisted chat-tab strip (`PersistedChatTab` rows), compose drafts, and
-/// the block-list cache.
+/// persisted chat-tab strip (`PersistedChatTab` rows), compose drafts, the
+/// block-list cache, and the cached follow roster.
 ///
 /// `Accounts` can't clean these up itself — it sits below Features and must
 /// not import it — so the app's composition root wires `remove` to
@@ -31,6 +31,7 @@ public enum AccountLocalData {
         }
         DraftStorage.removeAll(forAccount: accountUserId)
         BlockStore.removePersisted(forAccountUserId: accountUserId)
+        Task { await FollowsRosterCache.shared.remove(forAccountUserId: accountUserId) }
         logger.notice("Removed local data for account \(accountUserId, privacy: .public)")
     }
 }

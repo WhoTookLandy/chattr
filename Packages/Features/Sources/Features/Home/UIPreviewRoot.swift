@@ -10,37 +10,85 @@ import DesignSystem
 /// `chattrApp`) so the new device flow can be screenshotted on a fresh
 /// simulator — same purpose as the `#Preview` blocks, but navigable.
 ///
-/// Mirrors `AppShell`'s TabView structure with presentational stand-ins:
-///   - Home: the section bar over `HomeContent` (fed by `HomePreviewData`),
-///     the real `FollowingList` and the real `OpenChatsList`.
+/// Built like `AppShell`: one `AppNavigation` holds the selected tab, Home's
+/// section and stack, the open chats and the Activity inbox, and the tab bar
+/// is the shipping one (Home / Chats / Activity / Search, with its badges).
+///   - Home: the section bar over `HomeContent` (fed by `HomePreviewData`;
+///     `HomeScreen` reads the follows store, absent here) and the real
+///     `FollowingList`. Settings (`ProfileScreen`) pushes from the corner
+///     button, as it does from the avatar in the app. Tapping a stream opens
+///     its chat through `\.openChannel`.
+///   - Chats: real `ChatsScreen`, so the chat push is driven by
+///     `ChatTabsModel.isPresented` exactly as in the app.
 ///   - Activity: real `ActivityScreen` (empty).
-///   - You: real `ProfileScreen` against an in-memory SwiftData container
-///     holding one mock account.
 ///   - Search: real `AddChannelView` in its tab configuration.
+///
+/// Injected, as the app does: `\.chatTabs`, `\.openChannel`, the model
+/// container, and the stores that work offline (`\.globalCatalog`,
+/// `\.blockStore`, `\.chatImagePrefetcher`; all start empty and nothing here
+/// loads them).
+///
+/// Left out on purpose, because their readers go to the network as soon as
+/// they have one and the mock account has no token: `\.followsStore` and
+/// `\.channelStatus` (Helix), `\.channelSessionRegistry` (a chat page would
+/// open an EventSub socket; without it chats stay empty), `\.playback` (the
+/// stream header would load the real stream). The tab-session coordinator
+/// isn't started for the same reason.
 ///
 /// DEBUG-only; never compiled into release builds.
 public struct UIPreviewRoot: View {
     private let container: ModelContainer
     private let account: Account
     private let accountStore: AccountStore
+    private let blockStore: BlockStore
 
-    enum PreviewTab: String, Hashable {
-        case home, activity, you, search
-    }
-
-    /// Initial tab from `-uiPreviewTab <home|activity|you|search>` so each
-    /// surface can be screenshotted headlessly without driving the UI.
-    /// (`live|following|chats` select Home's section instead; see
-    /// `homeSection`.)
-    @State private var selectedTab: PreviewTab = {
-        let args = ProcessInfo.processInfo.arguments
-        if let index = args.firstIndex(of: "-uiPreviewTab"),
-           args.indices.contains(index + 1),
-           let tab = PreviewTab(rawValue: args[index + 1]) {
-            return tab
+    /// The shell's navigation state, seeded with the mock open chats and
+    /// positioned by the launch arguments so each surface can be
+    /// screenshotted headlessly without driving the UI:
+    ///
+    ///   - `-uiPreviewTab <home|chats|activity|search>` selects a tab;
+    ///     `live` / `following` select Home's section; `you` opens Settings
+    ///     on Home.
+    ///   - `-uiPreviewChatOpen` lands on Chats with the first chat pushed
+    ///     (for screenshotting the full-screen chat layout); otherwise the
+    ///     Chats tab shows its list.
+    @State private var navigation: AppNavigation = {
+        let navigation = AppNavigation()
+        let arguments = ProcessInfo.processInfo.arguments
+        let chatTabs = navigation.chatTabs
+        for tab in HomePreviewData.openTabs {
+            chatTabs.open(tab)
         }
-        return .home
+        // `open` presents each tab as it adds it; put the pager where the
+        // arguments want it.
+        let chatOpen = arguments.contains("-uiPreviewChatOpen")
+        chatTabs.activeTabId = chatOpen ? chatTabs.tabs.first?.id : nil
+        chatTabs.isPresented = chatOpen
+        if chatOpen {
+            navigation.selectedTab = .chats
+        }
+        // A background tab with an unseen mention, so screenshots of the
+        // quick-switcher popover show the red-dot state.
+        if chatTabs.tabs.count > 1 {
+            chatTabs.markMention(tabId: chatTabs.tabs[1].id)
+        }
+
+        if let index = arguments.firstIndex(of: "-uiPreviewTab"),
+           arguments.indices.contains(index + 1) {
+            switch arguments[index + 1] {
+            case "chats": navigation.selectedTab = .chats
+            case "activity": navigation.selectedTab = .activity
+            case "search": navigation.selectedTab = .search
+            case "you": navigation.homePath = [.profile]
+            case "following": navigation.homeSection = .following
+            default: break  // "home" / "live": where the shell starts
+            }
+        }
+        return navigation
     }()
+
+    @State private var globalCatalog = GlobalCatalog()
+    @State private var chatImagePrefetcher = ChatImagePrefetcher()
 
     public init() {
         do {
@@ -60,63 +108,39 @@ public struct UIPreviewRoot: View {
         )
         container.mainContext.insert(mock)
         account = mock
-        accountStore = AccountStore(modelContainer: container, clientId: "preview")
+        let store = AccountStore(modelContainer: container, clientId: "preview")
+        accountStore = store
+        blockStore = BlockStore(accountUserId: mock.userId, accountStore: store)
     }
 
-    /// Open chats for the Chats tab's list. `-uiPreviewChatOpen` leaves
-    /// the first tab active so the transcript arrives pushed (for
-    /// screenshotting the full-screen chat layout); otherwise the list
-    /// root shows.
-    @State private var chatTabsModel: ChatTabsModel = {
-        let model = ChatTabsModel()
-        for tab in HomePreviewData.openTabs {
-            model.open(tab)
-        }
-        if !ProcessInfo.processInfo.arguments.contains("-uiPreviewChatOpen") {
-            model.activeTabId = nil
-        } else {
-            model.activeTabId = model.tabs.first?.id
-        }
-        // A background tab with an unseen mention, so screenshots of the
-        // quick-switcher popover show the red-dot state.
-        if model.tabs.count > 1 {
-            model.markMention(tabId: model.tabs[1].id)
-        }
-        return model
-    }()
-
-    /// Home's section; `-uiPreviewTab following` lands on Following,
-    /// everything else on Live. (Chats is its own tab in the app.)
-    @State private var homeSection: HomeSection = {
-        let args = ProcessInfo.processInfo.arguments
-        if let index = args.firstIndex(of: "-uiPreviewTab"),
-           args.indices.contains(index + 1),
-           let section = HomeSection(rawValue: args[index + 1]) {
-            return section
-        }
-        return .live
-    }()
-
-    @State private var activity = ActivityStore()
-
     public var body: some View {
-        TabView(selection: $selectedTab) {
+        @Bindable var navigation = navigation
+        // The same action the shell injects; Home's mock streams open
+        // through it the way `HomeScreen`'s do.
+        let openChannel = OpenChannelAction(navigation)
+        TabView(selection: $navigation.selectedTab) {
             // Icon-only tabs — mirrors AppShell's custom-`label` tabs so the
             // design-review harness reflects the shipping tab bar.
-            Tab(value: PreviewTab.home) {
+            Tab(value: AppShell.AppTab.home) {
                 // Mirrors `HomeScreen`'s structure, but Live is fed mock
                 // streams (`HomeScreen` reads the real, here-absent stores).
-                NavigationStack {
+                NavigationStack(path: $navigation.homePath) {
                     VStack(spacing: 0) {
-                        HomeSectionBar(selection: $homeSection)
+                        HomeSectionBar(selection: $navigation.homeSection)
+                            .overlay(alignment: .trailing) {
+                                profileButton
+                                    .padding(.trailing, 16)
+                            }
                         Group {
-                            switch homeSection {
+                            switch navigation.homeSection {
                             case .live:
                                 HomeContent(
                                     liveStreams: HomePreviewData.streams,
                                     profileImageURLs: [:],
                                     liveLoadState: .loaded,
-                                    onStreamTap: { _, _ in }
+                                    onStreamTap: { stream, intent in
+                                        openChannel(stream: stream, profileImageURL: nil, intent: intent)
+                                    }
                                 )
                             case .following:
                                 FollowingList(account: account, accountStore: accountStore)
@@ -128,29 +152,32 @@ public struct UIPreviewRoot: View {
                     #if os(iOS)
                     .toolbar(.hidden, for: .navigationBar)
                     #endif
-                    .navigationDestination(isPresented: chatIsPresented) {
-                        ChatPagerScreen(account: account, accountStore: accountStore)
+                    .navigationDestination(for: HomeRoute.self) { route in
+                        switch route {
+                        case .profile:
+                            ProfileScreen(account: account, accountStore: accountStore, clientId: "preview")
+                        }
                     }
                 }
             } label: {
                 Image(systemName: "house")
             }
             .accessibilityLabel("Home")
-            Tab(value: PreviewTab.activity) {
-                ActivityScreen(store: activity)
+            Tab(value: AppShell.AppTab.chats) {
+                ChatsScreen(account: account, accountStore: accountStore, navigation: navigation)
+            } label: {
+                Image(systemName: "bubble.left.and.bubble.right")
+            }
+            .badge(navigation.chatTabs.mentionedTabIds.count)
+            .accessibilityLabel("Chats")
+            Tab(value: AppShell.AppTab.activity) {
+                ActivityScreen(store: navigation.activity)
             } label: {
                 Image(systemName: "bell")
             }
+            .badge(navigation.activity.unreadCount)
             .accessibilityLabel("Activity")
-            Tab(value: PreviewTab.you) {
-                NavigationStack {
-                    ProfileScreen(account: account, accountStore: accountStore, clientId: "preview")
-                }
-            } label: {
-                Image(systemName: "person.crop.circle")
-            }
-            .accessibilityLabel("You")
-            Tab(value: PreviewTab.search, role: .search) {
+            Tab(value: AppShell.AppTab.search, role: .search) {
                 AddChannelView(
                     account: account,
                     accountStore: accountStore,
@@ -162,14 +189,29 @@ public struct UIPreviewRoot: View {
             .accessibilityLabel("Search")
         }
         .modelContainer(container)
-        .environment(\.chatTabs, chatTabsModel)
+        .environment(\.chatTabs, navigation.chatTabs)
+        .environment(\.openChannel, openChannel)
+        .environment(\.globalCatalog, globalCatalog)
+        .environment(\.blockStore, blockStore)
+        .environment(\.chatImagePrefetcher, chatImagePrefetcher)
     }
 
-    private var chatIsPresented: Binding<Bool> {
-        Binding(
-            get: { chatTabsModel.activeTabId != nil && !chatTabsModel.tabs.isEmpty },
-            set: { if !$0 { chatTabsModel.activeTabId = nil } }
-        )
+    /// Stands in for `HomeScreen`'s avatar button (the mock account has no
+    /// profile image): Settings, pushed on Home.
+    private var profileButton: some View {
+        Button {
+            navigation.homePath.append(.profile)
+        } label: {
+            Image(systemName: "person.crop.circle.fill")
+                .resizable()
+                .foregroundStyle(.secondary)
+                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("You")
+        .accessibilityHint("Settings and accounts")
     }
 }
 #endif

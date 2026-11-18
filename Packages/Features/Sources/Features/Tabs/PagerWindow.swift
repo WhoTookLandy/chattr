@@ -1,5 +1,4 @@
 import SwiftUI
-import DesignSystem
 
 /// Which chat pages the pager keeps mounted: the page it has settled on plus
 /// one neighbour on each side.
@@ -58,48 +57,5 @@ final class PagerWindow {
         // center: `.scrollPosition(id:)` writes it mid-swipe.
         let centerIndex = position(of: centerId) ?? position(of: chatTabs.activeTabId) ?? 0
         return abs(index - centerIndex) <= Self.radius
-    }
-}
-
-/// Keeps `PagerWindow.centerId` following `activeTabId`, except while the
-/// user is mid-swipe (see `PagerWindow`). A zero-size view of its own so the
-/// `activeTabId` read invalidates only this, never the pager body.
-struct PagerWindowTracker: View {
-    let chatTabs: ChatTabsModel
-    let window: PagerWindow
-
-    var body: some View {
-        let active = chatTabs.activeTabId ?? chatTabs.tabs.first?.id
-        // Mid-swipe: hold the current center. Otherwise follow the page.
-        let target = window.isUserScrolling ? window.centerId : active
-        Color.clear
-            .frame(width: 0, height: 0)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .onChange(of: target, initial: true) { _, newTarget in
-                guard let newTarget, window.centerId != newTarget else { return }
-                window.centerId = newTarget
-            }
-    }
-}
-
-/// One page slot in the pager: the chat when inside the mounted window, the
-/// bare chat surface otherwise. Its own view so a window move re-evaluates
-/// only the page slots, not the pager.
-struct ChatPagerPage<Content: View>: View {
-    let tabId: UUID
-    let chatTabs: ChatTabsModel
-    let window: PagerWindow
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        if window.isMounted(tabId, in: chatTabs) {
-            content()
-        } else {
-            // Same surface the chat paints, so a page that is still outside
-            // the window (a fast multi-page fling) reads as loading chat,
-            // not a hole.
-            Color.chatSurface
-        }
     }
 }

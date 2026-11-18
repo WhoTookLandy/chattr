@@ -111,31 +111,33 @@ public final class ChannelSessionRegistry {
         let task: Task<Void, Never>
     }
 
-    /// Active sessions, keyed by composite "accountUserId/channelId".
+    /// What everything per account × channel is keyed by — the router's own
+    /// key, so "this account's sessions" is a field comparison and the
+    /// routing table needs no translation.
+    typealias SessionKey = ChannelEventRouter.RouteKey
+
+    /// Active sessions, keyed by account × channel.
     ///
     /// A key appears here only AFTER `session.start()` succeeds — this map is
     /// both the fast-path cache and the "ready to hand to a tab" set. Keeping
     /// it post-start is what guarantees no tab can `subscribe(_:)` to a session
     /// mid-startup (the "expose-late" half of option 2's backfill buffering).
-    var sessions: [String: ChannelSession] = [:]
+    var sessions: [SessionKey: ChannelSession] = [:]
 
-    /// Event-routing targets, keyed the same way as `sessions`. A session is
-    /// registered here BEFORE `start()` runs, so the shared dispatcher can
-    /// deliver live events to `handle(event:)` (which buffers them) during the
-    /// subscribe + backfill window. Without this, the router would drop those
-    /// events because the session isn't in `sessions` yet.
+    /// The off-main routing table the per-account dispatchers deliver
+    /// through, keyed the same way as `sessions` — and the only record of
+    /// each key's event-routing target. See `ChannelEventRouter`.
+    ///
+    /// A session is registered here BEFORE `start()` runs, so the shared
+    /// dispatcher can deliver live events to `handle(event:)` (which buffers
+    /// them) during the subscribe + backfill window. Without this, the
+    /// router would drop those events because the session isn't in
+    /// `sessions` yet.
     ///
     /// Distinct from `sessions` on purpose: routing must begin early, but
     /// exposure (fast-path + coalescing result) must stay late. Conflating them
     /// would let a concurrent caller grab a not-yet-started session. Cleared on
     /// teardown and on failed start.
-    ///
-    /// Mirrored into `router` (which the off-main dispatcher reads): every
-    /// write here is paired with a `router.register` / `router.unregister`.
-    var dispatchTargets: [String: ChannelSession] = [:]
-
-    /// The off-main routing table the per-account dispatchers deliver
-    /// through. See `ChannelEventRouter`.
     let router = ChannelEventRouter()
 
     /// In-flight session-construction Tasks, keyed the same way as `sessions`.
@@ -145,7 +147,7 @@ public final class ChannelSessionRegistry {
     /// call `start()` — the second `subscribe` then races Twitch's "already
     /// subscribed" rejection. Storing the in-flight Task here lets the second
     /// caller await the first's result instead.
-    private var inFlight: [String: PendingStart] = [:]
+    private var inFlight: [SessionKey: PendingStart] = [:]
 
     /// Teardowns still in progress, keyed the same way as `sessions`. The
     /// key's maps are cleared synchronously when its lifetime ends, so a
@@ -154,7 +156,7 @@ public final class ChannelSessionRegistry {
     /// awaits the entry here. Otherwise its subscribe could hit Twitch's 409
     /// "already subscribed" (capturing no subscription id) and the old
     /// session's unsubscribe would then delete the topic out from under it.
-    private var stopping: [String: PendingStop] = [:]
+    private var stopping: [SessionKey: PendingStop] = [:]
 
     /// In-progress `clientReplaced` passes, keyed by `accountUserId`.
     private var clientRebinds: [String: PendingRebind] = [:]
@@ -165,7 +167,7 @@ public final class ChannelSessionRegistry {
     /// — if a `release` already ended that lifetime, the release consumed
     /// the increment (refcount AND `sessionActivity`), and rolling back again
     /// would steal a newer holder's refcount.
-    private var lifetimes: [String: UInt64] = [:]
+    private var lifetimes: [SessionKey: UInt64] = [:]
 
     /// Monotonic source for `lifetimes`, `PendingStop.id`, `PendingRebind.id`
     /// and `dispatchGenerations`.
@@ -234,7 +236,7 @@ public final class ChannelSessionRegistry {
     /// A session built by `session(...)` while nothing holds the key is
     /// *unowned*: no refcount, no `sessionActivity` mark. It is not immortal
     /// — `release`, `releaseUnowned` and `releaseAll` all tear it down.
-    private var refCounts: [String: Int] = [:]
+    private var refCounts: [SessionKey: Int] = [:]
 
     // MARK: - Per-channel view stores (T11)
     //
@@ -259,13 +261,13 @@ public final class ChannelSessionRegistry {
     // ChatBadgeStore.load) — multiple callers asking for "load this
     // channel" trigger network work only once.
 
-    var emoteIndexes: [String: EmoteIndex] = [:]
-    var badgeStores: [String: ChatBadgeStore] = [:]
+    var emoteIndexes: [SessionKey: EmoteIndex] = [:]
+    var badgeStores: [SessionKey: ChatBadgeStore] = [:]
 
     /// One pending "the emote table changed" notification per key, so a
     /// load that publishes several interim tables in quick succession
     /// re-renders a channel's rows once (see `emoteIndex(forAccountUserId:)`).
-    var emoteRefreshes: [String: Task<Void, Never>] = [:]
+    var emoteRefreshes: [SessionKey: Task<Void, Never>] = [:]
 
     /// Ring capacity handed to each NEWLY constructed `ChannelSession` —
     /// the user's Chat History setting. Kept in sync by `RootView` (set at
@@ -287,7 +289,7 @@ public final class ChannelSessionRegistry {
     /// starting; it re-reads the shared flag, so nudge order doesn't matter.
     public func setAppInForeground(_ inForeground: Bool) {
         guard appForeground.set(inForeground) else { return }
-        for session in dispatchTargets.values {
+        for session in router.sessions {
             Task { [weak session] in
                 await session?.appForegroundDidChange()
             }
@@ -370,8 +372,7 @@ public final class ChannelSessionRegistry {
         // `sessions[key]` stays unset until start() succeeds, so this does NOT
         // expose the session to the fast path or to subscribers yet.
         // Idempotent: ensureEventDispatch spins up at most one Task per account.
-        dispatchTargets[key] = session
-        router.register(session, for: .init(accountUserId: accountUserId, channelId: channelId))
+        router.register(session, for: key)
         ensureEventDispatch(client: client, accountUserId: accountUserId)
 
         // Emotes load with the session, not with the chat page: a restored
@@ -448,12 +449,9 @@ public final class ChannelSessionRegistry {
     /// still belong to `session`. A `release` + re-acquire during the start
     /// will have replaced both entries with a newer session's; clearing them
     /// unconditionally would orphan that newer acquire.
-    private func abandonStart(key: String, session: ChannelSession, accountUserId: String) {
+    private func abandonStart(key: SessionKey, session: ChannelSession, accountUserId: String) {
         if inFlight[key]?.session === session {
             inFlight[key] = nil
-        }
-        if dispatchTargets[key] === session {
-            dispatchTargets[key] = nil
         }
         // Identity-based: a no-op if a newer session already took the route.
         router.unregister(session)
@@ -499,7 +497,7 @@ public final class ChannelSessionRegistry {
         dependencies.sessionActivity.increment(forAccount: accountUserId)
         // .debug: refcount churn is per-tab-open/close — visible in DevLogView
         // only when investigating session lifecycle issues, otherwise hidden.
-        logger.debug("acquire \(key, privacy: .public) → refcount \(self.refCounts[key] ?? 0)")
+        logger.debug("acquire \(key.description, privacy: .public) → refcount \(self.refCounts[key] ?? 0)")
         // Delegate construction to the existing session(...) path. If
         // construction fails, roll the refcount back so a future caller
         // can retry from a clean state — otherwise an orphan refcount
@@ -565,11 +563,11 @@ public final class ChannelSessionRegistry {
         let key = Self.key(accountUserId: accountUserId, channelId: channelId)
         guard let count = refCounts[key], count > 0 else {
             if await tearDownUnowned(key: key, accountUserId: accountUserId) {
-                logger.notice("release \(key, privacy: .public) with no refcount → unowned session torn down")
+                logger.notice("release \(key.description, privacy: .public) with no refcount → unowned session torn down")
             } else {
                 // .debug: nothing to do. Routine after a `releaseAll` (the
                 // tabs' own releases land later) and after a failed acquire.
-                logger.debug("release \(key, privacy: .public) with no outstanding refcount and no session; ignoring")
+                logger.debug("release \(key.description, privacy: .public) with no outstanding refcount and no session; ignoring")
             }
             return
         }
@@ -582,7 +580,7 @@ public final class ChannelSessionRegistry {
             refCounts[key] = count - 1
             // .debug: refcount decrement when not the last reference.
             // Pairs with the .debug "acquire" log on the opposite side.
-            logger.debug("release \(key, privacy: .public) → refcount \(count - 1)")
+            logger.debug("release \(key.description, privacy: .public) → refcount \(count - 1)")
             return
         }
 
@@ -594,13 +592,13 @@ public final class ChannelSessionRegistry {
             await teardown.value
             // .notice: session teardown is a boundary event — counterpart
             // to the "Created session" notice above.
-            logger.notice("release \(key, privacy: .public) → refcount 0; session stopped")
+            logger.notice("release \(key.description, privacy: .public) → refcount 0; session stopped")
         } else {
             // .debug: rare path (release raced a still-running start, which
             // was cancelled and will stop its own session when start()
             // returns). Not awaited — a slow start must not stall the
             // caller's teardown loop; a re-acquire waits on it via `stopping`.
-            logger.debug("release \(key, privacy: .public) → refcount 0; no started session (start cancelled or already gone)")
+            logger.debug("release \(key.description, privacy: .public) → refcount 0; no started session (start cancelled or already gone)")
         }
         // The account's event dispatcher deliberately outlives its last
         // session — its streams are single-use (see `ensureEventDispatch`).
@@ -615,7 +613,7 @@ public final class ChannelSessionRegistry {
     public func releaseUnowned(accountUserId: String, channelId: String) async {
         let key = Self.key(accountUserId: accountUserId, channelId: channelId)
         if await tearDownUnowned(key: key, accountUserId: accountUserId) {
-            logger.notice("releaseUnowned \(key, privacy: .public) → unowned session torn down")
+            logger.notice("releaseUnowned \(key.description, privacy: .public) → unowned session torn down")
         }
     }
 
@@ -626,7 +624,7 @@ public final class ChannelSessionRegistry {
     ///
     /// Same ordering as `release`: everything is detached synchronously, and
     /// only a session that had finished starting is awaited.
-    private func tearDownUnowned(key: String, accountUserId: String) async -> Bool {
+    private func tearDownUnowned(key: SessionKey, accountUserId: String) async -> Bool {
         guard refCounts[key] == nil,
               sessions[key] != nil || inFlight[key] != nil
         else { return false }
@@ -654,11 +652,10 @@ public final class ChannelSessionRegistry {
     /// that lands afterwards finds no refcount and no session, and is a
     /// no-op — it never decrements `sessionActivity` a second time.
     public func releaseAll(forAccountUserId accountUserId: String) async {
-        let prefix = "\(accountUserId)/"
-        var keys = Set(refCounts.keys.filter { $0.hasPrefix(prefix) })
-        keys.formUnion(sessions.keys.filter { $0.hasPrefix(prefix) })
-        keys.formUnion(inFlight.keys.filter { $0.hasPrefix(prefix) })
-        keys.formUnion(dispatchTargets.keys.filter { $0.hasPrefix(prefix) })
+        var keys = Set(refCounts.keys.filter { $0.accountUserId == accountUserId })
+        keys.formUnion(sessions.keys.filter { $0.accountUserId == accountUserId })
+        keys.formUnion(inFlight.keys.filter { $0.accountUserId == accountUserId })
+        keys.formUnion(router.keys(forAccountUserId: accountUserId))
         guard !keys.isEmpty else { return }
 
         // All synchronous detaching happens before the first await — same
@@ -691,13 +688,11 @@ public final class ChannelSessionRegistry {
     /// also recorded in `stopping` so a re-acquire's start waits for it.
     ///
     /// Callers must have already zeroed the key's refcount + lifetime.
-    private func detach(key: String, accountUserId: String) -> Task<Void, Never>? {
+    private func detach(key: SessionKey, accountUserId: String) -> Task<Void, Never>? {
         // Stop routing events to this session regardless of whether it
-        // finished starting (it may be in `dispatchTargets` but not yet in
-        // `sessions` if the release races a slow start).
-        if let target = dispatchTargets.removeValue(forKey: key) {
-            router.unregister(target)
-        }
+        // finished starting (it may be routed but not yet in `sessions` if
+        // the release races a slow start).
+        router.unregister(key: key)
         // T11: per-channel view stores share the session's lifetime.
         // Drop them here so the next acquire for the same channel starts
         // fresh — emote provider catalogs and channel badges might have
@@ -737,7 +732,7 @@ public final class ChannelSessionRegistry {
     }
 
     /// Clears `stopping[key]` if it is still the teardown identified by `id`.
-    private func finishTeardown(key: String, id: UInt64, accountUserId: String) {
+    private func finishTeardown(key: SessionKey, id: UInt64, accountUserId: String) {
         if stopping[key]?.id == id {
             stopping[key] = nil
         }
@@ -754,10 +749,9 @@ public final class ChannelSessionRegistry {
     /// `ensureEventDispatch`) and go when its streams end
     /// (`eventStreamDidFinish`).
     private func pruneAccountStateIfIdle(_ accountUserId: String) {
-        let prefix = "\(accountUserId)/"
-        guard !sessions.keys.contains(where: { $0.hasPrefix(prefix) }),
-              !inFlight.keys.contains(where: { $0.hasPrefix(prefix) }),
-              !stopping.keys.contains(where: { $0.hasPrefix(prefix) })
+        guard !sessions.keys.contains(where: { $0.accountUserId == accountUserId }),
+              !inFlight.keys.contains(where: { $0.accountUserId == accountUserId }),
+              !stopping.keys.contains(where: { $0.accountUserId == accountUserId })
         else { return }
         moderatedChannelsTasks[accountUserId] = nil
     }
@@ -799,11 +793,10 @@ public final class ChannelSessionRegistry {
     }
 
     private func rebindSessions(forAccountUserId accountUserId: String) async {
-        let prefix = "\(accountUserId)/"
         // A start already in flight may have been built on the old client.
         // Let it settle first, so every session of the account is either
         // started (and rebound below) or gone.
-        let starting = inFlight.filter { $0.key.hasPrefix(prefix) }.map { $0.value.task }
+        let starting = inFlight.filter { $0.key.accountUserId == accountUserId }.map { $0.value.task }
         for start in starting {
             _ = try? await start.value
         }
@@ -818,7 +811,7 @@ public final class ChannelSessionRegistry {
             retired.append(previous)
         }
 
-        let accountSessions = sessions.filter { $0.key.hasPrefix(prefix) }.map(\.value)
+        let accountSessions = sessions.filter { $0.key.accountUserId == accountUserId }.map(\.value)
         if !accountSessions.isEmpty {
             logger.notice("Client replaced for account \(accountUserId, privacy: .public) — rebinding \(accountSessions.count) session(s)")
             // New consumers before anything is subscribed on the new client,
@@ -871,7 +864,7 @@ public final class ChannelSessionRegistry {
     // MARK: - Helpers
 
     /// Cache key for everything this registry owns per account × channel
-    /// (sessions, emote indexes, badge stores).
+    /// (sessions, routes, emote indexes, badge stores).
     ///
     /// ## Twitch-scoped until sessions are platform-abstracted
     ///
@@ -886,7 +879,7 @@ public final class ChannelSessionRegistry {
     /// get platform-abstracted and this key switches to
     /// `ChannelDescriptor.ID` in the same change, keeping all keyed
     /// paths in lockstep.
-    static func key(accountUserId: String, channelId: String) -> String {
-        "\(accountUserId)/\(channelId)"
+    static func key(accountUserId: String, channelId: String) -> SessionKey {
+        SessionKey(accountUserId: accountUserId, channelId: channelId)
     }
 }

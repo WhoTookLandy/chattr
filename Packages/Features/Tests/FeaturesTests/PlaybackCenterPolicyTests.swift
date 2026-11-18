@@ -16,7 +16,8 @@ private struct PendingResolver: StreamPlaylistResolving {
 
 /// `PlaybackCenter`'s own decisions — what keeps the screen awake, when an
 /// offline reading stops the stream, and the long-pause unload — driven
-/// with the native engine still loading, so only the bookkeeping runs.
+/// on a `FakeStreamEngine` (a native engine still loading), so only the
+/// bookkeeping runs.
 @MainActor
 @Suite("Playback center policy")
 struct PlaybackCenterPolicyTests {
@@ -26,7 +27,11 @@ struct PlaybackCenterPolicyTests {
     )
 
     private func playingCenter() -> PlaybackCenter {
-        let center = PlaybackCenter(playlistResolver: PendingResolver())
+        playingCenter(FakeStreamEngines())
+    }
+
+    private func playingCenter(_ engines: FakeStreamEngines) -> PlaybackCenter {
+        let center = engines.center()
         center.play(
             Self.channel, title: "x", profileImageURL: nil,
             native: true, audioOnly: false, quality: .auto
@@ -45,7 +50,7 @@ struct PlaybackCenterPolicyTests {
 
     @Test("The screen is held awake only while a stream is loaded and not paused")
     func holdsScreenAwake() {
-        #expect(!PlaybackCenter(playlistResolver: PendingResolver()).holdsScreenAwake)
+        #expect(!FakeStreamEngines().center().holdsScreenAwake)
 
         let center = playingCenter()
         defer { center.stop() }
@@ -127,18 +132,21 @@ struct PlaybackCenterPolicyTests {
 
     @Test("A long pause unloads the engine but keeps the stream; play builds it again")
     func longPauseUnloadsAndPlayRestores() {
-        let center = playingCenter()
+        let engines = FakeStreamEngines()
+        let center = playingCenter(engines)
         defer { center.stop() }
         let controller = center.controller
 
         // Not paused: nothing to unload.
         center.unloadAfterLongPause()
         #expect(center.engine != nil)
+        #expect(engines.built.first?.teardownCount == 0)
 
         controller.togglePlay()
         #expect(controller.isPaused)
         center.unloadAfterLongPause()
         #expect(center.engine == nil)
+        #expect(engines.built.first?.teardownCount == 1)
         #expect(center.isPlaying(Self.channel.channelId))
         #expect(controller.isPaused)
 
@@ -148,10 +156,41 @@ struct PlaybackCenterPolicyTests {
             native: true, audioOnly: false, quality: .auto
         )
         #expect(center.engine == nil)
+        #expect(engines.built.count == 1)
 
         // Play.
         controller.togglePlay()
         #expect(center.engine != nil)
+        #expect(engines.built.count == 2)
+        #expect(engines.built.last?.kind == .native)
+        #expect(controller.wantsPlayback)
+        #expect(!controller.isPaused)
+    }
+
+    @Test("Handed no factory, the center builds the real engine")
+    func defaultFactoryBuildsRealEngine() {
+        // The one test here on a real engine: a `NativeStreamEngine` whose
+        // playlist never resolves, so no `AVPlayer` is made.
+        let center = PlaybackCenter(playlistResolver: PendingResolver())
+        center.play(
+            Self.channel, title: "x", profileImageURL: nil,
+            native: true, audioOnly: false, quality: .auto
+        )
+        defer { center.stop() }
+        #expect(center.engine is NativeStreamEngine)
+        #expect(center.engine?.kind == .native)
+        #expect(!center.controller.isNative)
+        // What `FakeStreamEngine` stands in for, checked on the real one
+        // (as `pauseThenPlayWhileNativeLoads` did before it moved to the
+        // fake): still resolving, it reports no page and no pause, and a
+        // tap flips intent and the control.
+        let controller = center.controller
+        #expect(!controller.isAwaitingWebEngine)
+        #expect(!controller.isPaused)
+        controller.togglePlay()
+        #expect(!controller.wantsPlayback)
+        #expect(controller.isPaused)
+        controller.togglePlay()
         #expect(controller.wantsPlayback)
         #expect(!controller.isPaused)
     }
