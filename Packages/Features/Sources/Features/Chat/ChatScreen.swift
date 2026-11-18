@@ -39,17 +39,22 @@ public struct ChatScreen: View {
     /// `@MainActor @Observable`).
     @State private var chatModel = ChatTranscriptModel()
 
-    @State private var errorMessage: String?
+    /// The session lifecycle for `chatModel`: attach on mount, detach on
+    /// teardown, Retry and the compose bar's self-heal — and the error to
+    /// show when a start fails. Driven from `.task(id: channelId)` below.
+    @State private var sessionCoordinator = ChatSessionCoordinator()
 
-    /// The attach epoch owned by the CURRENT session-lifecycle task (see
-    /// `.task(id: channelId)`). Each run of that task mints a fresh lease and
-    /// detaches with whatever epoch it holds at teardown. Out-of-band attaches
-    /// — the error view's Retry button and the compose bar's self-heal — record
-    /// into the live lease too, so the attachment they create is torn down
-    /// when the view goes away. Without it, a retry after a failed start left
-    /// the task holding the `0` sentinel and its `detach(ifEpoch: 0)` no-op'd,
-    /// keeping a subscription draining the session offscreen.
-    @State private var attachLease = AttachLease()
+    /// What `sessionCoordinator` works against, built where it is used: the
+    /// registry is only readable from the environment, and the account is
+    /// read when a start actually runs.
+    private var sessionLink: ChatSessionCoordinator.Link {
+        .live(
+            registry: channelSessionRegistry,
+            chatModel: chatModel,
+            account: account,
+            channel: channel
+        )
+    }
 
     /// The persisted compose draft for this channel, read from `DraftStorage`
     /// exactly once at construction (see `init`). `ComposeBar` only consumes
@@ -220,7 +225,7 @@ public struct ChatScreen: View {
         // tab has its own draft — sharing one bar across tabs would lose
         // drafts on swipe.
         Group {
-            if let errorMessage {
+            if let errorMessage = sessionCoordinator.errorMessage {
                 errorView(errorMessage)
             } else {
                 // The transcript (empty state + message list + pills) is a
@@ -434,10 +439,11 @@ public struct ChatScreen: View {
         //
         // The session-lifecycle .task uses `.task(id: channelId)` instead of
         // bare `.task`:
-        //   - Runs startSession on first mount (and on channelId change,
+        //   - Runs the session start on first mount (and on channelId change,
         //     though channelId is stable per ChatScreen instance).
-        //   - Body sleeps indefinitely after startSession completes, holding
-        //     the task alive until SwiftUI cancels it.
+        //   - `ChatSessionCoordinator.run` sleeps indefinitely after the
+        //     start completes, holding the task alive until SwiftUI cancels
+        //     it.
         //   - Cancellation comes from view tear-down (paged ScrollView
         //     unmounts off-screen ChatScreens during swipes) OR an id change.
         //   - On cancellation, the `try?` swallows the CancellationError and
@@ -453,31 +459,7 @@ public struct ChatScreen: View {
         // SwiftUI's task cancellation completes before the next view's
         // `.task` body starts.
         .task(id: channelId) {
-            // A lease per task run: a channelId change starts a new run with
-            // a new lease, so the outgoing run's teardown can never detach an
-            // epoch the incoming run (or a retry during it) established.
-            let lease = AttachLease()
-            attachLease = lease
-            await startSession(recordingInto: lease)
-            // Hold the task open until SwiftUI cancels us (view torn down
-            // or channelId changes). Sleeping for a year is the canonical
-            // SwiftUI idiom — Task.sleep is implemented as a scheduler
-            // primitive, not a busy-loop, so the cost is zero CPU.
-            try? await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
-            // Cancellation reaches here via CancellationError from sleep.
-            // Detach ONLY if this appearance still owns the current attachment:
-            // a newer ChatScreen appearance (paged re-mount, or a session
-            // teardown+rebuild) bumps the model's epoch, so a stale teardown
-            // here becomes a no-op and can't strand the freshly re-attached
-            // model (the "I see chat but it says Not connected" bug). The
-            // chatModel reference survives because @State storage persists
-            // until the task fully exits.
-            // Close the lease FIRST (synchronously, before any suspension):
-            // an out-of-band start still in flight will then detach its own
-            // attachment when it lands instead of recording it into a lease
-            // nobody will tear down. Cancel it too, so it stops early.
-            lease.close()
-            await chatModel.detach(ifEpoch: lease.epoch)
+            await sessionCoordinator.run(sessionLink)
         }
         .task {
             guard let store = badgeStore else { return }
@@ -635,16 +617,9 @@ public struct ChatScreen: View {
                 )
             },
             onSend: { draft in
-                // Self-heal: if the model lost its live session under us (a
-                // lifecycle race, or a session teardown+rebuild that left it
-                // detached while still showing primed lines), re-establish it
-                // before sending — so the user never hits a phantom
-                // "Not connected to chat" on a channel that's clearly live.
-                // `startSession`/`attach` are epoch-guarded + idempotent, so a
-                // no-op when already attached.
-                if chatModel.attachState != .attached {
-                    await startSession(recordingInto: attachLease)
-                }
+                // Self-heal first: a model that lost its live session is
+                // re-attached before the send (see `reattachIfNeeded`).
+                await sessionCoordinator.reattachIfNeeded(sessionLink)
                 await chatModel.send(text: draft)
             },
             // Settings live in the compose bar's ⋯ menu (moved out of the
@@ -680,9 +655,7 @@ public struct ChatScreen: View {
             // never clears and `.task(id: channelId)` won't re-fire for the
             // same channel — the only escape was closing the tab.
             Button("Retry") {
-                let lease = attachLease
-                guard !lease.isClosed else { return }
-                lease.track(Task { await startSession(recordingInto: lease) })
+                sessionCoordinator.retry(sessionLink)
             }
             .buttonStyle(.borderedProminent)
         }
@@ -765,181 +738,5 @@ public struct ChatScreen: View {
                 showReportConfirmation = false
             }
         }
-    }
-
-    // MARK: - Session lifecycle
-
-    /// Starts (or re-establishes) the session attachment and records the
-    /// resulting epoch into `lease`, which the session-lifecycle task passes
-    /// to `detach(ifEpoch:)` on teardown. A failed, cancelled or missing-
-    /// registry start records nothing, leaving the lease's previous epoch
-    /// (or the `0` pre-attach sentinel, whose teardown no-ops unless nothing
-    /// ever attached). If the lease closed while the start was in flight,
-    /// its teardown has already run, so this start detaches its own
-    /// attachment rather than leaving it orphaned.
-    @MainActor
-    private func startSession(recordingInto lease: AttachLease) async {
-        let epoch = await attachSession()
-        guard epoch != 0 else { return }
-        if lease.isClosed {
-            await chatModel.detach(ifEpoch: epoch)
-        } else {
-            lease.record(epoch)
-        }
-    }
-
-    @MainActor
-    /// - Returns: the attach epoch the model established, or `0` if no attach
-    ///   happened (missing registry, cancelled, or error).
-    private func attachSession() async -> Int {
-        // Clear any prior failure so a retry (button or compose-bar
-        // self-heal) actually dismisses the error view; a repeat failure
-        // re-sets it below.
-        errorMessage = nil
-        // Badge load runs in a sibling .task modifier (see body) — gives us
-        // structured-cancellation parity with this session-start task.
-        guard let registry = channelSessionRegistry else {
-            errorMessage = "Couldn't open chat: missing session registry"
-            logger.error("ChatScreen has no registry in environment — was RootView injected?")
-            return 0
-        }
-
-        // Signpost-bracket the session-start so Instruments can show the
-        // overlap with the emote-load interval. Useful for diagnosing
-        // races like the cancellation-during-channel-open bug we hit
-        // (Instruments would show emote-load truncated while session-start
-        // continues to completion, making the relationship obvious).
-        let signpostID = signposter.makeSignpostID()
-        let signpostState = signposter.beginInterval(
-            "session-start",
-            id: signpostID,
-            "channel=\(channelLoginName)"
-        )
-        defer { signposter.endInterval("session-start", signpostState) }
-
-        do {
-            // Registry returns the cached session if one exists for this
-            // (userId, channelId), or constructs + starts a new one. Either
-            // way the session is already-running by the time we get it.
-            let session = try await registry.session(
-                accountUserId: account.userId,
-                accountLogin: account.login,
-                channelId: channelId,
-                channelLoginName: channelLoginName
-            )
-            logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
-
-            // Hand the session to the tab model, which atomically primes its
-            // transcript from the session's current ring buffer AND
-            // subscribes for future rows via `ChannelSession.subscribe()`.
-            //
-            // For the MVP this is always a single-element array. When multi-
-            // channel tabs ship, `attach(sessions: [a, b, c])` will subscribe
-            // to all of them with the same model — the rest of ChatScreen
-            // doesn't need to change.
-            //
-            // Lifecycle: the session-lifecycle `.task(id: channelId)` in the
-            // body detaches (with the epoch returned here) when SwiftUI
-            // cancels it. The model's subscriptions stay live as long as this
-            // ChatScreen instance is mounted; on tear-down they're released,
-            // but the underlying `ChannelSession` stays alive in the registry
-            // (other tabs may share it — it's ref-counted there).
-            //
-            // Rows arrive already normalized: the session tokenizes each
-            // message once, off the main actor, against the registry-owned
-            // EmoteIndex (the registry loads it; this screen's emote `.task`
-            // retries on remount), and every tab showing the channel shares
-            // the result.
-            let epoch = await chatModel.attach(
-                sessions: [session],
-                currentUserId: account.userId,
-                currentUserLogin: account.login,
-                currentUserDisplayName: account.displayName,
-                // User-configured highlight keywords (Profile → Highlight
-                // Keywords). Read at attach time — changing them mid-session
-                // applies on the next channel attach (reopen / relaunch).
-                // Self-mentions are always highlighted regardless of this
-                // list (the session flags them); keywords are additive and
-                // applied by this model, per attach.
-                highlightKeywords: HighlightSettings.keywords(),
-                // Chat History setting — read at attach time, like the
-                // keywords. Tab remounts re-attach, so a changed setting
-                // takes hold on the next swipe back to (or reopen of) a
-                // channel.
-                lineCap: ChatAppearance.chatHistoryLines(),
-                // Composite draft key — the model clears the persisted
-                // draft under this key after a successful send. Passed
-                // from the descriptor here so the model never has to
-                // compose platform-qualified keys itself.
-                draftKey: channel.id,
-                // Hybrid mod detection: an async provider for the account's
-                // moderated-channel set (`/moderation/channels`, cached per
-                // account on the registry). attach fires it concurrently —
-                // it never blocks chat startup — and seeds
-                // `currentUserCanModerate` when this channel is in the set,
-                // so mods get Delete Message without sending a message
-                // first. Captures the userId string (not `account`, a
-                // non-Sendable @Model) and the registry weakly — if the
-                // registry is gone by resolution time the model just
-                // falls back to badge observation.
-                moderatedChannelIds: { [weak registry, accountUserId = account.userId] in
-                    await registry?.moderatedChannelIds(
-                        forAccountUserId: accountUserId
-                    ) ?? []
-                },
-                // Counterpart hook: a live unmod (channel.moderate event or
-                // subscription revocation) evicts the registry's cached
-                // moderated-set, so reopening the channel refetches instead
-                // of re-seeding mod affordances from the stale entry.
-                onModerationRevoked: { [weak registry, accountUserId = account.userId] in
-                    await registry?.invalidateModeratedChannels(
-                        forAccountUserId: accountUserId
-                    )
-                }
-            )
-            return epoch
-        } catch is CancellationError {
-            // Expected on view tear-down / channel-tab switch. The outgoing
-            // instance's `try await registry.session(...)` gets cancelled in
-            // flight. Silently exit — don't show a red error.
-            logger.info("ChatScreen session-start cancelled for #\(channelLoginName)")
-            return 0
-        } catch {
-            errorMessage = "Couldn't open chat: \(error.localizedDescription)"
-            logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")
-            return 0
-        }
-    }
-}
-
-/// Mutable holder for the attach epoch a `ChatScreen` session-lifecycle task
-/// owns — see `ChatScreen.attachLease`. A reference type so the Retry button
-/// and the compose-bar self-heal can record into the lease of the task run
-/// that is live when they fire.
-@MainActor
-final class AttachLease {
-    /// The NEWEST epoch any start under this lease established. Epochs only
-    /// grow, so keeping the max means a superseded start that finishes late
-    /// can't overwrite a newer one with its stale epoch (whose
-    /// `detach(ifEpoch:)` would then no-op).
-    private(set) var epoch = 0
-    /// Set by the lifecycle task's teardown; after that, starts detach what
-    /// they establish instead of recording it.
-    private(set) var isClosed = false
-    /// Out-of-band starts (Retry) in flight, cancelled on close.
-    private var pending: [Task<Void, Never>] = []
-
-    func record(_ newEpoch: Int) {
-        epoch = max(epoch, newEpoch)
-    }
-
-    func track(_ task: Task<Void, Never>) {
-        pending.append(task)
-    }
-
-    func close() {
-        isClosed = true
-        for task in pending { task.cancel() }
-        pending.removeAll()
     }
 }

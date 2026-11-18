@@ -66,39 +66,14 @@ final class ChatListViewController: UIViewController {
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<Section, String>!
 
-    /// Last `isAtBottom` value pushed to SwiftUI — we only call the callback on
-    /// a flip, never per scroll frame (matches the old onScrollGeometryChange).
-    private var lastReportedAtBottom = true
-
-    /// True while the transcript is "tailing" — glued to the newest message.
-    ///
-    /// While pinned, every collection-view layout pass re-asserts the
-    /// bottom-pinned content offset (see `pinToBottomIfNeeded`). This replaces
-    /// the old one-shot `scrollToItem(at:.bottom)`: with `.estimated(44)`
-    /// self-sizing rows, a one-shot scroll computes its destination from
-    /// estimated attributes and lands wrong whenever real heights differ —
-    /// the per-pass re-pin absorbs each estimate→actual correction before
-    /// it's ever drawn (the "bounce" on new messages, and the pill jump
-    /// landing short of the bottom).
-    ///
-    /// Cleared the moment the user starts dragging; restored when a drag or
-    /// deceleration ends near the bottom, or when a re-pin is requested (the
-    /// jump-to-bottom pill, or an own send). Starts true — chat opens tailing.
-    ///
-    /// Also gates data flow: while unpinned, appends / trims / re-keys are
-    /// held back by `feed` so the rows being read can't be trimmed out from
-    /// under the reader; re-pinning flushes them in one apply.
-    private var isPinnedToBottom = true
-
-    /// Last-seen scroll-to-bottom token — the jump pill and own sends increment the
-    /// value to request a re-pin; we act only when it changes.
-    private var lastScrollToBottomToken = 0
-
-    /// A re-pin requested while the user's finger was dragging the list
-    /// (e.g. a hardware-keyboard send mid-scroll). Applied when the drag
-    /// ends: pinning now would make every layout pass yank the offset out
-    /// from under the finger.
-    private var repinAfterDrag = false
+    /// The tailing rules: pinned or reading scrollback, suspended in the
+    /// background, visible or an off-screen neighbour — and what each scroll,
+    /// lifecycle and update event does about it. This controller reports the
+    /// events (with the geometry they depend on) and performs what comes
+    /// back — see `perform(_:)`. Effects are performed after the reporting
+    /// call has returned, never from inside it, so the refresh and layout
+    /// they cause can't re-enter the value while it is being changed.
+    private var tailing = ChatListTailing()
 
     /// Consumer of the model's change log: what the data source shows (and
     /// the cell provider's `linesByID` lookup), plus the changes held back
@@ -111,43 +86,13 @@ final class ChatListViewController: UIViewController {
     private var pullChanges: ((Int) -> ChatChangeLog.Delta)?
     private var pullSnapshot: (() -> (version: Int, lines: [ChatLine]))?
 
-    /// Last unread count pushed to SwiftUI — report on change only.
-    private var lastReportedUnread = 0
-
     /// Ceiling for the reported unread count: the transcript's line cap (set
     /// by the representable). Arrivals beyond it were trimmed before the
     /// reader could jump down to them.
     var unreadLimit = Int.max
 
-    /// A growing unread count reaches SwiftUI at most this often. Each push
-    /// writes `ChatTranscript`'s state and re-renders the jump pill; in a
-    /// busy channel the count changes with every flush, far faster than
-    /// "N new" needs to tick.
-    private static let unreadReportInterval: Duration = .milliseconds(500)
-
-    /// When the unread count was last pushed.
-    private var lastUnreadReportAt: ContinuousClock.Instant?
-
     /// The trailing push for a count that changed inside the interval.
     private var pendingUnreadReport: Task<Void, Never>?
-
-    /// Last row inputs (badges loaded, can moderate) — `update` reconfigures
-    /// every row when they change. Nil before the first update.
-    private var rowInputs: ChatRowInputs?
-
-    /// True while the app is in the background — typically the stream
-    /// playing on in Picture in Picture. Nothing here is visible then, yet
-    /// every model flush would still apply a snapshot and force-lay-out
-    /// self-sizing SwiftUI cells at message rate, competing with the video
-    /// for the CPU (and the battery). While suspended, updates only record
-    /// what they'd need; the model's change log keeps every change, and
-    /// returning to the foreground catches up in one apply (or one reset,
-    /// if the log no longer reaches back that far).
-    private var isSuspended = false
-
-    /// A row-inputs change that arrived while suspended — applied as a
-    /// reconfigure-all on resume.
-    private var pendingReconfigureAll = false
 
     /// False while this list is a mounted pager neighbour rather than the
     /// visible page (see `PagerWindow`). Off-screen, every flush would still
@@ -155,16 +100,31 @@ final class ChatListViewController: UIViewController {
     /// coalesce into one refresh per `offscreenRefreshInterval`, keeping the
     /// neighbour close enough to current that swiping to it shows live chat.
     /// Becoming visible catches up immediately.
-    var isVisible = true {
-        didSet {
-            guard isViewLoaded, isVisible != oldValue else { return }
-            if isVisible {
-                throttledRefresh?.cancel()
-                throttledRefresh = nil
-                guard !isSuspended else { return }
-                refresh()
-                pinToBottomIfNeeded()
-            }
+    var isVisible: Bool {
+        get { tailing.isVisible }
+        set {
+            let effects = tailing.setVisible(newValue, isViewLoaded: isViewLoaded)
+            perform(effects)
+        }
+    }
+
+    /// Carries out what `tailing` answered an event with, in its order:
+    /// cancel the scheduled refresh, refresh (now or later), pin.
+    private func perform(_ effects: ChatListTailing.Effects) {
+        if effects.cancelsScheduledRefresh {
+            throttledRefresh?.cancel()
+            throttledRefresh = nil
+        }
+        switch effects.refresh {
+        case .now(let reconfigureAll)?:
+            refresh(reconfigureAll: reconfigureAll)
+        case .later?:
+            scheduleThrottledRefresh()
+        case nil:
+            break
+        }
+        if effects.pinsToBottom {
+            pinToBottomIfNeeded()
         }
     }
 
@@ -185,8 +145,7 @@ final class ChatListViewController: UIViewController {
             try? await Task.sleep(for: Self.offscreenRefreshInterval)
             guard let self, !Task.isCancelled else { return }
             self.throttledRefresh = nil
-            guard !self.isSuspended else { return }
-            self.refresh()
+            self.perform(self.tailing.scheduledRefreshFired())
         }
     }
 
@@ -244,22 +203,15 @@ final class ChatListViewController: UIViewController {
     @objc private func keyboardWillHide() { keyboardVisible = false }
 
     @objc private func appDidEnterBackground() {
-        isSuspended = true
-        // Nothing may wake up for this list while backgrounded: the resume
-        // refreshes unconditionally.
-        throttledRefresh?.cancel()
-        throttledRefresh = nil
+        let effects = tailing.enteredBackground()
+        perform(effects)
     }
 
     /// Catch up before the first foreground frame, so the transcript is
     /// already current when the app (or the PiP restore) comes back.
     @objc private func appWillEnterForeground() {
-        guard isSuspended else { return }
-        isSuspended = false
-        let reconfigureAll = pendingReconfigureAll
-        pendingReconfigureAll = false
-        refresh(reconfigureAll: reconfigureAll)
-        pinToBottomIfNeeded()
+        let effects = tailing.willEnterForeground()
+        perform(effects)
     }
 
     @objc private func transcriptTapped(_ gesture: UITapGestureRecognizer) {
@@ -374,7 +326,7 @@ final class ChatListViewController: UIViewController {
     /// false)` also kills any in-flight deceleration so a pill tap mid-fling
     /// doesn't fight the momentum.
     private func pinToBottomIfNeeded() {
-        guard isPinnedToBottom else { return }
+        guard tailing.isPinnedToBottom else { return }
         let target = ScrollAnchor.bottomPinnedOffsetY(
             contentHeight: collectionView.contentSize.height,
             containerHeight: collectionView.bounds.height,
@@ -413,50 +365,15 @@ final class ChatListViewController: UIViewController {
         pullChanges = changes
         pullSnapshot = snapshot
 
-        // Row inputs changed (badges finished loading, mod status flipped):
-        // reconfigure every row already in the list, in the same apply as
-        // whatever data arrived. Not on the first update — every row is
-        // fresh then.
-        let isFirstUpdate = self.rowInputs == nil
-        let inputsChanged = !isFirstUpdate && self.rowInputs != rowInputs
-        self.rowInputs = rowInputs
-
-        var jumpRequested = scrollToBottomToken != lastScrollToBottomToken
-        if jumpRequested {
-            lastScrollToBottomToken = scrollToBottomToken
-            if collectionView?.isDragging == true {
-                // A finger is on the list: honour the request when it lifts
-                // (see `repinAfterDrag`).
-                repinAfterDrag = true
-                jumpRequested = false
-            } else {
-                // Re-pin request (jump pill, own send): re-enter tailing
-                // BEFORE pulling, so the backlog held back while reading
-                // flushes in this same apply. The per-pass
-                // pinToBottomIfNeeded (and the explicit pin in `apply`) glue
-                // the offset to the live edge from here — same mechanism as
-                // resumeTailing.
-                isPinnedToBottom = true
-            }
-        }
-        // Backgrounded (see `isSuspended`): the accessors, row inputs and any
-        // re-pin request are recorded above; the data waits for the resume.
-        if isSuspended {
-            if inputsChanged { pendingReconfigureAll = true }
-            return
-        }
-        // Off-screen pager neighbour (see `isVisible`): coalesce plain data
-        // updates. The first update (priming the list, so the page is ready
-        // before it's swiped in) and the rare row-input / re-pin changes
-        // still apply at once.
-        if !isVisible, !isFirstUpdate, !inputsChanged, !jumpRequested {
-            scheduleThrottledRefresh()
-            return
-        }
-        throttledRefresh?.cancel()
-        throttledRefresh = nil
-        refresh(reconfigureAll: inputsChanged)
-        if jumpRequested { pinToBottomIfNeeded() }
+        // The accessors are recorded above whatever happens next; whether
+        // this update applies now, later (off-screen) or on resume
+        // (backgrounded) is `ChatListTailing.update`'s call.
+        let effects = tailing.update(
+            rowInputs: rowInputs,
+            scrollToBottomToken: scrollToBottomToken,
+            isDragging: collectionView?.isDragging == true
+        )
+        perform(effects)
     }
 
     /// Pulls everything the model published since the feed's last version and
@@ -466,7 +383,7 @@ final class ChatListViewController: UIViewController {
     private func refresh(reconfigureAll: Bool = false) {
         guard let pullChanges, let pullSnapshot else { return }
         let edit = feed.update(
-            pinned: isPinnedToBottom,
+            pinned: tailing.isPinnedToBottom,
             reconfigureAll: reconfigureAll,
             changes: pullChanges,
             snapshot: pullSnapshot
@@ -476,20 +393,21 @@ final class ChatListViewController: UIViewController {
     }
 
     private func reportUnreadCountIfChanged() {
-        let count = min(feed.unreadCount, unreadLimit)
-        guard count != lastReportedUnread else { return }
-        let now = ContinuousClock.now
-        // Zero (caught up — the pill must clear at once) is never delayed;
-        // a count that is still climbing is (see `unreadReportInterval`).
-        if count != 0, let last = lastUnreadReportAt, now - last < Self.unreadReportInterval {
-            scheduleUnreadReport(after: Self.unreadReportInterval - (now - last))
-            return
+        let report = tailing.unreadReport(
+            heldBack: feed.unreadCount,
+            limit: unreadLimit,
+            now: .now
+        )
+        switch report {
+        case .now(let count)?:
+            pendingUnreadReport?.cancel()
+            pendingUnreadReport = nil
+            onUnreadCountChanged?(count)
+        case .after(let delay)?:
+            scheduleUnreadReport(after: delay)
+        case nil:
+            break
         }
-        pendingUnreadReport?.cancel()
-        pendingUnreadReport = nil
-        lastUnreadReportAt = now
-        lastReportedUnread = count
-        onUnreadCountChanged?(count)
     }
 
     /// One trailing push once the interval has passed, so the last value
@@ -512,7 +430,7 @@ final class ChatListViewController: UIViewController {
     private func apply(_ edit: ChatListEdit) {
         guard !edit.isEmpty else { return }
 
-        // Pinned state — not the geometric `lastReportedAtBottom` — decides.
+        // Pinned state — not the geometric at-bottom flag — decides.
         // Mid-drag near the bottom the pin is already released while the
         // geometry still reads "at bottom"; keying off geometry skipped the
         // anchor there and let the edit shove the content under the finger.
@@ -521,7 +439,7 @@ final class ChatListViewController: UIViewController {
         // from in-place edits above the viewport (a delete flipping a row to
         // its placeholder).
         let anchor: (id: String, distanceFromTop: CGFloat)? =
-            isPinnedToBottom ? nil : currentTopAnchor()
+            tailing.isPinnedToBottom ? nil : currentTopAnchor()
 
         var snapshot: NSDiffableDataSourceSnapshot<Section, String>
         if let resetIds = edit.resetIds {
@@ -553,7 +471,7 @@ final class ChatListViewController: UIViewController {
         }
         dataSource.apply(snapshot, animatingDifferences: false)
 
-        if isPinnedToBottom {
+        if tailing.isPinnedToBottom {
             // Force the post-snapshot layout now, then pin. layoutIfNeeded
             // runs the collection view's layoutSubviews, whose onDidLayout
             // already pins — the explicit call after it is a cheap no-op
@@ -567,7 +485,7 @@ final class ChatListViewController: UIViewController {
             // onDidLayout pins it, and becoming visible refreshes and pins
             // again. A reset (the mount that readies the page for a swipe,
             // and feeds the height estimate below) still lays out now.
-            if isVisible || edit.resetIds != nil {
+            if tailing.settlesLayoutAfterApply(isReset: edit.resetIds != nil) {
                 collectionView.layoutIfNeeded()
                 pinToBottomIfNeeded()
             }
@@ -613,15 +531,19 @@ extension ChatListViewController: UICollectionViewDelegate {
         return false
     }
 
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        let atBottom = ScrollAnchor.isNearBottom(
+    /// The near-bottom fact the tailing rules ask for, from live geometry.
+    private func isNearBottom(_ scrollView: UIScrollView) -> Bool {
+        ScrollAnchor.isNearBottom(
             contentHeight: scrollView.contentSize.height,
             offsetY: scrollView.contentOffset.y,
             containerHeight: scrollView.bounds.height,
             bottomInset: scrollView.adjustedContentInset.bottom
         )
-        guard atBottom != lastReportedAtBottom else { return }
-        lastReportedAtBottom = atBottom
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        let nearBottom = isNearBottom(scrollView)
+        guard let atBottom = tailing.scrolled(isNearBottom: nearBottom) else { return }
         onAtBottomChanged?(atBottom)
     }
 
@@ -629,25 +551,25 @@ extension ChatListViewController: UICollectionViewDelegate {
     /// immediately so a layout pass mid-drag can't yank the offset back
     /// to the bottom while the user is reading scrollback.
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        isPinnedToBottom = false
+        tailing.dragBegan()
     }
 
-    /// Drag released. A re-pin requested mid-drag (see `repinAfterDrag`)
-    /// applies now, momentum or not; otherwise resume tailing if the drag
-    /// ended near the bottom without momentum (within the same 44pt the pill
-    /// logic uses).
+    /// Drag released. A re-pin requested mid-drag applies now, momentum or
+    /// not; otherwise tailing resumes if the drag ended near the bottom
+    /// without momentum (within the same 44pt the pill logic uses) — see
+    /// `ChatListTailing.dragEnded`. Resuming flushes what was held back and
+    /// pins; `setContentOffset` also stops any remaining momentum.
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if repinAfterDrag {
-            repinAfterDrag = false
-            resumeTailing()
-        } else if !decelerate {
-            resumeTailingIfNearBottom(scrollView)
-        }
+        let nearBottom = isNearBottom(scrollView)
+        let effects = tailing.dragEnded(willDecelerate: decelerate, isNearBottom: nearBottom)
+        perform(effects)
     }
 
     /// Momentum settled — same near-bottom check as the direct release.
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        resumeTailingIfNearBottom(scrollView)
+        let nearBottom = isNearBottom(scrollView)
+        let effects = tailing.decelerationEnded(isNearBottom: nearBottom)
+        perform(effects)
     }
 
     /// Refuse the status-bar-tap scroll-to-top gesture: the quick-switcher
@@ -655,30 +577,6 @@ extension ChatListViewController: UICollectionViewDelegate {
     /// the transcript to the oldest line instead of opening the switcher.
     func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
         false
-    }
-
-    /// Re-enter tailing mode when a user-initiated scroll settles near the
-    /// bottom, and snap the remaining ≤44pt so "near the bottom" and
-    /// "tailing" can't drift apart (the pin keeps asserting the exact
-    /// bottom from here on).
-    private func resumeTailingIfNearBottom(_ scrollView: UIScrollView) {
-        guard ScrollAnchor.isNearBottom(
-            contentHeight: scrollView.contentSize.height,
-            offsetY: scrollView.contentOffset.y,
-            containerHeight: scrollView.bounds.height,
-            bottomInset: scrollView.adjustedContentInset.bottom
-        ) else { return }
-        resumeTailing()
-    }
-
-    /// Back to the live edge: flush everything held back while reading right
-    /// now — the next model publish may be a while away on a quiet channel —
-    /// then glue the offset to the (new) bottom. `setContentOffset` also
-    /// stops any remaining momentum.
-    private func resumeTailing() {
-        isPinnedToBottom = true
-        refresh()
-        pinToBottomIfNeeded()
     }
 }
 #endif

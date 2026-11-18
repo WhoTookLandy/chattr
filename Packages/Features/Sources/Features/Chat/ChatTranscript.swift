@@ -142,7 +142,7 @@ struct ChatTranscript: View {
         // Picture, with the chat socket up): stop feeding a transcript nobody
         // can see, and catch up on the way back — see
         // `ChatTranscriptModel.setLiveUpdatesPaused`. The same notifications
-        // suspend the list (`ChatListViewController.isSuspended`); attached
+        // suspend the list (`ChatListTailing.isSuspended`); attached
         // out here so the empty state is covered too. Becoming active is a
         // second chance to resume, and a no-op when already resumed.
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
