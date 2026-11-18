@@ -47,7 +47,7 @@ public final class TabPersistence {
     }
 
     /// Fetch this account's persisted tabs in user-defined order. Called
-    /// once per account appearance (by AppShell's hydration `.task`) to seed
+    /// once per account appearance (by AppShell as it appears) to seed
     /// `ChatTabsModel`.
     ///
     /// Order is the source of truth for left-to-right position in the

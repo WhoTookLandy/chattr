@@ -166,9 +166,12 @@ struct HomeContent: View {
     @State private var selectedCategory: String?
 
     var body: some View {
+        // Derived once per pass: the chips, the header count and the rows
+        // all read it, and each used to re-total the categories.
+        let feed = liveFeed
         ScrollViewReader { proxy in
             List {
-                liveSection
+                liveSection(feed)
             }
             .listStyle(.plain)
             // Rows stay transparent so the shared chat surface reads through;
@@ -190,7 +193,7 @@ struct HomeContent: View {
             // `-uiPreviewChatOpen` in UIPreviewRoot.
             .task {
                 guard ProcessInfo.processInfo.arguments.contains("-uiPreviewScrolled"),
-                      let last = displayedStreams.last else { return }
+                      let last = feed.displayedStreams.last else { return }
                 try? await Task.sleep(for: .milliseconds(500))
                 proxy.scrollTo(last.userId, anchor: .bottom)
             }
@@ -203,50 +206,58 @@ struct HomeContent: View {
 
     // MARK: - Categories
 
-    /// Categories with at least one live followed channel, busiest (total
-    /// viewers) first. Chips only appear when there are two or more —
-    /// one chip would filter nothing.
-    private var categories: [String] {
+    /// What one body pass shows, derived from `liveStreams` and the chip
+    /// selection.
+    private struct LiveFeed {
+        /// Categories with at least one live followed channel, busiest
+        /// (total viewers) first. Chips only appear when there are two or
+        /// more — one chip would filter nothing.
+        let categories: [String]
+        /// The selection, ignored once its category has nobody live.
+        let activeCategory: String?
+        /// Every live followed channel (in the selected category). No
+        /// preview cap + "See all": the feed is the full list.
+        let displayedStreams: [TwitchStream]
+    }
+
+    private var liveFeed: LiveFeed {
         var totals: [String: Int] = [:]
         for stream in liveStreams where !stream.gameName.isEmpty {
             totals[stream.gameName, default: 0] += stream.viewerCount
         }
-        guard totals.count >= 2 else { return [] }
-        return totals.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
-    }
-
-    /// The selection, ignored once its category has nobody live.
-    private var activeCategory: String? {
-        guard let selectedCategory, categories.contains(selectedCategory) else { return nil }
-        return selectedCategory
-    }
-
-    private var filteredStreams: [TwitchStream] {
-        guard let activeCategory else { return liveStreams }
-        return liveStreams.filter { $0.gameName == activeCategory }
-    }
-
-    /// Every live followed channel (in the selected category). No preview
-    /// cap + "See all": the feed is the full list.
-    private var displayedStreams: [TwitchStream] {
-        filteredStreams
+        let categories = totals.count >= 2
+            ? totals.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+            : []
+        var activeCategory: String?
+        if let selectedCategory, categories.contains(selectedCategory) {
+            activeCategory = selectedCategory
+        }
+        var displayedStreams = liveStreams
+        if let activeCategory {
+            displayedStreams = liveStreams.filter { $0.gameName == activeCategory }
+        }
+        return LiveFeed(
+            categories: categories,
+            activeCategory: activeCategory,
+            displayedStreams: displayedStreams
+        )
     }
 
     // MARK: - Live now
 
     @ViewBuilder
-    private var liveSection: some View {
+    private func liveSection(_ feed: LiveFeed) -> some View {
         Section {
             // A regular row, not a Section header — plain-list headers pin
             // to the top as a translucent bar that never goes away.
-            liveHeaderRow
+            liveHeaderRow(feed)
             if liveStreams.isEmpty {
                 liveEmptyContent
             } else {
-                if !categories.isEmpty {
-                    categoryChips
+                if !feed.categories.isEmpty {
+                    categoryChips(feed)
                 }
-                ForEach(Array(displayedStreams.enumerated()), id: \.element.userId) { index, stream in
+                ForEach(Array(feed.displayedStreams.enumerated()), id: \.element.userId) { index, stream in
                     Button {
                         onStreamTap(stream, .implicit)
                     } label: {
@@ -276,16 +287,16 @@ struct HomeContent: View {
         }
     }
 
-    private var liveHeaderRow: some View {
+    private func liveHeaderRow(_ feed: LiveFeed) -> some View {
         HStack(alignment: .firstTextBaseline) {
             sectionHeader("Live now")
             Spacer()
             // How many are live. The whole list is right here, so a
             // count replaces the old "See all" link.
             if !liveStreams.isEmpty {
-                Text(displayedStreams.count == liveStreams.count
+                Text(feed.displayedStreams.count == liveStreams.count
                      ? "\(liveStreams.count) live"
-                     : "\(displayedStreams.count) of \(liveStreams.count)")
+                     : "\(feed.displayedStreams.count) of \(liveStreams.count)")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -298,14 +309,14 @@ struct HomeContent: View {
 
     /// All / per-category filter chips (Twitch Home's "All · Just Chatting
     /// · IRL" row), scoped to the Live now preview.
-    private var categoryChips: some View {
+    private func categoryChips(_ feed: LiveFeed) -> some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
-                chip("All", isSelected: activeCategory == nil) {
+                chip("All", isSelected: feed.activeCategory == nil) {
                     selectedCategory = nil
                 }
-                ForEach(categories, id: \.self) { category in
-                    chip(category, isSelected: activeCategory == category) {
+                ForEach(feed.categories, id: \.self) { category in
+                    chip(category, isSelected: feed.activeCategory == category) {
                         selectedCategory = category
                     }
                 }

@@ -44,15 +44,19 @@ final class PagerWindow {
     /// Whether the page for `tabId` should be mounted.
     func isMounted(_ tabId: UUID, in chatTabs: ChatTabsModel) -> Bool {
         let tabs = chatTabs.tabs
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return false }
+        func position(of id: UUID?) -> Int? {
+            guard let id else { return nil }
+            return tabs.firstIndex { $0.id == id }
+        }
         // Center on the settled page; if that tab has since closed (or
         // nothing has settled yet), on the active one, then the first. Never
         // "everything" — with many tabs open that would attach them all.
-        let candidates = [centerId, chatTabs.activeTabId, tabs.first?.id]
-        guard let centerIndex = candidates.lazy.compactMap({ candidate in
-                  candidate.flatMap { id in tabs.firstIndex { $0.id == id } }
-              }).first,
-              let index = tabs.firstIndex(where: { $0.id == tabId })
-        else { return false }
+        //
+        // `??` evaluates its right side only when needed, so `activeTabId` is
+        // read (and observed by every page slot) only without a usable
+        // center: `.scrollPosition(id:)` writes it mid-swipe.
+        let centerIndex = position(of: centerId) ?? position(of: chatTabs.activeTabId) ?? 0
         return abs(index - centerIndex) <= Self.radius
     }
 }

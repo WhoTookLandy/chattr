@@ -80,6 +80,23 @@ public enum EmoteProviderError: Error, Equatable, Sendable {
     case httpStatus(Int)
 }
 
+/// The `URLSession` the three providers use unless one is injected.
+///
+/// Not `URLSession.shared`: its 60 s request timeout is how long a channel
+/// open could sit waiting on one stalled provider before the others' emotes
+/// counted as loaded. Emote metadata is a small JSON document, so a provider
+/// that has sent nothing for 10 s is treated as down; `EmoteIndex` keeps
+/// that provider's last good set and retries later.
+public enum EmoteProviderTransport {
+    public static let session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 10
+        // Ceiling on a response that keeps trickling in under the idle timeout.
+        configuration.timeoutIntervalForResource = 30
+        return URLSession(configuration: configuration)
+    }()
+}
+
 /// Shared HTTP status policy for the three providers.
 enum ProviderHTTP {
     /// Throws `EmoteProviderError.httpStatus` unless the response is 2xx.

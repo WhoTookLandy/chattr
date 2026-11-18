@@ -78,6 +78,44 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             | xcbeautify --renderer github-actions
 
+  # Accounts also runs under host `swift test` above, but its UIKit-gated
+  # code and tests (`#if canImport(UIKit)`: the OAuth callback parser) only
+  # compile and run on iOS.
+  accounts-tests:
+    name: Accounts tests (iOS Simulator)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.6"
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: spm-accounts-${{ runner.os }}-${{ hashFiles('Packages/*/Package.swift') }}
+          restore-keys: spm-accounts-${{ runner.os }}-
+
+      - name: Test on iOS Simulator
+        working-directory: Packages/Accounts
+        run: |
+          set -o pipefail
+          UDID=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
+          echo "Using simulator $UDID"
+          # SwiftPM generates "<Name>-Package" when a package has several
+          # products/targets; otherwise the scheme is just the package name.
+          SCHEME=$(xcodebuild -list -json | jq -r '.workspace.schemes as $s
+            | if ($s | index("Accounts-Package")) then "Accounts-Package" else "Accounts" end')
+          xcodebuild test \
+            -scheme "$SCHEME" \
+            -destination "id=$UDID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            | xcbeautify --renderer github-actions
+
   app-build:
     name: Build app (iOS Simulator)
     runs-on: macos-26
@@ -102,6 +140,39 @@ jobs:
           xcodebuild build-for-testing \
             -project chattr.xcodeproj \
             -scheme chattr \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions
+
+  # The job above builds Debug. TestFlight archives Release, where the
+  # optimizer and `#if DEBUG` blocks differ, so compile that too before a
+  # tag finds out.
+  app-build-release:
+    name: Build app, Release (iOS Simulator)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.6"
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: spm-app-release-${{ runner.os }}-${{ hashFiles('Packages/*/Package.swift') }}
+          restore-keys: spm-app-release-${{ runner.os }}-
+
+      - name: Build Release
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project chattr.xcodeproj \
+            -scheme chattr \
+            -configuration Release \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \

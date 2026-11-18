@@ -1,6 +1,10 @@
 import Foundation
 import Nuke
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 /// Configures Nuke's shared `ImagePipeline` with limits tuned for
 /// chattr's chat-heavy usage. Called once at app launch by `RootView`
 /// (via `ImagePipelineSetup.configure()`).
@@ -77,5 +81,18 @@ public enum ImagePipelineSetup {
         }
 
         ImagePipeline.shared = pipeline
+
+        #if canImport(UIKit)
+        // Nuke's memory cache empties itself on a memory warning; the
+        // decoded-animation cache sits outside Nuke and is the larger of
+        // the two (up to 64 MB of frames), so it has to be told. Animations
+        // still on screen survive through the views showing them. The block
+        // observer lives for the process, so its token is not kept.
+        _ = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
+        ) { _ in
+            DecodedAnimationCache.shared.removeAll()
+        }
+        #endif
     }
 }

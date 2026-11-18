@@ -274,6 +274,45 @@ struct ChannelSessionPipelineTests {
         #expect(woke == nil)
     }
 
+    @Test("Subscribing to a stopped session returns a subscription that has already ended")
+    func subscribeAfterStopIsFinished() async throws {
+        let session = await makeSession()
+        try await session.handle(event: chatEvent(id: "m1"))
+        await session.stop()
+
+        let (subscription, snapshot) = await session.subscribe()
+        // The last rows are still readable; the stream just never waits.
+        #expect(lines(snapshot).map(\.id) == ["m1"])
+        var wakeups = subscription.wakeups.makeAsyncIterator()
+        let woke = await wakeups.next()
+        #expect(woke == nil)
+    }
+
+    @Test("State-only updates reach subscribers but are not kept in the ring")
+    func stateOnlyUpdatesAreNotStored() async throws {
+        let session = await makeSession(ringCapacity: 2)
+        let (subscription, _) = await session.subscribe()
+
+        try await session.handle(event: chatEvent(id: "m1"))
+        try await session.handle(event: settingsEvent(slowSeconds: 5))
+        try await session.handle(event: settingsEvent(slowSeconds: 6))
+        try await session.handle(event: chatEvent(id: "m2"))
+
+        // Delivered in order, restrictions included…
+        let delivered = subscription.takePending()
+        #expect(delivered.count == 4)
+        let slowModes = delivered.compactMap { update -> Int? in
+            if case .restrictionsUpdated(let restrictions) = update { return restrictions.slowModeSeconds }
+            return nil
+        }
+        #expect(slowModes == [5, 6])
+        // …but they took no ring slot: both messages still fit a ring of 2.
+        let ring = await session.currentSnapshot()
+        #expect(ring.count == 2)
+        #expect(lines(ring).map(\.id) == ["m1", "m2"])
+        #expect(await session.currentChatRestrictions()?.slowModeSeconds == 6)
+    }
+
     @Test("subscribe(onBatch:) runs the handler on its own task, per batch")
     func batchHandlerReceivesUpdates() async throws {
         actor Received {
@@ -306,8 +345,9 @@ struct ChannelSessionPipelineTests {
         func channelEmotes(broadcasterId: String, broadcasterLogin: String) async throws -> [Emote] { [emote] }
     }
 
-    @Test("Rows normalized before the emote table loaded are refreshed when a tab subscribes")
-    func staleRowsRenormalizedOnSubscribe() async throws {
+    /// An index whose one channel emote is "Kappa", published only once
+    /// `load` is called.
+    private func makeKappaIndex() -> EmoteIndex {
         let kappa = Emote(
             id: "7tv:Kappa",
             name: "Kappa",
@@ -317,7 +357,7 @@ struct ChannelSessionPipelineTests {
             source: .sevenTV,
             ownerChannelId: "1"
         )
-        let index = EmoteIndex(
+        return EmoteIndex(
             providers: [OneEmoteProvider(emote: kappa)],
             cache: JSONDiskCache(
                 subdirectory: "ch",
@@ -325,6 +365,84 @@ struct ChannelSessionPipelineTests {
                     .appendingPathComponent("pipeline-tests-\(UUID().uuidString)", isDirectory: true)
             )
         )
+    }
+
+    @Test("Rows a subscriber already holds are re-delivered resolved once the emote table lands")
+    func staleRowsRedeliveredWhenEmoteTableChanges() async throws {
+        let index = makeKappaIndex()
+        let session = await makeSession(emoteIndex: index)
+
+        // A background tab: subscribed and receiving before its emotes load.
+        let (subscription, _) = await session.subscribe()
+        try await session.handle(event: chatEvent(id: "m1", text: "hi Kappa"))
+        try await session.handle(event: chatEvent(id: "m2", text: "no emotes here"))
+        let early = lines(subscription.takePending())
+        #expect(early.first?.runs == [.text("hi"), .text("Kappa")])
+
+        // Nothing published yet: nothing to refresh, nothing sent.
+        await session.emoteTableDidChange()
+        #expect(subscription.takePending().isEmpty)
+
+        await index.load(broadcasterId: "1", broadcasterLogin: "ch")
+        await session.emoteTableDidChange()
+
+        let pending = subscription.takePending()
+        try #require(pending.count == 1)
+        guard case .reprime(let snapshot) = pending[0] else {
+            Issue.record("Expected a reprime of the ring, got \(pending[0])")
+            return
+        }
+        let refreshed = lines(snapshot)
+        try #require(refreshed.count == 2)
+        #expect(refreshed.map(\.id) == ["m1", "m2"])
+        try #require(refreshed[0].runs.count == 2)
+        guard case .emote(let resolved) = refreshed[0].runs[1] else {
+            Issue.record("Expected Kappa to resolve as an emote, got \(refreshed[0].runs[1])")
+            return
+        }
+        #expect(resolved.name == "Kappa")
+        #expect(refreshed[0].timestamp == early[0].timestamp)
+
+        // Already current: a second notification re-sends nothing.
+        await session.emoteTableDidChange()
+        #expect(subscription.takePending().isEmpty)
+    }
+
+    @Test("An emote-table change before the join backfill is committed sends nothing")
+    func emoteTableChangeBeforeBackfillIsIgnored() async throws {
+        let index = makeKappaIndex()
+        // Not `makeSession`: the buffering window must still be open.
+        let session = ChannelSession(
+            client: TwitchClient(clientId: "test-client", tokenStore: NullTokenStore()),
+            channelId: "1",
+            channelLoginName: "ch",
+            accountUserId: "me-id",
+            emoteIndex: index,
+            fetchBackfill: { _, _ in [] }
+        )
+        let (subscription, _) = await session.subscribe()
+        try await session.handle(event: chatEvent(id: "m1", text: "hi Kappa"))
+        _ = subscription.takePending()
+
+        await index.load(broadcasterId: "1", broadcasterLogin: "ch")
+        await session.emoteTableDidChange()
+        #expect(subscription.takePending().isEmpty)
+
+        // The buffered row is refreshed for whoever subscribes once the
+        // session is open.
+        await session.applyBackfill([])
+        let (_, snapshot) = await session.subscribe()
+        let line = try #require(lines(snapshot).first)
+        try #require(line.runs.count == 2)
+        guard case .emote = line.runs[1] else {
+            Issue.record("Expected Kappa to resolve as an emote, got \(line.runs[1])")
+            return
+        }
+    }
+
+    @Test("Rows normalized before the emote table loaded are refreshed when a tab subscribes")
+    func staleRowsRenormalizedOnSubscribe() async throws {
+        let index = makeKappaIndex()
         let session = await makeSession(emoteIndex: index)
 
         // Arrives before the channel's emotes are loaded → plain text.

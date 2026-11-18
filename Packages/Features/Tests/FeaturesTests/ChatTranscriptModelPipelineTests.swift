@@ -13,7 +13,11 @@ import ChatModel
 /// `@testable import Channels` reaches `ChannelSession.handle(event:)` so the
 /// end-to-end tests can inject a live event into a real (never-started)
 /// session without a socket.
-@Suite("ChatTranscriptModel pipeline", .timeLimit(.minutes(1)))
+///
+/// The limit is a hang guard, and it counts time spent queued for the main
+/// actor. The whole target runs in parallel on one simulator, and on CI that
+/// wait has run to about 90 seconds before these tests get their turn.
+@Suite("ChatTranscriptModel pipeline", .timeLimit(.minutes(5)))
 @MainActor
 struct ChatTranscriptModelPipelineTests {
 
@@ -147,6 +151,26 @@ struct ChatTranscriptModelPipelineTests {
         model.apply(.reprime([message("h1"), message("h2")]))
 
         #expect(model.lines.map(\.id) == ["h1", "h2", local.id])
+        await model.detach()
+    }
+
+    @Test("A reprime reaches readers as ONE wholesale reset, kept local rows included")
+    func reprimePublishesOneReset() async throws {
+        let model = ChatTranscriptModel()
+        await model.attach(sessions: [makeSession()], currentUserId: "me-1", currentUserLogin: "me")
+        model.apply(message("old"))
+        // Offline, so the send fails at once and stays as a local row.
+        await model.send(text: "my message")
+        let local = try #require(model.lines.last)
+        let before = model.transcriptSnapshot().version
+
+        model.apply(.reprime([message("h1"), message("old")]))
+
+        let rebuilt = model.lines
+        #expect(rebuilt.map(\.id) == ["h1", "old", local.id])
+        // Not `.reset([])` plus an append per row: a list in scrollback
+        // applies resets at once and holds appends back.
+        #expect(model.changes(since: before) == .changes([.reset(rebuilt)], through: before + 1))
         await model.detach()
     }
 

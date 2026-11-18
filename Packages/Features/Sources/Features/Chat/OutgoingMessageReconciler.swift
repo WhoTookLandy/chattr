@@ -200,13 +200,16 @@ struct OutgoingMessageReconciler {
     /// before the next call so `rowState` reflects the previous one.
     ///
     /// A due send whose row is no longer `.sending` (its echo raced the
-    /// deadline, or the row left the transcript) is just disarmed.
+    /// deadline, or the row left the transcript) is settled with no outcome:
+    /// its text and Helix-id keys go too, or a later identical send's echo
+    /// would match this dead entry first and be appended as a duplicate
+    /// beside its own still-dimmed row.
     mutating func nextDueFallback(rowState: RowState) -> FallbackOutcome? {
         let currentTime = now()
         while let due = mostOverdueFallback(at: currentTime) {
-            fallbacks[due.pendingId] = nil
-            guard rowState(due.pendingId) == .sending else { continue }
+            // Terminal either way; also disarms the deadline.
             settle(due.pendingId)
+            guard rowState(due.pendingId) == .sending else { continue }
             if rowState(due.messageId) != nil {
                 return .dropOptimistic(pendingId: due.pendingId, messageId: due.messageId)
             }

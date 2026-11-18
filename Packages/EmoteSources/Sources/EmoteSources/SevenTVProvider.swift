@@ -21,7 +21,7 @@ public struct SevenTVProvider: EmoteProvider {
 
     public var emoteSource: Emote.Source? { .sevenTV }
 
-    public init(urlSession: URLSession = .shared) {
+    public init(urlSession: URLSession = EmoteProviderTransport.session) {
         self.urlSession = urlSession
     }
 

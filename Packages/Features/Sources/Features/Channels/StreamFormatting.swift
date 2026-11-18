@@ -1,8 +1,10 @@
 import Foundation
+import Nuke
 
 /// Shared text formatting for stream metadata, so Home cards, the chat
 /// stream header, the Chats list and the channel pill all say "48.2K",
-/// "2h 50m" and "Streamed 2 days ago" the same way.
+/// "2h 50m" and "Streamed 2 days ago" the same way — and the one place live
+/// preview images are requested from.
 enum StreamFormatting {
 
     /// Compact viewer count: 41 → "41", 48213 → "48K".
@@ -44,5 +46,41 @@ enum StreamFormatting {
         URL(string: template
             .replacingOccurrences(of: "{width}", with: String(width))
             .replacingOccurrences(of: "{height}", with: String(height)))
+    }
+
+    /// How long a fetched live preview keeps being shown before the next
+    /// request for it fetches a new frame.
+    static let thumbnailLifetime: TimeInterval = 5 * 60
+
+    /// The image request for a live preview (same template as
+    /// `thumbnailURL`).
+    ///
+    /// Twitch serves a stream's preview from one URL for the whole
+    /// broadcast and only the picture behind it changes, so the URL alone
+    /// can't be the cache identity — the first frame fetched would be shown
+    /// until it was evicted, across refreshes and relaunches. Instead:
+    ///
+    ///   - the request skips the disk cache in both directions (a preview is
+    ///     worthless by the next launch, and it would only crowd out emotes);
+    ///   - its identity carries a time bucket, so the memory cache serves a
+    ///     frame for at most `thumbnailLifetime` and every size and surface
+    ///     of one stream rolls over together.
+    static func thumbnailRequest(
+        _ template: String,
+        width: Int,
+        height: Int,
+        now: Date = Date()
+    ) -> ImageRequest? {
+        guard let url = thumbnailURL(template, width: width, height: height) else { return nil }
+        var request = ImageRequest(url: url, options: [.disableDiskCache])
+        request.imageID = thumbnailCacheIdentity(for: url, now: now)
+        return request
+    }
+
+    /// `url` plus the index of the `thumbnailLifetime`-long window `now`
+    /// falls in.
+    static func thumbnailCacheIdentity(for url: URL, now: Date) -> String {
+        let bucket = Int((now.timeIntervalSince1970 / thumbnailLifetime).rounded(.down))
+        return "\(url.absoluteString)#\(bucket)"
     }
 }

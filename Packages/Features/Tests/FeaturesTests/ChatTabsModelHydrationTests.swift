@@ -4,6 +4,32 @@ import SwiftData
 import Core
 @testable import Features
 
+/// Holds each `onOpen` until released, and counts how many are held at once.
+@MainActor
+private final class HydrationOpenGate {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var started: [String] = []
+    private(set) var inFlight = 0
+    private(set) var maxInFlight = 0
+    private(set) var finished = 0
+
+    var hasWaiter: Bool { !waiters.isEmpty }
+
+    func enter(_ name: String) async {
+        started.append(name)
+        inFlight += 1
+        maxInFlight = max(maxInFlight, inFlight)
+        await withCheckedContinuation { waiters.append($0) }
+        inFlight -= 1
+        finished += 1
+    }
+
+    func releaseOne() {
+        guard !waiters.isEmpty else { return }
+        waiters.removeFirst().resume()
+    }
+}
+
 @MainActor
 @Suite("ChatTabsModel.hydrateFromPersistence")
 struct ChatTabsModelHydrationTests {
@@ -66,6 +92,89 @@ struct ChatTabsModelHydrationTests {
         model.persistence = persistence
         model.hydrateFromPersistence()
         #expect(model.tabs.count == 2)
+    }
+
+    // MARK: - Open order
+
+    @Test("Opens are ordered outward from the tab being shown")
+    func outwardOrder() {
+        #expect(ChatTabsModel.outwardOrder(count: 5, from: 2) == [2, 3, 1, 4, 0])
+        #expect(ChatTabsModel.outwardOrder(count: 4, from: 0) == [0, 1, 2, 3])
+        #expect(ChatTabsModel.outwardOrder(count: 4, from: 3) == [3, 2, 1, 0])
+        #expect(ChatTabsModel.outwardOrder(count: 1, from: 0) == [0])
+        #expect(ChatTabsModel.outwardOrder(count: 0, from: 0).isEmpty)
+        // An out-of-range center is clamped rather than trapping.
+        #expect(ChatTabsModel.outwardOrder(count: 3, from: 9) == [2, 1, 0])
+    }
+
+    /// Yields until `condition` holds (bounded, so a bug fails the following
+    /// `#expect` instead of hanging).
+    private func waitUntil(_ condition: () -> Bool) async {
+        var remaining = 1_000
+        while !condition(), remaining > 0 {
+            await Task.yield()
+            remaining -= 1
+        }
+    }
+
+    @Test("Restored tabs open at most three at a time, starting with the tab being shown")
+    func hydrationOpensAreBounded() async throws {
+        let persistence = try makePersistence()
+        let tabs = ["a", "b", "c", "d", "e", "f", "g"].map { ChatTab(channel: channel($0)) }
+        try persistence.save(tabs: tabs)
+        let gate = HydrationOpenGate()
+        let model = ChatTabsModel()
+        model.onOpen = { [gate] tab in
+            await gate.enter(tab.channels[0].channelLoginName)
+        }
+        model.persistence = persistence
+        model.hydrateFromPersistence(openingFirst: tabs[3].id)
+        #expect(model.tabs.map(\.id) == tabs.map(\.id))
+
+        // The shown tab and its two neighbours go first; nothing else starts
+        // while they are in flight.
+        await waitUntil { gate.started.count >= 3 }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(Set(gate.started) == ["d", "e", "c"])
+        #expect(gate.inFlight == 3)
+
+        // Each finished open frees one slot for the next tab outward.
+        for finished in 1...tabs.count {
+            await waitUntil { gate.hasWaiter }
+            gate.releaseOne()
+            await waitUntil { gate.finished == finished }
+        }
+        #expect(Set(gate.started) == ["a", "b", "c", "d", "e", "f", "g"])
+        #expect(gate.started.count == tabs.count)
+        #expect(gate.maxInFlight == ChatTabsModel.hydrationOpenLimit)
+    }
+
+    @Test("A restored tab closed while it waits for a slot never opens")
+    func closedWhileQueuedNeverOpens() async throws {
+        let persistence = try makePersistence()
+        let tabs = ["a", "b", "c", "d"].map { ChatTab(channel: channel("queued-\($0)-\(UUID().uuidString)")) }
+        try persistence.save(tabs: tabs)
+        let gate = HydrationOpenGate()
+        let model = ChatTabsModel()
+        model.onOpen = { [gate] tab in
+            await gate.enter(tab.channels[0].channelLoginName)
+        }
+        model.persistence = persistence
+        model.hydrateFromPersistence()
+        await waitUntil { gate.started.count >= 3 }
+
+        // The fourth tab is queued behind the first; close it, then let
+        // everything through.
+        let queued = tabs[3]
+        model.close(tabId: queued.id)
+        for finished in 1...3 {
+            await waitUntil { gate.hasWaiter }
+            gate.releaseOne()
+            await waitUntil { gate.finished == finished }
+        }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(gate.started.count == 3)
+        #expect(!gate.started.contains(queued.channels[0].channelLoginName))
     }
 
     // MARK: - Account scoping

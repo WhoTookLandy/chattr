@@ -22,7 +22,7 @@ public struct BTTVProvider: EmoteProvider {
 
     public var emoteSource: Emote.Source? { .bttv }
 
-    public init(urlSession: URLSession = .shared) {
+    public init(urlSession: URLSession = EmoteProviderTransport.session) {
         self.urlSession = urlSession
     }
 

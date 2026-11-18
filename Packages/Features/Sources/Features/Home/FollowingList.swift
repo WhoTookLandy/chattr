@@ -81,9 +81,11 @@ struct FollowingList: View {
                 open: { intent in openChannel?(channel: channel, profileImageURL: profileURL, intent: intent) }
             )
             .listRowBackground(Color.clear)
-            .task {
+            // Only queues the lookup; the store runs it (a few at a time), so
+            // a row scrolling away again neither cancels nor repeats it.
+            .onAppear {
                 guard followsStore.liveStreams[channel.broadcasterId] == nil else { return }
-                await channelStatus?.ensureLastLive(
+                channelStatus?.ensureLastLive(
                     channelId: channel.broadcasterId, account: account, accountStore: accountStore
                 )
             }

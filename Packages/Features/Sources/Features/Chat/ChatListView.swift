@@ -47,6 +47,10 @@ struct ChatListView: UIViewControllerRepresentable {
     /// UIKit → SwiftUI: messages that arrived while the list was unpinned and
     /// are held back off screen. Drives the pill's "N new".
     @Binding var unreadCount: Int
+    /// Ceiling for `unreadCount` — the transcript's retained-line cap. More
+    /// than that many arrivals while reading means the oldest have already
+    /// been trimmed, so "N new" stops at what a jump to the bottom can show.
+    var unreadLimit: Int = .max
     /// SwiftUI → UIKit: incremented (by the jump-to-bottom pill, and on each
     /// of the user's own sends) to request a re-pin to the newest message.
     let scrollToBottomToken: Int
@@ -90,6 +94,7 @@ struct ChatListView: UIViewControllerRepresentable {
         vc.rowContent = rowContent
         vc.extendsToTop = extendsToTop
         vc.onLineTapped = onLineTapped
+        vc.unreadLimit = unreadLimit
         vc.isVisible = isVisible
         vc.update(
             changes: changes,

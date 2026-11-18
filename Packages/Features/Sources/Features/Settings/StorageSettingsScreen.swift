@@ -39,6 +39,10 @@ public struct StorageSettingsScreen: View {
     /// Bumped after a clear to re-fire the measuring `.task(id:)`.
     @State private var measureToken = 0
 
+    /// Told about a clear so it stops treating the deleted images as
+    /// already prefetched.
+    @Environment(\.chatImagePrefetcher) private var chatImagePrefetcher
+
     public init() {}
 
     /// Root of the emote-metadata cache. `emote-cache/channels` nests under
@@ -161,6 +165,14 @@ public struct StorageSettingsScreen: View {
             pipeline.cache.removeAll()
             (pipeline.configuration.dataCache as? DataCache)?.flush()
         }.value
+
+        // Decoded animation frames live outside Nuke; emotes on screen keep
+        // theirs, everything else decodes again from the re-downloaded file.
+        DecodedAnimationCache.shared.removeAll()
+        // The prefetcher remembers what it already fetched (URLs this
+        // session, the subscribed-emote walk per day); none of that is on
+        // disk any more.
+        chatImagePrefetcher?.forgetSubmissions()
 
         // Emote metadata: drop the whole directory; JSONDiskCache.save
         // recreates it on the next fetch.

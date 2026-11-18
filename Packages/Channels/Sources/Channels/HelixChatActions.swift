@@ -223,7 +223,7 @@ struct HelixChatActions: Sendable {
             logger.debug("Banned lookup skipped: no token, or it lacks a scope for GET /moderation/banned")
             return nil
         }
-        var components = URLComponents(string: "https://api.twitch.tv/helix/moderation/banned")
+        var components = URLComponents(url: Endpoints.Helix.bannedUsers, resolvingAgainstBaseURL: false)
         components?.queryItems = [
             URLQueryItem(name: "broadcaster_id", value: channelId),
             URLQueryItem(name: "user_id", value: userId),

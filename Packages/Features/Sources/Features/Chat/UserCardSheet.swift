@@ -8,10 +8,41 @@ import DesignSystem
 import NukeUI
 import Nuke
 
-/// Which message's author the card is for.
+/// Which message's author the card is for, with that author's recent
+/// messages as they stood when the card was opened.
 struct UserCardTarget: Identifiable {
     let line: ChatLine
+    /// The author's latest messages in this chat, newest first. Filtered
+    /// out of the transcript once, here — a sheet's content closure re-runs
+    /// with its presenter's body, and the filter is O(transcript).
+    let recentLines: [ChatLine]
     var id: String { line.id }
+
+    /// How many recent messages the card lists.
+    static let recentLimit = 50
+
+    init(line: ChatLine, transcript: [ChatLine] = []) {
+        self.line = line
+        self.recentLines = Self.recentLines(
+            byAuthor: line.authorUserId,
+            in: transcript,
+            limit: Self.recentLimit
+        )
+    }
+
+    /// The last `limit` chat messages by `authorUserId` in `transcript`
+    /// (oldest first), returned newest first. Deleted placeholders and
+    /// bubbles don't count.
+    static func recentLines(byAuthor authorUserId: String, in transcript: [ChatLine], limit: Int) -> [ChatLine] {
+        guard limit > 0 else { return [] }
+        var recent: [ChatLine] = []
+        for candidate in transcript.reversed()
+        where candidate.authorUserId == authorUserId && candidate.kind == .message {
+            recent.append(candidate)
+            if recent.count == limit { break }
+        }
+        return recent
+    }
 }
 
 /// Tap a chat message → this card. A short sheet that leaves chat visible
@@ -22,7 +53,8 @@ struct UserCardSheet: View {
     let badges: [ChatBadgeEntry]
     let account: Account
     let accountStore: AccountStore
-    /// This user's messages in this chat, oldest first.
+    /// This user's latest messages in this chat, newest first
+    /// (`UserCardTarget.recentLines`).
     let recentLines: [ChatLine]
     let rowContent: (ChatLine) -> ChatRow
     let onReply: (() -> Void)?
@@ -138,7 +170,7 @@ struct UserCardSheet: View {
                 }
             }
             actionButton("Twitch", systemImage: "arrow.up.forward.app") {
-                if let url = URL(string: "https://www.twitch.tv/\(line.authorUserLogin)") {
+                if let url = Endpoints.TwitchWeb.channel(login: line.authorUserLogin) {
                     openURL(url)
                 }
             }
@@ -207,11 +239,13 @@ struct UserCardSheet: View {
     @ViewBuilder
     private var recentMessages: some View {
         if !recentLines.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
+            // Lazy: the resting card shows none of these rows, and each is a
+            // full `ChatRow` (badges, emote images).
+            LazyVStack(alignment: .leading, spacing: 6) {
                 Text("Recent messages")
                     .font(.headline)
                     .padding(.top, 4)
-                ForEach(recentLines.suffix(50).reversed()) { recent in
+                ForEach(recentLines) { recent in
                     rowContent(recent)
                 }
             }

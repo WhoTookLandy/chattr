@@ -36,32 +36,39 @@ private struct ChannelPreviewMenu: ViewModifier {
     let open: (ChatOpenIntent) -> Void
     let close: (() -> Void)?
 
-    // The same preferences the chat header and its More menu use.
-    @AppStorage(StreamHeaderView.expandedKey) private var videoVisible = false
-    @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
+    /// Sets the preferences the chat header and its More menu use. Written
+    /// straight to `UserDefaults` (their `@AppStorage` readers still see
+    /// it): nothing here reads them, and an `@AppStorage` pair attached two
+    /// observers to every row carrying this menu.
+    private func setVideo(visible: Bool, audioOnly: Bool) {
+        let defaults = UserDefaults.standard
+        defaults.set(visible, forKey: StreamHeaderView.expandedKey)
+        defaults.set(audioOnly, forKey: PlayerSettings.audioOnlyKey)
+    }
 
     func body(content: Content) -> some View {
         content.contextMenu {
             if stream != nil {
                 Button {
-                    videoVisible = true
-                    audioOnly = false
+                    setVideo(visible: true, audioOnly: false)
                     open(.explicit)
                 } label: {
                     Label("Watch", systemImage: "play.rectangle")
                 }
                 #if os(iOS)
-                Button {
-                    videoVisible = true
-                    audioOnly = true
-                    open(.explicit)
-                } label: {
-                    Label("Listen (Audio Only)", systemImage: "headphones")
+                // Audio-only is the native engine's; not offered while
+                // that's switched off.
+                if PlayerSettings.isNativePlaybackEnabled {
+                    Button {
+                        setVideo(visible: true, audioOnly: true)
+                        open(.explicit)
+                    } label: {
+                        Label("Listen (Audio Only)", systemImage: "headphones")
+                    }
                 }
                 #endif
                 Button {
-                    videoVisible = false
-                    audioOnly = false
+                    setVideo(visible: false, audioOnly: false)
                     open(.explicit)
                 } label: {
                     Label("Chat Only", systemImage: "bubble.left.and.bubble.right")
@@ -93,7 +100,7 @@ private struct ChannelPreviewCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let stream {
-                LazyImage(url: StreamFormatting.thumbnailURL(stream.thumbnailUrl, width: 640, height: 360)) { state in
+                LazyImage(request: StreamFormatting.thumbnailRequest(stream.thumbnailUrl, width: 640, height: 360)) { state in
                     if let image = state.image {
                         image.resizable().scaledToFill()
                     } else {

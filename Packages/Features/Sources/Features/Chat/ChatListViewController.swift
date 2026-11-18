@@ -114,6 +114,23 @@ final class ChatListViewController: UIViewController {
     /// Last unread count pushed to SwiftUI — report on change only.
     private var lastReportedUnread = 0
 
+    /// Ceiling for the reported unread count: the transcript's line cap (set
+    /// by the representable). Arrivals beyond it were trimmed before the
+    /// reader could jump down to them.
+    var unreadLimit = Int.max
+
+    /// A growing unread count reaches SwiftUI at most this often. Each push
+    /// writes `ChatTranscript`'s state and re-renders the jump pill; in a
+    /// busy channel the count changes with every flush, far faster than
+    /// "N new" needs to tick.
+    private static let unreadReportInterval: Duration = .milliseconds(500)
+
+    /// When the unread count was last pushed.
+    private var lastUnreadReportAt: ContinuousClock.Instant?
+
+    /// The trailing push for a count that changed inside the interval.
+    private var pendingUnreadReport: Task<Void, Never>?
+
     /// Last row inputs (badges loaded, can moderate) — `update` reconfigures
     /// every row when they change. Nil before the first update.
     private var rowInputs: ChatRowInputs?
@@ -151,8 +168,11 @@ final class ChatListViewController: UIViewController {
         }
     }
 
-    /// How often an off-screen neighbour applies what has arrived.
-    private static let offscreenRefreshInterval: Duration = .milliseconds(750)
+    /// How often an off-screen neighbour applies what has arrived. Long on
+    /// purpose: each refresh is a snapshot apply over the whole retained
+    /// list for a page nobody is looking at, and becoming visible catches up
+    /// at once whatever the interval.
+    private static let offscreenRefreshInterval: Duration = .seconds(2)
 
     /// The pending off-screen refresh, if one is scheduled.
     private var throttledRefresh: Task<Void, Never>?
@@ -223,7 +243,13 @@ final class ChatListViewController: UIViewController {
     @objc private func keyboardWillShow() { keyboardVisible = true }
     @objc private func keyboardWillHide() { keyboardVisible = false }
 
-    @objc private func appDidEnterBackground() { isSuspended = true }
+    @objc private func appDidEnterBackground() {
+        isSuspended = true
+        // Nothing may wake up for this list while backgrounded: the resume
+        // refreshes unconditionally.
+        throttledRefresh?.cancel()
+        throttledRefresh = nil
+    }
 
     /// Catch up before the first foreground frame, so the transcript is
     /// already current when the app (or the PiP restore) comes back.
@@ -303,15 +329,22 @@ final class ChatListViewController: UIViewController {
         }
     }
 
-    /// The topmost visible item's id and its offset from the viewport top —
-    /// captured before a data change so we can restore the same reading
-    /// position afterward.
+    /// The id of the topmost visible item that the pending edit keeps, and
+    /// its offset from the viewport top — captured before a data change so we
+    /// can restore the same reading position afterward.
+    ///
+    /// Call after `feed.update` and before applying its edit: the data source
+    /// still shows the old list, while `feed.liveIds` already names the rows
+    /// that survive. So a wholesale reset (a reprime, a block) or a re-key
+    /// that drops the very top row still anchors on a neighbour that stays.
     private func currentTopAnchor() -> (id: String, distanceFromTop: CGFloat)? {
-        let visible = collectionView.indexPathsForVisibleItems.sorted()
-        guard let top = visible.first,
-              let id = dataSource.itemIdentifier(for: top),
-              let attrs = collectionView.layoutAttributesForItem(at: top) else { return nil }
-        return (id, attrs.frame.minY - collectionView.contentOffset.y)
+        for indexPath in collectionView.indexPathsForVisibleItems.sorted() {
+            guard let id = dataSource.itemIdentifier(for: indexPath),
+                  feed.liveIds.contains(id),
+                  let attrs = collectionView.layoutAttributesForItem(at: indexPath) else { continue }
+            return (id, attrs.frame.minY - collectionView.contentOffset.y)
+        }
+        return nil
     }
 
     /// Restore the viewport so `anchor.id` sits at the same distance from the
@@ -372,6 +405,11 @@ final class ChatListViewController: UIViewController {
         rowInputs: ChatRowInputs,
         scrollToBottomToken: Int
     ) {
+        // `collectionView` and `dataSource` exist only once the view has
+        // loaded, and nothing guarantees SwiftUI loads it before its first
+        // update. Load rather than skip: this update may be the only one a
+        // quiet channel ever sends, and it primes the list.
+        loadViewIfNeeded()
         pullChanges = changes
         pullSnapshot = snapshot
 
@@ -438,10 +476,32 @@ final class ChatListViewController: UIViewController {
     }
 
     private func reportUnreadCountIfChanged() {
-        let count = feed.unreadCount
+        let count = min(feed.unreadCount, unreadLimit)
         guard count != lastReportedUnread else { return }
+        let now = ContinuousClock.now
+        // Zero (caught up — the pill must clear at once) is never delayed;
+        // a count that is still climbing is (see `unreadReportInterval`).
+        if count != 0, let last = lastUnreadReportAt, now - last < Self.unreadReportInterval {
+            scheduleUnreadReport(after: Self.unreadReportInterval - (now - last))
+            return
+        }
+        pendingUnreadReport?.cancel()
+        pendingUnreadReport = nil
+        lastUnreadReportAt = now
         lastReportedUnread = count
         onUnreadCountChanged?(count)
+    }
+
+    /// One trailing push once the interval has passed, so the last value
+    /// always lands even if no further update comes.
+    private func scheduleUnreadReport(after delay: Duration) {
+        guard pendingUnreadReport == nil else { return }
+        pendingUnreadReport = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled else { return }
+            self.pendingUnreadReport = nil
+            self.reportUnreadCountIfChanged()
+        }
     }
 
     /// Folds one `ChatListEdit` into the diffable data source with a SINGLE
@@ -500,8 +560,17 @@ final class ChatListViewController: UIViewController {
             // guard for the path where layout was already clean.
             // setContentOffset fires scrollViewDidScroll synchronously; the
             // flip-only guard there prevents any feedback loop.
-            collectionView.layoutIfNeeded()
-            pinToBottomIfNeeded()
+            //
+            // Not for an off-screen neighbour's incremental edits: nobody
+            // sees the page, so nothing needs its geometry settled inside
+            // this call. Whenever UIKit next lays the list out on its own,
+            // onDidLayout pins it, and becoming visible refreshes and pins
+            // again. A reset (the mount that readies the page for a swipe,
+            // and feeds the height estimate below) still lays out now.
+            if isVisible || edit.resetIds != nil {
+                collectionView.layoutIfNeeded()
+                pinToBottomIfNeeded()
+            }
         } else if let anchor {
             restoreTopAnchor(anchor)
         }

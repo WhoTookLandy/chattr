@@ -14,7 +14,9 @@ import Core
 ///
 /// `SessionActivitySignal` clamps at zero, so tests that care about activity
 /// bookkeeping keep a second channel open — a double decrement then shows up
-/// as `hasActiveSessions` flipping false too early.
+/// as `hasActiveSessions` flipping false too early. The registry marks
+/// activity per account, so that second channel is on the same account
+/// unless the test is about accounts not affecting each other.
 @Suite("ChannelSessionRegistry acquire/release lifecycle", .timeLimit(.minutes(1)))
 @MainActor
 struct ChannelSessionRegistryLifecycleTests {
@@ -126,8 +128,41 @@ struct ChannelSessionRegistryLifecycleTests {
             refreshTokens: { _, _ in },
             sessionActivity: activity,
             startSession: { try await fake.start($0) },
-            stopSession: { await fake.stop($0) }
+            stopSession: { await fake.stop($0) },
+            // No emote-provider requests from a lifecycle test.
+            loadEmoteIndex: { _, _, _ in }
         ))
+    }
+
+    /// `session(...)` alone: builds (or joins) the session without taking a
+    /// reference — what a chat page does.
+    private func lookUp(
+        _ registry: ChannelSessionRegistry,
+        account: String = "me",
+        channel: String = "1"
+    ) -> Task<ChannelSession, any Error> {
+        Task { @MainActor in
+            try await registry.session(
+                accountUserId: account,
+                accountLogin: account,
+                channelId: channel,
+                channelLoginName: "ch\(channel)"
+            )
+        }
+    }
+
+    /// Build `channel`'s session through `session(...)` alone and let its
+    /// start succeed: a started session nothing holds.
+    private func openUnowned(
+        _ registry: ChannelSessionRegistry,
+        _ fake: FakeLifecycle,
+        channel: String,
+        startIndex: Int
+    ) async throws -> ChannelSession {
+        let task = lookUp(registry, channel: channel)
+        await fake.waitForStarts(startIndex + 1)
+        await fake.resolveStart(startIndex)
+        return try await task.value
     }
 
     private func acquire(
@@ -409,5 +444,155 @@ struct ChannelSessionRegistryLifecycleTests {
         #expect(reopened !== one)
         await registry.release(accountUserId: "me", channelId: "1")
         #expect(!activity.hasActiveSessions)
+    }
+
+    // MARK: - Unowned sessions (built by session(...) alone)
+
+    @Test("release tears down a session nothing acquired, without touching activity")
+    func releaseTearsDownUnownedSession() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+        // An acquired channel on the same account: a wrongful decrement for
+        // the unowned one would clear the account's only activity mark.
+        let keeper = try await openChannel(registry, fake, channel: "2", startIndex: 0)
+
+        let unowned = try await openUnowned(registry, fake, channel: "1", startIndex: 1)
+        #expect(registry.isRouted(accountUserId: "me", channelId: "1"))
+
+        await registry.release(accountUserId: "me", channelId: "1")
+
+        #expect(await fake.wasStopped(unowned))
+        #expect(!registry.isRouted(accountUserId: "me", channelId: "1"))
+        #expect(registry.existingSession(accountUserId: "me", channelId: "1") == nil)
+        #expect(!(await fake.wasStopped(keeper)))
+        #expect(activity.hasActiveSessions(forAccount: "me"))
+
+        // A second release finds nothing and changes nothing.
+        await registry.release(accountUserId: "me", channelId: "1")
+        #expect(await fake.stopCount == 1)
+        #expect(activity.hasActiveSessions(forAccount: "me"))
+
+        await registry.release(accountUserId: "me", channelId: "2")
+        #expect(!activity.hasActiveSessions(forAccount: "me"))
+    }
+
+    @Test("releaseUnowned tears down a session nothing acquired")
+    func releaseUnownedTearsDownUnownedSession() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+        let keeper = try await openChannel(registry, fake, channel: "2", startIndex: 0)
+
+        let unowned = try await openUnowned(registry, fake, channel: "1", startIndex: 1)
+        await registry.releaseUnowned(accountUserId: "me", channelId: "1")
+
+        #expect(await fake.wasStopped(unowned))
+        #expect(!registry.isRouted(accountUserId: "me", channelId: "1"))
+        #expect(!(await fake.wasStopped(keeper)))
+        #expect(activity.hasActiveSessions(forAccount: "me"))
+
+        // The next open builds a fresh session.
+        let reopened = try await openChannel(registry, fake, channel: "1", startIndex: 2)
+        #expect(reopened !== unowned)
+    }
+
+    @Test("releaseUnowned leaves an acquired session alone")
+    func releaseUnownedIgnoresAcquiredSession() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+        let held = try await openChannel(registry, fake, channel: "1", startIndex: 0)
+
+        await registry.releaseUnowned(accountUserId: "me", channelId: "1")
+
+        #expect(await fake.stopCount == 0)
+        #expect(registry.existingSession(accountUserId: "me", channelId: "1") === held)
+        #expect(registry.isRouted(accountUserId: "me", channelId: "1"))
+        #expect(activity.hasActiveSessions(forAccount: "me"))
+
+        // The holder's own release is still the one that ends it.
+        await registry.release(accountUserId: "me", channelId: "1")
+        #expect(await fake.wasStopped(held))
+        #expect(!activity.hasActiveSessions(forAccount: "me"))
+    }
+
+    @Test("releaseUnowned cancels an unowned start still in flight")
+    func releaseUnownedCancelsUnownedStart() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+
+        let pending = lookUp(registry)
+        await fake.waitForStarts(1)
+        await registry.releaseUnowned(accountUserId: "me", channelId: "1")
+        #expect(!registry.isStarting(accountUserId: "me", channelId: "1"))
+        #expect(!registry.isRouted(accountUserId: "me", channelId: "1"))
+
+        // The start returns normally; its session is stopped, never installed.
+        await fake.resolveStart(0)
+        let error = await failure(of: pending)
+        #expect(error is CancellationError)
+        #expect(await fake.wasStopped(await fake.startedSession(0)))
+        #expect(registry.existingSession(accountUserId: "me", channelId: "1") == nil)
+    }
+
+    @Test("releaseAll covers unowned sessions and starts, and later releases are no-ops")
+    func releaseAllCoversUnowned() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+
+        let acquired = try await openChannel(registry, fake, channel: "1", startIndex: 0)
+        let unowned = try await openUnowned(registry, fake, channel: "2", startIndex: 1)
+        let otherAccount = try await openChannel(registry, fake, account: "other", channel: "9", startIndex: 2)
+        let pendingUnowned = lookUp(registry, channel: "3")
+        await fake.waitForStarts(4)
+
+        await registry.releaseAll(forAccountUserId: "me")
+
+        #expect(await fake.wasStopped(acquired))
+        #expect(await fake.wasStopped(unowned))
+        #expect(!(await fake.wasStopped(otherAccount)))
+        #expect(!registry.isStarting(accountUserId: "me", channelId: "3"))
+        // One acquire was outstanding for "me": exactly its mark is gone.
+        #expect(!activity.hasActiveSessions(forAccount: "me"))
+        #expect(activity.hasActiveSessions(forAccount: "other"))
+
+        await fake.resolveStart(3)
+        let error = await failure(of: pendingUnowned)
+        #expect(error is CancellationError)
+        #expect(await fake.wasStopped(await fake.startedSession(3)))
+
+        // The tabs' own releases landing afterwards find nothing to do and
+        // never reach into the other account's mark.
+        let stopsBefore = await fake.stopCount
+        await registry.release(accountUserId: "me", channelId: "1")
+        await registry.release(accountUserId: "me", channelId: "2")
+        await registry.releaseUnowned(accountUserId: "me", channelId: "3")
+        #expect(await fake.stopCount == stopsBefore)
+        #expect(activity.hasActiveSessions(forAccount: "other"))
+
+        await registry.release(accountUserId: "other", channelId: "9")
+        #expect(!activity.hasActiveSessions)
+    }
+
+    @Test("A release that lands before releaseAll leaves it nothing to double-count")
+    func releaseBeforeReleaseAll() async throws {
+        let fake = FakeLifecycle()
+        let activity = SessionActivitySignal()
+        let registry = makeRegistry(fake, activity: activity)
+
+        let one = try await openChannel(registry, fake, channel: "1", startIndex: 0)
+        let two = try await openChannel(registry, fake, channel: "2", startIndex: 1)
+
+        await registry.release(accountUserId: "me", channelId: "1")
+        #expect(await fake.wasStopped(one))
+        #expect(activity.hasActiveSessions(forAccount: "me"))   // channel 2
+
+        await registry.releaseAll(forAccountUserId: "me")
+        #expect(await fake.wasStopped(two))
+        #expect(await fake.stopCount == 2)
+        #expect(!activity.hasActiveSessions(forAccount: "me"))
     }
 }

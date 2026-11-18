@@ -1,19 +1,20 @@
 import SwiftUI
+import ChatModel
 import DesignSystem
 #if os(iOS)
 import UIKit
 #endif
 
 /// Signed-out "just looking" mode: a channel's stream (Twitch's web player
-/// needs no account) and its chat, read anonymously. No sending, badges or
-/// emote images — a sign-in prompt sits where the compose bar would be.
+/// needs no account) and its chat, read anonymously, with Twitch and
+/// third-party emotes. No sending and no badges — a sign-in prompt sits
+/// where the compose bar would be.
 struct GuestChannelView: View {
     let login: String
     let onSignIn: () -> Void
 
     @State private var chat: AnonymousChatReader
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var colorScheme
 
     init(login: String, onSignIn: @escaping () -> Void) {
         self.login = login
@@ -75,7 +76,7 @@ struct GuestChannelView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 switch chat.status {
-                case .connecting where chat.messages.isEmpty:
+                case .connecting where chat.lines.isEmpty:
                     HStack(spacing: 8) {
                         ProgressView()
                         Text("Joining #\(login)…")
@@ -85,10 +86,11 @@ struct GuestChannelView: View {
                 default:
                     EmptyView()
                 }
-                ForEach(chat.messages) { message in
+                ForEach(chat.lines) { line in
                     // The same row view as signed-in chat: inline emotes,
-                    // name colors, text-size settings. No badges here.
-                    ChatRow(line: chat.chatLine(for: message), badgeEntries: [])
+                    // name colors, text-size settings. No badges here. The
+                    // line was built once, when the message arrived.
+                    ChatRow(line: line, badgeEntries: [])
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -112,14 +114,6 @@ struct GuestChannelView: View {
         }
         .animation(.snappy, value: chat.status)
         .scrollDismissesKeyboard(.interactively)
-    }
-
-    private func messageText(_ message: AnonymousChatReader.Message) -> some View {
-        let nameColor: Color = message.color.map { .twitchUsername(hex: $0, scheme: colorScheme) } ?? .primary
-        let name = Text(message.author).fontWeight(.semibold).foregroundStyle(nameColor)
-        let text = Text(message.text).foregroundStyle(message.isAction ? nameColor : .primary)
-        return Text("\(name)\(message.isAction ? " " : ": ")\(text)")
-            .font(.body)
     }
 
     // MARK: - Sign-in bar

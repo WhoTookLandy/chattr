@@ -2,6 +2,7 @@ import SwiftUI
 import Accounts
 import DesignSystem
 import NukeUI
+import Nuke
 import Core
 
 /// The full-screen chat surface pushed from Home → Chats.
@@ -162,7 +163,7 @@ struct ChatPagerScreen: View {
     /// Placeholder symbol while the image loads or when the descriptor has
     /// no profile URL.
     private func tabAvatar(_ tab: ChatTab, size: CGFloat = 40) -> some View {
-        LazyImage(url: tab.profileImageURL) { state in
+        LazyImage(request: ImageRequest.avatar(url: tab.profileImageURL, side: size)) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else {

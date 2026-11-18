@@ -52,7 +52,7 @@ struct LiveStreamCard: View {
     }
 
     private var thumbnail: some View {
-        LazyImage(url: StreamFormatting.thumbnailURL(stream.thumbnailUrl, width: 640, height: 360)) { state in
+        LazyImage(request: StreamFormatting.thumbnailRequest(stream.thumbnailUrl, width: 640, height: 360)) { state in
             if let image = state.image {
                 image.resizable().scaledToFill()
             } else if state.error != nil {

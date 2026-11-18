@@ -1,5 +1,6 @@
 import SwiftUI
 import Core
+import TwitchKit
 #if os(iOS)
 import UIKit
 import WebKit
@@ -27,18 +28,34 @@ final class WebStreamEngine: StreamEngine {
     private let webView: WKWebView
     private let coordinator: TwitchWebPlayer.Coordinator
 
-    init(login: String, controller: StreamPlayerController) {
+    /// `reusing`: the web view of the web engine this one replaces
+    /// (`releaseWebView()`), navigated to `login` instead of a new one
+    /// being built. The startup sequence is the same either way: a new
+    /// coordinator, `beginWebEngineLoad`, then the page's first report.
+    init(login: String, controller: StreamPlayerController, reusing recycled: WKWebView? = nil) {
         coordinator = TwitchWebPlayer.Coordinator(controller: controller)
         // Loads paused when the user paused or a hold is out — the page
         // never autoplays against intent (`StreamPlayerController.noteDidPlay`).
         // Play/pause made while it loads are applied once it reports ready
         // (`StreamPlayerController.noteEngineReady`).
-        webView = TwitchWebPlayer.makeWebView(
-            login: login,
-            autoplay: controller.beginWebEngineLoad(),
-            muted: controller.startsMuted,
-            coordinator: coordinator
-        )
+        let autoplay = controller.beginWebEngineLoad()
+        if let recycled {
+            TwitchWebPlayer.navigate(
+                recycled,
+                to: login,
+                autoplay: autoplay,
+                muted: controller.startsMuted,
+                coordinator: coordinator
+            )
+            webView = recycled
+        } else {
+            webView = TwitchWebPlayer.makeWebView(
+                login: login,
+                autoplay: autoplay,
+                muted: controller.startsMuted,
+                coordinator: coordinator
+            )
+        }
         view = webView
         controller.webView = webView
     }
@@ -46,6 +63,15 @@ final class WebStreamEngine: StreamEngine {
     func teardown() {
         coordinator.controller.webView = nil
         TwitchWebPlayer.teardown(webView)
+    }
+
+    /// Ends this page like `teardown`, but keeps the web view for the next
+    /// channel's engine (`init(login:controller:reusing:)`). This engine is
+    /// done after it.
+    func releaseWebView() -> WKWebView {
+        coordinator.controller.webView = nil
+        TwitchWebPlayer.quiesce(webView)
+        return webView
     }
 }
 
@@ -55,8 +81,14 @@ final class NativeStreamEngine: StreamEngine {
     private let playerView = NativePlayer.PlayerLayerView()
     private let coordinator: NativePlayer.Coordinator
 
-    init(login: String, audioOnly: Bool, quality: PlayerQuality, controller: StreamPlayerController) {
-        coordinator = NativePlayer.Coordinator(controller: controller)
+    init(
+        login: String,
+        audioOnly: Bool,
+        quality: PlayerQuality,
+        controller: StreamPlayerController,
+        resolver: any StreamPlaylistResolving = TwitchHLS.Resolver()
+    ) {
+        coordinator = NativePlayer.Coordinator(controller: controller, resolver: resolver)
         view = playerView
         playerView.backgroundColor = .clear
         playerView.playerLayer.videoGravity = .resizeAspect
@@ -108,6 +140,29 @@ final class PlaybackCenter {
     @ObservationIgnored private var engineKey: String?
 
     @ObservationIgnored private var lastQuality: PlayerQuality = .auto
+    /// The `native` the header last asked for — a rebuild after a long
+    /// pause (`restoreUnloadedEngine`) asks for the same.
+    @ObservationIgnored private var lastNative = false
+    private let playlistResolver: any StreamPlaylistResolving
+    private let nowPlaying = StreamNowPlaying()
+
+    /// The playing channel's stream as last polled, kept through a poll
+    /// that left it out. The engine is still playing then, so the surfaces
+    /// that follow live status (the header, the landscape stage) read
+    /// `stream(for:live:)` and stay up until the reading is confirmed
+    /// (`offlineReadingConfirmed(at:)`) or the stream shows up again.
+    private(set) var lingeringStream: TwitchStream?
+    /// The reading that started `lingeringStream`.
+    @ObservationIgnored private var firstOfflineReadingAt: Date?
+    /// The playing channel's stream as the header last asked to play it
+    /// (`noteLive`). Stands in for `lingeringStream` when an offline
+    /// reading is judged before `noteWentOffline` was told about the drop.
+    @ObservationIgnored private var lastLiveStream: TwitchStream?
+
+    /// A paused stream gives its engine up after this long
+    /// (`unloadAfterLongPause`).
+    static let pauseUnloadDelay: Duration = .seconds(600)
+    @ObservationIgnored private var pauseUnloadTask: Task<Void, Never>?
 
     /// Bumped when WHAT plays changes: a different channel, or stop.
     /// Rebuilding the same channel's engine (native → web fallback, an
@@ -123,16 +178,40 @@ final class PlaybackCenter {
     /// `PlaybackLifecycleObserver`).
     @ObservationIgnored private(set) var lifecycle: PlaybackLifecycleObserver?
 
+    /// A stream is loaded — playing, paused, or still starting.
     var isPlaying: Bool { channel != nil }
 
-    init() {
+    /// A stream is loaded, not paused, and showing video: the one case
+    /// that should keep the display from sleeping. A paused stream or the
+    /// audio-only pill shouldn't.
+    var holdsScreenAwake: Bool {
+        channel != nil && !controller.isPaused && !(audioOnly && !controller.nativeFailed)
+    }
+
+    init(playlistResolver: any StreamPlaylistResolving = TwitchHLS.Resolver()) {
+        self.playlistResolver = playlistResolver
         controller.onNativeFailure = { [weak self] in
-            guard let self else { return }
-            self.fallBackToWeb(quality: self.lastQuality)
+            self?.nativeEngineGaveUp()
+        }
+        controller.staysOnNativeEngine = { [weak self] in
+            self?.staysOnNativeEngine ?? false
+        }
+        // The broadcast is over: nothing is left to play or to fall back to.
+        controller.onStreamEnded = { [weak self] in
+            self?.stop()
         }
         controller.onPictureInPictureActiveChange = { [weak self] in
             self?.syncPictureInPictureFlags()
             self?.yieldBackgroundHoldToPictureInPicture()
+            // A stream paused inside PiP isn't unloaded there; out of it
+            // again and still paused, the countdown starts over.
+            self?.schedulePauseUnload()
+        }
+        controller.onPausedChange = { [weak self] in
+            self?.pausedDidChange()
+        }
+        controller.onResumeRequested = { [weak self] in
+            self?.restoreUnloadedEngine()
         }
         lifecycle = PlaybackLifecycleObserver(center: self)
     }
@@ -250,24 +329,51 @@ final class PlaybackCenter {
         let entersAudioOnly = audioOnly && !self.audioOnly
         if self.audioOnly != audioOnly { self.audioOnly = audioOnly }
         lastQuality = quality
+        lastNative = native
+        // Asked to play: it's live (or it's another stream altogether), so
+        // the offline reading didn't hold.
+        clearLingeringStream()
 
         // A native failure for this channel sticks — fall back to web.
+        // The kill switch is read here and nowhere else decides the
+        // engine: off, nothing takes the native path, audio-only included.
         let sameChannel = self.channel?.channelId == channel.channelId
-        let useNative = native && !(sameChannel && controller.nativeFailed)
+        let nativeEnabled = PlayerSettings.isNativePlaybackEnabled
+        let useNative = native && nativeEnabled && !(sameChannel && controller.nativeFailed)
         let key = "\(channel.channelLoginName)|\(useNative)|\(useNative && audioOnly)"
         guard key != engineKey else {
             controller.applyQuality(quality)
             return
         }
 
-        engine?.teardown()
+        let previous = engine
+        engine = nil
+        var recycledWebView: WKWebView?
+        if !useNative, let web = previous as? WebStreamEngine {
+            // Web to web is a channel change: keep the web view and
+            // navigate it, rather than build another one.
+            recycledWebView = web.releaseWebView()
+        } else {
+            previous?.teardown()
+        }
+        // The audio session outlives a native engine replaced by another
+        // native one (a channel change); the next start reconfigures it.
+        // Replaced by the web player, native playback has really stopped.
+        if previous is NativeStreamEngine, !useNative {
+            PlaybackAudioSession.shared.deactivate()
+        }
         if !sameChannel {
             controller.nativeFailed = false
+            lastLiveStream = nil
             // A new stream starts out meant to play.
             controller.wantsPlayback = true
             // A new stream isn't the one that was held.
             advanceGeneration()
         }
+        // Switched off, the native engine counts as failed for whoever
+        // asked for it: every surface already shows a failed audio-only
+        // stream as video on the web player.
+        if native, !nativeEnabled { controller.nativeFailed = true }
         // A rebuild of the same stream (engine fallback) keeps its mute
         // state — `isMuted` carries the requested mute even if the old
         // engine never got as far as an AVPlayer (see `reset()`). Switching
@@ -283,11 +389,19 @@ final class PlaybackCenter {
         syncPictureInPictureFlags()
         engineKey = key
         engine = useNative
-            ? NativeStreamEngine(login: channel.channelLoginName, audioOnly: audioOnly, quality: quality, controller: controller)
-            : WebStreamEngine(login: channel.channelLoginName, controller: controller)
+            ? NativeStreamEngine(
+                login: channel.channelLoginName,
+                audioOnly: audioOnly,
+                quality: quality,
+                controller: controller,
+                resolver: playlistResolver
+            )
+            : WebStreamEngine(login: channel.channelLoginName, controller: controller, reusing: recycledWebView)
         // Re-render hosts so the new engine view gets attached.
         activeHostID = hostStack.last
         hostRevision += 1
+        refreshNowPlaying()
+        schedulePauseUnload()
     }
 
     /// Native engine gave up — rebuild the same channel on the web engine.
@@ -298,18 +412,169 @@ final class PlaybackCenter {
              native: false, audioOnly: audioOnly, quality: quality)
     }
 
+    /// The native engine is out of tries (`PlaybackRecovery`).
+    private func nativeEngineGaveUp() {
+        // Audio-only in the background has nothing to fall back to — the
+        // web player can't play there — so it stops cleanly instead.
+        if staysOnNativeEngine {
+            stop()
+        } else {
+            fallBackToWeb(quality: lastQuality)
+        }
+    }
+
+    /// Audio-only on the native engine with the app in the background:
+    /// the one place a stream plays where the web player can't.
+    private var staysOnNativeEngine: Bool {
+        audioOnly && engine is NativeStreamEngine && (lifecycle?.isInBackground ?? false)
+    }
+
     func stop() {
         advanceGeneration()
+        pauseUnloadTask?.cancel()
+        pauseUnloadTask = nil
+        let wasNative = engine is NativeStreamEngine
         engine?.teardown()
         engine = nil
         engineKey = nil
         channel = nil
+        clearLingeringStream()
+        lastLiveStream = nil
         controller.startsMuted = false
         controller.wantsPlayback = true
         controller.reset()
         controller.nativeFailed = false
+        if wasNative { PlaybackAudioSession.shared.deactivate() }
+        nowPlaying.clear()
         syncPictureInPictureFlags()
         hostRevision += 1
+    }
+
+    // MARK: Offline readings
+
+    /// The stream to show for `channelId`: the polled one, or — while its
+    /// engine plays on through a poll that left it out — the last one seen.
+    /// Read from `body`; a page whose channel is live registers nothing
+    /// here.
+    func stream(for channelId: String, live: TwitchStream?) -> TwitchStream? {
+        if let live { return live }
+        guard let lingering = lingeringStream, lingering.userId == channelId else { return nil }
+        return lingering
+    }
+
+    /// A poll dropped `stream`, which was live a moment ago. If it's the
+    /// one playing, keep it on screen for now.
+    func noteWentOffline(_ stream: TwitchStream) {
+        guard engine != nil, channel?.channelId == stream.userId else { return }
+        if lingeringStream != stream { lingeringStream = stream }
+    }
+
+    /// The header asked to play `stream` (right after `play`). Remembered
+    /// so the first offline reading keeps the stream up whichever of the
+    /// header's two reactions to it runs first: its `onChange`
+    /// (`noteWentOffline`, with the freshest copy) or its playback task
+    /// (`offlineReadingConfirmed`). SwiftUI doesn't promise that order.
+    func noteLive(_ stream: TwitchStream) {
+        guard channel?.channelId == stream.userId else { return }
+        lastLiveStream = stream
+    }
+
+    /// Whether the offline reading taken at `fetchedAt` should stop the
+    /// playing stream. The first one doesn't: `/streams` now and then
+    /// leaves a live channel out of a single response, and stopping on it
+    /// cost a rebuild a minute later. A later reading that still says
+    /// offline does. (A stream that really ended stops sooner where the
+    /// engine can tell — `StreamPlayerController.onStreamEnded`.)
+    func offlineReadingConfirmed(at fetchedAt: Date) -> Bool {
+        // Asked before `noteWentOffline` (or without it: a header mounted
+        // after the drop): the stream as last played stands in.
+        if lingeringStream == nil, let lastLiveStream { noteWentOffline(lastLiveStream) }
+        guard lingeringStream != nil else { return true }
+        guard let first = firstOfflineReadingAt else {
+            firstOfflineReadingAt = fetchedAt
+            return false
+        }
+        return fetchedAt != first
+    }
+
+    private func clearLingeringStream() {
+        firstOfflineReadingAt = nil
+        if lingeringStream != nil { lingeringStream = nil }
+    }
+
+    // MARK: Long pause
+
+    private func pausedDidChange() {
+        refreshNowPlaying()
+        schedulePauseUnload()
+    }
+
+    /// (Re)starts the countdown to `unloadAfterLongPause` while the stream
+    /// sits paused; any play cancels it.
+    private func schedulePauseUnload() {
+        pauseUnloadTask?.cancel()
+        pauseUnloadTask = nil
+        guard channel != nil, engine != nil, controller.isPaused else { return }
+        pauseUnloadTask = Task { [weak self] in
+            try? await Task.sleep(for: PlaybackCenter.pauseUnloadDelay)
+            guard !Task.isCancelled else { return }
+            self?.unloadAfterLongPause()
+        }
+    }
+
+    /// A stream left paused this long gives up its engine — a web view and
+    /// its content process, or a player and the audio session — while
+    /// staying the loaded stream: same channel, same surfaces, a play
+    /// button. Pressing it builds the engine again
+    /// (`restoreUnloadedEngine`). Not while a hold is out (a clip, the
+    /// background: those pauses end by themselves) or in picture in
+    /// picture (tearing the engine down would close the window).
+    ///
+    /// Internal so tests can run it without the wait.
+    func unloadAfterLongPause() {
+        pauseUnloadTask = nil
+        guard channel != nil, let engine, controller.isPaused,
+              !controller.isHeld, !controller.isPictureInPictureActive
+        else { return }
+        let wasNative = engine is NativeStreamEngine
+        engine.teardown()
+        self.engine = nil
+        // `engineKey` stays: the header asking for this same stream again
+        // (a swipe away and back) must not build a player just to sit
+        // paused.
+        controller.startsMuted = controller.isMuted
+        // However it came to be paused, by now it's the user's.
+        controller.wantsPlayback = false
+        controller.reset()
+        if wasNative { PlaybackAudioSession.shared.deactivate() }
+        refreshNowPlaying()
+        hostRevision += 1
+    }
+
+    /// Play was pressed on a stream unloaded by `unloadAfterLongPause`.
+    private func restoreUnloadedEngine() {
+        guard engine == nil, let channel else { return }
+        engineKey = nil
+        play(channel, title: title, profileImageURL: profileImageURL,
+             native: lastNative, audioOnly: audioOnly, quality: lastQuality)
+    }
+
+    // MARK: Now Playing
+
+    /// Lock screen / Control Center info and play / pause, for the one
+    /// stream that plays with the app in the background: audio-only on the
+    /// native engine. Cleared for anything else, and on teardown.
+    private func refreshNowPlaying() {
+        guard let channel, audioOnly, engine is NativeStreamEngine else {
+            nowPlaying.clear()
+            return
+        }
+        nowPlaying.publish(
+            title: title,
+            channelName: channel.channelDisplayName,
+            isPaused: controller.isPaused,
+            controller: controller
+        )
     }
 
     func isPlaying(_ channelId: String) -> Bool {
@@ -365,6 +630,9 @@ final class PlaybackCenter {
         // screen, say) wins over the hold's own resume. Another hold still
         // out keeps the stream paused (`endHold` checks `startsPlaying`).
         controller.endHold(hold.reason, resume: hold.resumeOnRelease && controller.wantsPlayback)
+        // Still paused with the hold gone (the user's own pause): the long
+        // pause countdown, which a hold suspends, starts over.
+        schedulePauseUnload()
     }
 
     /// Whether a hold taken now should resume the stream on release: the

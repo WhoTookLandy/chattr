@@ -29,11 +29,11 @@ struct ChannelActionRow: View {
     private static let height: CGFloat = 36
 
     private var channelURL: URL? {
-        URL(string: "https://www.twitch.tv/\(channel.channelLoginName)")
+        Endpoints.TwitchWeb.channel(login: channel.channelLoginName)
     }
 
     private var subsURL: URL? {
-        URL(string: "https://www.twitch.tv/subs/\(channel.channelLoginName)")
+        Endpoints.TwitchWeb.subscribe(login: channel.channelLoginName)
     }
 
     var body: some View {

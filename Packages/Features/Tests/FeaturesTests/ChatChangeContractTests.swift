@@ -14,7 +14,7 @@ import ChatModel
 /// i.e. the emitted changes, applied to the previous visible state, reproduce
 /// the new visible state exactly. These tests pin that invariant across the
 /// full operation surface (append, cap-trim, blocked lines, replace, remove,
-/// the three mutate shapes, block-set change, reset) — so the UIKit applier in
+/// the three mutate shapes, block-set change, reset, replace-all) — so the UIKit applier in
 /// `ChatListView` can be trusted without per-operation UI tests.
 @Suite("ChatChange contract")
 struct ChatChangeContractTests {
@@ -210,6 +210,47 @@ struct ChatChangeContractTests {
         var buf = ChatBuffer(cap: 100)
         buf.append(line("a")); _ = buf.takeChanges()
         assertContract(&buf) { $0.reset() }
+        #expect(buf.lines.isEmpty)
+    }
+
+    @Test("replaceAll records the whole rebuild as ONE .reset of the final lines")
+    func replaceAllEmitsOneReset() {
+        var buf = ChatBuffer(cap: 3)
+        buf.append(line("a")); buf.append(line("b")); _ = buf.takeChanges()
+        let rows = [line("h1"), line("a2"), line("b2"), line("c2")]
+        buf.replaceAll { rebuilt in
+            for row in rows { rebuilt.append(row) }   // 4 rows into cap 3: trims h1
+            rebuilt.mutate(id: "c2") { $0.markingDeleted() }
+        }
+        // No `.reset([])`, no per-row appends, trims or edits: a reader that
+        // applies resets at once but holds appends back never sees it empty.
+        let changes = buf.takeChanges()
+        #expect(changes == [.reset(buf.lines)])
+        #expect(buf.lines.map(\.id) == ["a2", "b2", "c2"])
+        #expect(buf.lines.last?.kind == .deletedPlaceholder)
+        #expect(!buf.contains(id: "a"))
+    }
+
+    @Test("replaceAll keeps the contract, with earlier undrained changes ahead of it")
+    func replaceAllContract() {
+        var buf = ChatBuffer(cap: 100)
+        buf.append(line("a")); _ = buf.takeChanges()
+        let undrained = line("b")
+        let fresh = line("z")
+        assertContract(&buf) { buffer in
+            buffer.append(undrained)
+            buffer.replaceAll { rebuilt in rebuilt.append(fresh) }
+        }
+        #expect(buf.lines.map(\.id) == ["z"])
+    }
+
+    @Test("replaceAll to nothing emits a .reset to empty")
+    func replaceAllToEmpty() {
+        var buf = ChatBuffer(cap: 100)
+        buf.append(line("a")); _ = buf.takeChanges()
+        buf.replaceAll { _ in }
+        let changes = buf.takeChanges()
+        #expect(changes == [.reset([])])
         #expect(buf.lines.isEmpty)
     }
 

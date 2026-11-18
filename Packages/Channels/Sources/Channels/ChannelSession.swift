@@ -57,14 +57,17 @@ private let logger = AppLogger.make("Channels.ChannelSession")
 ///   settings.
 /// - `ChannelSession+EventTranslation.swift` — `ChannelEvent` and the
 ///   EventSub → `ChannelEvent` mapping.
+/// - `ChannelSession+ClientRebind.swift` — moving a running session onto a
+///   replacement `TwitchClient`.
 ///
 /// State the sibling files touch is `internal` (Swift has no cross-file
 /// `private`); it is still actor-isolated.
 public actor ChannelSession {
 
     /// Internal (not private): `ChannelSession+LiveEvents.swift` seeds from
-    /// Helix with it.
-    let client: TwitchClient
+    /// Helix with it. A `var` only for `rebind(to:)`, which swaps it (with
+    /// `topics` and `chatActions`) when the account's client is replaced.
+    var client: TwitchClient
     /// Public + `nonisolated` because it's set once at init and never
     /// changes. Callers outside the actor (e.g. `ChatTranscriptModel` reading
     /// it to key `DraftStorage` lookups) can read without hopping the
@@ -123,7 +126,20 @@ public actor ChannelSession {
 
     /// The EventSub topics this session subscribes to. Stateless: the ids it
     /// returns land in `activeSubscriptionIds`. See `EventSubTopics`.
-    let topics: EventSubTopics
+    var topics: EventSubTopics
+
+    /// Retries start-time topics whose subscribe failed, with backoff (see
+    /// `retryTopics`). At most one per session; `stop()` cancels it.
+    var topicRetryTask: Task<Void, Never>?
+
+    /// Set when `rebind(to:)` couldn't connect the new client's EventSub
+    /// socket: the retry task connects before it subscribes again.
+    var needsEventSubConnect = false
+
+    /// Set when `rebind(to:)` couldn't subscribe chat on the new client:
+    /// where that gap began. The retry that subscribes it resyncs from here
+    /// (the rebind's own resync ran before chat was back).
+    var chatGapFloor: Date?
 
     /// Send / delete / chat-settings / chat-colour Helix calls. See
     /// `HelixChatActions`.
@@ -132,7 +148,7 @@ public actor ChannelSession {
     /// bridge, retry once) whose `refreshTokenHandler` is injected at
     /// construction time by `ChannelSessionRegistry`, so this actor doesn't
     /// need to know about `AccountStore` or `Account` directly.
-    let chatActions: HelixChatActions
+    var chatActions: HelixChatActions
 
     /// The `HelixAuthRetry` that `topics` and `chatActions` share, kept for
     /// the session's own Helix reads (the live-event reconcile — see
@@ -165,8 +181,18 @@ public actor ChannelSession {
     /// True while a reconnect gap-fill is in flight. Set synchronously at the
     /// top of `resyncAfterReconnect` (before its first await) so back-to-back
     /// `.connected` transitions — flapping network, registry resyncing every
-    /// session for the account — collapse to one rustlog fetch.
+    /// session for the account — never run two rustlog fetches at once.
     var resyncInFlight = false
+
+    /// A resync was requested while one was in flight: its floor (see
+    /// `resyncAfterReconnect`), kept so exactly one more fetch runs when the
+    /// current one finishes. Coalesces any number of requests.
+    var resyncFollowUpFloor: Date?
+
+    /// When the newest live event arrived (session construction until the
+    /// first one). The reconnect gap-fill takes nothing sent before it: older
+    /// history is the join backfill's to place, not the gap's.
+    var lastLiveReceiptAt = Date()
 
     /// True while a `channel.moderate` v2 subscription is live (or being
     /// created) for this session. Makes `enableModerationEvents()`
@@ -313,16 +339,11 @@ public actor ChannelSession {
         // session-open path. Each call still hops back onto the actor to append
         // its id to `activeSubscriptionIds`, so that mutation stays serialized;
         // only the network waits overlap. We still await the group as a unit so
-        // the session isn't exposed until every subscription is live — same
-        // guarantee as before, just parallelized.
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { await self.subscribeToNotificationTopic(.notification, label: "notification") }
-            group.addTask { await self.subscribeToNotificationTopic(.messageDelete, label: "message_delete") }
-            group.addTask { await self.subscribeToNotificationTopic(.clear, label: "chat_clear") }
-            group.addTask { await self.subscribeToNotificationTopic(.clearUserMessages, label: "clear_user_messages") }
-            group.addTask { await self.subscribeToNotificationTopic(.settingsUpdate, label: "settings_update") }
-            group.addTask { await self.subscribeToRaid() }
-        }
+        // the session isn't exposed until every subscription has been tried —
+        // same guarantee as before, just parallelized. One that failed is
+        // retried in the background: a transient error here must not leave
+        // deletes and clears unseen for as long as the tab stays open.
+        retryTopics(await subscribeTopics(EventSubTopics.SessionTopic.enrichment))
 
         // Drain backfill and merge — waiting no later than the deadline.
         // Failures are absorbed by BackfillProvider — we never propagate; an
@@ -368,24 +389,120 @@ public actor ChannelSession {
     /// The core chat.message subscription — required for the session to be
     /// useful. Throws on failure so the registry doesn't keep a session that
     /// can't deliver chat. The other (notification/raid/delete/clear) topics
-    /// use `subscribeToNotificationTopic` / `subscribeToRaid` which swallow
-    /// errors — those topics are enrichment, not core function.
+    /// go through `subscribeTopics`, which swallows errors — those topics are
+    /// enrichment, not core function.
     private func subscribeToChat() async throws {
         if let id = try await topics.subscribeToChat() {
+            await recordSubscription(id)
+        }
+    }
+
+    /// Keeps a created subscription's id for `stop()` — or, when `stop()`
+    /// already ran while the POST was in flight (and deleted the ids it knew
+    /// about), deletes this one rather than leak it until the socket closes.
+    private func recordSubscription(_ id: String) async {
+        if isStopped {
+            await topics.unsubscribe([id])
+        } else {
             activeSubscriptionIds.append(id)
         }
     }
 
-    private func subscribeToNotificationTopic(_ kind: EventSubTopics.NotificationKind, label: String) async {
-        if let id = await topics.subscribeToNotificationTopic(kind, label: label) {
-            activeSubscriptionIds.append(id)
+    /// Subscribes one topic and records its id. False when the attempt
+    /// failed in a way a later retry could fix.
+    private func subscribeTopic(_ topic: EventSubTopics.SessionTopic) async -> Bool {
+        guard !isStopped else { return true }
+        switch await topics.subscribe(topic) {
+        case .subscribed(let id):
+            await recordSubscription(id)
+            return true
+        case .alreadySubscribed:
+            return true
+        case .failed(let retryable):
+            return !retryable
         }
     }
 
-    private func subscribeToRaid() async {
-        if let id = await topics.subscribeToRaid() {
-            activeSubscriptionIds.append(id)
+    /// Subscribes `wanted` concurrently and returns the topics worth
+    /// retrying. Never throws. Internal for `rebind(to:)`.
+    func subscribeTopics(_ wanted: [EventSubTopics.SessionTopic]) async -> [EventSubTopics.SessionTopic] {
+        await withTaskGroup(of: EventSubTopics.SessionTopic?.self) { group in
+            for topic in wanted {
+                group.addTask {
+                    let settled = await self.subscribeTopic(topic)
+                    return settled ? nil : topic
+                }
+            }
+            var failed: [EventSubTopics.SessionTopic] = []
+            for await topic in group {
+                if let topic { failed.append(topic) }
+            }
+            return failed
         }
+    }
+
+    /// First retry delay, doubled each round up to the cap.
+    private static let topicRetryInitialDelaySeconds = 2
+    private static let topicRetryMaxDelaySeconds = 60
+    /// Rounds after which an enrichment topic is given up on (about six
+    /// minutes). `chat` — only ever retried after `rebind(to:)` — keeps
+    /// going: without it the session shows nothing.
+    private static let enrichmentRetryLimit = 10
+
+    /// Retries `failed` with backoff from a task the session owns, until
+    /// each topic is subscribed, runs out of attempts, or the session stops.
+    /// Replaces a retry already running. Internal for `rebind(to:)`.
+    func retryTopics(_ failed: [EventSubTopics.SessionTopic]) {
+        topicRetryTask?.cancel()
+        topicRetryTask = nil
+        guard !failed.isEmpty, !isStopped else { return }
+        // `self` is re-bound each round, so the sleeping loop never keeps
+        // the session alive.
+        topicRetryTask = Task { [weak self] in
+            var remaining = failed
+            var delaySeconds = ChannelSession.topicRetryInitialDelaySeconds
+            var attempt = 0
+            while !remaining.isEmpty {
+                do {
+                    try await Task.sleep(for: .seconds(delaySeconds))
+                } catch {
+                    return   // cancelled: stopped, or replaced by a newer retry
+                }
+                guard let self else { return }
+                attempt += 1
+                remaining = await self.retryRound(remaining, attempt: attempt)
+                delaySeconds = min(delaySeconds * 2, ChannelSession.topicRetryMaxDelaySeconds)
+            }
+        }
+    }
+
+    /// One retry round: the topics still failing afterwards.
+    private func retryRound(
+        _ wanted: [EventSubTopics.SessionTopic],
+        attempt: Int
+    ) async -> [EventSubTopics.SessionTopic] {
+        guard !isStopped, !Task.isCancelled else { return [] }
+        if needsEventSubConnect {
+            do {
+                try await client.eventSub.connect()
+                needsEventSubConnect = false
+            } catch {
+                return wanted
+            }
+        }
+        var remaining = await subscribeTopics(wanted)
+        guard !isStopped else { return [] }
+        if let floor = chatGapFloor, !remaining.contains(.chat) {
+            // Chat is subscribed again: fill what was broadcast meanwhile.
+            chatGapFloor = nil
+            await resyncAfterReconnect(droppedAt: floor)
+            guard !isStopped else { return [] }
+        }
+        if attempt >= Self.enrichmentRetryLimit, remaining.contains(where: { $0 != .chat }) {
+            remaining.removeAll { $0 != .chat }
+            logger.warning("Giving up on enrichment EventSub topic(s) for #\(self.channelLoginName, privacy: .public) after \(attempt) retries")
+        }
+        return remaining
     }
 
     /// Subscribes to `channel.moderate` v2 — the live feed of moderation
@@ -407,12 +524,13 @@ public actor ChannelSession {
     /// token missing the `channel.moderate` v2 read bundle) just means
     /// mod status stays attach-time-static, the pre-existing behavior.
     public func enableModerationEvents() async {
-        guard !moderationEventsEnabled else { return }
+        guard !moderationEventsEnabled, !isStopped else { return }
         moderationEventsEnabled = true
 
         switch await topics.subscribeToModeration() {
         case .subscribed(let id):
-            activeSubscriptionIds.append(id)
+            // `stop()` may have run while the POST was in flight.
+            await recordSubscription(id)
         case .alreadySubscribed:
             // Already live on this WebSocket from a prior session — keep
             // the flag, events flow.
@@ -422,6 +540,15 @@ public actor ChannelSession {
             // re-signs-in mid-run and picks up the scopes) can retry.
             moderationEventsEnabled = false
         }
+    }
+
+    /// Forgets the `channel.moderate` subscription and reports whether there
+    /// was one. For `rebind(to:)`: the subscription lived on the client being
+    /// replaced, and is made again on the new one.
+    func resetModerationEvents() -> Bool {
+        let wasEnabled = moderationEventsEnabled
+        moderationEventsEnabled = false
+        return wasEnabled
     }
 
     /// Stops the session: deletes every EventSub subscription on Twitch's
@@ -441,6 +568,9 @@ public actor ChannelSession {
         liveEventsReconcileTask?.cancel()   // the pass clears its own handle
         updateLiveEventsVerification()   // isStopped: cancels the check
         finishLiveEventSubscribers()
+
+        topicRetryTask?.cancel()
+        topicRetryTask = nil
 
         // Cancel the in-flight restrictions fetch so it stops retaining the
         // actor past teardown (and skips its now-pointless subscriber fan-out).
@@ -492,6 +622,7 @@ public actor ChannelSession {
         // surface EventSub's envelope `message_timestamp`, so receipt time is
         // the best send-time we have — and every replay must reuse it.
         let receivedAt = Date()
+        lastLiveReceiptAt = receivedAt
 
         // Side-effect: losing mod status invalidates the live
         // channel.moderate subscription (Twitch revokes it server-side

@@ -55,6 +55,11 @@ let package = Package(
             dependencies: [
                 "Features",
                 "ChatModel",
+                // Imported directly by test files (fixtures, endpoints,
+                // accounts) — declared rather than reached through Features.
+                "Core",
+                "Accounts",
+                "EmoteSources",
                 // Channels + TwitchKit: ChatTranscriptModelModerationTests builds
                 // real (never-started) ChannelSessions around an offline
                 // TwitchClient to drive attach-time moderation seeding.

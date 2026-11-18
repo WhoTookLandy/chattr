@@ -176,17 +176,23 @@ struct ChatRow: View, Equatable {
     /// the divider, or deleted placeholders (whose kind isn't `.message`);
     /// for those the menu is empty and the long-press is a no-op, matching
     /// the platform default. Each item is present only when its callback is.
+    ///
+    /// Reply and View Thread also need a delivered row: a `.sending` or
+    /// `.failed` row still carries its local `pending-…` id, which Twitch
+    /// can't thread a reply against. `line` is part of `==`, so the items
+    /// appear the moment the row settles.
     @ViewBuilder
     private var contextMenuItems: some View {
         if case .message = line.kind {
-            if let onReply {
+            let isDelivered = line.deliveryState == .delivered
+            if isDelivered, let onReply {
                 Button {
                     onReply()
                 } label: {
                     Label("Reply", systemImage: "arrowshape.turn.up.left")
                 }
             }
-            if let onViewThread {
+            if isDelivered, let onViewThread {
                 Button {
                     onViewThread()
                 } label: {
@@ -334,17 +340,7 @@ struct ChatRow: View, Equatable {
     /// once and threads it through here and every `runView`.
     private func usernamePrefix(bodyFont: Font, color: Color) -> Text {
         let nameFont = bodyFont.weight(.semibold)
-        // Fast path: only a genuinely localized name needs the annotation
-        // lookup. `hasLocalizedDisplayName` is precomputed on the line, so the
-        // common case (display name is just the login) short-circuits here and
-        // skips `loginAnnotation`'s two `.lowercased()` allocations per body.
-        // The flag mirrors that trigger, so this is behavior-preserving.
-        guard line.hasLocalizedDisplayName,
-              let pair = ChatAppearance.loginAnnotation(
-                  displayName: line.authorDisplayName,
-                  login: line.authorUserLogin,
-                  style: appearance.loginNameDisplay
-              ) else {
+        guard let pair = loginAnnotationPair else {
             return Text(line.authorDisplayName)
                 .font(nameFont)
                 .foregroundStyle(color)
@@ -356,6 +352,23 @@ struct ChatRow: View, Equatable {
             .font(nameFont)
             .foregroundStyle(Color.secondary)
         return Text("\(primary)\(secondary)")
+    }
+
+    /// The (primary, secondary) names for a localized display name, or nil
+    /// when the row shows the display name alone.
+    ///
+    /// Fast path: only a genuinely localized name needs the annotation
+    /// lookup. `hasLocalizedDisplayName` is precomputed on the line, so the
+    /// common case (display name is just the login) short-circuits here and
+    /// skips `loginAnnotation`'s two `.lowercased()` allocations per body.
+    /// The flag mirrors that trigger, so this is behavior-preserving.
+    private var loginAnnotationPair: (primary: String, secondary: String)? {
+        guard line.hasLocalizedDisplayName else { return nil }
+        return ChatAppearance.loginAnnotation(
+            displayName: line.authorDisplayName,
+            login: line.authorUserLogin,
+            style: appearance.loginNameDisplay
+        )
     }
 
     /// Combined VoiceOver label for the whole message row, e.g.
@@ -396,6 +409,158 @@ struct ChatRow: View, Equatable {
         // `imageScale` is also a computed property (a division); read it once
         // rather than per badge + per emote run.
         let imgScale = appearance.imageScale
+        Group {
+            if rendersAsSingleText {
+                singleTextBody(bodyFont: bodyFont, nameColor: nameColor)
+            } else {
+                flowBody(bodyFont: bodyFont, nameColor: nameColor, imageScale: imgScale)
+            }
+        }
+        // Highlighted lines get an accent-tinted backplate so a "@me ..."
+        // mention stands out at a glance. Subtle — uses the system accent at
+        // low opacity so it doesn't fight with the row content.
+        .padding(.horizontal, highlightPlate ? 4 : 0)
+        .padding(.vertical, highlightPlate ? 2 : 0)
+        .background {
+            if highlightPlate {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.accentColor.opacity(0.12))
+            }
+        }
+        // One VoiceOver stop per message. Without this, every timestamp,
+        // badge, name, and text/emote run is its own swipe stop — a single
+        // message reads as 5-8 fragments. The explicit label replaces the
+        // awkward child concatenation ("14 32 Moderator Landy colon hello…")
+        // with a purpose-built read-out (author, badge titles, emote names).
+        // Only rebuilt when the row's body re-evaluates — the Equatable
+        // short-circuit still gates that.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityMessageLabel)
+    }
+
+    // MARK: - Single-Text rows
+
+    /// True when the row has no inline images — no emote runs and no badges
+    /// to draw — so timestamp, name and message render as ONE `Text`.
+    ///
+    /// Only then: `FlowLayout` places each subview as a rectangle, so a
+    /// long `Text` sharing the flow with a badge or an emote would drop to
+    /// a row of its own instead of wrapping around it. With nothing else
+    /// in the row the single `Text` wraps the way the words did, for one
+    /// text layout instead of one per word.
+    private var rendersAsSingleText: Bool {
+        (!appearance.showBadges || badgeEntries.isEmpty) && Self.isTextOnly(line.runs)
+    }
+
+    /// True when no run is an inline image (third-party or Twitch emote).
+    nonisolated static func isTextOnly(_ runs: [LineRun]) -> Bool {
+        !runs.contains { isEmoteRun($0) }
+    }
+
+    nonisolated private static func isEmoteRun(_ run: LineRun) -> Bool {
+        switch run {
+        case .emote, .twitchEmote: return true
+        case .text, .mention, .cheermote: return false
+        }
+    }
+
+    /// The whole row as one wrapping `Text`. Matches the flow rendering:
+    /// full width, never truncated, 4pt between lines (the flow's row
+    /// spacing), and the same per-piece fonts and colors.
+    private func singleTextBody(bodyFont: Font, nameColor: Color) -> some View {
+        var text = AttributedString()
+        if appearance.showTimestamps {
+            var stamp = AttributedString(line.timestamp.formatted(Self.timestampFormat) + " ")
+            stamp.font = Font.system(size: appearance.textSizePoints * 0.8).monospacedDigit()
+            stamp.foregroundColor = Color.secondary
+            text.append(stamp)
+        }
+        let nameFont = bodyFont.weight(.semibold)
+        if let pair = loginAnnotationPair {
+            var primary = AttributedString(pair.primary)
+            primary.font = nameFont
+            primary.foregroundColor = nameColor
+            var secondary = AttributedString(" (\(pair.secondary))")
+            secondary.font = nameFont
+            secondary.foregroundColor = Color.secondary
+            text.append(primary)
+            text.append(secondary)
+        } else {
+            var name = AttributedString(line.authorDisplayName)
+            name.font = nameFont
+            name.foregroundColor = nameColor
+            text.append(name)
+        }
+        // No font on the colon, as in the flow rendering.
+        var colon = AttributedString(":")
+        colon.foregroundColor = Color.secondary
+        text.append(colon)
+        if !line.runs.isEmpty {
+            var gap = AttributedString(" ")
+            gap.font = bodyFont
+            text.append(gap)
+            text.append(Self.attributedBody(line.runs, font: bodyFont))
+        }
+        return Text(text)
+            .lineSpacing(4)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The runs as one attributed string: words joined by single spaces
+    /// (runs are word-level), with the styling `runView` gives each kind —
+    /// links tappable and underlined, mentions in the accent color,
+    /// cheermotes orange. Consecutive plain words go in as one chunk. An
+    /// emote run falls back to its name; callers gate on `isTextOnly`.
+    static func attributedBody(_ runs: [LineRun], font: Font) -> AttributedString {
+        var result = AttributedString()
+        var plain = ""
+        func flushPlain() {
+            guard !plain.isEmpty else { return }
+            var chunk = AttributedString(plain)
+            chunk.font = font
+            result.append(chunk)
+            plain = ""
+        }
+        for (index, run) in runs.enumerated() {
+            if index > 0 { plain += " " }
+            switch run {
+            case .text(let word):
+                if let url = ChatLinkDetector.url(in: word) {
+                    flushPlain()
+                    var link = linkText(word, url: url)
+                    link.font = font
+                    result.append(link)
+                } else {
+                    plain += word
+                }
+            case .mention(let login, let isMe):
+                flushPlain()
+                var mention = AttributedString("@\(login)")
+                mention.font = font.weight(isMe ? .bold : .semibold)
+                mention.foregroundColor = Color.accentColor
+                result.append(mention)
+            case .cheermote(let prefix, let bits, _):
+                flushPlain()
+                var cheer = AttributedString("\(prefix)\(bits)")
+                cheer.font = font.weight(.semibold)
+                cheer.foregroundColor = Color.orange
+                result.append(cheer)
+            case .emote(let emote):
+                plain += emote.name
+            case .twitchEmote(_, let displayName):
+                plain += displayName
+            }
+        }
+        flushPlain()
+        return result
+    }
+
+    // MARK: - Flow rows
+
+    /// Badges, name and runs as separate flow items — the rendering for any
+    /// row with an inline image.
+    private func flowBody(bodyFont: Font, nameColor: Color, imageScale imgScale: CGFloat) -> some View {
         // No hanging indent — wrapped lines continue flush at the leading
         // edge, matching Twitch's native chat. The 14pt indent we shipped
         // briefly made continuations look misaligned ("starts a little bit
@@ -435,30 +600,58 @@ struct ChatRow: View, Equatable {
             // `Array(...enumerated())` allocation per body without disturbing
             // the stateful emote image views (`LazyImage` /
             // `AnimatedImageView`) of unchanged runs.
+            //
+            // A zero-width emote that follows an emote yields no item of its
+            // own: it is drawn inside that emote's item (see `flowItem`).
             ForEach(line.runs.indices, id: \.self) { idx in
-                runView(for: line.runs[idx], bodyFont: bodyFont, imageScale: imgScale)
+                flowItem(at: idx, bodyFont: bodyFont, imageScale: imgScale)
             }
         }
-        // Highlighted lines get an accent-tinted backplate so a "@me ..."
-        // mention stands out at a glance. Subtle — uses the system accent at
-        // low opacity so it doesn't fight with the row content.
-        .padding(.horizontal, highlightPlate ? 4 : 0)
-        .padding(.vertical, highlightPlate ? 2 : 0)
-        .background {
-            if highlightPlate {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.accentColor.opacity(0.12))
+    }
+
+    /// The flow item for the run at `index`: the run's own view, with any
+    /// zero-width emotes that follow it stacked on top — or nothing, when
+    /// the run is itself one of those overlays.
+    ///
+    /// The stack is as large as its largest member, and every member's box
+    /// comes from metadata (see `ThirdPartyEmoteImage`), so the item's size
+    /// is final on the first layout pass like any other emote's.
+    @ViewBuilder
+    private func flowItem(at index: Int, bodyFont: Font, imageScale: CGFloat) -> some View {
+        let runs = line.runs
+        if !Self.isStackedOverlay(runs, at: index) {
+            let overlays = Self.stackedOverlays(runs, after: index)
+            if overlays.isEmpty {
+                runView(for: runs[index], bodyFont: bodyFont, imageScale: imageScale)
+            } else {
+                ZStack {
+                    runView(for: runs[index], bodyFont: bodyFont, imageScale: imageScale)
+                    ForEach(overlays, id: \.self) { overlay in
+                        runView(for: runs[overlay], bodyFont: bodyFont, imageScale: imageScale)
+                    }
+                }
             }
         }
-        // One VoiceOver stop per message. Without this, every timestamp,
-        // badge, name, and text/emote run is its own swipe stop — a single
-        // message reads as 5-8 fragments. The explicit label replaces the
-        // awkward child concatenation ("14 32 Moderator Landy colon hello…")
-        // with a purpose-built read-out (author, badge titles, emote names).
-        // Only rebuilt when the row's body re-evaluates — the Equatable
-        // short-circuit still gates that.
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityMessageLabel)
+    }
+
+    /// True when the run at `index` is a zero-width emote (7TV overlay)
+    /// drawn on the emote before it instead of in a slot of its own. With
+    /// no emote before it, it renders as a normal emote.
+    nonisolated static func isStackedOverlay(_ runs: [LineRun], at index: Int) -> Bool {
+        guard index > 0, case .emote(let emote) = runs[index], emote.isZeroWidth else { return false }
+        return isEmoteRun(runs[index - 1])
+    }
+
+    /// Indices of the zero-width emotes stacked on the emote at `index`:
+    /// the unbroken run of them right after it. Empty for a non-emote run.
+    nonisolated static func stackedOverlays(_ runs: [LineRun], after index: Int) -> Range<Int> {
+        let start = index + 1
+        guard isEmoteRun(runs[index]) else { return start..<start }
+        var end = start
+        while end < runs.count, case .emote(let emote) = runs[end], emote.isZeroWidth {
+            end += 1
+        }
+        return start..<end
     }
 
     /// Dispatch a single run to its inline view. Each case is a one-liner —
@@ -494,6 +687,7 @@ struct ChatRow: View, Equatable {
             TwitchEmoteImage(
                 emote: reference,
                 displayName: displayName,
+                scale: imageScale,
                 allowAnimation: appearance.animatedEmotes
             )
 

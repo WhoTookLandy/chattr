@@ -32,6 +32,11 @@ concurrency:
   group: testflight
   cancel-in-progress: false
 
+# The job only checks the repo out; everything it uploads goes to App Store
+# Connect (with the API key) or to the run's own artifacts.
+permissions:
+  contents: read
+
 jobs:
   upload:
     runs-on: macos-26
@@ -113,7 +118,7 @@ jobs:
           ASC_KEY_PATH: ${{ env.KEY_PATH }}
         run: |
           python3 -m venv "$RUNNER_TEMP/asc-venv"
-          "$RUNNER_TEMP/asc-venv/bin/pip" install --quiet pyjwt cryptography
+          "$RUNNER_TEMP/asc-venv/bin/pip" install --quiet pyjwt==2.10.1 cryptography==46.0.3
           "$RUNNER_TEMP/asc-venv/bin/python" ci/set_whats_new.py com.landy.chattr "$BUILD_NUMBER" ci/WhatToTest.txt
           echo "What to Test notes set from ci/WhatToTest.txt." >> "$GITHUB_STEP_SUMMARY"
 

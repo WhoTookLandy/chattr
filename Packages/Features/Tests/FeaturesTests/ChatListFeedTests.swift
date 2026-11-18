@@ -399,6 +399,67 @@ struct ChatListFeedTests {
         rig.expectInSync()
     }
 
+    @Test("unpinned: a reprime lands as one reset — never an emptied list — and survivors keep their cells")
+    func unpinnedReprimeReplacesWholesale() {
+        var rig = Rig()
+        for id in ["a", "b", "c"] { rig.transcript.buffer.append(line(id)) }
+        rig.update()
+
+        rig.pinned = false
+        rig.transcript.buffer.append(line("d"))   // held back, unread
+        #expect(rig.update().isEmpty)
+
+        // Late join history merged above the live rows: the session's
+        // snapshot replaces the whole transcript.
+        let history = [line("h1"), line("h2")]
+        let survivors = rig.transcript.buffer.lines
+        rig.transcript.buffer.replaceAll { rebuilt in
+            for row in history + survivors { rebuilt.append(row) }
+        }
+        let edit = rig.update()
+        #expect(edit.resetIds == ["h1", "h2", "a", "b", "c", "d"])
+        #expect(edit.steps.isEmpty)
+        // Unchanged survivors are neither re-inserted nor reconfigured, so
+        // the viewport can anchor on the row the reader was on.
+        #expect(edit.reconfigure.isEmpty)
+        #expect(rig.feed.unreadCount == 1)
+        #expect(!rig.feed.hasDeferredChanges)
+        rig.expectInSync()
+
+        rig.pinned = true
+        #expect(rig.update().isEmpty)
+        rig.expectInSync()
+    }
+
+    @Test("unpinned: a reprime that edits a surviving row reconfigures it, and later appends are held again")
+    func unpinnedReprimeRefreshesChangedSurvivors() {
+        var rig = Rig()
+        for id in ["a", "b"] { rig.transcript.buffer.append(line(id)) }
+        rig.update()
+        rig.pinned = false
+
+        // The snapshot carries `a` struck by a moderator while this reader
+        // was behind, and no longer holds `b`.
+        let struck = line("a").markingDeleted()
+        let fresh = line("c")
+        rig.transcript.buffer.replaceAll { rebuilt in
+            rebuilt.append(struck)
+            rebuilt.append(fresh)
+        }
+        rig.transcript.buffer.append(line("d"))   // live again, after the reprime
+        let edit = rig.update()
+        #expect(edit.resetIds == ["a", "c"])
+        #expect(edit.reconfigure == ["a"])
+        #expect(rig.mirror.ids == ["a", "c"])
+        #expect(rig.mirror.shown["a"]?.kind == .deletedPlaceholder)
+        #expect(rig.feed.unreadCount == 1)
+        #expect(rig.feed.hasDeferredChanges)
+
+        rig.pinned = true
+        rig.update()
+        rig.expectInSync()
+    }
+
     @Test("unpinned: overflowing the backlog abandons it and resets on resume")
     func unpinnedOverflowResetsOnResume() {
         var rig = Rig(maxDeferred: 10)
@@ -444,7 +505,7 @@ struct ChatListFeedTests {
 
             for _ in 0..<300 {
                 let buffer = rig.transcript
-                switch rng.next(upTo: 12) {
+                switch rng.next(upTo: 13) {
                 case 0, 1, 2:
                     buffer.buffer.append(line("m\(next)", author: rng.next(upTo: 6) == 0 ? "villain" : "u"))
                     next += 1
@@ -470,6 +531,18 @@ struct ChatListFeedTests {
                     if rng.next(upTo: 10) == 0 { buffer.buffer.mutateAll { $0.markingDeleted() } }
                 case 10:
                     buffer.flush()
+                case 11:
+                    // Reprime: one wholesale rebuild — late history on top,
+                    // some current rows surviving, a new live row at the tail.
+                    if rng.next(upTo: 4) == 0 {
+                        var rebuiltLines = [line("h\(next)")]
+                        rebuiltLines += buffer.buffer.lines.suffix(rng.next(upTo: 6))
+                        rebuiltLines.append(line("m\(next + 1)"))
+                        next += 2
+                        buffer.buffer.replaceAll { rebuilt in
+                            for row in rebuiltLines { rebuilt.append(row) }
+                        }
+                    }
                 default:
                     rig.pinned = rng.next(upTo: 3) != 0
                     rig.update(reconfigureAll: rng.next(upTo: 10) == 0)

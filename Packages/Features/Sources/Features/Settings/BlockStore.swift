@@ -71,7 +71,8 @@ public final class BlockStore {
             var cursor: String? = nil
             repeat {
                 let (chatters, nextCursor) = try await accountStore.withTokenRefresh(forUserId: userId) { [cursor] () async throws -> ([BlockedChatter], String?) in
-                    let page = try await client.api.fetchUserBlockListPage(broadcasterID: userId, first: nil, after: cursor)
+                    // 100 is Helix's largest page (its default is 20).
+                    let page = try await client.api.fetchUserBlockListPage(broadcasterID: userId, first: 100, after: cursor)
                     let chatters = page.data.map {
                         BlockedChatter(id: $0.userId, login: $0.userLogin, displayName: $0.displayName)
                     }

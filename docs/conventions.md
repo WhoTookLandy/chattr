@@ -35,14 +35,14 @@ back into one module.
 Network/IO/persistence and the types they produce → the matching domain
 package (`Channels`, `Accounts`, `EmoteSources`). Pure presentation transforms
 → `ChatModel`. Cross-cutting primitives (logging, errors, endpoints, disk
-cache) → `Core`. Color/typography/appearance tokens → `DesignSystem`.
+cache) → `Core`. Color and appearance tokens → `DesignSystem`.
 
 ### Group by feature, not by type
 
 Inside `Features`, files are grouped into **feature folders** (vertical
-slices): `Chat/`, `Channels/`, `Emotes/`, `Highlights/`, `Settings/`,
-`Tabs/`, `App/`, plus a `Shared/` folder for genuinely cross-feature UI
-primitives. A feature's screen, its `@Observable` model, its stores, and its
+slices): `Chat/`, `Channels/`, `Emotes/`, `Highlights/`, `Guest/`, `Settings/`,
+`Tabs/`, `App/` and so on, plus a `Shared/` folder for genuinely
+cross-feature UI primitives. A feature's screen, its `@Observable` model, its stores, and its
 private helper views all live **together** in that folder. Do NOT add
 `Views/` / `Models/` / `Stores/` subfolders — splitting one feature across
 type-named folders fragments it and buries the thing you actually navigate by
@@ -216,7 +216,9 @@ catch let error as AppError {
     case .sessionExpired:
         // Auth-state transition handled upstream.
     case .bridgeRefreshFailed, .network, .timeout:
-        // Transient — show retry affordance.
+        // Transient — show retry affordance. (`.bridgeRefreshFailed` is
+        // any bridge error that doesn't say the refresh token is invalid,
+        // whatever its status; an invalid one is `.sessionExpired`.)
     case .decoding, .unknown:
         // Generic fallback.
         showToast(error.localizedDescription)

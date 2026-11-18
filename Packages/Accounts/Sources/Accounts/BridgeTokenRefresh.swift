@@ -16,19 +16,39 @@ private let logger = AppLogger.make("Accounts.BridgeTokenRefresh")
 /// tested against a stubbed `URLSession`.
 struct BridgeTokenRefresh: Sendable {
 
-    /// The bridge answered 400 / 401 / 403: Twitch rejected the
-    /// refresh_token (revoked, expired, or issued to a different client_id).
-    /// Terminal — this credential can never work again, so the caller signs
-    /// the account out.
+    /// Twitch rejected the refresh_token itself (revoked or expired), and
+    /// the response body says so. Terminal — this credential can never work
+    /// again, so the caller signs the account out.
     struct Rejected: Error, Equatable {
         let status: Int
     }
 
-    /// Statuses that mean "this refresh_token is dead". Deliberately NOT
-    /// every 4xx: the bridge passes Twitch's status through, and a 429 (rate
-    /// limited) or 408 (timeout) says nothing about the credential — treating
-    /// those as terminal would force-sign-out a user over a transient blip.
-    static let rejectionStatuses: Set<Int> = [400, 401, 403]
+    /// Whether a non-200 response says "this refresh_token is dead".
+    ///
+    /// The status alone never decides it. The bridge passes Twitch's
+    /// response through, and a 400 / 401 / 403 is also what a rotated or
+    /// misconfigured client secret, a bad deploy or a platform error page
+    /// looks like — signing every user out over one of those can't be
+    /// undone. So the body has to name the refresh token: Twitch's
+    /// `{"status":400,"message":"Invalid refresh token"}`, or an OAuth-style
+    /// `"error":"invalid_grant"`. Anything else, including a body that isn't
+    /// JSON, is transient. The same fields are read one level down too, in
+    /// case the bridge wraps Twitch's error (`{"error": {"message": …}}`).
+    static func isRefreshTokenRejection(status: Int, body: Data) -> Bool {
+        guard (400..<500).contains(status),
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return false }
+        let keys = ["message", "error", "error_description"]
+        var fields: [String] = []
+        for key in keys {
+            if let text = object[key] as? String {
+                fields.append(text.lowercased())
+            } else if let nested = object[key] as? [String: Any] {
+                fields.append(contentsOf: keys.compactMap { (nested[$0] as? String)?.lowercased() })
+            }
+        }
+        return fields.contains { $0.contains("invalid refresh token") || $0 == "invalid_grant" }
+    }
 
     let endpoint: URL
     let session: URLSession
@@ -40,11 +60,13 @@ struct BridgeTokenRefresh: Sendable {
 
     /// Exchanges `refreshToken` for fresh tokens.
     ///
-    /// - Throws: `Rejected` on 400 / 401 / 403;
+    /// - Throws: `Rejected` when the response says the refresh token is
+    ///   invalid (see `isRefreshTokenRejection`);
     ///   `AppError.bridgeRefreshFailed(status:)` on any other non-200 (5xx,
-    ///   408, 429, … = bridge / Twitch having a bad day — transient, the
-    ///   credentials are probably still good); transport and decoding errors
-    ///   as-is.
+    ///   408, 429, a 401 / 403 about the client or its secret, an
+    ///   unreadable 400, … = bridge / Twitch having a bad day — transient,
+    ///   the credentials are probably still good); transport and decoding
+    ///   errors as-is.
     /// - Returns: the new token. When Twitch's response omits a
     ///   refresh_token (rotation is conditional on Twitch's own policy), the
     ///   one we *used* is carried forward — persisting `nil` would leave the
@@ -64,7 +86,7 @@ struct BridgeTokenRefresh: Sendable {
             let body = String(data: data, encoding: .utf8) ?? "(no body)"
             // body is server-side debug text (no secrets) — public is fine.
             logger.error("Bridge refresh failed for @\(login, privacy: .public) (HTTP \(http.statusCode)): \(body, privacy: .public)")
-            if Self.rejectionStatuses.contains(http.statusCode) {
+            if Self.isRefreshTokenRejection(status: http.statusCode, body: data) {
                 throw Rejected(status: http.statusCode)
             }
             throw AppError.bridgeRefreshFailed(status: http.statusCode)

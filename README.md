@@ -2,17 +2,21 @@
 
 An iOS-native, multi-chat client for Twitch. chattr lets you follow several
 channels' chat at once, signed in with one or more Twitch accounts, with
-first-class third-party emote support (7TV, BTTV, FFZ) and a native Liquid
-Glass look.
+first-class third-party emote support (7TV, BTTV, FFZ), the channel's stream
+playing above its chat, and a native Liquid Glass look.
 
-The MVP is **chat-only and Twitch-only**. The architecture deliberately reserves
-seams for stream playback, other platforms (Kick, YouTube), push notifications,
-moderation tools, and iPad split-view — all deliverable later without rework.
+chattr is **Twitch-only**. The architecture reserves seams for other
+platforms (Kick, YouTube), push notifications and iPad split-view — all
+deliverable later without rework.
 
 ## Highlights
 
 - **Multi-account** — add multiple Twitch logins and switch between them.
 - **Multi-channel** — tab/swipe between joined channels, one visible at a time.
+- **Stream playback** — the channel's stream above its chat (native player
+  with Picture in Picture, or Twitch's web player), a landscape stage, and
+  clip playback and creation.
+- **Guest mode** — watch a channel and read its chat without signing in.
 - **Third-party emotes** — Twitch native emotes plus 7TV, BTTV, and FFZ,
   including animated WebP and zero-width overlays.
 - **Live + history** — EventSub-driven live chat with join-time backfill via
@@ -62,9 +66,9 @@ against your own Twitch developer app, register one at
 ### UI preview harness
 
 A debug-only design-review harness boots the tab shell with mock data and no
-sign-in. Launch the **chattr** scheme with the `-uiPreview` argument (already
-wired into the shared scheme's options) to inspect screens without a live
-account.
+sign-in. Launch the **chattr** scheme with the `-uiPreview` argument to
+inspect screens without a live account. The shared scheme doesn't pass it:
+add it yourself under Edit Scheme → Run → Arguments.
 
 ## Architecture
 
@@ -89,12 +93,12 @@ chattr app target                  ← composition root + DI wiring only
 | Package | Responsibility |
 |---|---|
 | **Core** | Cross-cutting primitives: `AppError`, logging, `Endpoints`, JSON disk cache, channel/platform descriptors, session-activity signal. Foundation + `os` only. |
-| **DesignSystem** | Liquid Glass visual identity — color, typography, appearance tokens, reusable views. |
+| **DesignSystem** | Shared color and appearance tokens: chat surface, send button and Twitch-username colors, and the light/dark/system `AppearanceMode`. No views. |
 | **EmoteSources** | 7TV / BTTV / FFZ providers and the per-channel `EmoteIndex` actor. |
 | **ChatModel** | Display-ready `ChatLine` / `LineRun` model and the `Normalizer` (EventSub & IRC-tag → `ChatLine`). |
 | **Accounts** | Multi-account state — `Account` (SwiftData), `AccountStore`, OAuth flow. |
 | **Channels** | Chat-session lifecycle — `ChannelSession` actor (normalizes each message once and owns the per-channel ring of display-ready rows), `ChannelSessionRegistry`, off-main event routing, badge lookup, backfill, optimistic send. |
-| **Features** | Every SwiftUI screen, grouped by feature folder (`Home`, `Chat`, `Channels`, `Emotes`, `Highlights`, `Filters`, `Moderation`, `Settings`, `Tabs`, `App`, `Shared`). |
+| **Features** | Every SwiftUI screen, grouped by feature folder (`Home`, `Chat`, `Channels`, `Emotes`, `Highlights`, `Filters`, `Moderation`, `Activity`, `Clips`, `Landscape`, `Guest`, `Settings`, `Tabs`, `App`, `Shared`). Stream playback lives in `Chat`. |
 
 ### External dependencies
 
@@ -115,7 +119,7 @@ buffer of display-ready rows (cap = Chat History setting) → posted to each
 subscriber's mailbox (the session never waits on a subscriber) →
 `ChatTranscriptModel` drains everything queued as **one batch per main-actor
 hop**, layers on the viewer's highlight keywords, and coalesces a publish
-(~15 ms) → `ChatListView` applies the change log to its diffable
+(~15 ms, widening to ~50 ms while messages keep pouring in) → `ChatListView` applies the change log to its diffable
 `UICollectionView` → `ChatRow` renders. Join history waits at most ~3 s and
 merges in above live chat if it's late; reconnect gaps land as one contiguous
 batch. Sends are optimistic: the line appears immediately as `.sending` and
@@ -146,8 +150,8 @@ that bite hardest:
 
 ## Testing
 
-Tests use **Swift Testing** for units, snapshot tests for cells, and
-`URLProtocol` stubs for network. Package tests are *not* part of the Xcode
+Tests use **Swift Testing** for units and `URLProtocol` stubs for network
+(there are no snapshot tests). Package tests are *not* part of the Xcode
 scheme — run them per package:
 
 ```sh
@@ -161,7 +165,9 @@ swift test --package-path Packages/ChatModel
 GitHub Actions (`.github/workflows/`):
 
 - **CI** (`ci.yml`) — on every push to `main` and every PR: `swift test` for
-  each package, plus an iOS Simulator `build-for-testing` of the app.
+  each host-testable package, the `Features` and `Accounts` tests on an iOS
+  Simulator, and Debug (`build-for-testing`) and Release simulator builds of
+  the app.
 - **TestFlight** (`testflight.yml`) — on a `v*` tag (or manually from the
   Actions tab): archives a Release build and uploads it to App Store Connect.
   The build number is the workflow run number unless overridden.

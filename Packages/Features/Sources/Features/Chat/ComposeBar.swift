@@ -1,4 +1,5 @@
 import Channels
+import Core
 import DesignSystem
 import SwiftUI
 #if canImport(UIKit)
@@ -13,20 +14,19 @@ import UIKit
 /// keeping that mutation OUT of ChatScreen prevents the LazyVStack of
 /// chat rows from re-evaluating its body on every typed character.
 ///
-/// Communicates with the parent only through:
-///   - `onSend`: async callback the parent uses to actually post via
-///     `chatModel.send(text:)`. Async-typed so the button can show a
-///     disabled state while a send is in flight.
+/// Talks to the parent through callbacks only (`onSend`, `onDraftChange`,
+/// `onCancelReply`, the ⋯ menu's actions) — never a binding to the draft.
+/// `onSend` is async so a second submit is ignored while one is in flight.
 ///
-/// Multi-line growing input: Twitch chat doesn't support newlines (the
-/// server strips them before sending), but `axis: .vertical` lets the
-/// field expand as the user types long messages — matching the native
-/// Twitch iOS experience. `.submitLabel` / `.onSubmit` are intentionally
-/// omitted because `axis: .vertical` re-assigns Return to newline; the
-/// send button is the submit action instead.
+/// Single-line input: Twitch chat has no newlines, so Return sends
+/// (`.submitLabel(.send)` + `.onSubmit`) and there is no send button. The
+/// pill holds the ⋯ menu, the field and the emote button.
 struct ComposeBar: View {
     let channelLoginName: String
     let channelDisplayName: String
+    /// The pager tab this bar's chat lives in — what the ⋯ menu's "Close
+    /// Chat" closes. nil outside the pager, which hides the item.
+    let tabId: UUID?
     /// When non-nil, the bar shows a "Replying to …" chip above the
     /// field and the next send threads against this parent. Owned by
     /// `ChatTranscriptModel.replyContext` upstream — the bar is purely
@@ -82,11 +82,6 @@ struct ComposeBar: View {
     @Environment(\.playback) private var playback
     #endif
 
-    /// The open tab showing this channel — for "Close Chat".
-    private var tabId: UUID? {
-        chatTabs?.tabs.first { $0.channels.first?.channelLoginName == channelLoginName }?.id
-    }
-
     @State private var composeText: String
     @State private var isSending: Bool = false
     @FocusState private var focused: Bool
@@ -110,6 +105,7 @@ struct ComposeBar: View {
     init(
         channelLoginName: String,
         channelDisplayName: String,
+        tabId: UUID? = nil,
         replyContext: ChatTranscriptModel.ReplyContext?,
         chatRestrictions: ChatRestrictions?,
         ownRestriction: OwnChatRestrictionState? = nil,
@@ -126,6 +122,7 @@ struct ComposeBar: View {
         self.createClip = createClip
         self.channelLoginName = channelLoginName
         self.channelDisplayName = channelDisplayName
+        self.tabId = tabId
         self.replyContext = replyContext
         self.chatRestrictions = chatRestrictions
         self.ownRestriction = ownRestriction
@@ -323,12 +320,8 @@ struct ComposeBar: View {
         ownRestriction?.current?.blocksSending() ?? false
     }
 
-    /// True when the draft has at least one non-whitespace character.
-    /// Drives the send button's appearance: hidden while empty (the bar
-    /// reads as a clean pill with just the emote button), faded in once
-    /// there's text. (Send clears `composeText` synchronously at
-    /// send-start, so the button disappears the instant a send is
-    /// committed — no separate isSending check needed for the swap.)
+    /// True when the draft has at least one non-whitespace character —
+    /// what the ⋯ menu's "Clear Draft" item appears for.
     private var hasDraft: Bool {
         !composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -423,10 +416,6 @@ struct ComposeBar: View {
             // the corners balloon into an over-rounded blob. A constant
             // 24pt radius stays pill-ish at one line and tidy as it grows.
             .glassEffect(.regular, in: .rect(cornerRadius: 24, style: .continuous))
-            // Animate the send button fading in/out (and the field width
-            // change it causes). Value-scoped so unrelated re-renders don't
-            // animate.
-            .animation(.snappy(duration: 0.2), value: hasDraft)
           }
         }
     }
@@ -466,7 +455,9 @@ struct ComposeBar: View {
                 }
             }
             #if os(iOS)
-            if !audioOnly {
+            // Audio-only is the native engine's; not offered while that's
+            // switched off.
+            if !audioOnly, PlayerSettings.isNativePlaybackEnabled {
                 Button {
                     withAnimation(.snappy(duration: 0.25)) {
                         videoVisible = true
@@ -590,7 +581,7 @@ struct ComposeBar: View {
     }
 
     private var channelURL: URL? {
-        URL(string: "https://www.twitch.tv/\(channelLoginName)")
+        Endpoints.TwitchWeb.channel(login: channelLoginName)
     }
 
     private func sendDraft() async {

@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 import ChatModel
 import Channels
 
@@ -134,6 +137,35 @@ struct ChatTranscript: View {
         .task {
             chatModel.blockedIds = blockStore?.blockedIds ?? []
         }
+        #if canImport(UIKit)
+        // Backgrounded (the stream may play on as audio or Picture in
+        // Picture, with the chat socket up): stop feeding a transcript nobody
+        // can see, and catch up on the way back — see
+        // `ChatTranscriptModel.setLiveUpdatesPaused`. The same notifications
+        // suspend the list (`ChatListViewController.isSuspended`); attached
+        // out here so the empty state is covered too. Becoming active is a
+        // second chance to resume, and a no-op when already resumed.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            chatModel.setLiveUpdatesPaused(true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            chatModel.setLiveUpdatesPaused(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            chatModel.setLiveUpdatesPaused(false)
+        }
+        // The pause is stored on the model but driven from this view, and
+        // the model outlives it: `ChatScreen` swaps the transcript for its
+        // error view when a session fails to start. If that happened in the
+        // background, nothing here heard the app return — without this, the
+        // transcript that mounts on Retry would stay parked (primed, but
+        // never live) until the next trip to the background.
+        .onAppear {
+            if UIApplication.shared.applicationState != .background {
+                chatModel.setLiveUpdatesPaused(false)
+            }
+        }
+        #endif
     }
 
     /// The list (either implementation) plus everything both share: the
@@ -207,6 +239,8 @@ struct ChatTranscript: View {
                 // batch, not just the latest publish — and zeroes the count
                 // when it flushes them (re-pin or pill tap).
                 unreadCount: $unreadWhileScrolledUp,
+                // "N new" can't exceed what a jump to the live edge reveals.
+                unreadLimit: chatModel.lineCap,
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge,
                 isVisible: isVisible,

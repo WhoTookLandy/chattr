@@ -80,7 +80,13 @@ public struct RootView: View {
     /// Owned here so the data survives chat-screen push/pop — previously
     /// every back-nav refetched the entire follow list because the state
     /// lived in ChannelListScreen's `@State` and `.task` re-fired on appear.
-    @State private var followsStore = FollowsStore()
+    /// One store per account: an account switch gets a fresh one (see
+    /// `FollowsStoreScope`).
+    @State private var followsScope = FollowsStoreScope()
+
+    private var followsStore: FollowsStore {
+        followsScope.store(forAccountUserId: activeAccount?.userId)
+    }
 
     /// Live/offline status for open chat channels (followed or not) — drives
     /// the chat stream header, live dots and last-live captions.
@@ -202,6 +208,10 @@ public struct RootView: View {
         // no concurrency cost vs splitting into two tasks.
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
+            // One refresh ahead of the launch fan-out (single-flight, shared
+            // by the tasks below) instead of a 401 per request once the
+            // access token has expired.
+            await accountStore.refreshTokensIfExpiringSoon(for: active)
             await globalCatalog.load(account: active, accountStore: accountStore)
             // After GlobalCatalog populates, kick image prefetches for
             // BOTH global emotes AND global badges. Both go into Nuke's
@@ -271,10 +281,16 @@ public struct RootView: View {
         // and effectively run in parallel anyway.
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
+            await accountStore.refreshTokensIfExpiringSoon(for: active)
+            // The refresh is a network round trip. An account switch during
+            // it cancels this task, and `refreshLive` (unlike
+            // `loadAllIfNeeded`) would switch the store back to `active`.
+            guard !Task.isCancelled else { return }
             await followsStore.refreshLive(account: active, accountStore: accountStore)
         }
         .task(id: activeAccount?.userId) {
             guard let active = activeAccount else { return }
+            await accountStore.refreshTokensIfExpiringSoon(for: active)
             await followsStore.loadAllIfNeeded(account: active, accountStore: accountStore)
         }
         // Foregrounding: live status goes stale while backgrounded. Non-forced
@@ -301,7 +317,15 @@ public struct RootView: View {
                 return
             }
             guard let active = activeAccount else { return }
-            Task { await followsStore.refreshLive(account: active, accountStore: accountStore) }
+            let activeUserId = active.userId
+            Task {
+                await accountStore.refreshTokensIfExpiringSoon(for: active)
+                // Same hazard as the launch task above, without a task to
+                // cancel: don't hand the store an account that was switched
+                // away from during the refresh.
+                guard activeAccount?.userId == activeUserId else { return }
+                await followsStore.refreshLive(account: active, accountStore: accountStore)
+            }
         }
         // Create the active account's BlockStore (loads its persisted cache in
         // init) and seed it from Twitch's authoritative block list. `.task(id:)`
@@ -313,6 +337,7 @@ public struct RootView: View {
             }
             let store = BlockStore(accountUserId: active.userId, accountStore: accountStore)
             blockStore = store
+            await accountStore.refreshTokensIfExpiringSoon(for: active)
             await store.load()
         }
     }

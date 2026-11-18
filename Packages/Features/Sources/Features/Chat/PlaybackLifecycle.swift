@@ -60,6 +60,10 @@ final class PlaybackLifecycleObserver: NSObject {
     /// The hold this observer took on the way out. It lapses on its own if
     /// the stream stops or the channel changes meanwhile.
     private var backgroundHold: PlaybackHold?
+    /// Between `didEnterBackground` and `willEnterForeground`. A native
+    /// engine that fails while this is true and the stream is audio-only
+    /// has no web player to fall back to (`PlaybackCenter`).
+    private(set) var isInBackground = false
 
     init(center: PlaybackCenter) {
         self.center = center
@@ -88,6 +92,7 @@ final class PlaybackLifecycleObserver: NSObject {
     /// Internal (not private) so tests can drive it without posting
     /// app-wide notifications.
     @objc func didEnterBackground() {
+        isInBackground = true
         guard let center, center.isPlaying else { return }
         let controller = center.controller
         // Decided on intent, not the displayed paused state: a stream
@@ -121,6 +126,7 @@ final class PlaybackLifecycleObserver: NSObject {
     }
 
     @objc func willEnterForeground() {
+        isInBackground = false
         guard let hold = backgroundHold else { return }
         backgroundHold = nil
         // Resumes at the live edge, only what this hold paused.

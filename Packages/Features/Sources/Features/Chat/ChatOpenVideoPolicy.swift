@@ -38,8 +38,11 @@ enum ChatOpenVideoPolicy {
         case .closed:
             setVideoOpen(false)
         case .autoplayOnWiFi:
-            // Audio-only has no video to autoplay; leave it closed.
-            if UserDefaults.standard.bool(forKey: PlayerSettings.audioOnlyKey) {
+            // Audio-only has no video to autoplay; leave it closed. (With
+            // the native engine switched off there is no audio-only: the
+            // stream shows as video.)
+            if UserDefaults.standard.bool(forKey: PlayerSettings.audioOnlyKey),
+               PlayerSettings.isNativePlaybackEnabled {
                 setVideoOpen(false)
                 return
             }

@@ -243,3 +243,137 @@ struct AnimatedEmoteDecoderBucketTests {
         #expect(AnimatedEmoteDecoder.maxPixelSize(for: .zero, scale: 0) == 16)
     }
 }
+
+@Suite("DecodedAnimation frame delays")
+struct DecodedAnimationFrameDelayTests {
+
+    /// Browsers play a delay of 10 ms or less as 100 ms; played literally
+    /// it runs ten times too fast and asks the display for its top rate.
+    @Test("Delays of 10 ms or less, or none at all, play at 100 ms")
+    func shortDelaysAreClamped() {
+        #expect(DecodedAnimation.clampedFrameDelay(0.01) == 0.1)
+        #expect(DecodedAnimation.clampedFrameDelay(0.005) == 0.1)
+        #expect(DecodedAnimation.clampedFrameDelay(0) == 0.1)
+        #expect(DecodedAnimation.clampedFrameDelay(nil) == 0.1)
+    }
+
+    @Test("Delays an author can really mean are kept as written")
+    func playableDelaysAreKept() {
+        #expect(DecodedAnimation.clampedFrameDelay(0.02) == 0.02)
+        // 60 fps WebP / APNG.
+        #expect(DecodedAnimation.clampedFrameDelay(0.016) == 0.016)
+        #expect(DecodedAnimation.clampedFrameDelay(0.05) == 0.05)
+        #expect(DecodedAnimation.clampedFrameDelay(0.5) == 0.5)
+    }
+
+    @Test("A decoded animation's timing uses the clamped delays")
+    func decodeAppliesClamp() throws {
+        // Two 10 ms frames and two 100 ms frames: clamped, all four play
+        // for 100 ms.
+        let data = DecodedAnimationTests.apng(alphas: [1, 1, 1, 1], delays: [0.01, 0.01, 0.1, 0.1])
+        let decoded = try #require(DecodedAnimation(data: data))
+        #expect(abs(decoded.totalDuration - 0.4) < 0.001)
+        // ~10 fps is all it needs; unclamped it would have asked for 60.
+        #expect(decoded.peakFrameRate <= 12)
+    }
+}
+
+@Suite("DecodedAnimation byte budget")
+struct DecodedAnimationByteBudgetTests {
+
+    @Test("A square emote at the usual decode size keeps the full frame cap")
+    func smallFramesKeepFrameCap() {
+        #expect(DecodedAnimation.frameLimit(pixelWidth: 64, pixelHeight: 64, maxPixelSize: nil)
+            == DecodedAnimation.maxFrameCount)
+        #expect(DecodedAnimation.frameLimit(pixelWidth: 0, pixelHeight: 0, maxPixelSize: nil)
+            == DecodedAnimation.maxFrameCount)
+    }
+
+    @Test("Larger frames get proportionally fewer")
+    func largeFramesGetFewer() {
+        // 256×64 = 65 536 bytes a frame → 64 frames in 4 MB.
+        #expect(DecodedAnimation.frameLimit(pixelWidth: 256, pixelHeight: 64, maxPixelSize: nil) == 64)
+        // The budget is on what is decoded, not on the source: a 512×128
+        // source downsampled to 256 on its long side costs the same.
+        #expect(DecodedAnimation.frameLimit(pixelWidth: 512, pixelHeight: 128, maxPixelSize: 256) == 64)
+        // Downsampling never upscales, so a bucket above the source changes nothing.
+        #expect(DecodedAnimation.frameLimit(pixelWidth: 256, pixelHeight: 64, maxPixelSize: 512) == 64)
+        // Always at least one frame.
+        #expect(DecodedAnimation.frameLimit(pixelWidth: 4096, pixelHeight: 4096, maxPixelSize: nil) == 1)
+    }
+
+    @Test("An animation over the budget is sampled down, keeping its loop length")
+    func overBudgetAnimationIsSampledDown() throws {
+        // 24 frames of 512×512 would be 24 MB decoded; 4 fit the budget.
+        let frameCount = 24
+        let data = DecodedAnimationTests.apng(
+            alphas: Array(repeating: 1, count: frameCount),
+            delays: Array(repeating: 0.05, count: frameCount),
+            width: 512, height: 512)
+        let decoded = try #require(DecodedAnimation(data: data))
+        #expect(decoded.frameCount == 4)
+        #expect(decoded.byteCost <= DecodedAnimation.maxByteCost)
+        #expect(abs(decoded.totalDuration - Double(frameCount) * 0.05) < 0.01)
+        #expect(decoded.normalizedKeyTimes.count == decoded.frameCount + 1)
+    }
+}
+
+@Suite("DecodedAnimation shared phase")
+struct DecodedAnimationPhaseTests {
+
+    @Test("The phase is the clock time modulo the loop length")
+    func phaseWrapsOnLoopLength() throws {
+        // 1.0 s loop.
+        let data = DecodedAnimationTests.apng(alphas: [1, 1, 1, 1], delays: [0.1, 0.3, 0.1, 0.5])
+        let decoded = try #require(DecodedAnimation(data: data))
+        #expect(abs(decoded.phase(at: 12.25) - 0.25) < 0.0001)
+        // Two views reading the clock a whole number of loops apart agree.
+        #expect(abs(decoded.phase(at: 12.25) - decoded.phase(at: 15.25)) < 0.0001)
+        #expect(decoded.phase(at: 0) == 0)
+    }
+
+    @Test("A still has no phase")
+    func stillHasNoPhase() throws {
+        let data = DecodedAnimationTests.apng(alphas: [1, 1])
+        let poster = try #require(DecodedAnimation(data: data, posterOnly: true))
+        #expect(poster.phase(at: 123.4) == 0)
+    }
+}
+
+@Suite("DecodedAnimationCache live table")
+struct DecodedAnimationCacheLiveTableTests {
+
+    @Test("An animation dropped from the cache is handed back while something still holds it")
+    func evictedAnimationIsReusedWhileHeld() throws {
+        let cache = DecodedAnimationCache()
+        let url = try #require(URL(string: "https://cdn.test/live.webp"))
+        let held = try #require(DecodedAnimation(data: DecodedAnimationTests.apng(alphas: [1, 1])))
+        cache.store(held, for: url, maxPixelSize: 32)
+
+        cache.removeAll()
+
+        #expect(cache.decoded(for: url, maxPixelSize: 32) === held)
+        // A poster-only decode is a different entry, and stays a miss.
+        #expect(cache.decoded(for: url, maxPixelSize: 32, posterOnly: true) == nil)
+    }
+
+    @Test("A larger size bucket aliased to the stored one finds the live animation too")
+    func aliasResolvesToLiveAnimation() throws {
+        let cache = DecodedAnimationCache()
+        let url = try #require(URL(string: "https://cdn.test/aliased.webp"))
+        let held = try #require(DecodedAnimation(data: DecodedAnimationTests.apng(alphas: [1, 1])))
+        cache.store(held, for: url, maxPixelSize: 32)
+        cache.alias(url, requested: 96, to: 32)
+
+        cache.removeAll()
+
+        #expect(cache.decoded(for: url, maxPixelSize: 96) === held)
+    }
+
+    @Test("Nothing is invented for a key that was never stored")
+    func unknownKeyMisses() throws {
+        let cache = DecodedAnimationCache()
+        let url = try #require(URL(string: "https://cdn.test/never-stored.webp"))
+        #expect(cache.decoded(for: url, maxPixelSize: 32) == nil)
+    }
+}

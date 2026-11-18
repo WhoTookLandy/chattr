@@ -294,6 +294,28 @@ struct OutgoingMessageReconcilerTests {
         #expect(reconciler.nextFallbackDeadline == nil)
     }
 
+    @Test("A due send whose row is gone is settled, so a later identical send's echo matches the new row")
+    func fallbackSettlesSendWhoseRowIsGone() {
+        var reconciler = makeReconciler()
+        var rows: [String: ChatLine.DeliveryState] = [:]
+        let stale = begin("hello", &reconciler, &rows)
+        reconciler.accepted(pendingId: stale, messageId: "msg-1") { rows[$0] }
+        rows[stale] = nil   // aged out of the buffer before its echo or deadline
+
+        clock.advance(by: .seconds(5))
+        let outcome = reconciler.nextDueFallback { rows[$0] }
+
+        #expect(outcome == nil)
+        #expect(!reconciler.isTracking(stale), "the text and Helix-id keys must go with the deadline")
+        #expect(reconciler.locallySettledIds.isEmpty)
+
+        // The same text again: its echo upgrades the new row rather than
+        // matching the dead entry and being appended as a duplicate.
+        let fresh = begin("hello", &reconciler, &rows)
+        let match = reconciler.matchEcho(messageId: "msg-2", text: "hello", isOwn: true) { rows[$0] }
+        #expect(match == .upgrade(pendingId: fresh))
+    }
+
     @Test("Several due sends come out one at a time, most overdue first")
     func multipleDueInDeadlineOrder() {
         var reconciler = makeReconciler()

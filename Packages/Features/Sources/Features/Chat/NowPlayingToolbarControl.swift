@@ -41,8 +41,9 @@ enum CondensedStreamMode: Equatable {
 
     /// Mirrors `StreamHeaderView.body`'s choice for the visible page: the
     /// header is expanded and the channel is live, then audio-only wins over
-    /// PiP. Audio-only needs the native engine — after a fallback to web the
-    /// header shows the video, so there's nothing condensed.
+    /// PiP. Audio-only needs the native engine — after a fallback to web, or
+    /// with the native path switched off, the header shows the video, so
+    /// there's nothing condensed.
     @MainActor
     static func resolve(
         channelId: String?,
@@ -52,7 +53,9 @@ enum CondensedStreamMode: Equatable {
         playback: PlaybackCenter?
     ) -> Self? {
         guard let channelId, isExpanded, isLive, let playback else { return nil }
-        if audioOnly, !playback.controller.nativeFailed { return .audioOnly }
+        if audioOnly, PlayerSettings.isNativePlaybackEnabled, !playback.controller.nativeFailed {
+            return .audioOnly
+        }
         if playback.controller.isPictureInPictureActive, playback.isPlaying(channelId) {
             return .pictureInPicture
         }
@@ -79,8 +82,11 @@ struct NowPlayingToolbarControl: View {
 
     private var mode: CondensedStreamMode? {
         let channelId = chatTabs.visibleChannelId
-        let isLive = channelId.map {
-            ChannelStatusStore.liveStream(for: $0, status: channelStatus, follows: followsStore) != nil
+        // Same source as the header: the polled stream, or the one still
+        // playing through a single poll that left it out.
+        let isLive = channelId.map { id in
+            let live = ChannelStatusStore.liveStream(for: id, status: channelStatus, follows: followsStore)
+            return (playback?.stream(for: id, live: live) ?? live) != nil
         } ?? false
         return CondensedStreamMode.resolve(
             channelId: channelId,

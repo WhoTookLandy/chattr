@@ -215,6 +215,19 @@ extension ChannelSession {
     /// Nothing missed → nothing appended: a clean blip doesn't litter the
     /// transcript with dividers.
     ///
+    /// Only rows that can belong to the gap are taken: those sent no earlier
+    /// than the last live event before the drop, less `resyncSlack`. Without
+    /// that floor, a session whose join history never landed would append up
+    /// to a fetch's worth of PRE-join messages below newer live rows. The
+    /// floor is the earlier of `droppedAt` (when the registry saw the socket
+    /// go down) and the newest live receipt — events that arrive after the
+    /// reconnect, before this runs, must not move it past the gap.
+    ///
+    /// A request that arrives while a fetch is in flight isn't dropped: that
+    /// fetch may have been answered before the newer gap existed, so one
+    /// follow-up fetch runs after it (any number of requests collapse into
+    /// that one).
+    ///
     /// Called by `ChannelSessionRegistry`'s connection pump on every
     /// reconnecting→connected (or waitingForNetwork→connected) transition.
     ///
@@ -227,17 +240,42 @@ extension ChannelSession {
     ///   - rustlog snapshots at fetch time; messages broadcast between that
     ///     snapshot and TwitchKit's `resubscribeAll()` completing can be
     ///     missed by both sources.
-    public func resyncAfterReconnect() async {
+    public func resyncAfterReconnect(droppedAt: Date? = nil) async {
         // The initial-backfill window has its own divider + merge path; a
         // resync during it would race `applyBackfill`'s atomic commit.
-        guard !hub.backfillPending, !resyncInFlight else { return }
+        guard !hub.backfillPending, !isStopped else { return }
+        let requestFloor = min(lastLiveReceiptAt, droppedAt ?? lastLiveReceiptAt)
+        guard !resyncInFlight else {
+            resyncFollowUpFloor = min(resyncFollowUpFloor ?? requestFloor, requestFloor)
+            return
+        }
         resyncInFlight = true
         defer { resyncInFlight = false }
 
-        let fetched = await fetchBackfill(channelLoginName, Self.reconnectBackfillLimit)
-        guard !fetched.isEmpty else { return }
+        var next: Date? = requestFloor
+        while let gapFloor = next, !isStopped {
+            await fillGap(notBefore: gapFloor.addingTimeInterval(-Self.resyncSlack))
+            next = resyncFollowUpFloor
+            resyncFollowUpFloor = nil
+        }
+    }
 
-        let missing = ChannelHistoryMerge.missingMessages(fetched, notIn: hub.snapshot)
+    /// How far before the floor a fetched row may have been sent and still
+    /// count as part of the gap. Covers what the floor can't know: a dead
+    /// socket goes unnoticed until EventSub's keepalive deadline (~15s), and
+    /// `tmi-sent-ts` is Twitch's clock while receipt times are the device's.
+    /// Rows this lets through that were received live are deduped by id.
+    private static let resyncSlack: TimeInterval = 30
+
+    /// One gap-fill fetch + commit. See `resyncAfterReconnect`.
+    private func fillGap(notBefore cutoff: Date) async {
+        let fetched = await fetchBackfill(channelLoginName, Self.reconnectBackfillLimit)
+        guard !fetched.isEmpty, !isStopped else { return }
+
+        let missing = ChannelHistoryMerge.missingMessages(
+            ChannelHistoryMerge.gapCandidates(fetched, notBefore: cutoff),
+            notIn: hub.snapshot
+        )
         guard !missing.isEmpty else {
             logger.info("Reconnect resync for #\(self.channelLoginName, privacy: .public): no missed messages")
             return

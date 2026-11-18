@@ -55,7 +55,7 @@ struct EmoteSettingsScreen: View {
             } header: {
                 Text("Playback")
             } footer: {
-                Text("When off, animated emotes show their first frame. Saves battery in busy chats.")
+                Text("When off, animated emotes show their first frame. Saves battery in busy chats. Animation also pauses in Low Power Mode and while the device is running hot.")
             }
         }
         .navigationTitle("Emotes")

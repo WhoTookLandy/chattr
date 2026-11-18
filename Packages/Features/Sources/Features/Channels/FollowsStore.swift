@@ -71,6 +71,11 @@ public final class FollowsStore {
     /// so search filtering doesn't lowercase every channel on every keystroke.
     public private(set) var sortedAllChannelSearchKeys: [String] = []
 
+    /// Broadcaster ids of `channels`, maintained with the sort. Lets a
+    /// reader tell "followed and not in the live list" (offline) from "not
+    /// followed" (the live list says nothing about it).
+    public private(set) var followedChannelIds: Set<String> = []
+
     // MARK: - "Live" data set (foreground, refetched when stale)
 
     /// Live channels in Twitch's returned order (desc viewer count). Drives
@@ -87,6 +92,12 @@ public final class FollowsStore {
 
     public private(set) var liveLoadState: LoadState = .idle
     public private(set) var liveErrorMessage: String?
+
+    /// Wall-clock time of the last successful live refresh — what
+    /// `liveStreams` is current as of. Nil until one completes for this
+    /// account. (`lastLiveRefreshAt` is the same moment on the monotonic
+    /// clock, for the throttle.)
+    public private(set) var liveRefreshedAt: Date?
 
     // MARK: - Internal bookkeeping
 
@@ -121,6 +132,10 @@ public final class FollowsStore {
     /// When the last live refresh completed successfully. Drives the
     /// staleness throttle; reset on account swap.
     private var lastLiveRefreshAt: ContinuousClock.Instant?
+
+    /// Bumped by every live refresh and by every account switch; only the
+    /// newest refresh may write its outcome (see `performLiveRefresh`).
+    @ObservationIgnored private var liveRefreshGeneration = 0
 
     /// In-flight profile-enrichment Tasks, split by data set so a live
     /// refresh and an All load never cancel each other's enrichment. Each
@@ -227,7 +242,9 @@ public final class FollowsStore {
 
         liveRefreshTask?.cancel()
         liveRefreshTask = nil
+        liveRefreshGeneration &+= 1
         lastLiveRefreshAt = nil
+        if liveRefreshedAt != nil { liveRefreshedAt = nil }
         for task in liveEnrichmentTasks { task.cancel() }
         liveEnrichmentTasks = []
         for task in allEnrichmentTasks { task.cancel() }
@@ -282,22 +299,36 @@ public final class FollowsStore {
         sortedAllChannelSearchKeys = sortedAllChannels.map {
             ($0.broadcasterName + "\n" + $0.broadcasterLogin).lowercased()
         }
+        // Unchanged on a live-only re-sort: don't notify its readers then.
+        let ids = Set(channels.map(\.broadcasterId))
+        if ids != followedChannelIds { followedChannelIds = ids }
     }
 
     // MARK: - Load implementation: Live
 
-    /// Paginates `/streams/followed`, committing per page so the UI sees
-    /// streams as they arrive. The All view's live-first sort is refreshed
-    /// once when the loop exits (on every path), not per page.
+    /// Paginates `/streams/followed`. The first load into an empty list
+    /// commits per page so the UI sees streams as they arrive; a refresh of
+    /// a list that already has rows builds the new one locally and swaps it
+    /// in once, so the list never shrinks to its first page and regrows.
+    /// The All view's live-first sort is refreshed once when the loop exits
+    /// (on every path), not per page.
     private func performLiveRefresh(account: Account, accountStore: AccountStore) async {
         // Swapped away before this Task even started: don't touch state (or
         // the new account's enrichment tasks below).
         guard !Task.isCancelled else { return }
 
+        liveRefreshGeneration &+= 1
+        let generation = liveRefreshGeneration
+
         // Cancel + clear enrichment from a prior *live* load only — the All
         // load's enrichment is independent and keeps running.
         for task in liveEnrichmentTasks { task.cancel() }
         liveEnrichmentTasks = []
+
+        let commitsProgressively = liveStreamsOrdered.isEmpty
+        // What a cancelled refresh puts back.
+        let stateBeforeRefresh: LoadState = liveLoadState == .loading ? .idle : liveLoadState
+        let errorBeforeRefresh = liveErrorMessage
 
         liveLoadState = .loading
         liveErrorMessage = nil
@@ -337,10 +368,12 @@ public final class FollowsStore {
                     freshKeys[stream.userId] =
                         (stream.userName + "\n" + stream.userLogin + "\n" + stream.gameName).lowercased()
                 }
-                // Commit progressively so the UI sees streams as pages arrive.
-                liveStreamsOrdered = fresh
-                liveStreams = freshMap
-                liveStreamSearchKeys = freshKeys
+                if commitsProgressively {
+                    // Commit progressively so the UI sees streams as pages arrive.
+                    liveStreamsOrdered = fresh
+                    liveStreams = freshMap
+                    liveStreamSearchKeys = freshKeys
+                }
 
                 // Kick off profile enrichment for live channels not already cached.
                 let liveIds = page.data.map(\.userId)
@@ -357,14 +390,30 @@ public final class FollowsStore {
                 }
             } while cursor != nil
 
+            if !commitsProgressively {
+                // The one swap of a refresh. No suspension since the last
+                // cancellation check, so this is still our account's store.
+                liveStreamsOrdered = fresh
+                liveStreams = freshMap
+                liveStreamSearchKeys = freshKeys
+            }
             liveLoadState = .loaded
             lastLiveRefreshAt = .now
+            liveRefreshedAt = Date()
             logger.info("Loaded \(fresh.count) live followed channel(s) across \(pagesFetched) page(s)")
         } catch is CancellationError {
-            // Cancelled (account swap) — leave whatever we already committed
-            // visible and exit silently.
+            // Cancelled by an account swap, which already reset the state
+            // for the new account (and may have started its refresh): leave
+            // whatever we already committed and exit silently. Only if
+            // nothing took over is the `.loading` above still ours to undo.
+            if liveRefreshGeneration == generation {
+                liveLoadState = stateBeforeRefresh
+                liveErrorMessage = errorBeforeRefresh
+            }
             logger.info("Live-streams load cancelled")
         } catch {
+            // Superseded while failing: the state belongs to a newer refresh.
+            guard liveRefreshGeneration == generation else { return }
             liveErrorMessage = "\(error)"
             liveLoadState = .failed
             logger.error("Failed to load live followed channels: \(error.localizedDescription, privacy: .public)")
@@ -374,21 +423,24 @@ public final class FollowsStore {
     // MARK: - Load implementation: All
 
     /// Paginates `/channels/followed`, building the next channel list into a
-    /// local array and committing progressively so the UI sees rows as pages
-    /// arrive. Commits (each re-sorts the full list) are throttled to the
-    /// first page, the last page, and at most one per `allCommitInterval` in
-    /// between; the progress counter still updates every page. Profile
-    /// enrichment fires per page.
+    /// local array. The first load into an empty store commits progressively
+    /// so the UI sees rows as pages arrive: commits (each re-sorts the full
+    /// list) are throttled to the first page, the last page, and at most one
+    /// per `allCommitInterval` in between. A refresh of a store that already
+    /// has rows commits once, on the last page. The progress counter still
+    /// updates every page. Profile enrichment fires per page.
     ///
     /// State-reset policy:
     ///   - Account swap: `prepare(forAccountUserId:)` wipes stale data
     ///     immediately so the previous user's follows don't briefly appear
     ///     under the new user's name.
-    ///   - Refresh (same account): keep existing data visible until new pages
-    ///     arrive — pull-to-refresh's own spinner is the loading signal.
+    ///   - Refresh (same account): keep existing data visible until the new
+    ///     list is complete — pull-to-refresh's own spinner is the loading
+    ///     signal.
     ///
-    /// CancellationError is treated as benign and leaves state intact (view
-    /// tear-down / `.task(id:)` re-fire).
+    /// CancellationError is treated as benign and leaves the data intact
+    /// (view tear-down / `.task(id:)` re-fire); the load state goes back to
+    /// what it was before this load unless a newer load owns it.
     private func loadAll(account: Account, accountStore: AccountStore) async {
         // A load cancelled before it started (an account switch got there
         // first) must not run `prepare`: it would switch the store back to
@@ -407,12 +459,29 @@ public final class FollowsStore {
         for task in allEnrichmentTasks { task.cancel() }
         allEnrichmentTasks = []
 
+        let userId = account.userId
+        // Page-by-page commits only when filling an empty store. A refresh
+        // keeps the current list on screen and swaps the new one in whole —
+        // committing its first page shrank a long list to 100 rows and
+        // regrew it.
+        let commitsProgressively = channels.isEmpty
+        // What a cancelled load puts back. `.loading` here is a load this
+        // one just superseded, which will never finish it: fall back to
+        // what the store actually holds.
+        let stateBeforeLoad: LoadState
+        if allLoadState == .loading {
+            stateBeforeLoad = loadedAllForUserId == userId ? .loaded : .idle
+        } else {
+            stateBeforeLoad = allLoadState
+        }
+        let errorBeforeLoad = allErrorMessage
+        let totalBeforeLoad = totalFollowed
+
         allLoadState = .loading
         allLoadProgress = 0
         totalFollowed = nil
         allErrorMessage = nil
 
-        let userId = account.userId
         // Outside the `do` so a mid-pagination failure can still commit the
         // pages fetched since the last throttled commit.
         var accumulated: [FollowedChannel] = []
@@ -445,10 +514,13 @@ public final class FollowsStore {
                 cursor = page.pagination?.cursor
                 let isLastPage = cursor == nil || pagesFetched >= pageCap
 
-                // Throttled commit: first page (rows appear fast), last page,
-                // and otherwise at most once per `allCommitInterval`.
+                // Always the last page. When filling an empty store, also
+                // the first page (rows appear fast) and otherwise at most
+                // once per `allCommitInterval`.
                 let now = ContinuousClock.now
-                if isLastPage || lastCommitAt.map({ now - $0 >= Self.allCommitInterval }) ?? true {
+                let commitsThisPage = commitsProgressively
+                    && (lastCommitAt.map { now - $0 >= Self.allCommitInterval } ?? true)
+                if isLastPage || commitsThisPage {
                     channels = accumulated
                     recomputeSortedAllChannels()
                     lastCommitAt = now
@@ -478,6 +550,16 @@ public final class FollowsStore {
             loadedAllForUserId = account.userId
             logger.info("Loaded \(self.channels.count) followed channels across \(pagesFetched) page(s)")
         } catch is CancellationError {
+            // Superseded (an account switch, or a newer load): that load
+            // owns the state now. Cancelled outright (pull-to-refresh torn
+            // down): nothing will finish this load, so don't leave it
+            // spinning.
+            if allLoadGeneration == generation, currentUserId == userId {
+                allLoadState = stateBeforeLoad
+                allErrorMessage = errorBeforeLoad
+                totalFollowed = totalBeforeLoad
+                allLoadProgress = channels.count
+            }
             logger.info("All-channels load cancelled — leaving existing data intact")
         } catch {
             // Keep what we fetched visible (the footer offers Retry for the

@@ -56,6 +56,21 @@ enum ChannelHistoryMerge {
         return merged.count > capacity ? Array(merged.suffix(capacity)) : merged
     }
 
+    /// The fetched messages that can belong to a reconnect gap: those sent
+    /// at or after `cutoff`, in fetched order. Anything older predates what
+    /// the session had already received when the socket dropped, so it is
+    /// history the gap-fill must not append below newer rows. A line with no
+    /// send time can't be placed and is kept.
+    static func gapCandidates(
+        _ fetched: [BackfillMessage],
+        notBefore cutoff: Date
+    ) -> [BackfillMessage] {
+        fetched.filter { record in
+            guard let sentAt = record.sentAt else { return true }
+            return sentAt >= cutoff
+        }
+    }
+
     /// Pure dedup: the fetched history messages the ring does NOT already
     /// hold, in fetched order. Empty when nothing was missed — callers then
     /// add nothing (no divider for a clean reconnect).
