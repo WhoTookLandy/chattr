@@ -312,7 +312,10 @@ final class TabSessionCoordinator {
                 ))
             }
             if mentioned {
-                await chatTabs?.markMention(tabId: tabId)
+                // In the split layout a presented chat stays "presented"
+                // while the user is on another tab, so pass which tab shows.
+                let selectedTab = await navigation?.selectedTab
+                await chatTabs?.markMention(tabId: tabId, chatsTabSelected: selectedTab == .chats)
             }
             if !hits.isEmpty {
                 await navigation?.recordActivity(hits, fromTab: tabId)

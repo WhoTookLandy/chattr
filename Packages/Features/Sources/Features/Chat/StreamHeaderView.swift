@@ -524,7 +524,7 @@ struct StreamHeaderView: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
-                    glyphButton("chevron.left", label: "Back") { dismiss() }
+                    glyphButton("chevron.left", label: "Back") { leaveChat() }
                     Spacer()
                     pageIndicator
                     #if os(iOS)
@@ -666,6 +666,17 @@ struct StreamHeaderView: View {
     private func openSubs() {
         touchChrome()
         if let subsURL { openURL(subsURL) }
+    }
+
+    /// Back out of the chat. Clearing `isPresented` pops the pushed pager in
+    /// the stack layout and empties the detail column in the split layout,
+    /// where the pager is a column root and `dismiss()` has nothing to end.
+    private func leaveChat() {
+        if let chatTabs {
+            chatTabs.isPresented = false
+        } else {
+            dismiss()
+        }
     }
 
     private func glyphButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {

@@ -1,14 +1,16 @@
 Chats side by side on foldable iPhones and iPad
 
 NEW
-• On an unfolded iPhone or an iPad, the Chats tab now shows your open chats on the left and the chat on the right. Tap a chat in the list to switch; the one you're in is highlighted.
+• On an unfolded iPhone or an iPad, the Chats tab now shows your open chats on the left and the chat on the right. Tap a chat in the list to switch; the one you're in is highlighted. (On iPad this needs the app window to be at least about 700 × 500 points; smaller windows keep the single-column layout.)
 • The tab bar stays available while a chat is open there, so Home, Activity and Search are one tap away.
 • Folded, and on every other iPhone, Chats works exactly as before.
 
 PLEASE TEST
-1. On an unfolded iPhone (or an iPad), open the Chats tab with a few chats open. You should see the list on the left and "No chat selected" on the right.
-2. Tap a chat: it should open on the right and its row should be highlighted. Tap another to switch.
-3. Swipe left and right in the chat: it should move between chats, and the highlight in the list should follow.
-4. Type a message: the layout should not jump while the keyboard is up.
-5. With a chat open, fold the phone: the same chat should stay open full screen. Unfold it again: the list should come back beside it.
-6. On a regular or Max iPhone, turn to landscape in a chat with video: the landscape video layout should look the same as before.
+1. Folded, open a few chats, then go back to the Chats list. Unfold (or open the app full screen on iPad): you should see the list on the left and "No chat selected" on the right.
+2. Tap a chat: it should open on the right and its row should be highlighted. Tap another to switch. With Settings → Video & Device → When a Chat Opens set to Closed, show the video in one chat, then tap another live chat: it should open with its video closed.
+3. With a stream's video showing on the right, tap the video and then Back: the right side should return to "No chat selected" and the chat should stay in the list.
+4. Open a chat on the right, go to Home, and have someone @-mention you in that chat: the Chats tab should get a badge, which clears when you come back.
+5. Swipe left and right in the chat: it should move between chats, and the highlight in the list should follow.
+6. Type a message: the layout should not jump while the keyboard is up.
+7. With a chat open, fold the phone: the same chat should stay open full screen. Unfold it again: the list should come back beside it.
+8. On a regular or Max iPhone, turn to landscape in a chat with video: the landscape video layout should look the same as before.

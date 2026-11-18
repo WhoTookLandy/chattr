@@ -218,6 +218,10 @@ private struct ChatSplitDetail: View {
     var body: some View {
         if showsChat {
             ChatPagerScreen(account: account, accountStore: accountStore, hidesTabBar: false)
+                // The tab bar stays visible here, so the user can leave for
+                // another tab and come back with the chat still presented.
+                // A ping that arrived meanwhile was badged; acknowledge it.
+                .onAppear { chatTabs?.acknowledgePresentedMention() }
         } else {
             ContentUnavailableView {
                 Label("No chat selected", systemImage: "bubble.left.and.bubble.right")

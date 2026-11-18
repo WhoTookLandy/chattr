@@ -56,15 +56,18 @@ struct OpenChatsList: View {
         ForEach(tabs) { tab in
             let stream = liveStream(tab)
             Button {
-                chatTabs.activeTabId = tab.id
-                chatTabs.isPresented = true
+                // Already on screen beside the list: nothing to open, and
+                // re-running the open policy would reset its video.
+                guard !(chatTabs.isPresented && chatTabs.activeTabId == tab.id) else { return }
+                // `present` runs the "When a Chat Opens" policy even when a
+                // chat is already presented — the split layout's case, where
+                // tapping another row swaps chats without leaving the pager.
+                chatTabs.present(tabId: tab.id)
             } label: {
                 OpenChatRow(tab: tab, chatTabs: chatTabs)
             }
             .buttonStyle(.plain)
-            .listRowBackground(
-                ActiveChatRowHighlight(tabId: tab.id, chatTabs: chatTabs, isEnabled: highlightsActiveChat)
-            )
+            .modifier(ActiveChatRowSelection(tabId: tab.id, chatTabs: chatTabs, isEnabled: highlightsActiveChat))
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 Button(role: .destructive) {
                     chatTabs.close(tabId: tab.id)
@@ -102,21 +105,26 @@ struct OpenChatsList: View {
     }
 }
 
-/// Selection background for a row in the split layout's sidebar. Its own
-/// view so that `activeTabId` (which changes on every pager swipe) is read
-/// here, invalidating one row background instead of the whole list.
-private struct ActiveChatRowHighlight: View {
+/// Selected state for a row in the split layout's sidebar: a tinted
+/// background plus the `.isSelected` trait for VoiceOver. A modifier with
+/// its own body so that `activeTabId` (which changes on every pager swipe)
+/// is read here, invalidating one row instead of the whole list.
+private struct ActiveChatRowSelection: ViewModifier {
     let tabId: UUID
     let chatTabs: ChatTabsModel
     /// Off in the stack layout: the row stays clear, and `activeTabId` is
     /// never read, so pager swipes don't touch the list at all.
     let isEnabled: Bool
 
-    var body: some View {
+    func body(content: Content) -> some View {
         let isActive = isEnabled && chatTabs.isPresented && chatTabs.activeTabId == tabId
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
+        content
+            .listRowBackground(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+            )
+            .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 }
