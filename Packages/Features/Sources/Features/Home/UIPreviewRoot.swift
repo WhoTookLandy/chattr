@@ -154,12 +154,6 @@ public struct UIPreviewRoot: View {
                     #endif
                     .navigationDestination(for: HomeRoute.self) { route in
                         switch route {
-                        case .allFollows:
-                            ChannelListScreen(
-                                account: account,
-                                accountStore: accountStore,
-                                initialMode: .live
-                            )
                         case .profile:
                             ProfileScreen(account: account, accountStore: accountStore, clientId: "preview")
                         }

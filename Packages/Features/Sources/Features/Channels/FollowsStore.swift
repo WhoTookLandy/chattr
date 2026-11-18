@@ -28,8 +28,8 @@ private let logger = AppLogger.make("Features.FollowsStore")
 ///     disk per account (`FollowsRosterCache`): a cold launch shows it at
 ///     once and the load then revalidates it.
 ///
-/// `userProfiles` (broadcasterId → TwitchUser) is shared between both views —
-/// each refresh batches `fetchUsers(ids:)` for IDs not already cached.
+/// `profileImageURLs` (broadcasterId → URL) is shared between both views —
+/// each refresh batches `fetchUsers(ids:)` for IDs not already fetched.
 ///
 /// Why this lives in a store (not in `ChannelListScreen.@State`): before this
 /// existed, every pop-back from a chat triggered `.task` to re-fire and
@@ -46,10 +46,9 @@ public final class FollowsStore {
     // MARK: - "All" data set (full follow list, cached)
 
     public private(set) var channels: [FollowedChannel] = []
-    public private(set) var userProfiles: [String: TwitchUser] = [:]
-    /// broadcasterId → parsed profile-image URL, maintained alongside
-    /// `userProfiles` so list bodies hand each row a resolved URL instead of
-    /// re-parsing `profileImageUrl` strings on every body evaluation.
+    /// broadcasterId → parsed profile-image URL, so list bodies hand each row
+    /// a resolved URL instead of re-parsing `profileImageUrl` strings on
+    /// every body evaluation.
     public private(set) var profileImageURLs: [String: URL] = [:]
     public private(set) var allLoadState: LoadState = .idle
     public private(set) var allLoadProgress: Int = 0
@@ -145,6 +144,12 @@ public final class FollowsStore {
     /// account swap), so each is bounded by one load's page count.
     private var liveEnrichmentTasks: [Task<Void, Never>] = []
     private var allEnrichmentTasks: [Task<Void, Never>] = []
+
+    /// Ids `/users` has answered for this account, so `enrichProfiles` asks
+    /// for each once. An id the response left out is not in here and is
+    /// asked for again. A restored roster's ids are not either: its image
+    /// URLs come from disk and are still refetched.
+    private var fetchedProfileIds: Set<String> = []
 
     public init() {}
 
@@ -295,7 +300,7 @@ public final class FollowsStore {
         liveStreams = [:]
         liveStreamsOrdered = []
         liveStreamSearchKeys = [:]
-        userProfiles = [:]
+        fetchedProfileIds = []
         profileImageURLs = [:]
         liveLoadState = .idle
         allLoadState = .idle
@@ -636,26 +641,26 @@ public final class FollowsStore {
 
     /// Batches `fetchUsers(ids:)` for IDs not already cached. Skips empty
     /// inputs cheaply. Called from both loadAll (per page) and refreshLive
-    /// (per page). The userProfiles dict accretes across both sources.
+    /// (per page). `fetchedProfileIds` accretes across both sources.
     private func enrichProfiles(ids: [String], userId: String, dependencies: Dependencies) async {
-        let missing = ids.filter { userProfiles[$0] == nil }
+        let missing = ids.filter { !fetchedProfileIds.contains($0) }
         guard !missing.isEmpty else { return }
         do {
             let users = try await dependencies.users(userId, missing)
             // Bail if cancelled while the request was in flight (account swap):
             // the fetch can return *after* `prepare` has cancelled us and wiped
-            // userProfiles, and writing here would re-populate the new account's
-            // dict with the previous account's profiles.
+            // the profiles, and writing here would re-populate the new account's
+            // with the previous account's.
             guard !Task.isCancelled else { return }
             // Build into locals and assign once each, so observers see one
             // change per batch rather than one per user.
-            var profiles = userProfiles
+            var fetched = fetchedProfileIds
             var urls = profileImageURLs
             for user in users {
-                profiles[user.id] = user
+                fetched.insert(user.id)
                 urls[user.id] = URL(string: user.profileImageUrl)
             }
-            userProfiles = profiles
+            fetchedProfileIds = fetched
             profileImageURLs = urls
         } catch is CancellationError {
             logger.info("Profile enrichment cancelled for \(missing.count) channels")
