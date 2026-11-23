@@ -239,6 +239,12 @@ extension AccountStore {
         // wants.
         do {
             let currentToken = try await entry.client.auth.tokenProvider.token()
+            // Re-verify the client is still live before touching the shared
+            // per-userId cache or calling the bridge: if the account was
+            // re-authorized during the await above, reading the cache would
+            // load and spend the NEW session's refresh token only to discard
+            // the rotated result at the end of `performRefresh`.
+            try Self.checkStillCurrent(entry, login: login)
             if let newer = clients.tokenGate(forUserId: userId).newerToken(than: currentToken),
                let token = newer.refreshToken, !token.isEmpty {
                 logger.notice("TwitchKit holds a superseded token for @\(login, privacy: .public); refreshing with the newest refresh_token")
@@ -247,26 +253,35 @@ extension AccountStore {
             if let token = currentToken.refreshToken, !token.isEmpty {
                 return token
             }
-            if let cached = OAuthRefreshTokenCache.load(for: userId, in: refreshTokenKeychain) {
+            if let cached = try await OAuthRefreshTokenCache.loadThrowingAsync(for: userId, in: refreshTokenKeychain) {
+                try Self.checkStillCurrent(entry, login: login)
                 // .warning: recoverable fallback path — we ARE working around
                 // a problem (TwitchKit lost its refresh_token), but the
                 // chattr cache saved us.
                 logger.warning("TwitchKit token has no refresh_token; using chattr-side cache for @\(login, privacy: .public)")
                 return cached
             }
+            try Self.checkStillCurrent(entry, login: login)
             // Terminal: no refresh_token anywhere.
             await forceSignOut(userId: userId, reason: .sessionExpired(login: login), expecting: entry)
             throw AppError.sessionExpired(login: login)
         } catch HelixError.notAuthenticated {
+            // Re-verify before falling back to the shared per-userId cache so
+            // a retired client never reads and spends a newer session's token
+            // (and never reports `.rejected` when it should be `.discarded`).
+            try Self.checkStillCurrent(entry, login: login)
             // TwitchKit's store is empty (most likely because its own
             // refresh attempt failed and called logout()). Fall back to
-            // our independent cache.
-            guard let cached = OAuthRefreshTokenCache.load(for: userId, in: refreshTokenKeychain) else {
+            // our independent cache. A transient Keychain error throws out
+            // instead of forcing a permanent sign-out.
+            guard let cached = try await OAuthRefreshTokenCache.loadThrowingAsync(for: userId, in: refreshTokenKeychain) else {
+                try Self.checkStillCurrent(entry, login: login)
                 logger.error("TwitchKit store empty AND chattr cache empty for @\(login) — must re-sign-in")
                 // Terminal: drive the auth-state transition (see above).
                 await forceSignOut(userId: userId, reason: .sessionExpired(login: login), expecting: entry)
                 throw AppError.sessionExpired(login: login)
             }
+            try Self.checkStillCurrent(entry, login: login)
             // .warning: TwitchKit lost its store; we're saved by chattr's
             // independent refresh cache. Recovery path — important to see.
             logger.warning("TwitchKit store empty for @\(login, privacy: .public); recovering via chattr-side refresh cache")

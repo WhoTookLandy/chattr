@@ -99,13 +99,40 @@ enum OAuthRefreshTokenCache {
         }
     }
 
-    /// Read the cached refresh token, or nil if none stored.
+    /// Read the cached refresh token, returning `nil` only when no item is
+    /// stored and throwing on unexpected Keychain errors (e.g.
+    /// `errSecInteractionNotAllowed`) so callers can distinguish "missing"
+    /// from transient Keychain unavailability.
+    static func loadThrowing(
+        for userId: String,
+        in keychain: any RefreshTokenKeychain = OAuthRefreshTokenCache.keychain
+    ) throws -> String? {
+        guard let data = try keychain.load(key: key(for: userId)) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Best-effort read of the cached refresh token, returning `nil` if absent
+    /// or unreadable. Prefer `loadThrowing` on auth-critical paths where a
+    /// transient Keychain failure must not trigger `forceSignOut`.
     static func load(
         for userId: String,
         in keychain: any RefreshTokenKeychain = OAuthRefreshTokenCache.keychain
     ) -> String? {
-        guard let data = keychain.load(key: key(for: userId)) else { return nil }
-        return String(data: data, encoding: .utf8)
+        try? loadThrowing(for: userId, in: keychain)
+    }
+
+    /// Off-main async variant of `loadThrowing` so real Keychain XPC calls
+    /// don't stall `@MainActor`. In-memory test fakes execute inline.
+    static func loadThrowingAsync(
+        for userId: String,
+        in keychain: any RefreshTokenKeychain = OAuthRefreshTokenCache.keychain
+    ) async throws -> String? {
+        guard keychain is SystemRefreshTokenKeychain else {
+            return try loadThrowing(for: userId, in: keychain)
+        }
+        return try await Task.detached(priority: .userInitiated) {
+            try loadThrowing(for: userId, in: keychain)
+        }.value
     }
 
     /// Drop the cached refresh token (used when removing an account).
@@ -122,7 +149,7 @@ enum OAuthRefreshTokenCache {
 /// substitute an in-memory store for the real `SecItem` primitives.
 protocol RefreshTokenKeychain: Sendable {
     func save(key: String, data: Data) throws
-    func load(key: String) -> Data?
+    func load(key: String) throws -> Data?
     func delete(key: String)
     /// Every key the backend holds, or `nil` when it can't be listed (the
     /// default). Used only by the orphaned-credential sweep, which does
@@ -177,7 +204,7 @@ struct SystemRefreshTokenKeychain: RefreshTokenKeychain {
         }
     }
 
-    func load(key: String) -> Data? {
+    func load(key: String) throws -> Data? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
@@ -193,7 +220,11 @@ struct SystemRefreshTokenKeychain: RefreshTokenKeychain {
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else {
             logger.error("Keychain load returned OSStatus \(status) for \(key, privacy: .public)")
-            return nil
+            throw NSError(
+                domain: "OAuthRefreshTokenCache",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "Keychain load failed (OSStatus \(status))"]
+            )
         }
         return result as? Data
     }
