@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Generic system bubble — announcements, charity events, bits-badge-tier
-/// upgrades, etc. Same visual treatment as the typed bubbles but with a
-/// neutral icon and accent tint.
+/// Generic system bubble — charity events, bits-badge-tier upgrades,
+/// pay-it-forward notices, etc. Same visual treatment as the typed bubbles
+/// but with a neutral icon and accent tint. (Announcements use their own
+/// `AnnouncementBubbleRow` so they can render emotes, badges, and accent colors.)
 struct SystemBubbleRow: View {
     let text: String
 

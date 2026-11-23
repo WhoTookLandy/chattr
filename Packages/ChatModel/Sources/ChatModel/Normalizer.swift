@@ -67,68 +67,13 @@ public enum Normalizer {
     ) -> ChatLine {
         // Walk Twitch's pre-tokenized fragments, expanding each one into
         // zero-or-more LineRuns.
-        //
-        // Text content is NOT tokenized per fragment: adjacent text-ish
-        // fragments are buffered into `pendingText` and tokenized as one
-        // stream when a non-text fragment (or end of message) is hit.
-        // Word boundaries come from whitespace in the content, never
-        // from fragment seams — a word Twitch splits across two text
-        // fragments must reassemble, not render as two half-words.
-        var runs: [LineRun] = []
-        var sawSelfMention = false
-        var pendingText = ""
-
-        func flushPendingText() {
-            guard !pendingText.isEmpty else { return }
-            tokenizeWords(text: pendingText, emoteSnapshot: emoteSnapshot, into: &runs)
-            pendingText = ""
-        }
-
-        for fragment in message.message.fragments {
-            switch fragment.type {
-            case .text:
-                pendingText += fragment.text
-
-            case .emote:
-                // Twitch-native emote, pre-resolved by Twitch's event.
-                if let ref = fragment.emote {
-                    flushPendingText()
-                    runs.append(.twitchEmote(reference: ref, displayName: fragment.text))
-                } else {
-                    // Defensive: if Twitch ever sends a .emote fragment
-                    // without an EmoteReference (shouldn't happen, but
-                    // future schema changes could), fall back to text.
-                    pendingText += fragment.text
-                }
-
-            case .mention:
-                // Twitch already resolved @username for us — extract the
-                // login from the reference, mark `isMe` if it matches.
-                if let mention = fragment.mention {
-                    let isMe = !currentUserLogin.isEmpty
-                        && mention.userLogin.caseInsensitiveCompare(currentUserLogin) == .orderedSame
-                    if isMe { sawSelfMention = true }
-                    flushPendingText()
-                    runs.append(.mention(login: mention.userLogin, isMe: isMe))
-                } else {
-                    pendingText += fragment.text
-                }
-
-            case .cheermote:
-                if let cheer = fragment.cheermote {
-                    flushPendingText()
-                    runs.append(.cheermote(prefix: cheer.prefix, bits: cheer.bits, tier: cheer.tier))
-                } else {
-                    pendingText += fragment.text
-                }
-
-            case .unknown:
-                // Future Twitch fragment types we don't yet handle —
-                // render the surface text rather than dropping content.
-                pendingText += fragment.text
-            }
-        }
-        flushPendingText()
+        let tokenized = tokenizeFragments(
+            message.message.fragments,
+            emoteSnapshot: emoteSnapshot,
+            currentUserLogin: currentUserLogin
+        )
+        var runs = tokenized.runs
+        let sawSelfMention = tokenized.sawSelfMention
 
         // Twitch's IRC convention prefixes reply bodies with
         // "@parentLogin " so legacy chat clients see who's being replied
@@ -203,11 +148,15 @@ public enum Normalizer {
     /// (the payload carries no send time).
     public static func line(
         from notification: EventSubChatNotification,
+        emoteSnapshot: [String: Emote] = [:],
+        currentUserLogin: String = "",
         timestamp: Date
     ) -> ChatLine? {
         // Dispatch on noticeType to find the right payload and build the
         // matching bubble kind.
         let kind: ChatLine.Kind
+        var runs: [LineRun] = []
+        var isHighlighted = false
 
         switch notification.noticeType {
         case "sub":
@@ -283,12 +232,28 @@ public enum Normalizer {
 
         case "announcement":
             // Twitch sends an empty `system_message` on chat announcements and
-            // puts the actual announcement copy in `message.text`.
-            let text = notification.message.text.isEmpty
-                ? notification.systemMessage
-                : notification.message.text
-            guard !text.isEmpty else { return nil }
-            kind = .systemBubble(text: text)
+            // puts the actual announcement copy (with Twitch emote/mention
+            // fragments) in `message`. Tokenize through the same fragment +
+            // third-party emote pipeline as regular chat messages so Twitch,
+            // 7TV, BTTV, and FFZ emotes all render inline.
+            if !notification.message.fragments.isEmpty {
+                let tokenized = tokenizeFragments(
+                    notification.message.fragments,
+                    emoteSnapshot: emoteSnapshot,
+                    currentUserLogin: currentUserLogin
+                )
+                runs = tokenized.runs
+                isHighlighted = tokenized.sawSelfMention
+            } else {
+                let fallbackText = notification.message.text.isEmpty
+                    ? notification.systemMessage
+                    : notification.message.text
+                runs = wordRuns(text: fallbackText, emoteSnapshot: emoteSnapshot)
+            }
+            guard !runs.isEmpty else { return nil }
+            kind = .announcementBubble(.init(
+                color: .init(twitchColor: notification.announcement?.color)
+            ))
 
         case "charity_donation", "bits_badge_tier",
              "prime_paid_upgrade", "gift_paid_upgrade", "pay_it_forward":
@@ -305,10 +270,13 @@ public enum Normalizer {
         return ChatLine(
             id: notification.messageId,
             kind: kind,
+            originalBadges: notification.badges,
             authorUserId: notification.chatterUserId,
             authorDisplayName: notification.chatterUserName,
+            authorUserLogin: notification.chatterUserLogin,
             authorColor: notification.color ?? "",
-            runs: [],   // bubbles render from `kind`, not `runs`
+            runs: runs,
+            isHighlighted: isHighlighted,
             timestamp: timestamp
         )
     }
@@ -360,6 +328,79 @@ public enum Normalizer {
     }
 
     // MARK: - Tokenization
+
+    /// Expand Twitch's pre-tokenized fragments into word-level `LineRun`s,
+    /// upgrading matching words against `emoteSnapshot` and flagging any
+    /// self-mention against `currentUserLogin`.
+    ///
+    /// Text content is NOT tokenized per fragment: adjacent text-ish
+    /// fragments are buffered into `pendingText` and tokenized as one
+    /// stream when a non-text fragment (or end of message) is hit.
+    /// Word boundaries come from whitespace in the content, never
+    /// from fragment seams — a word Twitch splits across two text
+    /// fragments must reassemble, not render as two half-words.
+    private static func tokenizeFragments(
+        _ fragments: [ChatFragment],
+        emoteSnapshot: [String: Emote],
+        currentUserLogin: String
+    ) -> (runs: [LineRun], sawSelfMention: Bool) {
+        var runs: [LineRun] = []
+        var sawSelfMention = false
+        var pendingText = ""
+
+        func flushPendingText() {
+            guard !pendingText.isEmpty else { return }
+            tokenizeWords(text: pendingText, emoteSnapshot: emoteSnapshot, into: &runs)
+            pendingText = ""
+        }
+
+        for fragment in fragments {
+            switch fragment.type {
+            case .text:
+                pendingText += fragment.text
+
+            case .emote:
+                // Twitch-native emote, pre-resolved by Twitch's event.
+                if let ref = fragment.emote {
+                    flushPendingText()
+                    runs.append(.twitchEmote(reference: ref, displayName: fragment.text))
+                } else {
+                    // Defensive: if Twitch ever sends a .emote fragment
+                    // without an EmoteReference (shouldn't happen, but
+                    // future schema changes could), fall back to text.
+                    pendingText += fragment.text
+                }
+
+            case .mention:
+                // Twitch already resolved @username for us — extract the
+                // login from the reference, mark `isMe` if it matches.
+                if let mention = fragment.mention {
+                    let isMe = !currentUserLogin.isEmpty
+                        && mention.userLogin.caseInsensitiveCompare(currentUserLogin) == .orderedSame
+                    if isMe { sawSelfMention = true }
+                    flushPendingText()
+                    runs.append(.mention(login: mention.userLogin, isMe: isMe))
+                } else {
+                    pendingText += fragment.text
+                }
+
+            case .cheermote:
+                if let cheer = fragment.cheermote {
+                    flushPendingText()
+                    runs.append(.cheermote(prefix: cheer.prefix, bits: cheer.bits, tier: cheer.tier))
+                } else {
+                    pendingText += fragment.text
+                }
+
+            case .unknown:
+                // Future Twitch fragment types we don't yet handle —
+                // render the surface text rather than dropping content.
+                pendingText += fragment.text
+            }
+        }
+        flushPendingText()
+        return (runs, sawSelfMention)
+    }
 
     /// Tokenize a plain string into word-level runs. Public entry point
     /// for callers that have raw text rather than a `ChatMessage` —

@@ -235,19 +235,26 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         /// and `runs` inline.
         case message
 
-        /// A sub/resub/gift-sub/Prime/announcement notification. Renders
-        /// as a tinted bubble row with a Twitch-formatted system message
-        /// and (for resubs with a user message) the user's text below.
+        /// A sub/resub/gift-sub/Prime notification. Renders as a tinted
+        /// bubble row with a Twitch-formatted system message and (for
+        /// resubs with a user message) the user's text below.
         case subBubble(SubBubble)
 
         /// Someone raided this channel. Renders as a tinted bubble row
         /// with the raider's name + viewer count.
         case raidBubble(RaidBubble)
 
-        /// An unstructured system notice (announcement, pay-it-forward,
-        /// charity donation, bits-badge-tier, etc.). Renders as a plain
-        /// tinted bubble with the Twitch-formatted system message —
-        /// distinct treatment isn't worth the per-case carry today.
+        /// A `/announce` chat notification. Carries the Twitch accent color
+        /// on the bubble while `authorBadges`, `originalBadges`,
+        /// `authorDisplayName`, `authorColor`, and tokenized `runs` live on
+        /// the `ChatLine` itself so emotes, mentions, and links render just
+        /// like regular chat.
+        case announcementBubble(AnnouncementBubble)
+
+        /// An unstructured system notice (pay-it-forward, charity donation,
+        /// bits-badge-tier, etc.). Renders as a plain tinted bubble with
+        /// the Twitch-formatted system message — distinct treatment isn't
+        /// worth the per-case carry today.
         case systemBubble(text: String)
 
         /// A message was deleted (moderation action). The original
@@ -320,6 +327,38 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
         public init(fromBroadcasterDisplayName: String, viewers: Int) {
             self.fromBroadcasterDisplayName = fromBroadcasterDisplayName
             self.viewers = viewers
+        }
+    }
+
+    /// Payload for an `.announcementBubble`: Twitch's `/announce` notice.
+    /// Carries the announcement accent color; the sender metadata and
+    /// emote-tokenized message body live on the enclosing `ChatLine`.
+    public struct AnnouncementBubble: Sendable, Equatable, Hashable {
+        public let color: AccentColor
+
+        /// Matches the `announcement.color` values Twitch sends on
+        /// `channel.chat.notification` (`PRIMARY`, `BLUE`, `GREEN`, `ORANGE`,
+        /// `PURPLE`). Unknown or absent values default to `.primary`.
+        public enum AccentColor: String, Sendable, Equatable, Hashable {
+            case primary
+            case blue
+            case green
+            case orange
+            case purple
+
+            public init(twitchColor: String?) {
+                switch twitchColor?.uppercased() {
+                case "BLUE":   self = .blue
+                case "GREEN":  self = .green
+                case "ORANGE": self = .orange
+                case "PURPLE": self = .purple
+                default:       self = .primary
+                }
+            }
+        }
+
+        public init(color: AccentColor = .primary) {
+            self.color = color
         }
     }
 

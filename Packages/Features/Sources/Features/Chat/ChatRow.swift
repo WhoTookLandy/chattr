@@ -285,6 +285,18 @@ struct ChatRow: View, Equatable {
             SubBubbleRow(bubble: bubble)
         case .raidBubble(let bubble):
             RaidBubbleRow(bubble: bubble)
+        case .announcementBubble(let bubble):
+            AnnouncementBubbleRow(
+                bubble: bubble,
+                timestamp: line.timestamp,
+                timestampFormat: Self.timestampFormat,
+                showTimestamp: appearance.showTimestamps
+            ) {
+                announcementMessageBody
+            }
+            .modifier(SpokenRowAccessibility(isActive: Self.isAssistiveTechRunning) {
+                "Announcement, \(accessibilityMessageLabel)"
+            })
         case .systemBubble(let text):
             SystemBubbleRow(text: text)
         case .newMessagesDivider:
@@ -409,6 +421,7 @@ struct ChatRow: View, Equatable {
     /// Runs read through the shared `LineRun.plainText(.spoken)` mapping.
     private var accessibilityMessageLabel: String {
         let body = line.runs.map { $0.plainText(.spoken) }.joined(separator: " ")
+        guard !line.authorDisplayName.isEmpty else { return body }
         var speaker = line.authorDisplayName
         if appearance.showBadges {
             let titles = badgeEntries.compactMap(\.title)
@@ -420,6 +433,21 @@ struct ChatRow: View, Equatable {
             return "\(speaker): message deleted. \(body)"
         }
         return "\(speaker): \(body)"
+    }
+
+    /// Rich inline body for an `.announcementBubble` — shares the exact same
+    /// badge, username, emote, and link rendering as regular chat messages,
+    /// leaving the timestamp in `AnnouncementBubbleRow`'s header.
+    @ViewBuilder
+    private var announcementMessageBody: some View {
+        let bodyFont = appearance.font
+        let nameColor = usernameColor
+        let imgScale = appearance.imageScale
+        if rendersAsSingleText {
+            singleTextBody(bodyFont: bodyFont, nameColor: nameColor, includeTimestamp: false)
+        } else {
+            flowBody(bodyFont: bodyFont, nameColor: nameColor, imageScale: imgScale, includeTimestamp: false)
+        }
     }
 
     /// `highlightPlate: false` lets the reply container own the tint —
@@ -497,38 +525,46 @@ struct ChatRow: View, Equatable {
     /// The whole row as one wrapping `Text`. Matches the flow rendering:
     /// full width, never truncated, 4pt between lines (the flow's row
     /// spacing), and the same per-piece fonts and colors.
-    private func singleTextBody(bodyFont: Font, nameColor: Color) -> some View {
+    private func singleTextBody(
+        bodyFont: Font,
+        nameColor: Color,
+        includeTimestamp: Bool = true
+    ) -> some View {
         var text = AttributedString()
-        if appearance.showTimestamps {
+        if includeTimestamp && appearance.showTimestamps {
             var stamp = AttributedString(line.timestamp.formatted(Self.timestampFormat) + " ")
             stamp.font = Font.system(size: appearance.textSizePoints * 0.8).monospacedDigit()
             stamp.foregroundColor = Color.secondary
             text.append(stamp)
         }
-        let nameFont = bodyFont.weight(.semibold)
-        if let pair = loginAnnotationPair {
-            var primary = AttributedString(pair.primary)
-            primary.font = nameFont
-            primary.foregroundColor = nameColor
-            var secondary = AttributedString(" (\(pair.secondary))")
-            secondary.font = nameFont
-            secondary.foregroundColor = Color.secondary
-            text.append(primary)
-            text.append(secondary)
-        } else {
-            var name = AttributedString(line.authorDisplayName)
-            name.font = nameFont
-            name.foregroundColor = nameColor
-            text.append(name)
+        if !line.authorDisplayName.isEmpty {
+            let nameFont = bodyFont.weight(.semibold)
+            if let pair = loginAnnotationPair {
+                var primary = AttributedString(pair.primary)
+                primary.font = nameFont
+                primary.foregroundColor = nameColor
+                var secondary = AttributedString(" (\(pair.secondary))")
+                secondary.font = nameFont
+                secondary.foregroundColor = Color.secondary
+                text.append(primary)
+                text.append(secondary)
+            } else {
+                var name = AttributedString(line.authorDisplayName)
+                name.font = nameFont
+                name.foregroundColor = nameColor
+                text.append(name)
+            }
+            // No font on the colon, as in the flow rendering.
+            var colon = AttributedString(":")
+            colon.foregroundColor = Color.secondary
+            text.append(colon)
+            if !line.runs.isEmpty {
+                var gap = AttributedString(" ")
+                gap.font = bodyFont
+                text.append(gap)
+            }
         }
-        // No font on the colon, as in the flow rendering.
-        var colon = AttributedString(":")
-        colon.foregroundColor = Color.secondary
-        text.append(colon)
         if !line.runs.isEmpty {
-            var gap = AttributedString(" ")
-            gap.font = bodyFont
-            text.append(gap)
             text.append(Self.attributedBody(line.runs, font: bodyFont))
         }
         return Text(text)
@@ -590,7 +626,12 @@ struct ChatRow: View, Equatable {
 
     /// Badges, name and runs as separate flow items — the rendering for any
     /// row with an inline image.
-    private func flowBody(bodyFont: Font, nameColor: Color, imageScale imgScale: CGFloat) -> some View {
+    private func flowBody(
+        bodyFont: Font,
+        nameColor: Color,
+        imageScale imgScale: CGFloat,
+        includeTimestamp: Bool = true
+    ) -> some View {
         // No hanging indent — wrapped lines continue flush at the leading
         // edge, matching Twitch's native chat. The 14pt indent we shipped
         // briefly made continuations look misaligned ("starts a little bit
@@ -605,23 +646,25 @@ struct ChatRow: View, Equatable {
             // One step smaller than the body (0.8×): at full body size the
             // timestamp column competed with usernames for attention. It still
             // shares the first text baseline, so it lines up with the name.
-            if appearance.showTimestamps {
+            if includeTimestamp && appearance.showTimestamps {
                 timestampText
             }
-            // Badges keyed by `url` — a stable per-badge identity across row
-            // re-renders, so SwiftUI keeps each badge's `LazyImage` (and its
-            // loaded image) instead of destroying and re-creating it. Keying
-            // by offset churned them whenever a row re-rendered (e.g. on a
-            // `.deletedPlaceholder` flip).
-            if appearance.showBadges {
-                ForEach(badgeEntries, id: \.url) { entry in
-                    BadgeImage(entry: entry, scale: imgScale)
+            if !line.authorDisplayName.isEmpty {
+                // Badges keyed by `url` — a stable per-badge identity across row
+                // re-renders, so SwiftUI keeps each badge's `LazyImage` (and its
+                // loaded image) instead of destroying and re-creating it. Keying
+                // by offset churned them whenever a row re-rendered (e.g. on a
+                // `.deletedPlaceholder` flip).
+                if appearance.showBadges {
+                    ForEach(badgeEntries, id: \.url) { entry in
+                        BadgeImage(entry: entry, scale: imgScale)
+                    }
                 }
+                // Username prefix. The colon is interpolated into the same Text
+                // so it hugs the name ("Landy:") instead of floating 4pt away as
+                // its own flow item — and the pair can never wrap apart.
+                Text("\(usernamePrefix(bodyFont: bodyFont, color: nameColor))\(Text(":").foregroundStyle(.secondary))")
             }
-            // Username prefix. The colon is interpolated into the same Text
-            // so it hugs the name ("Landy:") instead of floating 4pt away as
-            // its own flow item — and the pair can never wrap apart.
-            Text("\(usernamePrefix(bodyFont: bodyFont, color: nameColor))\(Text(":").foregroundStyle(.secondary))")
 
             // Walk the pre-normalized runs in order. `line.runs` never
             // changes shape for a given line id (a mutation replaces the
