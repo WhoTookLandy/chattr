@@ -30,6 +30,7 @@ public enum AccountLocalData {
             logger.error("Deleting tabs for removed account \(accountUserId, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         }
         DraftStorage.removeAll(forAccount: accountUserId)
+        SearchHistoryStorage.clear(forAccount: accountUserId)
         BlockStore.removePersisted(forAccountUserId: accountUserId)
         Task { await FollowsRosterCache.shared.remove(forAccountUserId: accountUserId) }
         logger.notice("Removed local data for account \(accountUserId, privacy: .public)")

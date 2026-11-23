@@ -52,11 +52,18 @@ struct AccountLocalDataTests {
         DraftStorage.setActiveAccount(userId)
         DraftStorage.save(forChannel: descriptor.id, text: "draft")
         DraftStorage.setActiveAccount(nil)
+        if let recent = RecentSearchItem.channel(id: "1", login: "x", displayName: "x", profileImageURL: nil) {
+            SearchHistoryStorage.record(recent, forAccount: userId)
+            SearchHistoryStorage.record(recent, forAccount: other)
+        }
 
         AccountLocalData.remove(forAccountUserId: userId, modelContainer: container)
 
         #expect(try tabs.fetchAll().isEmpty)
         #expect(try otherTabs.fetchAll().count == 1)
         #expect(UserDefaults.standard.object(forKey: DraftStorage.storageKey(forAccount: userId)) == nil)
+        #expect(SearchHistoryStorage.load(forAccount: userId).isEmpty)
+        #expect(SearchHistoryStorage.load(forAccount: other).count == 1)
+        SearchHistoryStorage.clear(forAccount: other)
     }
 }
