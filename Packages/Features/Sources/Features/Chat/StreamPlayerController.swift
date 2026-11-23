@@ -354,11 +354,34 @@ final class StreamPlayerController {
         // offset the item keeps from it (`liveOffset`). At the very end of
         // the seekable range nothing is buffered yet, and the player
         // stalls the moment it starts.
-        if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
-            let liveEdge = CMTimeRangeGetEnd(range)
-            player.seek(to: CMTimeMaximum(range.start, CMTimeSubtract(liveEdge, Self.liveOffset)))
+        if let item = player.currentItem,
+           item.status == .readyToPlay,
+           let range = item.seekableTimeRanges.last?.timeRangeValue,
+           let target = Self.liveResumeTarget(for: range) {
+            player.seek(to: target)
         }
         player.play()
+    }
+
+    /// Computes the live-edge seek target for `range`, or `nil` when `range`
+    /// cannot yield a finite numeric `CMTime`.
+    ///
+    /// Live HLS items can report invalid, empty, indefinite, or infinite
+    /// seekable ranges (during stalls, playlist reloads, or discontinuities).
+    /// Passing a non-numeric `CMTime` to `AVPlayer.seek(to:)` throws
+    /// `NSInvalidArgumentException`, so `resume()` skips the seek and lets
+    /// `AVPlayer.play()` resume via `configuredTimeOffsetFromLive`.
+    static func liveResumeTarget(for range: CMTimeRange) -> CMTime? {
+        guard range.isValid, !range.isEmpty,
+              range.start.isNumeric, range.duration.isNumeric
+        else { return nil }
+        let liveEdge = CMTimeRangeGetEnd(range)
+        guard liveEdge.isNumeric else { return nil }
+        let offsetTarget = CMTimeSubtract(liveEdge, liveOffset)
+        let target = offsetTarget.isNumeric
+            ? CMTimeMaximum(range.start, offsetTarget)
+            : range.start
+        return target.isNumeric ? target : nil
     }
 
     /// How far behind the live edge the native player sits
