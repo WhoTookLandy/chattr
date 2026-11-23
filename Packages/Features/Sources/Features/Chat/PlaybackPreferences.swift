@@ -13,6 +13,8 @@ enum PlaybackPreferences {
     static let pictureInPictureKey = "chattr.player.pictureInPicture"
     /// What the video does when a chat opens.
     static let videoOnOpenKey = "chattr.player.videoOnOpen"
+    /// When Home feed cards autoplay muted live video previews.
+    static let homePreviewKey = "chattr.home.livePreview"
 
     static var keepScreenAwake: Bool {
         UserDefaults.standard.bool(forKey: keepScreenAwakeKey)
@@ -26,6 +28,28 @@ enum PlaybackPreferences {
     static var videoOnOpen: VideoOnOpen {
         UserDefaults.standard.string(forKey: videoOnOpenKey)
             .flatMap(VideoOnOpen.init(rawValue:)) ?? .lastUsed
+    }
+
+    static var homePreview: HomePreviewMode {
+        UserDefaults.standard.string(forKey: homePreviewKey)
+            .flatMap(HomePreviewMode.init(rawValue:)) ?? .wiFiOnly
+    }
+}
+
+/// When the focused card on Home → Live plays a muted inline live preview.
+enum HomePreviewMode: String, CaseIterable, Identifiable, Sendable {
+    case wiFiOnly
+    case always
+    case off
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .wiFiOnly: "Wi-Fi Only"
+        case .always: "Always"
+        case .off: "Off"
+        }
     }
 }
 

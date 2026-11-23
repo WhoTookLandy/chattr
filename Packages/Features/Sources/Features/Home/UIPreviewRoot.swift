@@ -3,6 +3,7 @@ import SwiftUI
 import SwiftData
 import Accounts
 import Channels
+import Core
 import DesignSystem
 
 /// Design-review harness: the full tab shell rendered from mock data, no
@@ -138,8 +139,22 @@ public struct UIPreviewRoot: View {
                                     liveStreams: HomePreviewData.streams,
                                     profileImageURLs: [:],
                                     liveLoadState: .loaded,
+                                    recentChannels: HomePreviewData.recentChannels,
+                                    isActive: false,
                                     onStreamTap: { stream, intent in
                                         openChannel(stream: stream, profileImageURL: nil, intent: intent)
+                                    },
+                                    onRecentChannelTap: { item, intent in
+                                        openChannel(
+                                            ChannelDescriptor(
+                                                platform: .twitch,
+                                                channelId: item.broadcasterId,
+                                                channelLoginName: item.broadcasterLogin,
+                                                channelDisplayName: item.broadcasterName,
+                                                profileImageURL: item.profileImageURL
+                                            ),
+                                            intent: intent
+                                        )
                                     }
                                 )
                             case .following:

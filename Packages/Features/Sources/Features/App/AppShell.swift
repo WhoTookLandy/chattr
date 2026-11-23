@@ -149,7 +149,8 @@ public struct AppShell: View {
                     accountStore: accountStore,
                     clientId: clientId,
                     section: $navigation.homeSection,
-                    path: $navigation.homePath
+                    path: $navigation.homePath,
+                    isTabSelected: navigation.selectedTab == .home
                 )
             } label: {
                 Image(systemName: "house")
@@ -225,7 +226,8 @@ public struct AppShell: View {
         // Settings → Video & Device → When a Chat Opens, applied just before the
         // pager presents so the header mounts in the chosen state.
         .onAppear {
-            if PlaybackPreferences.videoOnOpen == .autoplayOnWiFi {
+            if PlaybackPreferences.videoOnOpen == .autoplayOnWiFi
+                || PlaybackPreferences.homePreview == .wiFiOnly {
                 NetworkReachability.warmUp()
             }
             let chatTabs = navigation.chatTabs

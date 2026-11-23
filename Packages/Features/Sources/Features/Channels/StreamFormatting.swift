@@ -41,11 +41,29 @@ enum StreamFormatting {
         return "\(days / 7)w ago"
     }
 
-    /// Fills Twitch's `{width}x{height}` thumbnail template.
+    /// Fills Twitch's `{width}x{height}` (live stream) or `%{width}x%{height}`
+    /// (VOD archive) thumbnail template.
     static func thumbnailURL(_ template: String, width: Int, height: Int) -> URL? {
-        URL(string: template
+        guard !template.isEmpty else { return nil }
+        let resolved = template
+            .replacingOccurrences(of: "%{width}", with: String(width))
+            .replacingOccurrences(of: "%{height}", with: String(height))
             .replacingOccurrences(of: "{width}", with: String(width))
-            .replacingOccurrences(of: "{height}", with: String(height)))
+            .replacingOccurrences(of: "{height}", with: String(height))
+        return URL(string: resolved)
+    }
+
+    /// The image request for an archived VOD thumbnail (static, so normal Nuke
+    /// caching applies). Nil if the template is empty or malformed.
+    static func vodThumbnailRequest(
+        _ template: String?,
+        width: Int,
+        height: Int
+    ) -> ImageRequest? {
+        guard let template, let url = thumbnailURL(template, width: width, height: height) else {
+            return nil
+        }
+        return ImageRequest(url: url)
     }
 
     /// How long a fetched live preview keeps being shown before the next

@@ -64,6 +64,41 @@ enum HomePreviewData {
         )),
     ]
 
+    static let recentChannels: [RecentChannelItem] = [
+        RecentChannelItem(
+            broadcasterId: "9001",
+            broadcasterLogin: "mewmel",
+            broadcasterName: "Mewmel",
+            profileImageURL: nil,
+            fallbackTitle: "CHAT DECIDES…",
+            fallbackLastLiveAt: Date().addingTimeInterval(-22 * 3600)
+        ),
+        RecentChannelItem(
+            broadcasterId: "9002",
+            broadcasterLogin: "shia",
+            broadcasterName: "shia",
+            profileImageURL: nil,
+            fallbackTitle: "late night chill",
+            fallbackLastLiveAt: Date().addingTimeInterval(-6 * 86_400)
+        ),
+        RecentChannelItem(
+            broadcasterId: "9003",
+            broadcasterLogin: "yokojpn4",
+            broadcasterName: "yokojpn4",
+            profileImageURL: nil,
+            fallbackTitle: "[Drops] morning stream",
+            fallbackLastLiveAt: Date().addingTimeInterval(-2 * 86_400)
+        ),
+        RecentChannelItem(
+            broadcasterId: "9004",
+            broadcasterLogin: "clara",
+            broadcasterName: "clara",
+            profileImageURL: nil,
+            fallbackTitle: "variety night",
+            fallbackLastLiveAt: Date().addingTimeInterval(-4 * 86_400)
+        ),
+    ]
+
     private static func decode<T: Decodable>(_ json: String) -> T {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -83,6 +118,8 @@ enum HomePreviewData {
             liveStreams: HomePreviewData.streams,
             profileImageURLs: [:],
             liveLoadState: .loaded,
+            recentChannels: HomePreviewData.recentChannels,
+            isActive: false,
             onStreamTap: { _, _ in }
         )
         .navigationTitle("Home")

@@ -86,7 +86,7 @@ private struct ChannelStatusFakes: Sendable {
           "id": "v1", "userId": "\(channelId)", "userLogin": "login-\(channelId)",
           "userName": "Name-\(channelId)", "title": "vod", "description": "",
           "createdAt": "\(createdAt)", "publishedAt": "\(createdAt)",
-          "url": "https://www.twitch.tv/videos/1", "thumbnailUrl": "",
+          "url": "https://www.twitch.tv/videos/1", "thumbnailUrl": "https://x/thumb-%{width}x%{height}.jpg",
           "viewable": "public", "viewCount": 3, "language": "en",
           "type": "archive", "duration": "\(duration)"
         }
@@ -216,6 +216,8 @@ struct ChannelStatusStoreTests {
         }
         let started = try #require(page.data.first?.createdAt)
         #expect(store.statuses["off1"]?.lastLiveAt == started.addingTimeInterval(90 * 60))
+        #expect(store.statuses["off1"]?.lastLiveTitle == "vod")
+        #expect(store.statuses["off1"]?.lastLiveThumbnailURL == "https://x/thumb-%{width}x%{height}.jpg")
         #expect(store.statuses["off1"]?.isLive == false)
         // The stream state is still unknown, so the next `refresh` fetches it.
         #expect(store.statuses["off1"]?.fetchedAt == Date.distantPast)

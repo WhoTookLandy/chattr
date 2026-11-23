@@ -6,5 +6,8 @@ enum PlaybackHoldReason: Hashable, Sendable {
     /// The app is in the background and the stream can't continue there
     /// (no PiP, not audio-only with sound — `PlaybackLifecycleObserver`).
     case background
+    /// The user unmuted an inline Home feed preview while another stream was
+    /// playing (e.g. in the audio-only mini player).
+    case feedPreview
 }
 #endif
