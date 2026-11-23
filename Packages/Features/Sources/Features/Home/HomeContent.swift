@@ -28,7 +28,7 @@ struct HomeContent: View {
     @AppStorage(PlaybackPreferences.homePreviewKey) private var homePreviewMode: HomePreviewMode = .wiFiOnly
     @State private var previewController = HomeFeedPreviewController()
 
-    private static let feedCoordinateSpace = "homeLiveFeed"
+    private nonisolated static let feedCoordinateSpace = "homeLiveFeed"
 
     /// A floating video mini player already owns a live video decoder; keep
     /// the inline feed on static thumbnails while it's showing. An audio-only

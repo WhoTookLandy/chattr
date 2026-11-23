@@ -80,12 +80,13 @@ public struct HomeScreen: View {
         }
         // Live data whenever Home appears (tab switches included), plus the
         // followed roster (cached on disk) so the top recent-channels rail
-        // populates right away. Both are throttled / idempotent in FollowsStore.
+        // populates right away. Both run on `@MainActor` and are throttled /
+        // idempotent in FollowsStore.
         .task {
-            guard let followsStore else { return }
-            async let live: Void = followsStore.refreshLive(account: account, accountStore: accountStore)
-            async let all: Void = followsStore.loadAllIfNeeded(account: account, accountStore: accountStore)
-            _ = await (live, all)
+            await followsStore?.refreshLive(account: account, accountStore: accountStore)
+        }
+        .task {
+            await followsStore?.loadAllIfNeeded(account: account, accountStore: accountStore)
         }
     }
 
