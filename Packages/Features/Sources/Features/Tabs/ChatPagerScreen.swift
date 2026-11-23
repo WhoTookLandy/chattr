@@ -1,8 +1,10 @@
 import SwiftUI
 import Accounts
 import DesignSystem
+#if !os(iOS)
 import NukeUI
 import Nuke
+#endif
 import Core
 
 /// The full-screen chat surface pushed from Home → Chats.
@@ -103,10 +105,30 @@ struct ChatPagerScreen: View {
                     .overlay {
                         PagerEdgeHints(chatTabs: chatTabs)
                     }
-                    // While the visible chat plays its stream, the bar hides
-                    // and the video overlay carries back / hide-video.
+                    #if os(iOS)
+                    // Single 44pt Liquid Glass dock (back, channel + live
+                    // metadata, and embedded audio/video controls). Hides
+                    // automatically while inline video is playing.
+                    .safeAreaBar(edge: .top) {
+                        ChatHeaderBar(
+                            chatTabs: chatTabs,
+                            showsBackButton: hidesTabBar,
+                            showPopover: $showQuickSwitcher,
+                            onBack: { chatTabs.isPresented = false },
+                            onEditChats: {
+                                showQuickSwitcher = false
+                                showSwitcher = true
+                            }
+                        )
+                    }
+                    #endif
                     .background {
-                        ChatNavBarAutoHider(chatTabs: chatTabs)
+                        #if os(iOS)
+                        SwipeBackEnabler()
+                            .frame(width: 0, height: 0)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                        #endif
                         PagerWindowTracker(chatTabs: chatTabs, window: window)
                     }
             }
@@ -115,35 +137,27 @@ struct ChatPagerScreen: View {
         // too) — without this, the page-gutters sit on pure system black
         // and read as dead bars around the chat.
         .background(Color.chatSurface.ignoresSafeArea())
+        #if os(iOS)
+        // Custom 44pt top dock replaces the system navigation bar on iOS so
+        // channel metadata + transport controls share the full horizontal
+        // width without `.principal` squeezing. Edge swipe-back is kept alive
+        // by `SwipeBackEnabler` above.
+        .toolbar(.hidden, for: .navigationBar)
+        // The immersive part: chat owns the whole screen; the dock's back
+        // chevron is the way out. (`.tabBar` visibility control is iOS-only;
+        // macOS has no tab bar to hide.)
+        .toolbar(hidesTabBar ? .hidden : .automatic, for: .tabBar)
+        #else
         .toolbar { headerToolbar(chatTabs: chatTabs) }
         .toolbarTitleDisplayMode(.inline)
         // Edge-to-Edge Chat: no bar background at all — the toolbar items
         // float free-standing over the transcript, each carrying its own
         // glass. Default (.automatic) restores the system bar treatment
-        // for the inset layout. Placement `.automatic` = the primary bar
-        // (nav bar on iOS) and, unlike `.navigationBar`, also compiles
-        // for the package's macOS target.
+        // for the inset layout.
         .toolbarBackgroundVisibility(
             appearance.edgeToEdge ? .hidden : .automatic,
             for: .automatic
         )
-        // The immersive part: chat owns the whole screen; the system
-        // back chevron is the way out. (`.tabBar` visibility control is
-        // iOS-only; macOS has no tab bar to hide.)
-        #if os(iOS)
-        .toolbar(hidesTabBar ? .hidden : .automatic, for: .tabBar)
-        // Audio-only / PiP controls, opposite the back button. Always
-        // present (the control renders nothing when there's no condensed
-        // stream) so the bar never gains or loses an item — see
-        // `headerToolbar`.
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                if let chatTabs {
-                    NowPlayingToolbarControl(chatTabs: chatTabs)
-                }
-            }
-            .sharedBackgroundVisibility(.hidden)
-        }
         #endif
         // Open-chats management sheet (reorder, close, browse).
         .sheet(isPresented: $showSwitcher) {
@@ -165,6 +179,7 @@ struct ChatPagerScreen: View {
         }
     }
 
+    #if !os(iOS)
     /// Circle avatar for a list row (40pt) or quick-switcher row (28pt).
     /// Placeholder symbol while the image loads or when the descriptor has
     /// no profile URL.
@@ -183,30 +198,18 @@ struct ChatPagerScreen: View {
         .clipShape(Circle())
     }
 
-    /// The toolbar header of the pushed pager: a floating glass pill with
-    /// the channel name (and page dots, when several tabs are open) in the
-    /// center. One STABLE item whose label reflects the active tab — never
-    /// inserted/removed conditionally (that would rebuild the bar and
-    /// flicker; see axiom toolbars guidance).
+    /// The toolbar header of the pushed pager on macOS: a floating glass pill
+    /// with the channel name (and page dots, when several tabs are open) in the
+    /// center.
     @ToolbarContentBuilder
     private func headerToolbar(chatTabs: ChatTabsModel?) -> some ToolbarContent {
         ToolbarItem(placement: .principal) {
-            // The label is its own `View` (`ChannelPillLabel`) so that
-            // unseen-mention updates (`mentionedTabIds`) invalidate ONLY the
-            // pill, not this `ChatPagerScreen` body — which also builds the
-            // paged transcript. A ping arriving in a background tab redraws
-            // the dot without re-evaluating the pager. See `ChannelPillLabel`.
             Button { showQuickSwitcher = true } label: {
                 ChannelPillLabel(chatTabs: chatTabs)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Switch channel")
             .disabled(chatTabs?.tabs.isEmpty ?? true)
-            // Quick switcher: a compact anchored popover, not the
-            // management sheet — switching chats is a two-tap flick, and
-            // the popover keeps the transcript visible behind it. The
-            // full sheet (reorder, close, browse) remains reachable via
-            // the popover's footer.
             .popover(isPresented: $showQuickSwitcher, arrowEdge: .top) {
                 if let chatTabs {
                     quickSwitcherContent(chatTabs: chatTabs)
@@ -214,14 +217,10 @@ struct ChatPagerScreen: View {
                 }
             }
         }
-        // The pill carries its own glass above; hide the bar's shared
-        // item background so the two don't stack into a double capsule.
         .sharedBackgroundVisibility(.hidden)
     }
 
-    /// Body of the quick-switcher popover: one row per open chat — avatar,
-    /// name, red mention dot, checkmark on the active row — plus an Edit
-    /// footer that escalates to the full management sheet.
+    /// Body of the quick-switcher popover on macOS.
     private func quickSwitcherContent(chatTabs: ChatTabsModel) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(chatTabs.tabs) { tab in
@@ -278,6 +277,7 @@ struct ChatPagerScreen: View {
     private func visibleTabId(chatTabs: ChatTabsModel) -> UUID? {
         chatTabs.activeTabId ?? chatTabs.tabs.first?.id
     }
+    #endif
 
 
 
