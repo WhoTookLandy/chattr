@@ -89,8 +89,11 @@ enum TwitchWebPlayer {
     /// and stops it reporting.
     @MainActor
     static func quiesce(_ webView: WKWebView) {
-        // Stop audio immediately — a torn-down page can otherwise keep
-        // playing until the web process notices.
+        // Stop audio and close any active PiP/fullscreen media presentations
+        // immediately so a torn-down page can't keep playing or overlap a new
+        // stream.
+        webView.pauseAllMediaPlayback(completionHandler: nil)
+        webView.closeAllMediaPresentations(completionHandler: nil)
         webView.evaluateJavaScript("document.querySelectorAll('video').forEach(v=>v.pause())")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: handlerName)
         webView.stopLoading()
@@ -99,6 +102,8 @@ enum TwitchWebPlayer {
     @MainActor
     static func teardown(_ webView: WKWebView) {
         quiesce(webView)
+        webView.navigationDelegate = nil
+        webView.loadHTMLString("", baseURL: nil)
         webView.removeFromSuperview()
     }
 
@@ -174,9 +179,11 @@ enum TwitchWebPlayer {
       }, true);
 
       var lastState = '';
+      var pollId = null;
       var report = function () {
         var v = video();
         if (!v) return;
+        if (pollId) { clearInterval(pollId); pollId = null; }
         var pip = !!(v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture'));
         var pipActive = v.webkitPresentationMode === 'picture-in-picture';
         var state = { type: 'state', paused: v.paused, muted: v.muted, pip: pip, pipActive: pipActive, playing: !v.paused && v.readyState > 2 };
@@ -186,7 +193,10 @@ enum TwitchWebPlayer {
       ['play', 'playing', 'pause', 'volumechange', 'loadeddata', 'waiting', 'webkitpresentationmodechanged'].forEach(function (n) {
         document.addEventListener(n, report, true);
       });
-      setInterval(report, 1000);
+      // Poll only until the <video> mounts and posts its initial state; after
+      // that the capture-phase listeners drive every subsequent update.
+      pollId = setInterval(report, 500);
+      report();
 
       // PiP start / end. WebKit reports "inline" after both a return to the
       // app and a close, so tell them apart the way the system does it:

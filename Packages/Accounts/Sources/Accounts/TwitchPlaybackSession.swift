@@ -45,7 +45,7 @@ public enum TwitchPlaybackSession {
 
     /// The stored session, if any. A blocking Keychain read.
     public static func current() -> TwitchPlaybackCredential? {
-        guard let data = keychain.load(key: keychainKey) else { return nil }
+        guard let data = try? keychain.load(key: keychainKey) else { return nil }
         return try? JSONDecoder().decode(TwitchPlaybackCredential.self, from: data)
     }
 

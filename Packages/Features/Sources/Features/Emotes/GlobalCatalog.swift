@@ -52,17 +52,40 @@ public final class GlobalCatalog {
     private static let cacheKey = "global"
     private static let cacheTTL: TimeInterval = 24 * 60 * 60
 
+    /// Coalesces overlapping `load(...)` callers (e.g. rapid account changes)
+    /// so duplicate disk reads, Helix requests, and disk writes never overlap.
+    @ObservationIgnored private var inFlightLoad: Task<Void, Never>?
+
     public init(cache: JSONDiskCache = JSONDiskCache(subdirectory: CacheSubdirectory.emoteGlobals)) {
         self.cache = cache
     }
 
-    /// Fetches global badges + global emotes sequentially and caches them.
+    /// Fetches global badges + global emotes and caches them.
     /// Errors are logged but non-fatal — the per-channel ChatBadgeStore will
     /// fall back to its own fetch if the catalog stays empty.
     ///
     /// Idempotent via `hasLoaded` — safe to call from `.task(id:)` which
     /// re-fires on account changes.
     public func load(account: Account, accountStore: AccountStore) async {
+        guard !hasLoaded else { return }
+        if let existing = inFlightLoad {
+            await existing.value
+            return
+        }
+        let task = Task { @MainActor in
+            await self.performLoad(account: account, accountStore: accountStore)
+        }
+        inFlightLoad = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if inFlightLoad == task { inFlightLoad = nil }
+    }
+
+    private func performLoad(account: Account, accountStore: AccountStore) async {
+        defer { inFlightLoad = nil }
         guard !hasLoaded else { return }
 
         // Disk: render instantly if present. If fresh, skip the network.
@@ -101,8 +124,12 @@ public final class GlobalCatalog {
                 // trips the sending check on the non-Sendable `Account`.
                 let badgeFetch = Task { await self.fetchBadges(client: client, accountStore: accountStore, account: account) }
                 let emoteFetch = Task { await self.fetchEmotes(client: client, accountStore: accountStore, account: account) }
-                badges = await badgeFetch.value
-                emotes = await emoteFetch.value
+                (badges, emotes) = await withTaskCancellationHandler {
+                    (await badgeFetch.value, await emoteFetch.value)
+                } onCancel: {
+                    badgeFetch.cancel()
+                    emoteFetch.cancel()
+                }
             } else {
                 if badges == nil {
                     badges = await fetchBadges(client: client, accountStore: accountStore, account: account)

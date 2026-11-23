@@ -182,6 +182,7 @@ public enum AppLogger {
         limit: Int = 200,
         minLevel: Entry.Level = .info
     ) -> [Entry] {
+        guard limit > 0 else { return [] }
         do {
             let store = try OSLogStore(scope: .currentProcessIdentifier)
             // Start from a generous lookback. OSLogStore positions are
@@ -191,9 +192,12 @@ public enum AppLogger {
             let predicate = NSPredicate(format: "subsystem == %@", subsystem)
             let raw = try store.getEntries(at: position, matching: predicate)
 
-            var collected: [Entry] = []
-            // OSLogStore returns oldest-first; we collect everything matching
-            // and reverse at the end so callers see newest-first.
+            // Fixed-size ring buffer so memory stays O(limit) even under a
+            // busy chat session instead of buffering an entire hour of logs.
+            var ring: [Entry] = []
+            ring.reserveCapacity(limit)
+            var writeIndex = 0
+
             for entry in raw {
                 guard let log = entry as? OSLogEntryLog else { continue }
                 let level = Self.mapLevel(log.level)
@@ -205,20 +209,34 @@ public enum AppLogger {
                 hasher.combine(log.date)
                 hasher.combine(log.category)
                 hasher.combine(log.composedMessage)
-                collected.append(Entry(
+                let item = Entry(
                     id: hasher.finalize(),
                     date: log.date,
                     level: level,
                     category: log.category,
                     composedMessage: log.composedMessage
-                ))
+                )
+                if ring.count < limit {
+                    ring.append(item)
+                } else {
+                    ring[writeIndex] = item
+                    writeIndex = (writeIndex + 1) % limit
+                }
             }
 
-            // Newest-first + truncate to limit. We collect everything first
-            // (rather than streaming + early-exit) because OSLogStore doesn't
-            // expose a reverse iterator.
-            let reversed = collected.reversed()
-            return Array(reversed.prefix(limit))
+            // Reconstruct newest-first from the ring.
+            guard !ring.isEmpty else { return [] }
+            var result: [Entry] = []
+            result.reserveCapacity(ring.count)
+            if ring.count < limit {
+                for item in ring.reversed() { result.append(item) }
+            } else {
+                for offset in 1...ring.count {
+                    let idx = (writeIndex - offset + limit) % limit
+                    result.append(ring[idx])
+                }
+            }
+            return result
         } catch {
             // Store unavailable, predicate malformed, etc. Return empty
             // rather than throwing — the dev view shows an empty state.

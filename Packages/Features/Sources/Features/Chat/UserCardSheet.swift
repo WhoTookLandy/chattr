@@ -91,6 +91,7 @@ struct UserCardSheet: View {
                         targetDisplayName: line.authorDisplayName,
                         chatModel: moderation
                     )
+                    .id(line.authorUserId)
                 }
                 details
                 recentMessages
@@ -255,6 +256,9 @@ struct UserCardSheet: View {
     // MARK: - Loading
 
     private func loadUser() async {
+        // Clear any prior user's profile immediately when switching targets
+        // while the semi-modal sheet stays presented.
+        user = nil
         let id = line.authorUserId
         guard !id.isEmpty else { return }
         do {

@@ -82,16 +82,22 @@ public actor JSONDiskCache {
         try? FileManager.default.removeItem(at: fileURL(for: key))
     }
 
-    /// Deletes files in this subdirectory whose modification date is older than `maxAge`.
+    /// Deletes regular files in this subdirectory whose modification date is
+    /// older than `maxAge`. Skips subdirectories (e.g. `emote-cache/channels/`
+    /// nested under `emote-cache/`) so sweeping a parent cache never wipes a
+    /// child cache.
     public func sweep(maxAge: TimeInterval) {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey]
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey]
+            includingPropertiesForKeys: keys
         ) else { return }
         let now = Date()
+        let keySet = Set(keys)
         for url in urls {
-            guard let mtime = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate else { continue }
+            guard let values = try? url.resourceValues(forKeys: keySet),
+                  values.isRegularFile == true,
+                  let mtime = values.contentModificationDate else { continue }
             if now.timeIntervalSince(mtime) > maxAge {
                 try? FileManager.default.removeItem(at: url)
             }

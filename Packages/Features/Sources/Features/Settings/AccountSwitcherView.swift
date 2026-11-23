@@ -168,6 +168,8 @@ struct AccountSwitcherView: View {
         do {
             _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
             dismiss()
+        } catch is CancellationError {
+            // User dismissed the auth sheet — leave sheet quiet.
         } catch {
             logger.error("Re-authorize failed for @\(account.login): \(error.localizedDescription)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription
@@ -184,6 +186,8 @@ struct AccountSwitcherView: View {
         do {
             _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
             dismiss()
+        } catch is CancellationError {
+            // User dismissed the auth sheet — leave sheet quiet.
         } catch {
             logger.error("Add account failed: \(error.localizedDescription)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription

@@ -31,11 +31,17 @@ struct CreateClipSheet: View {
     }
 
     @State private var phase: Phase = .creating
-    /// Guards against a second clip if the sheet's task re-runs.
-    @State private var didStart = false
+    /// Drives `.task(id:)` so dismissing cancels both the initial request and
+    /// any retry, while bumping it cleanly restarts creation.
+    @State private var attempt = 0
     @State private var copiedEditURL = false
     @State private var copiedClipLink = false
     @Environment(\.dismiss) private var dismiss
+
+    /// System browser opener — overrides the chat's `ClipLinkRouter` so
+    /// "Open Clip Editor" always opens in Safari rather than re-entering the
+    /// in-app clip player.
+    private static let systemOpenURL = OpenURLAction { _ in .systemAction }
 
     var body: some View {
         NavigationStack {
@@ -58,9 +64,8 @@ struct CreateClipSheet: View {
             if case .created = new { return true }
             return false
         }
-        .task {
-            guard !didStart else { return }
-            didStart = true
+        .environment(\.openURL, Self.systemOpenURL)
+        .task(id: attempt) {
             await createClip()
         }
     }
@@ -95,7 +100,7 @@ struct CreateClipSheet: View {
                 unavailable("Couldn't create clip", systemImage: "exclamationmark.triangle", message: message)
                 Button("Try Again") {
                     phase = .creating
-                    Task { await createClip() }
+                    attempt += 1
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -175,6 +180,11 @@ struct CreateClipSheet: View {
     // MARK: - Request
 
     private func createClip() async {
+        // Guard against SwiftUI re-running `.task(id:)` on re-appearance
+        // (e.g. after dismissing a ShareLink sheet) once a clip was already
+        // created or settled; "Try Again" resets `phase = .creating` before
+        // bumping `attempt`.
+        guard phase == .creating else { return }
         let client = accountStore.client(for: account)
         let broadcasterID = channel.channelId
         do {

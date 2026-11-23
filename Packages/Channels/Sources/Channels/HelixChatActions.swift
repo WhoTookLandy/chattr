@@ -284,8 +284,19 @@ struct HelixChatActions: Sendable {
     /// scope list, can't prove the scope, so nothing is sent. Reads the
     /// token without refreshing.
     private func requireGrantedScope(_ scope: TwitchScope) async throws {
-        guard let token = try? await client.auth.tokenProvider.token(),
-              Self.grants(token, anyOf: [scope]) else {
+        // Propagate `HelixError.notAuthenticated` (e.g. TwitchKit's store was
+        // temporarily emptied) so `HelixAuthRetry` can recover via the
+        // refresh-token cache instead of forcing a spurious re-sign-in.
+        let token: OAuthToken
+        do {
+            token = try await client.auth.tokenProvider.token()
+        } catch HelixError.notAuthenticated {
+            throw HelixError.notAuthenticated
+        } catch {
+            logger.notice("\(scope.rawValue, privacy: .public) token read failed; asking to sign in again")
+            throw ModerationActionError.needsSignInAgain
+        }
+        guard Self.grants(token, anyOf: [scope]) else {
             logger.notice("\(scope.rawValue, privacy: .public) isn't confirmed for this sign-in; asking to sign in again")
             throw ModerationActionError.needsSignInAgain
         }

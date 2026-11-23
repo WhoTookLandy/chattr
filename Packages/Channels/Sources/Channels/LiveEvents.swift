@@ -313,6 +313,65 @@ public struct LiveEventsState: Sendable, Equatable {
     public static func == (lhs: LiveEventsState, rhs: LiveEventsState) -> Bool {
         lhs.poll == rhs.poll && lhs.prediction == rhs.prediction && lhs.hypeTrain == rhs.hypeTrain
     }
+
+    /// True when everything rendered by the UI banners matches `other`,
+    /// ignoring internal liveness timestamps (`confirmedAt`). Used by
+    /// `ChannelSession` to skip publishing to SwiftUI observers when a Helix
+    /// reconcile only refreshed `confirmedAt` without changing visible data.
+    public func hasSameDisplayContent(as other: LiveEventsState) -> Bool {
+        Self.pollDisplayEqual(poll, other.poll)
+            && Self.predictionDisplayEqual(prediction, other.prediction)
+            && Self.hypeTrainDisplayEqual(hypeTrain, other.hypeTrain)
+    }
+
+    private static func pollDisplayEqual(_ a: LivePoll?, _ b: LivePoll?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case (let lhs?, let rhs?):
+            return lhs.id == rhs.id
+                && lhs.title == rhs.title
+                && lhs.choices == rhs.choices
+                && lhs.startedAt == rhs.startedAt
+                && lhs.endsAt == rhs.endsAt
+                && lhs.status == rhs.status
+                && lhs.concludedAt == rhs.concludedAt
+        default: return false
+        }
+    }
+
+    private static func predictionDisplayEqual(_ a: LivePrediction?, _ b: LivePrediction?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case (let lhs?, let rhs?):
+            return lhs.id == rhs.id
+                && lhs.title == rhs.title
+                && lhs.outcomes == rhs.outcomes
+                && lhs.startedAt == rhs.startedAt
+                && lhs.locksAt == rhs.locksAt
+                && lhs.status == rhs.status
+                && lhs.winningOutcomeId == rhs.winningOutcomeId
+                && lhs.concludedAt == rhs.concludedAt
+        default: return false
+        }
+    }
+
+    private static func hypeTrainDisplayEqual(_ a: LiveHypeTrain?, _ b: LiveHypeTrain?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case (let lhs?, let rhs?):
+            return lhs.id == rhs.id
+                && lhs.startedAt == rhs.startedAt
+                && lhs.level == rhs.level
+                && lhs.total == rhs.total
+                && lhs.progress == rhs.progress
+                && lhs.goal == rhs.goal
+                && lhs.expiresAt == rhs.expiresAt
+                && lhs.status == rhs.status
+                && lhs.isGoldenKappa == rhs.isGoldenKappa
+                && lhs.concludedAt == rhs.concludedAt
+        default: return false
+        }
+    }
 }
 
 /// A small, bounded memory of event ids that are over: ended, archived,

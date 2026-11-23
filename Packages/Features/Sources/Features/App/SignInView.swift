@@ -299,6 +299,8 @@ struct SignInView: View {
             // to AccountStore.add. RootView's @Query observes the new
             // row and transitions away from this view automatically.
             _ = try await TwitchSignIn.run(accountStore: accountStore, clientId: clientId)
+        } catch is CancellationError {
+            // User dismissed the auth sheet or task was cancelled — no error banner.
         } catch {
             logger.error("Sign-in failed: \(error.localizedDescription, privacy: .public)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription

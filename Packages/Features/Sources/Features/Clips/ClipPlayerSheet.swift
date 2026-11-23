@@ -137,21 +137,32 @@ private struct ClipWebPlayer: UIViewRepresentable {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
         webView.navigationDelegate = context.coordinator
+        context.coordinator.loadedURL = url
         webView.load(URLRequest(url: url))
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {}
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        if webView.url != url, context.coordinator.loadedURL != url {
+            context.coordinator.loadedURL = url
+            webView.load(URLRequest(url: url))
+        }
+    }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
-        // Stop audio at once — a dismissed page can otherwise play on until
-        // the web process notices.
+        // Stop audio and close any active PiP/fullscreen presentation before
+        // `ClipPlayerSheet.onDisappear` resumes the live stream underneath.
+        webView.pauseAllMediaPlayback(completionHandler: nil)
+        webView.closeAllMediaPresentations(completionHandler: nil)
         webView.evaluateJavaScript("document.querySelectorAll('video').forEach(v=>v.pause())")
+        webView.navigationDelegate = nil
         webView.stopLoading()
+        webView.loadHTMLString("", baseURL: nil)
     }
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
+        var loadedURL: URL?
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction

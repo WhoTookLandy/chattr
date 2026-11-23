@@ -48,6 +48,12 @@ struct ChatSettingsSheet: View {
     /// Most recent PATCH failure, shown in an alert. nil = no alert.
     @State private var errorMessage: String?
 
+    /// Tail of the serialized PATCH chain + count of in-flight local PATCHes
+    /// so rapid toggles apply in order and intermediate responses don't snap
+    /// a still-in-flight control back off.
+    @State private var pendingPatchTask: Task<Void, Never>?
+    @State private var inFlightPatches = 0
+
     // Viewer-preference quick toggles — same UserDefaults keys as
     // AppearanceSettingsScreen, so flipping one here updates open chats and
     // the appearance screen alike.
@@ -103,9 +109,10 @@ struct ChatSettingsSheet: View {
             }
         }
         // Seed at mount AND re-sync whenever the authoritative snapshot
-        // changes (our PATCH response, an EventSub update from another
-        // mod, or the error-revert path calling syncFromModel directly).
+        // changes — deferred while local PATCHes are still settling so an
+        // earlier response can't snap a newer toggle back.
         .task(id: chatModel.chatRestrictions) {
+            guard inFlightPatches == 0 else { return }
             syncFromModel()
         }
         .alert(
@@ -258,15 +265,23 @@ struct ChatSettingsSheet: View {
         }
     }
 
-    /// Run one PATCH; on failure surface the error and snap the controls
-    /// back to the authoritative state.
+    /// Run one PATCH serialized behind any prior in-flight PATCH; on failure
+    /// surface the error and snap the controls back to the authoritative state.
     private func apply(_ change: @escaping @MainActor () async throws -> Void) {
-        Task { @MainActor in
+        let previous = pendingPatchTask
+        inFlightPatches += 1
+        pendingPatchTask = Task { @MainActor in
+            await previous?.value
+            defer {
+                inFlightPatches -= 1
+                if inFlightPatches == 0 {
+                    syncFromModel()
+                }
+            }
             do {
                 try await change()
             } catch {
                 errorMessage = error.localizedDescription
-                syncFromModel()
             }
         }
     }

@@ -349,11 +349,12 @@ public struct ChatLine: Sendable, Equatable, Identifiable {
     /// `buffer.mutateAll { $0.markingDeleted() }`.
     ///
     /// Idempotent: deleting a deleted line is a no-op (same returned value).
-    /// `.newMessagesDivider` rows are also a no-op — the divider isn't a
-    /// message, so a chat-clear (which calls this on every line) must leave
-    /// the rule intact rather than render it as struck-through nothing.
+    /// Non-message rows (`.newMessagesDivider`, `.subBubble`, `.raidBubble`,
+    /// `.systemBubble`) are also a no-op — they carry their copy in `kind`
+    /// with empty `runs`, so flipping them to `.deletedPlaceholder` on a
+    /// chat-clear would render them as empty struck-through lines.
     public func markingDeleted() -> ChatLine {
-        if case .newMessagesDivider = kind { return self }
+        guard case .message = kind else { return self }
         // Copy-and-flip rather than a memberwise rebuild: a chat-clear runs
         // this on every line in the window, and the init would recompute
         // `hasLocalizedDisplayName` for each one. Everything else carries

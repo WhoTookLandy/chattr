@@ -14,7 +14,14 @@ struct GuestChannelView: View {
     let onSignIn: () -> Void
 
     @State private var chat: AnonymousChatReader
+    #if os(iOS)
+    @State private var playerController = StreamPlayerController()
+    @State private var showPlayerControls = false
+    @State private var controlsHideTask: Task<Void, Never>?
+    @State private var pausedForBackground = false
+    #endif
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     init(login: String, onSignIn: @escaping () -> Void) {
         self.login = login
@@ -29,8 +36,37 @@ struct GuestChannelView: View {
             signInBar
         }
         .background(Color.chatSurface.ignoresSafeArea())
-        .onAppear { chat.start() }
-        .onDisappear { chat.stop() }
+        .onAppear {
+            chat.start()
+            #if os(iOS)
+            playerController.onTap = { togglePlayerControls() }
+            #endif
+        }
+        .onDisappear {
+            chat.stop()
+            #if os(iOS)
+            controlsHideTask?.cancel()
+            controlsHideTask = nil
+            #endif
+        }
+        #if os(iOS)
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                if !playerController.isPaused {
+                    pausedForBackground = true
+                    playerController.pause()
+                }
+            case .active:
+                if pausedForBackground {
+                    pausedForBackground = false
+                    playerController.resume()
+                }
+            default:
+                break
+            }
+        }
+        #endif
     }
 
     // MARK: - Player
@@ -39,7 +75,38 @@ struct GuestChannelView: View {
         ZStack(alignment: .topLeading) {
             Color.black
             #if os(iOS)
-            GuestPlayerView(login: login)
+            GuestPlayerView(login: login, controller: playerController)
+            if showPlayerControls {
+                HStack(spacing: 24) {
+                    Button {
+                        playerController.togglePlay()
+                        scheduleControlsAutoHide()
+                    } label: {
+                        Image(systemName: playerController.isPaused ? "play.fill" : "pause.fill")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 48, height: 48)
+                            .background(.black.opacity(0.55), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(playerController.isPaused ? "Play" : "Pause")
+
+                    Button {
+                        playerController.toggleMute()
+                        scheduleControlsAutoHide()
+                    } label: {
+                        Image(systemName: playerController.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.black.opacity(0.55), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(playerController.isMuted ? "Unmute" : "Mute")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
+            }
             #endif
             HStack {
                 Button {
@@ -69,6 +136,31 @@ struct GuestChannelView: View {
         .frame(maxWidth: .infinity)
         .background { Color.black.ignoresSafeArea(edges: .top) }
     }
+
+    #if os(iOS)
+    private func togglePlayerControls() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showPlayerControls.toggle()
+        }
+        if showPlayerControls {
+            scheduleControlsAutoHide()
+        } else {
+            controlsHideTask?.cancel()
+            controlsHideTask = nil
+        }
+    }
+
+    private func scheduleControlsAutoHide() {
+        controlsHideTask?.cancel()
+        controlsHideTask = Task {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showPlayerControls = false
+            }
+        }
+    }
+    #endif
 
     // MARK: - Chat
 
@@ -154,10 +246,10 @@ struct GuestChannelView: View {
 /// uses, owned by this view (no PlaybackCenter / mini player for guests).
 private struct GuestPlayerView: UIViewRepresentable {
     let login: String
+    let controller: StreamPlayerController
 
     @MainActor
     final class Coordinator {
-        let controller = StreamPlayerController()
         var engine: WebStreamEngine?
     }
 
@@ -166,7 +258,7 @@ private struct GuestPlayerView: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
         container.backgroundColor = .black
-        let engine = WebStreamEngine(login: login, controller: context.coordinator.controller)
+        let engine = WebStreamEngine(login: login, controller: controller)
         context.coordinator.engine = engine
         engine.view.frame = container.bounds
         engine.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]

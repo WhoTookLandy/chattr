@@ -68,6 +68,8 @@ public enum Endpoints {
     // Twitch's static-cdn serves emote images by id + format + theme + scale.
 
     public enum TwitchCDN {
+        private static let emotesBase = URL(string: "https://static-cdn.jtvnw.net/emoticons/v2")!
+
         /// Construct a CDN URL for a Twitch native emote.
         /// - Parameters:
         ///   - id: Emote ID from `EmoteReference.id`.
@@ -81,7 +83,11 @@ public enum Endpoints {
             theme: String = "dark",
             scale: String = "2.0"
         ) -> URL {
-            URL(string: "https://static-cdn.jtvnw.net/emoticons/v2/\(id)/\(format)/\(theme)/\(scale)")!
+            emotesBase
+                .appending(component: id)
+                .appending(component: format)
+                .appending(component: theme)
+                .appending(component: scale)
         }
     }
 
@@ -90,19 +96,24 @@ public enum Endpoints {
     // Largest third-party emote provider. v3 API.
 
     public enum SevenTV {
+        private static let usersBase = URL(string: "https://7tv.io/v3/users/twitch")!
+
         /// Global emote set — available across every channel.
         public static let globalEmoteSet = URL(string: "https://7tv.io/v3/emote-sets/global")!
 
         /// Per-channel emote set, keyed by Twitch broadcaster id.
         /// Returns a user object whose `emote_set.emotes` is the channel set.
         public static func userByTwitchID(_ id: String) -> URL {
-            URL(string: "https://7tv.io/v3/users/twitch/\(id)")!
+            usersBase.appending(component: id)
         }
     }
 
     // MARK: - BetterTTV (BTTV)
 
     public enum BTTV {
+        private static let usersBase = URL(string: "https://api.betterttv.net/3/cached/users/twitch")!
+        private static let emoteCDNBase = URL(string: "https://cdn.betterttv.net/emote")!
+
         /// Global emotes.
         public static let globalEmotes = URL(string: "https://api.betterttv.net/3/cached/emotes/global")!
 
@@ -110,13 +121,15 @@ public enum Endpoints {
         /// a user object with `channelEmotes[]` + `sharedEmotes[]`.
         /// 404 means the channel hasn't configured BTTV (very common).
         public static func userByTwitchID(_ id: String) -> URL {
-            URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(id)")!
+            usersBase.appending(component: id)
         }
 
         /// CDN URL for a BTTV emote image. Sizes: "1x", "2x", "3x"
         /// (BTTV's "3x" is the largest; no "4x").
         public static func emoteCDN(id: String, size: String = "2x") -> URL {
-            URL(string: "https://cdn.betterttv.net/emote/\(id)/\(size)")!
+            emoteCDNBase
+                .appending(component: id)
+                .appending(component: size)
         }
     }
 
@@ -133,17 +146,24 @@ public enum Endpoints {
     // the user just doesn't see history.
 
     public enum Rustlog {
+        private static let recentBase = URL(string: "https://recent-messages.robotty.de/api/v2/recent-messages")!
+
         /// Fetch the most recent N messages for a channel, by login
         /// (lowercase Twitch username). Returns JSON with a `messages`
         /// array of raw IRC-format strings.
         public static func recentMessages(channelLogin: String, limit: Int = 150) -> URL {
-            URL(string: "https://recent-messages.robotty.de/api/v2/recent-messages/\(channelLogin)?limit=\(limit)")!
+            let base = recentBase.appending(component: channelLogin)
+            var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
+            components?.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+            return components?.url ?? base
         }
     }
 
     // MARK: - FrankerFaceZ (FFZ)
 
     public enum FFZ {
+        private static let roomBase = URL(string: "https://api.frankerfacez.com/v1/room")!
+
         /// Global emote sets — flatten emoticons across all sets.
         public static let globalSet = URL(string: "https://api.frankerfacez.com/v1/set/global")!
 
@@ -152,7 +172,7 @@ public enum Endpoints {
         /// `EmoteProvider.channelEmotes(broadcasterId:broadcasterLogin:)`
         /// takes both — 7TV/BTTV use the id, FFZ uses the login.
         public static func roomByLogin(_ login: String) -> URL {
-            URL(string: "https://api.frankerfacez.com/v1/room/\(login)")!
+            roomBase.appending(component: login)
         }
     }
 
@@ -189,20 +209,27 @@ public enum Endpoints {
     // Pages chattr hands to the system (Open in Twitch, Share, Subscribe).
 
     public enum TwitchWeb {
+        private static let root = URL(string: "https://www.twitch.tv")!
+        private static let subsBase = URL(string: "https://www.twitch.tv/subs")!
+
         /// A channel's (or user's) page on twitch.tv.
         public static func channel(login: String) -> URL? {
-            URL(string: "https://www.twitch.tv/\(login)")
+            guard !login.isEmpty else { return nil }
+            return root.appending(component: login)
         }
 
         /// The channel's subscribe page.
         public static func subscribe(login: String) -> URL? {
-            URL(string: "https://www.twitch.tv/subs/\(login)")
+            guard !login.isEmpty else { return nil }
+            return subsBase.appending(component: login)
         }
     }
 
     // MARK: - Twitch stream playback
 
     public enum TwitchPlayer {
+        private static let hlsBase = URL(string: "https://usher.ttvnw.net/api/channel/hls")!
+
         /// Twitch's embeddable live player, loaded top-level by the web
         /// engine. Callers add the `channel` / `parent` / `autoplay` items.
         public static let embed = URL(string: "https://player.twitch.tv/")!
@@ -214,7 +241,9 @@ public enum Endpoints {
         /// A live channel's HLS master playlist. Callers add the signed
         /// token and player options as query items.
         public static func livePlaylist(login: String) -> URL? {
-            URL(string: "https://usher.ttvnw.net/api/channel/hls/\(login.lowercased()).m3u8")
+            let trimmed = login.lowercased()
+            guard !trimmed.isEmpty else { return nil }
+            return hlsBase.appending(component: "\(trimmed).m3u8")
         }
     }
 

@@ -86,14 +86,23 @@ public final class ChannelSubscription: Sendable {
         mailbox.withLock { pending in
             var latestRestrictions: ChannelUpdate?
             var latestModeration: ChannelUpdate?
-            for update in pending + unposted {
-                switch update {
-                case .restrictionsUpdated: latestRestrictions = update
-                case .moderationStatusChanged: latestModeration = update
-                default: break
+            func scan(_ updates: [ChannelUpdate]) {
+                for update in updates {
+                    switch update {
+                    case .restrictionsUpdated: latestRestrictions = update
+                    case .moderationStatusChanged: latestModeration = update
+                    default: break
+                    }
                 }
             }
-            pending = [latestRestrictions, latestModeration].compactMap { $0 } + [.reprime(snapshot)]
+            scan(pending)
+            scan(unposted)
+            var next: [ChannelUpdate] = []
+            next.reserveCapacity(3)
+            if let latestRestrictions { next.append(latestRestrictions) }
+            if let latestModeration { next.append(latestModeration) }
+            next.append(.reprime(snapshot))
+            pending = next
         }
         doorbell.yield(())
     }

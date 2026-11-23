@@ -117,22 +117,27 @@ public enum DraftStorage {
     @MainActor
     public static func removeAll(forAccount accountUserId: String) {
         let key = storageKey(forAccount: accountUserId)
-        pendingDrafts[key] = nil
+        pendingDrafts.withLock { _ = $0.removeValue(forKey: key) }
         UserDefaults.standard.removeObject(forKey: key)
     }
 
     // MARK: - Reads and immediate writes
 
-    /// Returns the persisted draft for a channel, or an empty string
-    /// if none. Returning a String (not String?) keeps the call site
-    /// simple — the compose bar always needs *something* to seed its
-    /// state, and `""` is the correct "no draft" value visually.
+    /// Returns the draft for a channel (preferring any unsaved debounced
+    /// keystrokes in `pendingDrafts` over disk), or an empty string if none.
+    /// Returning a String (not String?) keeps the call site simple — the
+    /// compose bar always needs *something* to seed its state, and `""` is
+    /// the correct "no draft" value visually.
     ///
     /// Falls back to the pre-composite bare-channelId key once, so
     /// drafts written before the keying change survive the upgrade
     /// (they're re-saved under the composite key on the next edit).
     public static func load(forChannel id: ChannelDescriptor.ID) -> String {
-        let dict = storedDrafts(activeStorageKey)
+        let key = activeStorageKey
+        if let pending = pendingDrafts.withLock({ $0[key]?[id] }) {
+            return pending.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : pending
+        }
+        let dict = storedDrafts(key)
         if let draft = dict[id] { return draft }
         // Legacy fallback: keys written before the composite-ID change
         // were the bare channelId (the part after the "/").
@@ -143,15 +148,17 @@ public enum DraftStorage {
         return ""
     }
 
-    /// Saves a draft for a channel immediately. Empty / whitespace-only
-    /// texts are REMOVED from storage rather than persisted as empty
-    /// strings — the dictionary stays tight and reload-after-empty
-    /// correctly reads as "no draft" instead of "empty draft."
+    /// Saves a draft for a channel immediately, clearing any pending
+    /// debounced save for it so an older timer can never overwrite this write.
+    /// Empty / whitespace-only texts are REMOVED from storage rather than
+    /// persisted as empty strings — the dictionary stays tight and
+    /// reload-after-empty correctly reads as "no draft" instead of "empty draft."
     ///
     /// Per-keystroke callers should use `scheduleSave` instead: every call
     /// here re-reads and rewrites the whole drafts dictionary.
     public static func save(forChannel id: ChannelDescriptor.ID, text: String) {
         let key = activeStorageKey
+        pendingDrafts.withLock { _ = $0[key]?.removeValue(forKey: id) }
         var dict = storedDrafts(key)
         apply(text, forChannel: id, to: &dict)
         UserDefaults.standard.set(dict, forKey: key)
@@ -164,7 +171,7 @@ public enum DraftStorage {
     @MainActor
     public static func clear(forChannel id: ChannelDescriptor.ID) {
         let key = activeStorageKey
-        pendingDrafts[key]?.removeValue(forKey: id)
+        pendingDrafts.withLock { _ = $0[key]?.removeValue(forKey: id) }
         var dict = storedDrafts(key)
         guard dict.removeValue(forKey: id) != nil else { return }
         UserDefaults.standard.set(dict, forKey: key)
@@ -177,7 +184,9 @@ public enum DraftStorage {
 
     /// Latest unsaved text per channel, grouped by the storage key (account)
     /// that was active when it was typed, written by the next flush.
-    @MainActor private static var pendingDrafts: [String: [ChannelDescriptor.ID: String]] = [:]
+    /// Lock-guarded so nonisolated `load` / `save` stay consistent with
+    /// pending debounced edits without forcing main-actor hops.
+    private static let pendingDrafts = OSAllocatedUnfairLock<[String: [ChannelDescriptor.ID: String]]>(initialState: [:])
 
     /// The debounce timer. One timer for all channels: a flush writes every
     /// pending channel in one read-modify-write per account dictionary.
@@ -189,7 +198,8 @@ public enum DraftStorage {
     /// `flushPendingSaves()`.
     @MainActor
     public static func scheduleSave(forChannel id: ChannelDescriptor.ID, text: String) {
-        pendingDrafts[activeStorageKey, default: [:]][id] = text
+        let key = activeStorageKey
+        pendingDrafts.withLock { $0[key, default: [:]][id] = text }
         pendingFlush?.cancel()
         pendingFlush = Task { @MainActor in
             try? await Task.sleep(for: saveDebounce)
@@ -208,9 +218,13 @@ public enum DraftStorage {
     public static func flushPendingSaves() {
         pendingFlush?.cancel()
         pendingFlush = nil
-        guard !pendingDrafts.isEmpty else { return }
-        let batches = pendingDrafts
-        pendingDrafts.removeAll()
+        let batches = pendingDrafts.withLock { state -> [String: [ChannelDescriptor.ID: String]] in
+            guard !state.isEmpty else { return [:] }
+            let snapshot = state
+            state.removeAll()
+            return snapshot
+        }
+        guard !batches.isEmpty else { return }
         for (key, batch) in batches {
             let original = storedDrafts(key)
             var dict = original
@@ -231,10 +245,14 @@ public enum DraftStorage {
     public static func remove(forChannels ids: [ChannelDescriptor.ID]) {
         guard !ids.isEmpty else { return }
         let key = activeStorageKey
+        pendingDrafts.withLock { state in
+            for id in ids {
+                state[key]?.removeValue(forKey: id)
+            }
+        }
         let original = storedDrafts(key)
         var dict = original
         for id in ids {
-            pendingDrafts[key]?.removeValue(forKey: id)
             dict.removeValue(forKey: id)
             if let slash = id.firstIndex(of: "/") {
                 dict.removeValue(forKey: String(id[id.index(after: slash)...]))

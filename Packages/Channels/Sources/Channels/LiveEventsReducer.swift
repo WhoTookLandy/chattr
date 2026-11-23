@@ -379,7 +379,7 @@ extension LiveEventsState {
     ) -> Bool {
         let before = self
         if let snapshot, snapshot.kind == kind {
-            if storedId(kind) == nil, snapshot.isConcluded, !expired.contains(snapshot.eventId, kind: kind) {
+            if storedId(kind) != snapshot.eventId, snapshot.isConcluded, !expired.contains(snapshot.eventId, kind: kind) {
                 tombstones.insert(snapshot.eventId, kind: kind)
             } else {
                 fold(snapshot, at: now, fromHelix: true)

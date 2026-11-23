@@ -81,13 +81,27 @@ struct OwnChatRestrictionBanner: View {
     private func trailingControl(for restriction: OwnChatRestriction) -> some View {
         switch restriction {
         case .warned:
-            Button("Open") {
-                if let url = Endpoints.TwitchWeb.channel(login: channelLoginName) {
-                    openURL(url)
+            HStack(spacing: 8) {
+                Button("Open") {
+                    if let url = Endpoints.TwitchWeb.channel(login: channelLoginName) {
+                        openURL(url)
+                    }
                 }
+                .font(.footnote.weight(.semibold))
+                .buttonStyle(.borderless)
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { state.dismiss() }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(8)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(-8)
+                .accessibilityLabel("Dismiss")
             }
-            .font(.footnote.weight(.semibold))
-            .buttonStyle(.borderless)
         case .timedOut(let until?) where until > .now:
             // Ends on its own; nothing to dismiss.
             EmptyView()

@@ -51,6 +51,9 @@ final class ChannelModerationState {
         from session: ChannelSession,
         moderatedChannelIds: (@Sendable () async -> Set<String>)?
     ) {
+        // Cancel any previous in-flight seed before starting a new one.
+        seedTask?.cancel()
+        seedTask = nil
         if session.isAccountBroadcaster {
             promote(session: session)
         }
@@ -58,8 +61,8 @@ final class ChannelModerationState {
         let channelId = session.channelId
         seedTask = Task { [weak self] in
             let ids = await moderatedChannelIds()
-            // Checked AFTER the await: detach cancels this task, and a
-            // result landing post-detach must not flip the flag.
+            // Checked AFTER the await: detach or a live unmod cancels this
+            // task, and a stale result must not flip the flag back on.
             guard !Task.isCancelled, let self else { return }
             if ids.contains(channelId) {
                 self.promote(session: session)
@@ -67,10 +70,11 @@ final class ChannelModerationState {
         }
     }
 
-    /// Stops an unresolved seed (detach).
+    /// Stops an unresolved seed and clears per-attach moderation state (detach).
     func cancelSeed() {
         seedTask?.cancel()
         seedTask = nil
+        canModerate = false
     }
 
     /// Path 3 for one of our own echoes. Cheap — the badge array is usually
@@ -95,6 +99,10 @@ final class ChannelModerationState {
             promote(session: session)
             return
         }
+        // Cancel any still-running seed so a stale cached moderated-channel
+        // list can't flip `canModerate` back to true after a live unmod.
+        seedTask?.cancel()
+        seedTask = nil
         self.canModerate = false
         if let onRevoked {
             Task { await onRevoked() }
@@ -120,6 +128,8 @@ final class ChannelModerationState {
     /// subscription so the status stays live. Safe to repeat — the flag set
     /// is idempotent and `enableModerationEvents` self-guards.
     private func promote(session: ChannelSession?) {
+        seedTask?.cancel()
+        seedTask = nil
         canModerate = true
         guard let session else { return }
         Task {

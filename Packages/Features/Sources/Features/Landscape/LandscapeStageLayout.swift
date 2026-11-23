@@ -138,7 +138,8 @@ struct LandscapeStageLayout: ViewModifier {
                     channel: channel,
                     tabId: tabId,
                     chatSide: side,
-                    layoutMode: mode
+                    layoutMode: mode,
+                    chatWidth: width
                 )
                 // Beside: the stage stops at the chat column. Over: it
                 // runs full width under the translucent chat.

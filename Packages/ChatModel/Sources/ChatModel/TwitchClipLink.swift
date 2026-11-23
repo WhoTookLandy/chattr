@@ -22,7 +22,7 @@ public enum TwitchClipLink {
         let components = url.pathComponents.filter { $0 != "/" }
 
         if host == "clips.twitch.tv" {
-            if components.first?.lowercased() == "embed" {
+            if components.count == 1, components[0].lowercased() == "embed" {
                 let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
                 return validated(query?.first { $0.name == "clip" }?.value)
             }
@@ -32,12 +32,14 @@ public enum TwitchClipLink {
 
         guard twitchHosts.contains(host) else { return nil }
         // `/<channel>/clip/<slug>`, `/clip/<slug>`, `/clips/<slug>`.
+        // Require the slug to be the final path segment so URLs like
+        // `/<channel>/clip/<slug>/edit` still open in Safari.
         guard let marker = components.firstIndex(where: { segment in
                   let lower = segment.lowercased()
                   return lower == "clip" || lower == "clips"
               }),
               marker <= 1,
-              components.indices.contains(marker + 1)
+              components.count == marker + 2
         else { return nil }
         // `/clips/<slug>` only at the root — `/<channel>/clips/…` is the
         // channel's clip browser, not a clip.

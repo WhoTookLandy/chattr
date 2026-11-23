@@ -19,9 +19,10 @@ public actor DiskUsage {
             at: directory,
             includingPropertiesForKeys: keys
         ) else { return 0 }
+        let keySet = Set(keys)
         var total: Int64 = 0
         for case let url as URL in enumerator {
-            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+            guard let values = try? url.resourceValues(forKeys: keySet),
                   values.isRegularFile == true else { continue }
             total += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
         }

@@ -31,10 +31,16 @@ public struct FFZProvider: EmoteProvider {
         let (data, response) = try await urlSession.data(from: Endpoints.FFZ.globalSet)
         try ProviderHTTP.requireSuccess(response)
         let body = try JSONDecoder().decode(GlobalResponse.self, from: data)
-        // `sets` is a dict keyed by set ID — flatten emoticons across all sets.
-        // FFZ may use multiple global sets for organization, but for chat
-        // resolution they all behave the same.
-        return body.sets.values.flatMap {
+        // Only load `default_sets` when FFZ provides them (other sets in the
+        // payload are user/tier-restricted sets, not truly global). Fall back
+        // to sorted keys when `default_sets` is absent (e.g. minimal fixtures).
+        let orderedSets: [EmoteSet]
+        if let defaultIds = body.default_sets, !defaultIds.isEmpty {
+            orderedSets = defaultIds.compactMap { body.sets[String($0)] }
+        } else {
+            orderedSets = body.sets.keys.sorted().compactMap { body.sets[$0] }
+        }
+        return orderedSets.flatMap {
             $0.emoticons.compactMap { Self.map($0, ownerChannelId: nil) }
         }
     }
@@ -46,7 +52,7 @@ public struct FFZProvider: EmoteProvider {
         // common, like BTTV's 404 case. Other non-2xx statuses throw.
         if try ProviderHTTP.isNotFound(response) { return [] }
         let body = try JSONDecoder().decode(RoomResponse.self, from: data)
-        return body.sets.values.flatMap {
+        return body.sets.keys.sorted().compactMap { body.sets[$0] }.flatMap {
             $0.emoticons.compactMap { Self.map($0, ownerChannelId: broadcasterId) }
         }
     }
@@ -54,6 +60,7 @@ public struct FFZProvider: EmoteProvider {
     // MARK: - Private decoding shapes
 
     private struct GlobalResponse: Decodable {
+        let default_sets: [Int]?
         let sets: [String: EmoteSet]
     }
 
@@ -82,18 +89,14 @@ public struct FFZProvider: EmoteProvider {
     }
 
     private static func map(_ j: EmoteJSON, ownerChannelId: String?) -> Emote? {
-        // Prefer animated URLs when the emote has them (its static set then
-        // rides along as `staticURLs`, below). Falling back to `urls`
-        // (static set) when no animated variant exists.
-        let urlMap = j.animated ?? j.urls ?? [:]
-        guard !urlMap.isEmpty else { return nil }
-
-        let urls = Self.sizedURLs(urlMap)
+        // Prefer animated URLs when the emote actually has non-empty animated
+        // variants (some FFZ responses send `"animated": {}`). Fall back to
+        // static `urls` otherwise so the emote isn't silently dropped.
+        let animatedURLs = j.animated.map(Self.sizedURLs) ?? [:]
+        let staticURLs = Self.sizedURLs(j.urls ?? [:])
+        let hasAnimated = !animatedURLs.isEmpty
+        let urls = hasAnimated ? animatedURLs : staticURLs
         guard !urls.isEmpty else { return nil }
-
-        // An animated emote's `urls` is its still image; keep it so a
-        // renderer that won't animate doesn't have to download the animation.
-        let staticURLs: [Emote.Size: URL] = j.animated == nil ? [:] : Self.sizedURLs(j.urls ?? [:])
 
         let aspectRatio: Double? = if let w = j.width, let h = j.height, w > 0, h > 0 {
             Double(w) / Double(h)
@@ -105,12 +108,12 @@ public struct FFZProvider: EmoteProvider {
             id: "ffz:\(j.id)",
             name: j.name,
             urls: urls,
-            isAnimated: j.animated != nil,
+            isAnimated: hasAnimated,
             isZeroWidth: false,                 // FFZ has no zero-width emotes.
             source: .ffz,
             ownerChannelId: ownerChannelId,
             aspectRatio: aspectRatio,
-            staticURLs: staticURLs.isEmpty ? nil : staticURLs
+            staticURLs: hasAnimated && !staticURLs.isEmpty ? staticURLs : nil
         )
     }
 

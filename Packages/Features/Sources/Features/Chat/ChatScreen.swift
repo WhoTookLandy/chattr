@@ -382,6 +382,7 @@ public struct ChatScreen: View {
                              && target.line.authorUserId != channelId)
                     ? chatModel : nil
             )
+            .id(target.line.authorUserId)
         }
         .sheet(isPresented: $showViewerList) {
             ViewerListSheet(channel: channel, account: account, accountStore: accountStore)

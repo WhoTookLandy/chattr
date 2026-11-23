@@ -29,8 +29,8 @@ public struct HighlightMatcher: Sendable, Equatable {
     private struct Keyword: Sendable, Equatable {
         /// As the user typed it — used for the Foundation fallback.
         let original: String
-        /// ASCII-lowercased; only meaningful when `isASCII`.
-        let lowered: String
+        /// ASCII-lowercased UTF-8 bytes; only meaningful when `isASCII`.
+        let loweredASCIIBytes: [UInt8]
         let isASCII: Bool
     }
 
@@ -42,11 +42,12 @@ public struct HighlightMatcher: Sendable, Equatable {
     public init(keywords: [String]) {
         var words: [Keyword] = []
         var phrases: [Keyword] = []
-        for keyword in keywords where !keyword.isEmpty {
+        for keyword in keywords where keyword.contains(where: { !$0.isWhitespace }) {
+            let ascii = Self.isASCII(keyword)
             let entry = Keyword(
                 original: keyword,
-                lowered: keyword.lowercased(),
-                isASCII: Self.isASCII(keyword)
+                loweredASCIIBytes: ascii ? keyword.utf8.map(Self.asciiLower) : [],
+                isASCII: ascii
             )
             if keyword.contains(" ") {
                 phrases.append(entry)
@@ -89,25 +90,54 @@ public struct HighlightMatcher: Sendable, Equatable {
     }
 
     private func spanMatchesPhrase(_ span: [String]) -> Bool {
-        guard !span.isEmpty else { return false }
+        // Phrase keywords always contain a space, which can only appear once
+        // at least two adjacent words are joined.
+        guard span.count >= 2 else { return false }
         return Self.contains(span.joined(separator: " "), anyOf: phraseKeywords)
     }
 
-    /// Case-insensitive "haystack contains any keyword". The haystack is
-    /// lowercased at most once, and only when it's ASCII.
+    /// Case-insensitive "haystack contains any keyword". ASCII vs ASCII scans
+    /// raw UTF-8 bytes with zero heap allocations; non-ASCII falls back to
+    /// Foundation's `.caseInsensitive` search.
     private static func contains(_ haystack: String, anyOf keywords: [Keyword]) -> Bool {
         let haystackIsASCII = isASCII(haystack)
-        var loweredHaystack: String?
         for keyword in keywords {
             if haystackIsASCII && keyword.isASCII {
-                let lowered = loweredHaystack ?? haystack.lowercased()
-                loweredHaystack = lowered
-                if lowered.contains(keyword.lowered) { return true }
+                if asciiContainsCaseInsensitive(haystack, needle: keyword.loweredASCIIBytes) {
+                    return true
+                }
             } else if haystack.range(of: keyword.original, options: .caseInsensitive) != nil {
                 return true
             }
         }
         return false
+    }
+
+    @inline(__always)
+    private static func asciiLower(_ byte: UInt8) -> UInt8 {
+        (byte >= 65 && byte <= 90) ? (byte &+ 32) : byte
+    }
+
+    private static func asciiContainsCaseInsensitive(_ haystack: String, needle: [UInt8]) -> Bool {
+        let needleCount = needle.count
+        guard needleCount > 0 else { return false }
+        return haystack.utf8.withContiguousStorageIfAvailable { buf -> Bool in
+            guard buf.count >= needleCount else { return false }
+            let lastStart = buf.count - needleCount
+            let firstNeedle = needle[0]
+            var i = 0
+            while i <= lastStart {
+                if asciiLower(buf[i]) == firstNeedle {
+                    var j = 1
+                    while j < needleCount && asciiLower(buf[i &+ j]) == needle[j] {
+                        j &+= 1
+                    }
+                    if j == needleCount { return true }
+                }
+                i &+= 1
+            }
+            return false
+        } ?? haystack.lowercased().contains(String(decoding: needle, as: UTF8.self))
     }
 
     static func isASCII(_ string: String) -> Bool {

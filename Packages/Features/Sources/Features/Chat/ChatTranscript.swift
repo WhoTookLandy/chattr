@@ -120,6 +120,28 @@ struct ChatTranscript: View {
                 chatScrollView
             }
         }
+        // Attached outside the empty/non-empty branch so ConnectionPill and
+        // connection-state transitions stay active even while a channel is
+        // quiet or all visible rows are filtered out.
+        .modifier(TranscriptOverlays(
+            isAtBottom: chatModel.isEmpty ? true : isAtBottom,
+            unreadCount: chatModel.isEmpty ? 0 : unreadWhileScrolledUp,
+            connectionBanner: connectionBanner,
+            showReportConfirmation: showReportConfirmation,
+            onJumpToLatest: jumpToLatest
+        ))
+        .onChange(of: connectionStatus?.state) { previous, current in
+            guard let current else { return }
+            connectionBanner = ConnectionBanner.next(previous: previous, current: current)
+            liveAgainDismiss?.cancel()
+            if connectionBanner == .liveAgain {
+                liveAgainDismiss = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    if connectionBanner == .liveAgain { connectionBanner = .hidden }
+                }
+            }
+        }
         // Keep the model's block filter in sync with the active account's
         // BlockStore. Attached OUTSIDE the empty/non-empty branch on purpose:
         // `isEmpty` counts VISIBLE rows, so blocking every chatter on screen
@@ -173,30 +195,6 @@ struct ChatTranscript: View {
     @ViewBuilder
     private var chatScrollView: some View {
         messageList
-            .modifier(TranscriptOverlays(
-                isAtBottom: isAtBottom,
-                unreadCount: unreadWhileScrolledUp,
-                connectionBanner: connectionBanner,
-                showReportConfirmation: showReportConfirmation,
-                onJumpToLatest: jumpToLatest
-            ))
-            // Drive the connection pill from connection-state transitions.
-            // `previous`/`current` are both `ConnectionState?` (the observed
-            // expression is one optional); `previous` passes straight through
-            // — the reducer treats nil as "no prior state → no Live-again
-            // flash."
-            .onChange(of: connectionStatus?.state) { previous, current in
-                guard let current else { return }
-                connectionBanner = ConnectionBanner.next(previous: previous, current: current)
-                liveAgainDismiss?.cancel()
-                if connectionBanner == .liveAgain {
-                    liveAgainDismiss = Task { @MainActor in
-                        try? await Task.sleep(for: .seconds(2))
-                        guard !Task.isCancelled else { return }
-                        if connectionBanner == .liveAgain { connectionBanner = .hidden }
-                    }
-                }
-            }
             // Sending re-pins to the live edge so the user sees their own
             // message, like any chat app — while scrolled up it would
             // otherwise sit in the held-back backlog until they scrolled down.

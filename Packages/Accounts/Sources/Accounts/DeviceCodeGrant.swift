@@ -264,9 +264,12 @@ public struct DeviceCodeGrant: Sendable {
     ) async throws -> OAuthToken {
         precondition(schedule.deviceCode == prompt.deviceCode, "Poll schedule belongs to a different device code")
         while true {
-            let wait = schedule.delay(at: now())
+            let current = now()
+            guard current < prompt.expiresAt else { throw Failure.expired }
+            let wait = schedule.delay(at: current)
             if wait > 0 {
-                try await sleep(.seconds(wait))
+                let remaining = prompt.expiresAt.timeIntervalSince(current)
+                try await sleep(.seconds(min(wait, remaining)))
             }
             try Task.checkCancellation()
             let pollTime = now()
