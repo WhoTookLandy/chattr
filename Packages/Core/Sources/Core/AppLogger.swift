@@ -2,8 +2,113 @@ import Foundation
 import os
 // `OSLog` (capital-L module) is separate from `os` despite the obvious
 // confusion. `Logger` lives in `os`; `OSLogStore`/`OSLogEntryLog` live in
-// `OSLog`. Both are required for the recent-entries reader.
+// `OSLog`. Both are required for the OSLogStore fallback reader.
 import OSLog
+
+/// Privacy policy for interpolated values in `AppLogMessage`, matching
+/// `OSLogPrivacy` call-site syntax (`\(value, privacy: .public)` / `.private`).
+public enum AppLogPrivacy: Sendable {
+    case `public`
+    case `private`
+    case auto
+    case sensitive
+}
+
+/// Interpolated log message that redacts `.private` / `.sensitive` values
+/// *before* reaching either `os.Logger` or `DiagnosticLogStore`.
+public struct AppLogMessage: ExpressibleByStringLiteral, ExpressibleByStringInterpolation, Sendable {
+    public let text: String
+
+    public init(stringLiteral value: String) {
+        self.text = value
+    }
+
+    public init(stringInterpolation: StringInterpolation) {
+        self.text = stringInterpolation.storage
+    }
+
+    public struct StringInterpolation: StringInterpolationProtocol {
+        var storage: String
+
+        public init(literalCapacity: Int, interpolationCount: Int) {
+            storage = ""
+            storage.reserveCapacity(literalCapacity + interpolationCount * 12)
+        }
+
+        public mutating func appendLiteral(_ literal: String) {
+            storage.append(literal)
+        }
+
+        public mutating func appendInterpolation<T>(_ value: T) {
+            storage.append(String(describing: value))
+        }
+
+        public mutating func appendInterpolation<T>(_ value: T, privacy: AppLogPrivacy) {
+            switch privacy {
+            case .private, .sensitive:
+                storage.append("<private>")
+            case .public, .auto:
+                storage.append(String(describing: value))
+            }
+        }
+    }
+}
+
+/// Dual-sink logger returned by `AppLogger.make(_:)`: forwards every message
+/// to Apple's unified logging (`os.Logger`) AND records it into
+/// `DiagnosticLogStore` so TestFlight builds retain `.debug` / `.info` logs
+/// and can export them cleanly without Xcode attached.
+public struct AppLog: Sendable {
+    public let category: String
+    private let osLogger: Logger
+    private let store: DiagnosticLogStore
+
+    init(
+        subsystem: String,
+        category: String,
+        store: DiagnosticLogStore = .shared
+    ) {
+        self.category = category
+        self.osLogger = Logger(subsystem: subsystem, category: category)
+        self.store = store
+    }
+
+    public func debug(_ message: AppLogMessage) {
+        let text = message.text
+        osLogger.debug("\(text, privacy: .public)")
+        store.record(level: .debug, category: category, message: text)
+    }
+
+    public func info(_ message: AppLogMessage) {
+        let text = message.text
+        osLogger.info("\(text, privacy: .public)")
+        store.record(level: .info, category: category, message: text)
+    }
+
+    public func notice(_ message: AppLogMessage) {
+        let text = message.text
+        osLogger.notice("\(text, privacy: .public)")
+        store.record(level: .notice, category: category, message: text)
+    }
+
+    public func warning(_ message: AppLogMessage) {
+        let text = message.text
+        osLogger.warning("\(text, privacy: .public)")
+        store.record(level: .warning, category: category, message: text)
+    }
+
+    public func error(_ message: AppLogMessage) {
+        let text = message.text
+        osLogger.error("\(text, privacy: .public)")
+        store.record(level: .error, category: category, message: text)
+    }
+
+    public func fault(_ message: AppLogMessage) {
+        let text = message.text
+        osLogger.fault("\(text, privacy: .public)")
+        store.record(level: .fault, category: category, message: text)
+    }
+}
 
 /// Centralized logger subsystem identifier for all chattr packages.
 ///
@@ -31,102 +136,52 @@ import OSLog
 ///
 /// ## Privacy
 ///
-/// `os.Logger` redacts string interpolations by default on device (the
-/// console shows `<private>`). Explicit annotations override:
-///
-///   - `logger.info("for @\(login, privacy: .public)")`  — visible on device
-///   - `logger.debug("token \(token, privacy: .private)")` — redacted always
-///   - `logger.info("count = \(count)")` — numeric, never redacted
-///
-/// Annotation policy for chattr:
-///   - User logins, channel IDs, message IDs, error codes → `.public`
-///     (they're not secrets; visibility helps debugging in production)
-///   - Tokens, refresh tokens, anything from Keychain → `.private`
-///   - Numeric counts, durations, status codes → no annotation (never redacted)
-///
-/// ## Examples
-///
-/// ```swift
-/// private let logger = AppLogger.make("Accounts.AccountStore")
-///
-/// logger.debug("Append cached refresh token entry: bytes=\(data.count)")
-/// logger.info("Refreshed tokens for @\(login, privacy: .public)")
-/// logger.notice("Active account → \(userId, privacy: .public)")
-/// logger.warning("Falling back to chattr-side refresh cache for @\(login, privacy: .public)")
-/// logger.error("Bridge refresh failed for @\(login, privacy: .public) (HTTP \(status))")
-/// ```
+/// Always annotate sensitive values (tokens, refresh tokens, Keychain data)
+/// with `privacy: .private` — `AppLogMessage` redacts them to `<private>`
+/// before writing to either `os.Logger` or `DiagnosticLogStore`.
 public enum AppLogger {
     /// Bundle-identifier-style subsystem name used by every chattr logger.
     public static let subsystem = "com.andrewbeshay.chattr"
 
-    /// Convenience builder: `AppLogger.make("Accounts")` → `Logger(subsystem: ..., category: "Accounts")`.
-    public static func make(_ category: String) -> Logger {
-        Logger(subsystem: subsystem, category: category)
+    /// Convenience builder: `AppLogger.make("Accounts")` → dual-sink `AppLog`
+    /// writing to both `os.Logger` and `DiagnosticLogStore.shared`.
+    public static func make(_ category: String) -> AppLog {
+        AppLog(subsystem: subsystem, category: category)
     }
 
     /// Companion to `make(_:)` for signpost-based timing instrumentation.
     /// Returns an `OSSignposter` sharing chattr's subsystem so signposts
     /// show up alongside text logs under the same identifier.
-    ///
-    /// ## Usage
-    ///
-    /// ```swift
-    /// private let signposter = AppLogger.signposter("ChatScreen")
-    ///
-    /// let id = signposter.makeSignpostID()
-    /// let state = signposter.beginInterval("emote-load", id: id, "channel=\(login)")
-    /// await emoteIndex.load(...)
-    /// signposter.endInterval("emote-load", state, "count=\(emoteIndex.snapshot().count)")
-    /// ```
-    ///
-    /// ## Where to see them
-    ///
-    /// Instruments → File → New Trace → Logging template → "Points of
-    /// Interest" lane. Each `beginInterval`/`endInterval` pair shows as
-    /// a graphical bar — overlapping operations are visible as overlapping
-    /// bars, cancelled operations show as truncated bars.
-    ///
-    /// Free-form signposts (`emitEvent`) also work and appear as
-    /// instantaneous markers — useful for "a thing happened" annotations
-    /// without a duration.
     public static func signposter(_ category: String) -> OSSignposter {
         OSSignposter(subsystem: subsystem, category: category)
     }
 
     // MARK: - Recent entries (DevLogView / debug menu)
 
-    /// One log entry, ready for display in a dev-only log viewer.
-    ///
-    /// ## Why a separate type from `OSLogEntryLog`
-    ///
-    /// `OSLogEntryLog` is the underlying Apple type. It's NOT `Sendable`
-    /// and carries internal references to the OSLogStore — bad for SwiftUI
-    /// `@State` arrays (would require unsafe pointer juggling) and bad
-    /// for crossing actor boundaries.
-    ///
-    /// `Entry` is a snapshot: it pulls out just the fields we want, has a
-    /// value-type identity, conforms to `Sendable`, and is safe to hold
-    /// in @State or pass across `await` boundaries.
+    /// One log entry, ready for display in `DevLogView` and diagnostic exports.
     public struct Entry: Sendable, Identifiable, Equatable, Hashable {
-        /// Deterministic id: same (date + category + message) → same id
-        /// across reloads. This is critical for SwiftUI diffing — without
-        /// stable identity, every refresh of the DevLogView would re-create
-        /// all row views (slow at 200 entries each with multi-line text).
-        ///
-        /// Implementation: a hash of the entry's display fields. Collisions
-        /// are vanishingly unlikely in practice (two distinct log lines
-        /// would need an identical timestamp down to the nanosecond, plus
-        /// identical category and message) and only cause a row not to
-        /// re-diff — never user-visible.
         public let id: Int
         public let date: Date
         public let level: Level
         public let category: String
         public let composedMessage: String
 
+        public init(
+            id: Int,
+            date: Date,
+            level: Level,
+            category: String,
+            composedMessage: String
+        ) {
+            self.id = id
+            self.date = date
+            self.level = level
+            self.category = category
+            self.composedMessage = composedMessage
+        }
+
         /// Mirrors the relevant cases of `OSLogEntryLog.Level`, plus a fallback
-        /// for unknowns. We surface our own enum so consumers (e.g., a SwiftUI
-        /// view) don't have to import `os` just to switch on severity.
+        /// for unknowns.
         public enum Level: String, Sendable, CaseIterable {
             case debug, info, notice, warning, error, fault, undefined
 
@@ -146,54 +201,43 @@ public enum AppLogger {
         }
     }
 
-    /// Fetch recent log entries from this process's `OSLogStore`, filtered to
-    /// chattr's subsystem.
+    /// Fetch recent log entries, newest-first.
     ///
-    /// ## How this works
-    ///
-    /// `OSLogStore.local()` reads from the unified system log Apple maintains
-    /// for every process. Since iOS 15, your app can read its own entries
-    /// without any entitlement (cross-process reads still require special
-    /// privileges).
-    ///
-    /// We filter via an `NSPredicate` matching our subsystem at the store
-    /// layer (much faster than iterating + filtering in Swift), then map
-    /// each `OSLogEntryLog` into our `Entry` value type.
-    ///
-    /// ## Performance
-    ///
-    /// Synchronous OSLogStore reads are fast — ~10-50ms for a few hundred
-    /// entries on a modern device. Still bad on the main thread; call from
-    /// a background Task in views.
-    ///
-    /// ## What entries does this return
-    ///
-    /// Everything `logger.*` (and TwitchKit's logger, and Apple's own
-    /// framework logs at chattr's subsystem) emitted in the current process
-    /// since launch, subject to OS retention (typically minutes-to-hours
-    /// of recent activity). It does NOT return entries from a previous
-    /// run — process boundaries reset the local view.
-    ///
-    /// - Parameters:
-    ///   - limit: Maximum number of entries to return (newest first).
-    ///   - minLevel: Lowest severity to include.
-    /// - Returns: Entries newest-first.
+    /// Reads from `DiagnosticLogStore.shared` first (which preserves `.debug`
+    /// and `.info` reliably in TestFlight / Release builds without Xcode
+    /// attached), falling back to `OSLogStore` if the in-app buffer is empty.
     public static func recentEntries(
-        limit: Int = 200,
+        limit: Int = 500,
         minLevel: Entry.Level = .info
     ) -> [Entry] {
         guard limit > 0 else { return [] }
+        let buffered = DiagnosticLogStore.shared.entries(limit: limit, minLevel: minLevel)
+        if !buffered.isEmpty {
+            return buffered
+        }
+        return recentOSLogEntries(limit: limit, minLevel: minLevel)
+    }
+
+    /// Reads the rotated previous-session log file, if one exists on disk.
+    public static func previousSessionLog(maxBytes: Int = 64 * 1024) -> String? {
+        DiagnosticLogStore.shared.previousSessionLog(maxBytes: maxBytes)
+    }
+
+    /// Clears the in-app log buffer and on-disk rotating log files.
+    public static func clearRecentEntries() {
+        DiagnosticLogStore.shared.clear()
+    }
+
+    private static func recentOSLogEntries(
+        limit: Int,
+        minLevel: Entry.Level
+    ) -> [Entry] {
         do {
             let store = try OSLogStore(scope: .currentProcessIdentifier)
-            // Start from a generous lookback. OSLogStore positions are
-            // wall-clock-based; 1 hour comfortably covers a debugging
-            // session without scanning the whole log.
             let position = store.position(date: Date(timeIntervalSinceNow: -3600))
             let predicate = NSPredicate(format: "subsystem == %@", subsystem)
             let raw = try store.getEntries(at: position, matching: predicate)
 
-            // Fixed-size ring buffer so memory stays O(limit) even under a
-            // busy chat session instead of buffering an entire hour of logs.
             var ring: [Entry] = []
             ring.reserveCapacity(limit)
             var writeIndex = 0
@@ -202,9 +246,6 @@ public enum AppLogger {
                 guard let log = entry as? OSLogEntryLog else { continue }
                 let level = Self.mapLevel(log.level)
                 guard level.severity >= minLevel.severity else { continue }
-                // Deterministic id from display fields. Same content →
-                // same id across reloads → stable SwiftUI row identity →
-                // no re-create on refresh.
                 var hasher = Hasher()
                 hasher.combine(log.date)
                 hasher.combine(log.category)
@@ -224,7 +265,6 @@ public enum AppLogger {
                 }
             }
 
-            // Reconstruct newest-first from the ring.
             guard !ring.isEmpty else { return [] }
             var result: [Entry] = []
             result.reserveCapacity(ring.count)
@@ -238,17 +278,10 @@ public enum AppLogger {
             }
             return result
         } catch {
-            // Store unavailable, predicate malformed, etc. Return empty
-            // rather than throwing — the dev view shows an empty state.
             return []
         }
     }
 
-    /// Map `OSLogEntryLog.Level` (Apple) → `Entry.Level` (ours). The case
-    /// names mostly line up; `notice` and `undefined` are the only quirks.
-    /// `warning` is our own intermediate level that maps to `.error` at the
-    /// OS layer (Apple's enum doesn't have a `.warning` case; calls to
-    /// `logger.warning(...)` are stored as `.error` severity in OSLogStore).
     private static func mapLevel(_ os: OSLogEntryLog.Level) -> Entry.Level {
         switch os {
         case .debug:     return .debug

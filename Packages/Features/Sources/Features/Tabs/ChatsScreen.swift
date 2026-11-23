@@ -1,6 +1,9 @@
 import SwiftUI
 import Accounts
+import Core
 import DesignSystem
+
+private let logger = AppLogger.make("Features.ChatsScreen")
 
 /// The Chats tab: open chats (`OpenChatsList`), Live first. Tapping one
 /// pushes the full-screen `ChatPagerScreen` (tab bar hidden) — or, on a
@@ -55,6 +58,20 @@ struct ChatsScreen: View {
     /// Keeps a Plus/Max iPhone in landscape (~930 × ~400pt) on the
     /// full-width chat and its landscape stream stage.
     private static let splitMinHeight: CGFloat = 500
+
+    /// Rounded geometry + split decision for `onGeometryChange` so only
+    /// whole-point resizes or layout flips trigger the callback.
+    private struct ChatsGeometry: Equatable {
+        let width: Int
+        let height: Int
+        let fitsSplit: Bool
+
+        init(size: CGSize, fitsSplit: Bool) {
+            self.width = Int(size.width.rounded())
+            self.height = Int(size.height.rounded())
+            self.fitsSplit = fitsSplit
+        }
+    }
 
     private static func fitsSplit(_ size: CGSize) -> Bool {
         size.width >= splitMinWidth && size.height >= splitMinHeight
@@ -120,10 +137,20 @@ struct ChatsScreen: View {
         // remount the chat mid-message.
         .background {
             Color.clear
-                .onGeometryChange(for: Bool.self) { proxy in
-                    Self.fitsSplit(proxy.size)
-                } action: { fits in
-                    usesSplitLayout = fits
+                .onGeometryChange(for: ChatsGeometry.self) { proxy in
+                    ChatsGeometry(size: proxy.size, fitsSplit: Self.fitsSplit(proxy.size))
+                } action: { geo in
+                    let changed = usesSplitLayout != geo.fitsSplit
+                    if changed {
+                        usesSplitLayout = geo.fitsSplit
+                    }
+                    ChatDiagnostics.shared.updatePagerLayout(
+                        usesSplitLayout: geo.fitsSplit,
+                        containerSize: CGSize(width: geo.width, height: geo.height)
+                    )
+                    if changed {
+                        logger.info("ChatsScreen layout → \(geo.fitsSplit ? "split" : "stack", privacy: .public) (\(geo.width)x\(geo.height))")
+                    }
                 }
                 .ignoresSafeArea(.keyboard)
                 .allowsHitTesting(false)

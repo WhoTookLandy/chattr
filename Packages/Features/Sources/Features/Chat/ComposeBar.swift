@@ -617,6 +617,10 @@ struct ComposeBar: View {
                     Label("Close Chat", systemImage: "xmark")
                 }
             }
+            if DeveloperSettings.isUnlocked {
+                Divider()
+                DeveloperComposeMenuItems()
+            }
         } label: {
             // ⋯ in its own interactive glass circle beside the pill, the
             // same height as the pill so the bar reads as one row. A "+"
@@ -709,6 +713,34 @@ struct ComposeBar: View {
         // Start the slow-mode wait from when the send went out.
         if !slowModeExempt, let seconds = chatRestrictions?.slowModeSeconds, seconds > 0 {
             cooldown = SlowModeCooldown(startedAt: .now, seconds: seconds)
+        }
+    }
+}
+
+/// Developer-only items in the compose bar's `⋯` menu. Kept in a child view
+/// so `@AppStorage` for the Debug HUD never subscribes `ComposeBar.body`.
+private struct DeveloperComposeMenuItems: View {
+    @AppStorage(DeveloperSettings.chatDebugHUDKey) private var showDebugHUD = false
+
+    var body: some View {
+        Menu {
+            Button {
+                let entries = AppLogger.recentEntries(limit: 500, minLevel: .debug)
+                let report = DiagnosticReportBuilder.build(entries: entries)
+                DeveloperSettings.copyToClipboard(report)
+            } label: {
+                Label("Copy Chat Diagnostics", systemImage: "doc.on.doc")
+            }
+            Button {
+                showDebugHUD.toggle()
+            } label: {
+                Label(
+                    showDebugHUD ? "Hide Debug HUD" : "Show Debug HUD",
+                    systemImage: showDebugHUD ? "eye.slash" : "gauge.with.dots.needle.33percent"
+                )
+            }
+        } label: {
+            Label("Developer", systemImage: "ladybug")
         }
     }
 }

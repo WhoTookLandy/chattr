@@ -202,6 +202,11 @@ public final class ChatTranscriptModel {
     /// pill's "N new". Not observed.
     var lineCap: Int { store.lineCap }
 
+    /// Non-observed diagnostic counts (safe to read outside view bodies).
+    var visibleLineCount: Int { store.visibleLineCount }
+    var unfilteredLineCount: Int { store.unfilteredLineCount }
+    var blockedUserCount: Int { store.blockedUserCount }
+
     // MARK: - Background pause
 
     /// True while the backlog a pause left behind is being applied: those

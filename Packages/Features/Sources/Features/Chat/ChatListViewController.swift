@@ -2,6 +2,9 @@
 import SwiftUI
 import UIKit
 import ChatModel
+import Core
+
+private let logger = AppLogger.make("Features.ChatListVC")
 
 /// Collection view that reports every layout pass to its owner. Self-sizing
 /// cells (`UIHostingConfiguration` + `.estimated` heights) invalidate layout
@@ -24,6 +27,16 @@ final class ChatListViewController: UIViewController {
 
     /// Single section — chat is one flat list.
     private enum Section { case main }
+
+    /// Channel login for diagnostic logs and live geometry snapshots.
+    var channelLoginName: String = ""
+
+    /// One-shot milestone / anomaly log guards so TestFlight diagnostics
+    /// capture initial mount & layout issues without per-message spam.
+    private var loggedInitialApply = false
+    private var loggedLayoutAnomaly = false
+    private var lastObservedBounds: CGRect = .zero
+    private var lastObservedVisibleCells = -1
 
     var rowContent: ((ChatLine) -> ChatRow)?
 
@@ -153,6 +166,19 @@ final class ChatListViewController: UIViewController {
         super.viewDidLoad()
         configureCollectionView()
         configureDataSource()
+        let snapshot = recordDiagnostics()
+        logger.info("ChatListVC viewDidLoad #\(self.channelLoginName, privacy: .public): \(snapshot.summaryLine, privacy: .public)")
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        let snapshot = recordDiagnostics()
+        logger.info("ChatListVC viewDidAppear #\(self.channelLoginName, privacy: .public): \(snapshot.summaryLine, privacy: .public)")
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        recordDiagnosticsIfLayoutChanged()
     }
 
     private func configureCollectionView() {
@@ -162,7 +188,11 @@ final class ChatListViewController: UIViewController {
         // keyboard/inset changes. The offset-delta guard inside
         // pinToBottomIfNeeded breaks the layout→pin→layout recursion once
         // the geometry converges.
-        layoutCallbackView.onDidLayout = { [weak self] in self?.pinToBottomIfNeeded() }
+        layoutCallbackView.onDidLayout = { [weak self] in
+            guard let self else { return }
+            self.pinToBottomIfNeeded()
+            self.recordDiagnosticsIfLayoutChanged()
+        }
         collectionView = layoutCallbackView
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
@@ -499,6 +529,89 @@ final class ChatListViewController: UIViewController {
         // NEXT page's layout. Gated on reset so the per-flush append path
         // never pays for it.
         if edit.resetIds != nil { Self.refineEstimatedRowHeight(from: collectionView) }
+
+        let diag = recordDiagnostics()
+        if !loggedInitialApply {
+            loggedInitialApply = true
+            logger.info("ChatListVC initial apply #\(self.channelLoginName, privacy: .public): \(diag.summaryLine, privacy: .public)")
+        }
+        if diag.itemCount > 0, (diag.collectionBounds.isEmpty || diag.visibleCellCount == 0) {
+            if !loggedLayoutAnomaly {
+                loggedLayoutAnomaly = true
+                logger.warning("ChatListVC blank-list anomaly #\(self.channelLoginName, privacy: .public): \(diag.summaryLine, privacy: .public)")
+            }
+        } else if diag.visibleCellCount > 0 {
+            loggedLayoutAnomaly = false
+        }
+    }
+
+    /// Captures live `UICollectionView` geometry and tailing state into
+    /// `ChatDiagnostics.shared` (non-observable, zero SwiftUI invalidation).
+    @discardableResult
+    private func recordDiagnostics() -> ChatListGeometrySnapshot {
+        guard isViewLoaded, let collectionView else {
+            let unloaded = ChatListGeometrySnapshot(
+                isViewLoaded: false,
+                isPinnedToBottom: tailing.isPinnedToBottom,
+                isVisible: tailing.isVisible,
+                isSuspended: tailing.isSuspended,
+                feedConsumedVersion: feed.consumedVersion,
+                feedLiveIdsCount: feed.liveIds.count,
+                feedUnreadCount: feed.unreadCount
+            )
+            if !channelLoginName.isEmpty {
+                ChatDiagnostics.shared.recordListGeometry(channelLogin: channelLoginName, unloaded)
+            }
+            return unloaded
+        }
+        let visibleCells = collectionView.visibleCells
+        var minH: CGFloat = 0
+        var maxH: CGFloat = 0
+        if !visibleCells.isEmpty {
+            minH = .greatestFiniteMagnitude
+            for cell in visibleCells {
+                let h = cell.bounds.height
+                if h < minH { minH = h }
+                if h > maxH { maxH = h }
+            }
+        }
+        let sectionCount = collectionView.numberOfSections
+        let itemCount = sectionCount > 0 ? collectionView.numberOfItems(inSection: 0) : 0
+        let snapshot = ChatListGeometrySnapshot(
+            isViewLoaded: true,
+            inWindow: view.window != nil,
+            viewBounds: view.bounds,
+            collectionBounds: collectionView.bounds,
+            contentSize: collectionView.contentSize,
+            contentOffset: collectionView.contentOffset,
+            adjustedContentInsetTop: collectionView.adjustedContentInset.top,
+            adjustedContentInsetBottom: collectionView.adjustedContentInset.bottom,
+            sectionCount: sectionCount,
+            itemCount: itemCount,
+            visibleCellCount: visibleCells.count,
+            minVisibleCellHeight: minH,
+            maxVisibleCellHeight: maxH,
+            isPinnedToBottom: tailing.isPinnedToBottom,
+            isVisible: tailing.isVisible,
+            isSuspended: tailing.isSuspended,
+            feedConsumedVersion: feed.consumedVersion,
+            feedLiveIdsCount: feed.liveIds.count,
+            feedUnreadCount: feed.unreadCount
+        )
+        lastObservedBounds = collectionView.bounds
+        lastObservedVisibleCells = visibleCells.count
+        if !channelLoginName.isEmpty {
+            ChatDiagnostics.shared.recordListGeometry(channelLogin: channelLoginName, snapshot)
+        }
+        return snapshot
+    }
+
+    private func recordDiagnosticsIfLayoutChanged() {
+        guard isViewLoaded, let collectionView else { return }
+        let boundsChanged = collectionView.bounds != lastObservedBounds
+        let visibleCount = collectionView.visibleCells.count
+        guard boundsChanged || visibleCount != lastObservedVisibleCells else { return }
+        _ = recordDiagnostics()
     }
 
     /// Refine the process-wide row-height estimate from the cells that are

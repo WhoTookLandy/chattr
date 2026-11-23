@@ -63,12 +63,15 @@ struct ChatListView: UIViewControllerRepresentable {
     /// up at a throttled rate instead of applying every flush, and catches
     /// up at once when it becomes the visible page.
     var isVisible: Bool = true
+    /// Channel login for diagnostic logging & snapshots.
+    var channelLoginName: String = ""
     /// A message row was tapped (with the keyboard down — a tap while
     /// typing just dismisses the keyboard).
     var onLineTapped: (ChatLine) -> Void = { _ in }
 
     func makeUIViewController(context: Context) -> ChatListViewController {
         let vc = ChatListViewController()
+        vc.channelLoginName = channelLoginName
         vc.rowContent = rowContent
         vc.openURLAction = openURL
         vc.onLineTapped = onLineTapped
@@ -91,6 +94,7 @@ struct ChatListView: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: ChatListViewController, context: Context) {
         // rowContent captures fresh per-body closures each update — refresh it
         // so cells built after this call use current state.
+        vc.channelLoginName = channelLoginName
         vc.rowContent = rowContent
         vc.extendsToTop = extendsToTop
         vc.onLineTapped = onLineTapped
