@@ -134,4 +134,11 @@ struct ChatRowInlineRunsTests {
         #expect(ChatRow.isStackedOverlay(runs, at: 2))
         #expect(ChatRow.stackedOverlays(runs, after: 1) == 2..<3)
     }
+
+    // MARK: - Viewer list pagination
+
+    @Test("ViewerListSheet page size stays within TwitchKit's HelixQuery 1...100 pagination limit")
+    func viewerListPageSizeWithinHelixLimit() {
+        #expect((1...100).contains(ViewerListSheet.pageSize))
+    }
 }

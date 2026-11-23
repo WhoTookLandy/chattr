@@ -1,12 +1,9 @@
-TestFlight diagnostics, persistent logs, and live chat HUD
+Fixes for TestFlight Build 34 feedback: viewer list loading and redesigned chat announcements
 
-NEW
-• Persistent in-app logs: Debug and Info logs now stay available in TestFlight without Xcode attached, and the previous session's log is preserved across restarts/crashes.
-• One-tap diagnostic export: Settings > About > Developer > Recent Logs (and Copy Diagnostic Report) now lets you search logs, inspect a Live Chat Snapshot, and copy or share a full report including device/layout info, chat state, and UICollectionView geometry.
-• Live Chat Debug HUD: Toggle "Chat Debug HUD" in Settings > About > Developer (or inside chat's ... > Developer menu) to show a compact live overlay of transcript branch, attach state, message counts, and list bounds/cells.
-• TestFlight auto-unlock: The Developer section under Settings > About is now shown automatically in TestFlight builds.
+FIXED
+• Viewers sheet loading: Fixed a client-side page size error that caused the Viewers sheet to always fail with "Couldn't load viewers" even for moderators and broadcasters, and added a Try Again button for transient errors.
+• Chat announcements: Announcements (/announce) now render Twitch native emotes and 7TV/BTTV/FFZ emotes inline, highlight @mentions and tappable links, show the sender's badges and colored username, and use a styled card with Twitch's announcement accent color and megaphone header instead of a plain gray info box.
 
 PLEASE TEST
-1. Open Settings > About and confirm the Developer section is visible with Recent Logs, Chat Debug HUD, and Copy Diagnostic Report.
-2. Open a stream's chat — if chat appears empty, tap ... > Developer > Copy Chat Diagnostics (or toggle Show Debug HUD) and share the copied report or screenshot.
-3. Open Recent Logs, filter by severity/category/search, expand Live Chat Snapshot, and test Copy and Share.
+1. Open a stream where you're a moderator or broadcaster and tap the viewer count — confirm the Viewers list loads and paginates as you scroll.
+2. Trigger or watch a /announce message (including one with channel/7TV emotes and a link) — confirm the card uses the announcement accent bar/tint, shows the sender and emotes inline, and links are tappable.

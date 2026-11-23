@@ -2,12 +2,21 @@ import SwiftUI
 import Accounts
 import TwitchKit
 import Core
+import os
+
+private let logger = AppLogger.make("Features.ViewerListSheet")
 
 /// Who's in chat — opened from the viewer count on the video. Twitch only
 /// returns the chatter list to the broadcaster and their moderators
 /// (`GET /chat/chatters`, scope `moderator:read:chatters`), so everyone
 /// else gets a clear explanation instead of a blank sheet.
 struct ViewerListSheet: View {
+    /// Page size requested per `fetchChattersPage` call. TwitchKit 0.3.4's
+    /// shared `HelixQuery.appendPagination` validates `1...100` client-side
+    /// and throws `HelixError.badRequest` for values above 100, so keep this
+    /// within that bound and rely on cursor pagination for larger chats.
+    static let pageSize = 100
+
     let channel: ChannelDescriptor
     let account: Account
     let accountStore: AccountStore
@@ -81,13 +90,29 @@ struct ViewerListSheet: View {
                             }
                         }
                     }
-                    if let nextCursor = cursor, query.isEmpty {
-                        HStack {
-                            Spacer()
-                            ProgressView()
-                            Spacer()
+                    if let nextCursor = cursor {
+                        if query.isEmpty {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                Spacer()
+                            }
+                            .task(id: nextCursor) { await loadMore() }
+                        } else {
+                            Button {
+                                Task { await loadMore() }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if isLoadingMore {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
+                                    Text(loadMoreSearchLabel)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .disabled(isLoadingMore)
                         }
-                        .task(id: nextCursor) { await loadMore() }
                     }
                 } header: {
                     Text(headerText)
@@ -111,7 +136,10 @@ struct ViewerListSheet: View {
                 "Couldn't load viewers",
                 systemImage: "exclamationmark.triangle",
                 message: "Try again in a moment."
-            )
+            ) {
+                state = .loading
+                Task { await loadFirstPage() }
+            }
         }
     }
 
@@ -123,7 +151,19 @@ struct ViewerListSheet: View {
         return "\(shown.formatted()) in chat"
     }
 
-    private func unavailable(_ title: String, systemImage: String, message: String) -> some View {
+    private var loadMoreSearchLabel: String {
+        if let total {
+            return "Load more viewers (\(chatters.count.formatted()) of \(total.formatted()) loaded)"
+        }
+        return "Load more viewers (\(chatters.count.formatted()) loaded)"
+    }
+
+    private func unavailable(
+        _ title: String,
+        systemImage: String,
+        message: String,
+        retry: (() -> Void)? = nil
+    ) -> some View {
         ContentUnavailableView {
             Label(title, systemImage: systemImage)
         } description: {
@@ -133,6 +173,11 @@ struct ViewerListSheet: View {
                     Text("\(viewerCount.formatted()) watching right now.")
                         .foregroundStyle(.secondary)
                 }
+            }
+        } actions: {
+            if let retry {
+                Button("Try Again", action: retry)
+                    .buttonStyle(.bordered)
             }
         }
     }
@@ -147,7 +192,7 @@ struct ViewerListSheet: View {
             try await client.api.fetchChattersPage(
                 broadcasterID: broadcasterID,
                 moderatorID: moderatorID,
-                first: 1000,
+                first: Self.pageSize,
                 after: cursor
             )
         }
@@ -168,9 +213,11 @@ struct ViewerListSheet: View {
                 // Twitch answers 401 for a token without the scope.
                 state = .missingScope
             default:
+                logger.warning("Viewer list load failed for #\(channel.channelLoginName, privacy: .public): \(String(describing: error), privacy: .public)")
                 state = .failed
             }
         } catch {
+            logger.warning("Viewer list load failed for #\(channel.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
             state = .failed
         }
     }
@@ -194,6 +241,7 @@ struct ViewerListSheet: View {
         } catch let urlError as URLError where urlError.code == .cancelled {
             // URLSession cancellation on view tear-down/search — keep `cursor`.
         } catch {
+            logger.warning("Viewer list pagination failed for #\(channel.channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
             cursor = nil
         }
     }

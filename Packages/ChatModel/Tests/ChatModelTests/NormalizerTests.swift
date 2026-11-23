@@ -434,6 +434,136 @@ struct NormalizerTokenizationTests {
         #expect(a == b)
     }
 
+    // MARK: - Announcement notifications
+
+    @Test("Announcement notification tokenizes Twitch + third-party emotes, mentions, badges, and color")
+    func announcementTokenizesEmotesAndCarriesMetadata() throws {
+        let json = """
+        {
+            "broadcaster_user_id": "1",
+            "broadcaster_user_login": "hello_kiko",
+            "broadcaster_user_name": "hello_kiko",
+            "chatter_user_id": "1001",
+            "chatter_user_login": "streamelements",
+            "chatter_user_name": "StreamElements",
+            "color": "#5B99FF",
+            "badges": [
+                { "set_id": "moderator", "id": "1", "info": "" }
+            ],
+            "system_message": "",
+            "message_id": "ann-1",
+            "message": {
+                "text": "Check out @Landy keekoLove KEKW",
+                "fragments": [
+                    { "type": "text", "text": "Check out " },
+                    {
+                        "type": "mention",
+                        "text": "@Landy",
+                        "mention": {
+                            "user_id": "42",
+                            "user_login": "landy",
+                            "user_name": "Landy"
+                        }
+                    },
+                    { "type": "text", "text": " " },
+                    {
+                        "type": "emote",
+                        "text": "keekoLove",
+                        "emote": {
+                            "id": "emotesv2_abc123",
+                            "emote_set_id": "999",
+                            "owner_id": "1",
+                            "format": ["static"]
+                        }
+                    },
+                    { "type": "text", "text": " KEKW" }
+                ]
+            },
+            "notice_type": "announcement",
+            "announcement": { "color": "PURPLE" }
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let notification = try decoder.decode(EventSubChatNotification.self, from: Data(json.utf8))
+
+        let kekw = makeEmote("KEKW")
+        let line = try #require(Normalizer.line(
+            from: notification,
+            emoteSnapshot: ["KEKW": kekw],
+            currentUserLogin: "landy",
+            timestamp: testStamp
+        ))
+
+        #expect(line.id == "ann-1")
+        #expect(line.kind == .announcementBubble(.init(color: .purple)))
+        #expect(line.authorUserId == "1001")
+        #expect(line.authorUserLogin == "streamelements")
+        #expect(line.authorDisplayName == "StreamElements")
+        #expect(line.authorColor == "#5B99FF")
+        #expect(line.originalBadges.count == 1)
+        #expect(line.originalBadges.first?.setId == "moderator")
+        #expect(line.isHighlighted == true)
+        #expect(line.runs.count == 5)
+        #expect(line.runs[0] == .text("Check"))
+        #expect(line.runs[1] == .text("out"))
+        #expect(line.runs[2] == .mention(login: "landy", isMe: true))
+        if case .twitchEmote(let ref, let name) = line.runs[3] {
+            #expect(ref.id == "emotesv2_abc123")
+            #expect(name == "keekoLove")
+        } else {
+            Issue.record("Expected Twitch emote at index 3, got \(line.runs[3])")
+        }
+        #expect(line.runs[4] == .emote(kekw))
+    }
+
+    @Test("Announcement falls back to plain message.text with third-party emotes when fragments are empty")
+    func announcementFallbackWithoutFragments() throws {
+        let json = """
+        {
+            "broadcaster_user_id": "1",
+            "broadcaster_user_login": "hello_kiko",
+            "broadcaster_user_name": "hello_kiko",
+            "chatter_user_id": "1001",
+            "chatter_user_login": "modbot",
+            "chatter_user_name": "ModBot",
+            "badges": [],
+            "system_message": "",
+            "message_id": "ann-2",
+            "message": {
+                "text": "Welcome KEKW",
+                "fragments": []
+            },
+            "notice_type": "announcement",
+            "announcement": { "color": "BLUE" }
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let notification = try decoder.decode(EventSubChatNotification.self, from: Data(json.utf8))
+
+        let kekw = makeEmote("KEKW")
+        let line = try #require(Normalizer.line(
+            from: notification,
+            emoteSnapshot: ["KEKW": kekw],
+            timestamp: testStamp
+        ))
+
+        #expect(line.kind == .announcementBubble(.init(color: .blue)))
+        #expect(line.runs == [.text("Welcome"), .emote(kekw)])
+    }
+
+    @Test("Announcement accent colors map Twitch strings case-insensitively and default to primary")
+    func announcementAccentColors() {
+        #expect(ChatLine.AnnouncementBubble.AccentColor(twitchColor: "PRIMARY") == .primary)
+        #expect(ChatLine.AnnouncementBubble.AccentColor(twitchColor: "BLUE") == .blue)
+        #expect(ChatLine.AnnouncementBubble.AccentColor(twitchColor: "green") == .green)
+        #expect(ChatLine.AnnouncementBubble.AccentColor(twitchColor: "ORANGE") == .orange)
+        #expect(ChatLine.AnnouncementBubble.AccentColor(twitchColor: "PURPLE") == .purple)
+        #expect(ChatLine.AnnouncementBubble.AccentColor(twitchColor: nil) == .primary)
+        #expect(ChatLine.AnnouncementBubble.AccentColor(twitchColor: "UNKNOWN") == .primary)
+    }
+
     // MARK: - Tokenizer paths
 
     @Test("ASCII whitespace of every kind separates words (byte fast path)")

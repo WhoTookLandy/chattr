@@ -19,6 +19,8 @@ struct WhatsNewScreen: View {
             version: "Beta",
             title: "Watch while you chat",
             notes: [
+                "Redesigned chat announcements with Twitch accent colors, sender badges, tappable links, and inline Twitch/7TV/BTTV/FFZ emotes.",
+                "Fixed: the Viewers list failing to load even for moderators and broadcasters.",
                 "Type @ in the message box for name suggestions from the chat.",
                 "The keyboard now drops after you send a message.",
                 "Drag the mini player anywhere (it settles in the nearest corner) and pinch it to resize. Or turn on PiP When Leaving Chat (Settings → Video & Device) to use Apple’s floating player instead.",

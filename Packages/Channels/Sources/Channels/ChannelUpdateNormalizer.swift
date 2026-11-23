@@ -114,7 +114,13 @@ struct ChannelUpdateNormalizer: Sendable {
             signposter.endInterval("normalize", interval)
             return .message(normalized)
         case .notification(let notification):
-            return Normalizer.line(from: notification, timestamp: receivedAt).map { ChannelUpdate.row($0) }
+            let table = currentEmoteTable()
+            return Normalizer.line(
+                from: notification,
+                emoteSnapshot: table.emotes,
+                currentUserLogin: accountLogin,
+                timestamp: receivedAt
+            ).map { ChannelUpdate.row($0) }
         case .raid(let raid):
             let id = Normalizer.raidLineID(
                 fromBroadcasterUserId: raid.fromBroadcasterUserId,
