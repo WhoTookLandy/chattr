@@ -65,16 +65,12 @@ struct ChatListView: UIViewControllerRepresentable {
     var isVisible: Bool = true
     /// Channel login for diagnostic logging & snapshots.
     var channelLoginName: String = ""
-    /// A message row was tapped (with the keyboard down — a tap while
-    /// typing just dismisses the keyboard).
-    var onLineTapped: (ChatLine) -> Void = { _ in }
 
     func makeUIViewController(context: Context) -> ChatListViewController {
         let vc = ChatListViewController()
         vc.channelLoginName = channelLoginName
         vc.rowContent = rowContent
         vc.openURLAction = openURL
-        vc.onLineTapped = onLineTapped
         vc.onAtBottomChanged = { atBottom in
             // Avoid mutating SwiftUI state during the UIKit layout pass.
             // Task { @MainActor } defers past the current synchronous
@@ -97,7 +93,6 @@ struct ChatListView: UIViewControllerRepresentable {
         vc.channelLoginName = channelLoginName
         vc.rowContent = rowContent
         vc.extendsToTop = extendsToTop
-        vc.onLineTapped = onLineTapped
         vc.unreadLimit = unreadLimit
         vc.isVisible = isVisible
         vc.update(

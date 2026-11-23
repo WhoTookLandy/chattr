@@ -1,20 +1,18 @@
 import SwiftUI
 import Channels
 
-/// The user card's moderation tools, in ONE compact row so the card's
-/// primary content (the user's recent messages) stays right below:
+/// The user card's moderation drawer, using Apple's inset-grouped hierarchy
+/// and semantic color tints:
 ///
-///   [Unban]  [1m] [10m] [1h] [1d]  ⋯ [shield menu: Ban… · Warn… · Unban · Edit timeouts…]
-///
-/// - Timeout chips fire immediately (a timeout is reversible and the most
-///   common action, so it gets no confirmation); the list is editable and
-///   persisted per device (`TimeoutPresets`).
-/// - Ban asks for confirmation with an optional reason; Warn asks for its
-///   required reason. Both live behind the shield menu.
-/// - Unban sits at the front of the row only when the user is KNOWN to be
-///   banned / timed out (GET /moderation/banned on open, which Twitch only
-///   answers for the broadcaster's own token); when that's unknown — always
-///   for an ordinary moderator — it stays in the menu instead.
+/// - When the user is known to be timed out or banned, a tinted status banner
+///   surfaces right above the controls with a live countdown (for timeouts)
+///   and a one-tap green **Lift** / **Unban** pill.
+/// - Inside the grouped **Moderation** card:
+///   - Row 1: instant-tap timeout pills (`TimeoutPresets`, editable via
+///     `Edit` in the header).
+///   - Row 2: semantically tinted high-impact controls (**Warn…** in amber,
+///     **Ban…** in red — both confirm via alert — plus **Unban** in green when
+///     ban state is unknown, as it always is for ordinary moderators).
 ///
 /// Only shown when the viewer moderates the channel and the target is
 /// neither themselves nor the broadcaster (decided by the caller).
@@ -28,8 +26,11 @@ struct UserCardModerationBar: View {
     @State private var warnReason = ""
     @State private var editingPresets = false
 
-    /// Height the row adds to the card's resting detent.
-    static let height: CGFloat = 44
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Height the drawer adds to the card's resting detent so all controls
+    /// remain reachable without dragging up.
+    static let height: CGFloat = 122
 
     init(targetUserId: String, targetDisplayName: String, chatModel: ChatTranscriptModel) {
         _model = State(initialValue: UserModerationModel(
@@ -40,31 +41,24 @@ struct UserCardModerationBar: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 6) {
-                        if model.isRestricted {
-                            unbanChip
-                        }
-                        ForEach(TimeoutPresets.decode(presetsRaw), id: \.self) { seconds in
-                            timeoutChip(seconds)
-                        }
-                    }
-                }
-                .scrollIndicators(.hidden)
-                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-
-                moreMenu
+        VStack(alignment: .leading, spacing: 10) {
+            if model.isRestricted {
+                restrictionBanner
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .disabled(model.isWorking)
+
+            moderationCard
+                .disabled(model.isWorking)
 
             if let feedback = model.feedback {
-                Label(feedback.message, systemImage: feedback.isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(feedback.isError ? Color.red : Color.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .transition(.opacity)
+                Label(
+                    feedback.message,
+                    systemImage: feedback.isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(feedback.isError ? Color.red : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .transition(.opacity)
             }
         }
         .animation(.snappy(duration: 0.2), value: model.feedback)
@@ -98,79 +92,195 @@ struct UserCardModerationBar: View {
         }
     }
 
-    // MARK: - Chips
+    // MARK: - Active Restriction Banner
 
-    private func timeoutChip(_ seconds: Int) -> some View {
+    @ViewBuilder
+    private var restrictionBanner: some View {
+        let isTimedOut: Bool = {
+            if case .timedOut? = model.banState { return true }
+            return false
+        }()
+        let tint: Color = isTimedOut ? .orange : .red
+
+        HStack(spacing: 8) {
+            Image(systemName: isTimedOut ? "clock.badge.exclamationmark" : "nosign")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(tint)
+
+            restrictionLabel
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Spacer(minLength: 6)
+
+            Button {
+                Task { await model.unban() }
+            } label: {
+                Text(isTimedOut ? "Lift" : "Unban")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.green.opacity(colorScheme == .dark ? 0.22 : 0.14), in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.green.opacity(0.38), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isWorking)
+            .accessibilityLabel(isTimedOut ? "Lift timeout for \(model.targetDisplayName)" : "Unban \(model.targetDisplayName)")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(tint.opacity(colorScheme == .dark ? 0.14 : 0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(tint.opacity(colorScheme == .dark ? 0.30 : 0.22), lineWidth: 0.5)
+        )
+    }
+
+    @ViewBuilder
+    private var restrictionLabel: some View {
+        switch model.banState {
+        case .timedOut(let until)?:
+            let now = Date.now
+            if until > now {
+                Text("Timed out · \(Text(timerInterval: now...until, countsDown: true).monospacedDigit().bold()) left")
+            } else {
+                Text("Timed out")
+            }
+        case .banned?:
+            Text("Banned in this channel")
+        default:
+            EmptyView()
+        }
+    }
+
+    // MARK: - Grouped Moderation Card
+
+    private var moderationCard: some View {
+        let presets = TimeoutPresets.decode(presetsRaw)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Moderation", systemImage: "shield.lefthalf.filled")
+                    .font(.caption.weight(.semibold))
+                    .textCase(.uppercase)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Edit") {
+                    editingPresets = true
+                }
+                .font(.caption.weight(.semibold))
+                .accessibilityLabel("Edit timeout presets")
+            }
+
+            if presets.count <= 4 {
+                HStack(spacing: 6) {
+                    ForEach(presets, id: \.self) { seconds in
+                        timeoutPill(seconds, fillsWidth: true)
+                    }
+                }
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        ForEach(presets, id: \.self) { seconds in
+                            timeoutPill(seconds, fillsWidth: false)
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            }
+
+            HStack(spacing: 8) {
+                impactButton(
+                    "Warn…",
+                    systemImage: "exclamationmark.triangle.fill",
+                    tint: .orange
+                ) {
+                    composingWarning = true
+                }
+                impactButton(
+                    "Ban…",
+                    systemImage: "nosign",
+                    tint: .red
+                ) {
+                    confirmingBan = true
+                }
+                // Ban state unknown (ordinary mod, older token, or fetch failed):
+                // still keep Unban one tap away.
+                if model.banState == nil {
+                    impactButton(
+                        "Unban",
+                        systemImage: "lock.open",
+                        tint: .green
+                    ) {
+                        Task { await model.unban() }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(cardFill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(cardBorder, lineWidth: 0.5)
+        )
+    }
+
+    private func timeoutPill(_ seconds: Int, fillsWidth: Bool) -> some View {
         Button {
             Task { await model.timeout(seconds: seconds) }
         } label: {
-            chipLabel(TimeoutPresets.label(forSeconds: seconds), systemImage: "clock")
+            Text(TimeoutPresets.label(forSeconds: seconds))
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+                .padding(.horizontal, fillsWidth ? 6 : 12)
+                .frame(maxWidth: fillsWidth ? .infinity : nil, minHeight: 34)
+                .background(
+                    Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08), lineWidth: 0.5)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Time out for \(TimeoutPresets.spokenLabel(forSeconds: seconds))")
     }
 
-    private var unbanChip: some View {
-        Button {
-            Task { await model.unban() }
-        } label: {
-            chipLabel(unbanTitle, systemImage: "lock.open", tint: .green)
+    private func impactButton(
+        _ title: String,
+        systemImage: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, minHeight: 36)
+                .background(
+                    tint.opacity(colorScheme == .dark ? 0.16 : 0.11),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(tint.opacity(colorScheme == .dark ? 0.34 : 0.24), lineWidth: 0.5)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
     }
 
-    private var unbanTitle: String {
-        if case .timedOut? = model.banState { return "Untimeout" }
-        return "Unban"
+    private var cardFill: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.055 : 0.04)
     }
 
-    private func chipLabel(_ title: String, systemImage: String, tint: Color? = nil) -> some View {
-        Label(title, systemImage: systemImage)
-            .labelStyle(.titleAndIcon)
-            .font(.subheadline.weight(.semibold).monospacedDigit())
-            .foregroundStyle(tint ?? .primary)
-            .padding(.horizontal, 12)
-            .frame(height: 34)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .contentShape(Capsule())
-    }
-
-    // MARK: - Menu
-
-    private var moreMenu: some View {
-        Menu {
-            Button(role: .destructive) {
-                confirmingBan = true
-            } label: {
-                Label("Ban…", systemImage: "nosign")
-            }
-            Button {
-                composingWarning = true
-            } label: {
-                Label("Warn…", systemImage: "exclamationmark.triangle")
-            }
-            // Ban state unknown (older token, fetch failed): still offer it.
-            if model.banState == nil {
-                Button {
-                    Task { await model.unban() }
-                } label: {
-                    Label("Unban", systemImage: "lock.open")
-                }
-            }
-            Divider()
-            Button {
-                editingPresets = true
-            } label: {
-                Label("Edit Timeouts…", systemImage: "slider.horizontal.3")
-            }
-        } label: {
-            Image(systemName: "shield.lefthalf.filled")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 34, height: 34)
-                .glassEffect(.regular.interactive(), in: .circle)
-                .contentShape(Circle())
-        }
-        .accessibilityLabel("More moderation actions for \(model.targetDisplayName)")
+    private var cardBorder: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.08)
     }
 }

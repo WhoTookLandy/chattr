@@ -131,8 +131,10 @@ public struct ChatScreen: View {
     /// String here is identifiable already (each root id is unique) so
     /// we wrap it minimally for the API.
     @State private var viewingThreadRootId: ThreadRootID?
-    /// Tapped message whose author's card is showing.
+    /// Tapped username whose author's card is showing.
     @State private var userCardTarget: UserCardTarget?
+    /// One-shot `@mention` insert requested from the user card.
+    @State private var pendingMention: ComposeBar.PendingMention?
     /// Viewer list sheet (from the viewer count on the video).
     @State private var showViewerList = false
 
@@ -257,18 +259,6 @@ public struct ChatScreen: View {
                     rowContent: { line in chatRow(for: line, rowDependencies) },
                     rowInputs: rowInputs(badgeStore: rowDependencies.badgeStore),
                     openURL: clipLinks.openURLAction,
-                    onLineTapped: { line in
-                        // Only real chat messages have an author to show.
-                        guard line.kind == .message, !line.authorUserId.isEmpty else { return }
-                        // The author's recent lines are filtered out of the
-                        // transcript here, once per presentation — not in
-                        // the sheet's content closure, which re-runs with
-                        // this body.
-                        userCardTarget = UserCardTarget(
-                            line: line,
-                            transcript: chatModel.transcriptSnapshot().lines
-                        )
-                    },
                     showReportConfirmation: $showReportConfirmation
                 )
             }
@@ -370,15 +360,20 @@ public struct ChatScreen: View {
             UserCardSheet(
                 line: target.line,
                 badges: rowDependencies.badgeStore?.entries(for: target.line.originalBadges) ?? [],
+                channelId: channelId,
+                channelLoginName: channelLoginName,
                 account: account,
                 accountStore: accountStore,
                 recentLines: target.recentLines,
-                rowContent: { chatRow(for: $0, rowDependencies) },
+                rowContent: { chatRow(for: $0, rowDependencies, allowUserCard: false) },
                 // An undelivered row has only its local `pending-…` id —
                 // nothing Twitch can thread a reply against.
                 onReply: target.line.deliveryState == .delivered
                     ? { chatModel.beginReply(to: target.line) }
                     : nil,
+                onMention: isOwnLine ? nil : { insertionName in
+                    pendingMention = ComposeBar.PendingMention(insertionName: insertionName)
+                },
                 onBlock: isOwnLine ? nil : {
                     blockAuthor(of: target.line, reason: .other, isReport: false)
                 },
@@ -666,7 +661,8 @@ public struct ChatScreen: View {
             createClip: ComposeBar.CreateClipEntry(
                 channelId: channelId,
                 action: { showCreateClip = true }
-            )
+            ),
+            pendingMention: pendingMention
         )
         // Write any draft still inside the debounce window when the compose
         // bar leaves (page swiped off, tab closed, account switched).
@@ -734,8 +730,13 @@ public struct ChatScreen: View {
     /// compares callbacks by presence, not identity (`ChatRow.Affordances`),
     /// so when a row compares equal SwiftUI keeps the OLD closures — one
     /// capturing any other changing value would silently go stale.
-    private func chatRow(for line: ChatLine, _ dependencies: RowDependencies) -> ChatRow {
+    private func chatRow(
+        for line: ChatLine,
+        _ dependencies: RowDependencies,
+        allowUserCard: Bool = true
+    ) -> ChatRow {
         let isOwnLine = line.authorUserId == dependencies.accountUserId
+        let canOpenUserCard = allowUserCard && line.kind == .message && !line.authorUserId.isEmpty
         return ChatRow(
             line: line,
             badgeEntries: dependencies.badgeStore?.entries(for: line.originalBadges) ?? [],
@@ -752,7 +753,16 @@ public struct ChatScreen: View {
             },
             onReport: isOwnLine ? nil : { reason in
                 blockAuthor(of: line, reason: reason, isReport: true)
-            }
+            },
+            onAuthorTapped: canOpenUserCard ? {
+                // The author's recent lines are filtered out of the transcript
+                // here, once per presentation — not in the sheet's content
+                // closure, which re-runs with this body.
+                userCardTarget = UserCardTarget(
+                    line: line,
+                    transcript: chatModel.transcriptSnapshot().lines
+                )
+            } : nil
         )
     }
 
