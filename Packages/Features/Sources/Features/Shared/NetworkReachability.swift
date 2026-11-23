@@ -17,6 +17,11 @@ final class NetworkReachability: @unchecked Sendable {
 
     static let shared = NetworkReachability()
 
+    /// Posted whenever `knownIsOnWiFi` changes (e.g., Wi-Fi ↔ cellular), so
+    /// non-view controllers like `HomeFeedPreviewController` can re-check
+    /// policy without making this type `@Observable`.
+    static let didChangeNotification = Notification.Name("com.andrewbeshay.chattr.reachabilityChanged")
+
     private struct State: Sendable {
         /// nil until the monitor reports its first path.
         var unmetered: Bool?
@@ -30,13 +35,17 @@ final class NetworkReachability: @unchecked Sendable {
     private init() {
         monitor.pathUpdateHandler = { [state] path in
             let unmetered = Self.unmetered(path)
-            let waiting = state.withLock { (current: inout State) -> [CheckedContinuation<Bool?, Never>] in
+            let (waiting, didChange) = state.withLock { (current: inout State) -> ([CheckedContinuation<Bool?, Never>], Bool) in
+                let changed = current.unmetered != unmetered
                 current.unmetered = unmetered
                 let waiting = Array(current.waiters.values)
                 current.waiters.removeAll()
-                return waiting
+                return (waiting, changed)
             }
             for waiter in waiting { waiter.resume(returning: unmetered) }
+            if didChange {
+                NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+            }
         }
         monitor.start(queue: DispatchQueue(label: "com.andrewbeshay.chattr.reachability", qos: .utility))
     }

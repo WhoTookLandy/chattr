@@ -166,7 +166,19 @@ final class HomeFeedPreviewController {
                     self.previewHold = center.holdPlayback(.feedPreview)
                 }
                 await PlaybackAudioSession.shared.activate(muted: false)
-                guard !Task.isCancelled, self.activeStreamID == streamID, !self.isMuted else { return }
+                guard !Task.isCancelled, self.activeStreamID == streamID, !self.isMuted else {
+                    // `activate(muted: false)` already committed an exclusive
+                    // session; undo it if no main stream or preview took over.
+                    if self.playbackCenter?.isPlaying != true {
+                        if self.activeStreamID == nil {
+                            PlaybackAudioSession.shared.deactivate()
+                            self.ownsAudioSession = false
+                        } else if self.isMuted {
+                            PlaybackAudioSession.shared.setMuted(true)
+                        }
+                    }
+                    return
+                }
                 if self.playbackCenter?.isPlaying != true {
                     self.ownsAudioSession = true
                 }
@@ -185,12 +197,16 @@ final class HomeFeedPreviewController {
     // MARK: - Lifecycle
 
     func stop() {
+        stopPlayback(clearingTarget: true)
+    }
+
+    private func stopPlayback(clearingTarget: Bool) {
         loadTask?.cancel()
         loadTask = nil
         unmuteTask?.cancel()
         unmuteTask = nil
         itemSubscriptions.removeAll()
-        targetedStreamID = nil
+        if clearingTarget { targetedStreamID = nil }
         if activeStreamID != nil { activeStreamID = nil }
         if readyStreamID != nil { readyStreamID = nil }
         if !isMuted { isMuted = true }
@@ -281,7 +297,13 @@ final class HomeFeedPreviewController {
                 // owns it; keep it mixable so muted previews never cut music.
                 if self.playbackCenter?.isPlaying != true {
                     await PlaybackAudioSession.shared.activate(muted: true)
-                    guard !Task.isCancelled, self.targetedStreamID == streamID else { return }
+                    guard !Task.isCancelled, self.targetedStreamID == streamID else {
+                        if self.playbackCenter?.isPlaying != true, self.activeStreamID == nil {
+                            PlaybackAudioSession.shared.deactivate()
+                            self.ownsAudioSession = false
+                        }
+                        return
+                    }
                     self.ownsAudioSession = true
                 }
 
@@ -324,10 +346,10 @@ final class HomeFeedPreviewController {
             .sink { [weak self] status in
                 guard let self, self.activeStreamID == streamID else { return }
                 if status == .failed {
-                    self.readyStreamID = nil
-                    self.activeStreamID = nil
-                    self.player.pause()
-                    self.player.replaceCurrentItem(with: nil)
+                    // Release any audio hold / owned session, while keeping
+                    // `targetedStreamID` so staying on a broken card doesn't
+                    // spin in a retry loop.
+                    self.stopPlayback(clearingTarget: false)
                 }
             }
             .store(in: &itemSubscriptions)
@@ -372,6 +394,11 @@ final class HomeFeedPreviewController {
             .store(in: &deviceSubscriptions)
 
         notifications.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshPolicy() }
+            .store(in: &deviceSubscriptions)
+
+        notifications.publisher(for: NetworkReachability.didChangeNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refreshPolicy() }
             .store(in: &deviceSubscriptions)

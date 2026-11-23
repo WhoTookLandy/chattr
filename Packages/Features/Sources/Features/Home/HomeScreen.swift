@@ -133,6 +133,11 @@ public struct HomeScreen: View {
         #endif
     }
 
+    /// Offline follows shown in the top rail. Helix has no batch last-live
+    /// endpoint (`/videos` is one call per broadcaster), so this intentionally
+    /// takes the first `recentRailLimit` offline follows in follow order and
+    /// resolves each card's last broadcast lazily on appear rather than fanning
+    /// out hundreds of requests up front.
     private var recentChannels: [RecentChannelItem] {
         guard let followsStore else { return [] }
         return followsStore.sortedAllChannels
