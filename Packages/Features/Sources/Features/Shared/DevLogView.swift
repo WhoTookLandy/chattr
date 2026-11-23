@@ -1,32 +1,42 @@
 import SwiftUI
 import Observation
+import UniformTypeIdentifiers
 import Core
 
-/// Dev-only log viewer. Reads from `OSLogStore` via `DevLogModel`
-/// (which wraps `AppLogger.recentEntries(...)`) and displays chattr's
-/// recent log entries with filtering.
+/// On-demand shareable diagnostic report file. Builds the report from live
+/// `ChatDiagnostics` + `DevLogModel` state at the moment the user taps Share,
+/// rather than holding a stale precomputed string or rebuilding per body pass.
+private struct DiagnosticReportTransferable: Transferable {
+    let build: @MainActor @Sendable () -> String
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .plainText) { item in
+            let text = await item.build()
+            return Data(text.utf8)
+        }
+        .suggestedFileName("chattr-diagnostics.txt")
+    }
+}
+
+/// Dev / TestFlight log viewer and diagnostic report exporter.
 ///
-/// ## Where this is reachable from
-///
-/// Settings → Developer → Recent Logs. Not in the normal nav graph —
-/// intentional. Casual users shouldn't see this; it's for diagnosing
-/// "why doesn't X work?" situations from inside the app without
-/// needing Xcode attached.
-///
-/// ## Architecture
-///
-/// All state + side effects live in `DevLogModel` (its own file).
-/// This view is a pure renderer. The split enables unit-testing
-/// the filter logic without rendering, and keeps the OSLogStore read
-/// configuration (priority, limit, lookback) co-located with the model
-/// instead of scattered in view modifiers.
+/// Reads from `DiagnosticLogStore` (via `AppLogger.recentEntries`) so `.debug`
+/// and `.info` entries are preserved on TestFlight devices without Xcode
+/// attached, alongside live `ChatDiagnostics` layout snapshots and one-tap
+/// Copy / Share report export.
 public struct DevLogView: View {
     @State private var model = DevLogModel()
+    @State private var showLiveSnapshot = false
+    @State private var copiedFeedback = false
+    @AppStorage(DeveloperSettings.chatDebugHUDKey) private var showChatDebugHUD = false
 
     public init() {}
 
     public var body: some View {
+        @Bindable var bindable = model
         List {
+            liveStateSection
+
             Section {
                 ForEach(model.visibleEntries) { entry in
                     DevLogRow(entry: entry)
@@ -43,16 +53,121 @@ public struct DevLogView: View {
             }
         }
         .listStyle(.plain)
+        .searchable(text: $bindable.searchText, prompt: "Filter logs")
         .navigationTitle("Recent Logs")
         .toolbarTitleDisplayMode(.inline)
-        // Hide the tab bar while this view is on screen —
-        // dev tooling shouldn't compete with the rest of the app's chrome.
-        // iOS-only modifier (`.tabBar` unavailable on macOS).
         #if os(iOS)
         .toolbar(.hidden, for: .tabBar)
         #endif
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    copyReport(filteredOnly: false)
+                } label: {
+                    Image(systemName: copiedFeedback ? "checkmark" : "doc.on.doc")
+                }
+                .accessibilityLabel("Copy diagnostic report")
+
+                let logModel = model
+                ShareLink(
+                    item: DiagnosticReportTransferable {
+                        logModel.buildReport(filteredOnly: false, includePreviousSession: true)
+                    },
+                    subject: Text("chattr Diagnostic Report (\(DeveloperSettings.versionString))"),
+                    preview: SharePreview("chattr-diagnostics.txt")
+                ) {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .accessibilityLabel("Share diagnostic report")
+
+                Menu {
+                    Button {
+                        copyReport(filteredOnly: true)
+                    } label: {
+                        Label("Copy Filtered Logs Only", systemImage: "line.3.horizontal.decrease.circle")
+                    }
+                    Toggle(isOn: $showChatDebugHUD) {
+                        Label("Chat Debug HUD", systemImage: "gauge.with.dots.needle.33percent")
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        Task { await model.clear() }
+                    } label: {
+                        Label("Clear Logs", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("More log actions")
+            }
+        }
+        .appSensoryFeedback(.success, trigger: copiedFeedback) { _, copied in copied }
         .refreshable { await model.load() }
         .task { await model.load() }
+    }
+
+    private func copyReport(filteredOnly: Bool) {
+        let report = model.buildReport(
+            filteredOnly: filteredOnly,
+            includePreviousSession: !filteredOnly
+        )
+        DeveloperSettings.copyToClipboard(report)
+        copiedFeedback = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            copiedFeedback = false
+        }
+    }
+
+    @ViewBuilder
+    private var liveStateSection: some View {
+        Section {
+            DisclosureGroup(isExpanded: $showLiveSnapshot) {
+                if showLiveSnapshot {
+                    TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                        liveSnapshotContent
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.path.ecg")
+                        .foregroundStyle(.secondary)
+                    Text("Live Chat Snapshot")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    Text("\(ChatDiagnostics.shared.mergedPages().count) page(s)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var liveSnapshotContent: some View {
+        let pager = ChatDiagnostics.shared.pager
+        let pages = ChatDiagnostics.shared.mergedPages()
+        VStack(alignment: .leading, spacing: 6) {
+            Text(pager?.summaryLine ?? "Pager: (none recorded)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            if pages.isEmpty {
+                Text("Pages: (none mounted)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(pages, id: \.channelLogin) { page in
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(page.summaryLines, id: \.self) { line in
+                            Text(line)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -73,12 +188,6 @@ public struct DevLogView: View {
             .pickerStyle(.segmented)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                // Same Liquid Glass pattern as ChatTabStrip — adjacent pill
-                // chips morph fluidly when categories appear/disappear,
-                // and active state uses `.regular.tint(accent)` so the
-                // material itself takes the color rather than overlaying
-                // a flat fill. Pattern consistency with the main app
-                // chrome; dev-only view but worth aligning.
                 GlassEffectContainer(spacing: 6) {
                     HStack(spacing: 6) {
                         chip(label: "All", isActive: model.selectedCategory == nil) {
@@ -108,9 +217,6 @@ public struct DevLogView: View {
         }
         .buttonStyle(.plain)
         .glassEffect(
-            // Per-branch `.interactive()` — same constraint as ChatTabStrip:
-            // ternary + chained method call won't unify across the two
-            // leaf types (tinted vs untinted Glass).
             isActive
                 ? .regular.tint(Color.accentColor).interactive()
                 : .regular.interactive(),

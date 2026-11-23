@@ -125,6 +125,12 @@ final class TranscriptStore {
     /// the most "new messages" a jump to the live edge can reveal.
     var lineCap: Int { buffer.cap }
 
+    /// Non-observed counts for diagnostics (avoids materializing `lines` or
+    /// subscribing a view body).
+    var visibleLineCount: Int { buffer.visibleCount }
+    var unfilteredLineCount: Int { buffer.count }
+    var blockedUserCount: Int { buffer.blockedIds.count }
+
     /// Every line of the thread rooted at `rootMessageId` — the root plus any
     /// reply naming it as root, in order. O(lines): computed on demand
     /// (threads are rare), and `ThreadView` only calls it on open and when a

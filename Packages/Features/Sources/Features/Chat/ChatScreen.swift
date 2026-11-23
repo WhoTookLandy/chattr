@@ -179,6 +179,11 @@ public struct ChatScreen: View {
     /// nil during previews / detached views just skips the prefetch.
     @Environment(\.chatImagePrefetcher) private var chatImagePrefetcher
 
+    /// Read ONLY inside `.onChange(of: sessionCoordinator.errorMessage)` to
+    /// tag diagnostic snapshots with whether this page is active — never read
+    /// `activeTabId` in `body`, so pager swipes stay isolated from `ChatScreen`.
+    @Environment(\.chatTabs) private var chatTabs
+
     /// The pager tab this page renders, or nil outside the pager (always
     /// active then). Stable for the page's lifetime — deliberately NOT an
     /// `isActive` flag: a flag would change on every swipe, re-creating this
@@ -245,6 +250,7 @@ public struct ChatScreen: View {
                 // provider, outside any body, exactly as before.
                 ChatTranscript(
                     chatModel: chatModel,
+                    channelId: channelId,
                     channelLoginName: channelLoginName,
                     tabId: tabId,
                     connectionStatus: connectionStatus,
@@ -289,6 +295,10 @@ public struct ChatScreen: View {
                         .padding(.top, 8)
                 }
             }
+        }
+        // Opt-in TestFlight / Developer HUD (renders EmptyView with zero cost when off).
+        .overlay(alignment: .bottomLeading) {
+            ChatDebugOverlay(channelLoginName: channelLoginName)
         }
         // Chat surface color — slightly lifted off pure black/white in
         // both schemes (see DesignSystem.Color.chatSurface). Applied here
@@ -550,6 +560,31 @@ public struct ChatScreen: View {
         // that don't inherit this, so `ChatTranscript` hands the same
         // action to each row explicitly.
         .environment(\.openURL, clipLinks.openURLAction)
+        .onAppear {
+            logger.info("ChatScreen appeared #\(channelLoginName, privacy: .public) (id=\(channelId, privacy: .public), tab=\(tabId?.uuidString.prefix(8).description ?? "nil", privacy: .public))")
+        }
+        .onDisappear {
+            logger.info("ChatScreen disappeared #\(channelLoginName, privacy: .public)")
+        }
+        .onChange(of: sessionCoordinator.errorMessage) { _, errorMessage in
+            guard let errorMessage else { return }
+            let isVisible = tabId.map { chatTabs?.activeTabId == $0 } ?? true
+            ChatDiagnostics.shared.recordPage(ChatPageDiagnosticSnapshot(
+                channelLogin: channelLoginName,
+                channelId: channelId,
+                tabId: tabId?.uuidString.prefix(8).description ?? "nil",
+                errorMessage: errorMessage,
+                attachState: String(describing: chatModel.attachState),
+                transcriptBranch: "error",
+                isEmpty: chatModel.isEmpty,
+                visibleLineCount: chatModel.visibleLineCount,
+                unfilteredLineCount: chatModel.unfilteredLineCount,
+                blockedCount: chatModel.blockedUserCount,
+                changeVersion: chatModel.changeVersion,
+                isVisible: isVisible,
+                connectionState: connectionStatus.map { String(describing: $0.state) } ?? "nil"
+            ))
+        }
         // Landscape with the stream showing: video beside / under this
         // whole chat column. Applied last so everything above (transcript,
         // header, compose bar, sheets, session tasks) keeps one structural

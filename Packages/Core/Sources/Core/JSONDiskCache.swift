@@ -10,6 +10,8 @@ public enum CacheSubdirectory {
     public static let emoteGlobals = "emote-cache"
     /// Per-channel third-party emote metadata (one file per broadcasterId).
     public static let emoteChannels = "emote-cache/channels"
+    /// Rotating in-app diagnostic logs (`current.log` / `previous.log`).
+    public static let diagnosticLogs = "diagnostic-logs"
 }
 
 /// Versioned wrapper written to disk. A version bump invalidates older files.

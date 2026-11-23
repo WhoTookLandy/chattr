@@ -535,7 +535,7 @@ public struct ChannelListScreen: View {
                 logger.notice("Sign-out of @\(login, privacy: .public) yielded to a re-authorization; still signed in")
             }
         } catch {
-            logger.error("Sign out had an error: \(error.localizedDescription)")
+            logger.error("Sign out had an error: \(error.localizedDescription, privacy: .public)")
             errorMessage = "Sign out: \(error.localizedDescription)"
         }
     }

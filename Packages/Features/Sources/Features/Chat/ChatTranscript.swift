@@ -4,6 +4,9 @@ import UIKit
 #endif
 import ChatModel
 import Channels
+import Core
+
+private let logger = AppLogger.make("Features.ChatTranscript")
 
 /// The transcript region: empty/connecting state, the scrolling message
 /// list, and the floating pills that ride on it. The row factory is injected
@@ -26,6 +29,7 @@ import Channels
 struct ChatTranscript: View {
     /// Observed HERE, not in ChatScreen — see the doc comment above.
     let chatModel: ChatTranscriptModel
+    var channelId: String = ""
     let channelLoginName: String
     /// The pager tab this transcript belongs to; nil outside the pager.
     /// Off-screen pager neighbours stay mounted (see `PagerWindow`) and
@@ -131,6 +135,7 @@ struct ChatTranscript: View {
             onJumpToLatest: jumpToLatest
         ))
         .onChange(of: connectionStatus?.state) { previous, current in
+            updateDiagnosticSnapshot()
             guard let current else { return }
             connectionBanner = ConnectionBanner.next(previous: previous, current: current)
             liveAgainDismiss?.cancel()
@@ -186,8 +191,58 @@ struct ChatTranscript: View {
             if UIApplication.shared.applicationState != .background {
                 chatModel.setLiveUpdatesPaused(false)
             }
+            recordDiagnostics(reason: "appear")
+        }
+        #else
+        .onAppear {
+            recordDiagnostics(reason: "appear")
         }
         #endif
+        .onChange(of: chatModel.isEmpty) { _, _ in
+            recordDiagnostics(reason: "isEmptyChanged")
+        }
+        .onChange(of: chatModel.attachState) { _, _ in
+            recordDiagnostics(reason: "attachStateChanged")
+        }
+        .onChange(of: isVisible) { _, _ in
+            recordDiagnostics(reason: "visibilityChanged")
+        }
+        .onChange(of: chatModel.changeVersion) { _, _ in
+            updateDiagnosticSnapshot()
+        }
+    }
+
+    /// Updates the stored `ChatDiagnostics` snapshot without emitting a log
+    /// line (safe for routine transcript flushes and connection updates).
+    @discardableResult
+    private func updateDiagnosticSnapshot() -> ChatPageDiagnosticSnapshot {
+        let branch = chatModel.isEmpty ? "empty" : "list"
+        let attach = String(describing: chatModel.attachState)
+        let conn = connectionStatus.map { String(describing: $0.state) } ?? "nil"
+        let snapshot = ChatPageDiagnosticSnapshot(
+            channelLogin: channelLoginName,
+            channelId: channelId,
+            tabId: tabId?.uuidString.prefix(8).description ?? "nil",
+            errorMessage: nil,
+            attachState: attach,
+            transcriptBranch: branch,
+            isEmpty: chatModel.isEmpty,
+            visibleLineCount: chatModel.visibleLineCount,
+            unfilteredLineCount: chatModel.unfilteredLineCount,
+            blockedCount: chatModel.blockedUserCount,
+            changeVersion: chatModel.changeVersion,
+            isVisible: isVisible,
+            connectionState: conn
+        )
+        ChatDiagnostics.shared.recordPage(snapshot)
+        return snapshot
+    }
+
+    /// Snapshots the transcript branch + model counts into `ChatDiagnostics`
+    /// and logs state transitions (never called per message).
+    private func recordDiagnostics(reason: String) {
+        let snapshot = updateDiagnosticSnapshot()
+        logger.info("ChatTranscript #\(channelLoginName, privacy: .public) [\(reason, privacy: .public)]: branch=\(snapshot.transcriptBranch, privacy: .public) attach=\(snapshot.attachState, privacy: .public) lines=\(snapshot.visibleLineCount)/\(snapshot.unfilteredLineCount) blocked=\(snapshot.blockedCount) vis=\(isVisible) conn=\(snapshot.connectionState, privacy: .public)")
     }
 
     /// The list (either implementation) plus everything both share: the
@@ -242,6 +297,7 @@ struct ChatTranscript: View {
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge,
                 isVisible: isVisible,
+                channelLoginName: channelLoginName,
                 onLineTapped: onLineTapped
             )
             .ignoresSafeArea(edges: appearance.edgeToEdge ? .top : [])

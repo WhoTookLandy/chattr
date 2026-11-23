@@ -190,7 +190,7 @@ public final class GlobalCatalog {
             }
             return ChatBadgeStore.flatten(sets: sets)
         } catch {
-            logger.error("GlobalCatalog badge fetch failed: \(error.localizedDescription)")
+            logger.error("GlobalCatalog badge fetch failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -211,7 +211,7 @@ public final class GlobalCatalog {
             // malformed-API regression.
             return list.reduce(into: [:]) { $0[$1.id] = $1 }
         } catch {
-            logger.error("GlobalCatalog emote fetch failed: \(error.localizedDescription)")
+            logger.error("GlobalCatalog emote fetch failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }

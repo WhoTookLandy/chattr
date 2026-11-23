@@ -314,7 +314,7 @@ struct AddChannelView: View {
         } catch is CancellationError {
             // Superseded by a newer query — ignore.
         } catch {
-            logger.warning("Channel search failed: \(error.localizedDescription)")
+            logger.warning("Channel search failed: \(error.localizedDescription, privacy: .public)")
             errorMessage = "Search failed: \(error.localizedDescription)"
             results = []
         }

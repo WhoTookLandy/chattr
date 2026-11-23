@@ -174,11 +174,11 @@ final class ChatSessionCoordinator {
             // Expected on view tear-down / channel-tab switch. The outgoing
             // instance's `try await registry.session(...)` gets cancelled in
             // flight. Silently exit — don't show a red error.
-            logger.info("ChatScreen session-start cancelled for #\(channelLoginName)")
+            logger.info("ChatScreen session-start cancelled for #\(channelLoginName, privacy: .public)")
             return 0
         } catch {
             errorMessage = "Couldn't open chat: \(error.localizedDescription)"
-            logger.error("ChatScreen failed to acquire session: \(error.localizedDescription)")
+            logger.error("ChatScreen failed to acquire session for #\(channelLoginName, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return 0
         }
     }
@@ -210,7 +210,7 @@ extension ChatSessionCoordinator.Link {
                     channelId: channelId,
                     channelLoginName: channelLoginName
                 )
-                logger.info("ChatScreen got session for #\(channelLoginName) (cached or new)")
+                logger.info("ChatScreen got session for #\(channelLoginName, privacy: .public) (cached or new)")
 
                 // Hand the session to the tab model, which atomically primes its
                 // transcript from the session's current ring buffer AND
