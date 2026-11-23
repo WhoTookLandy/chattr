@@ -205,7 +205,14 @@ internal enum IRCMessageParser {
         let afterSourceStr = String(afterSource)
         guard let separatorRange = afterSourceStr.range(of: " :") else { return nil }
         let head = afterSourceStr[..<separatorRange.lowerBound]
-        let messageText = String(afterSourceStr[separatorRange.upperBound...])
+        var messageText = String(afterSourceStr[separatorRange.upperBound...])
+        // Strip CTCP `/me` ACTION framing (`\u{01}ACTION <text>\u{01}`). Twitch
+        // computes `emotes=` offsets against the inner `<text>`, so stripping
+        // the wrapper both prevents raw control bytes from rendering and aligns
+        // emote positions.
+        if messageText.hasPrefix("\u{01}ACTION "), messageText.hasSuffix("\u{01}") {
+            messageText = String(messageText.dropFirst(8).dropLast())
+        }
 
         // head is "PRIVMSG #channel"
         let headParts = head.split(separator: " ", maxSplits: 1)

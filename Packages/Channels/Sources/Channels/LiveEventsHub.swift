@@ -119,10 +119,13 @@ struct LiveEventsHub {
     /// a consumer.
     @discardableResult
     mutating func apply(_ update: LiveEventUpdate, now: Date) -> Bool {
+        let before = state
         let pruned = state.prune(now: now)
         let applied = state.apply(update, at: now)
         guard pruned || applied else { return false }
-        publish()
+        if !state.hasSameDisplayContent(as: before) {
+            publish()
+        }
         return true
     }
 
@@ -136,6 +139,7 @@ struct LiveEventsHub {
         now: Date
     ) -> Bool {
         guard !isStopped else { return false }
+        let before = state
         // Reconcile FIRST. After a long background nothing has confirmed a
         // locked prediction for longer than `unconfirmedExpiry`; pruning
         // first would expire the very event Helix still reports as running.
@@ -144,7 +148,9 @@ struct LiveEventsHub {
         let changed = state.reconcile(kind, snapshot: snapshot, fetchedAt: fetchedAt, now: now)
         let pruned = state.prune(now: now)
         guard pruned || changed else { return false }
-        publish()
+        if !state.hasSameDisplayContent(as: before) {
+            publish()
+        }
         return true
     }
 
