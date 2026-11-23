@@ -53,6 +53,11 @@ struct ChatRow: View, Equatable {
     private let onBlock: (() -> Void)?
     /// Called when the user picks a reason from "Report…". Same nil-hides rule.
     private let onReport: ((UserBlockReason) -> Void)?
+    /// Called when the user taps the message author's username (opens the
+    /// user card). Optional — nil disables the username tap (e.g. inside the
+    /// user card's own recent messages, thread sheet, previews, or non-message
+    /// rows).
+    private let onAuthorTapped: (() -> Void)?
     /// Whether a reply line renders its quoted-parent block. The thread
     /// sheet sets this false — inside a thread every message's parent is
     /// already visible right above it, so per-row quotes are pure noise.
@@ -72,6 +77,7 @@ struct ChatRow: View, Equatable {
         static let delete     = Affordances(rawValue: 1 << 3)
         static let block      = Affordances(rawValue: 1 << 4)
         static let report     = Affordances(rawValue: 1 << 5)
+        static let authorTap  = Affordances(rawValue: 1 << 6)
     }
 
     init(
@@ -83,6 +89,7 @@ struct ChatRow: View, Equatable {
         onDelete: (() -> Void)? = nil,
         onBlock: (() -> Void)? = nil,
         onReport: ((UserBlockReason) -> Void)? = nil,
+        onAuthorTapped: (() -> Void)? = nil,
         showsQuotedReply: Bool = true
     ) {
         self.line = line
@@ -93,6 +100,7 @@ struct ChatRow: View, Equatable {
         self.onDelete = onDelete
         self.onBlock = onBlock
         self.onReport = onReport
+        self.onAuthorTapped = onAuthorTapped
         self.showsQuotedReply = showsQuotedReply
 
         var affordances: Affordances = []
@@ -102,6 +110,7 @@ struct ChatRow: View, Equatable {
         if onDelete != nil { affordances.insert(.delete) }
         if onBlock != nil { affordances.insert(.block) }
         if onReport != nil { affordances.insert(.report) }
+        if onAuthorTapped != nil { affordances.insert(.authorTap) }
         self.affordances = affordances
     }
 
@@ -403,15 +412,45 @@ struct ChatRow: View, Equatable {
         #endif
     }
 
+    /// Author tap callback gated to real chat messages with a known author.
+    /// Deleted placeholders and announcements never open the user card.
+    private var authorTapAction: (() -> Void)? {
+        guard case .message = line.kind, !line.authorUserId.isEmpty else { return nil }
+        return onAuthorTapped
+    }
+
     private struct SpokenRowAccessibility: ViewModifier {
         let isActive: Bool
+        let authorName: String
+        let onAuthorTapped: (() -> Void)?
         let label: () -> String
+
+        init(
+            isActive: Bool,
+            authorName: String = "",
+            onAuthorTapped: (() -> Void)? = nil,
+            label: @escaping () -> String
+        ) {
+            self.isActive = isActive
+            self.authorName = authorName
+            self.onAuthorTapped = onAuthorTapped
+            self.label = label
+        }
 
         func body(content: Content) -> some View {
             if isActive {
-                content
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(label())
+                if let onAuthorTapped, !authorName.isEmpty {
+                    content
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(label())
+                        .accessibilityAction(named: Text("View \(authorName)")) {
+                            onAuthorTapped()
+                        }
+                } else {
+                    content
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(label())
+                }
             } else {
                 content
             }
@@ -491,7 +530,11 @@ struct ChatRow: View, Equatable {
         // with a purpose-built read-out (author, badge titles, emote names).
         // Only rebuilt when the row's body re-evaluates — the Equatable
         // short-circuit still gates that.
-        .modifier(SpokenRowAccessibility(isActive: Self.isAssistiveTechRunning) {
+        .modifier(SpokenRowAccessibility(
+            isActive: Self.isAssistiveTechRunning,
+            authorName: line.authorDisplayName,
+            onAuthorTapped: authorTapAction
+        ) {
             accessibilityMessageLabel
         })
     }
@@ -571,6 +614,30 @@ struct ChatRow: View, Equatable {
             .lineSpacing(4)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .topLeading) {
+                if let authorTapAction, !line.authorDisplayName.isEmpty {
+                    // Overlay a transparent button sized to just the username
+                    // prefix so tapping the author opens their user card while
+                    // tapping the message text (or links) stays unaffected.
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        if includeTimestamp && appearance.showTimestamps {
+                            Text(line.timestamp.formatted(Self.timestampFormat) + " ")
+                                .font(Font.system(size: appearance.textSizePoints * 0.8).monospacedDigit())
+                                .hidden()
+                                .allowsHitTesting(false)
+                        }
+                        Button(action: authorTapAction) {
+                            Text("\(usernamePrefix(bodyFont: bodyFont, color: nameColor))\(Text(":").foregroundStyle(.secondary))")
+                                .hidden()
+                                .overlay { Color.clear }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .contentShape(Rectangle())
+                    }
+                    .accessibilityHidden(true)
+                }
+            }
     }
 
     /// The runs as one attributed string: words joined by single spaces
@@ -663,7 +730,15 @@ struct ChatRow: View, Equatable {
                 // Username prefix. The colon is interpolated into the same Text
                 // so it hugs the name ("Landy:") instead of floating 4pt away as
                 // its own flow item — and the pair can never wrap apart.
-                Text("\(usernamePrefix(bodyFont: bodyFont, color: nameColor))\(Text(":").foregroundStyle(.secondary))")
+                let usernameLabel = Text("\(usernamePrefix(bodyFont: bodyFont, color: nameColor))\(Text(":").foregroundStyle(.secondary))")
+                if let authorTapAction {
+                    Button(action: authorTapAction) {
+                        usernameLabel
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    usernameLabel
+                }
             }
 
             // Walk the pre-normalized runs in order. `line.runs` never
@@ -823,9 +898,26 @@ struct ChatRow: View, Equatable {
             Text("\(name)\(Text(":").foregroundStyle(.secondary)) \(message)")
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+                .overlay(alignment: .topLeading) {
+                    if let authorTapAction, !line.authorDisplayName.isEmpty {
+                        Button(action: authorTapAction) {
+                            Text("\(name)\(Text(":").foregroundStyle(.secondary))")
+                                .hidden()
+                                .overlay { Color.clear }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .contentShape(Rectangle())
+                        .accessibilityHidden(true)
+                    }
+                }
         }
         .opacity(0.85)
-        .modifier(SpokenRowAccessibility(isActive: Self.isAssistiveTechRunning) {
+        .modifier(SpokenRowAccessibility(
+            isActive: Self.isAssistiveTechRunning,
+            authorName: line.authorDisplayName,
+            onAuthorTapped: authorTapAction
+        ) {
             accessibilityMessageLabel
         })
     }

@@ -56,11 +56,8 @@ final class ChatListViewController: UIViewController {
     /// representable). Fired only when the count changes.
     var onUnreadCountChanged: ((Int) -> Void)?
 
-    /// A message row was tapped while the keyboard was down.
-    var onLineTapped: ((ChatLine) -> Void)?
-
-    /// Tracked from keyboard notifications: a tap on the transcript while
-    /// typing dismisses the keyboard instead of opening a user card.
+    /// Tracked from keyboard notifications: tapping a chat row while typing
+    /// dismisses the keyboard.
     private var keyboardVisible = false
 
     /// Mirrors `ChatListView.extendsToTop` — applied on change (and once
@@ -637,15 +634,12 @@ final class ChatListViewController: UIViewController {
 }
 
 extension ChatListViewController: UICollectionViewDelegate {
-    /// Row tap. Never actually selects (returns false): while typing it puts
-    /// the keyboard away; otherwise it reports the line (user card).
+    /// Row tap. Never selects (returns false): while typing it puts the
+    /// keyboard away; user-card taps are handled directly on the username
+    /// inside `ChatRow` so tapping the message body doesn't pop up the card.
     func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
         if keyboardVisible {
             view.window?.endEditing(true)
-            return false
-        }
-        if let id = dataSource.itemIdentifier(for: indexPath), let line = feed.linesByID[id] {
-            onLineTapped?(line)
         }
         return false
     }

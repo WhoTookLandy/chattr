@@ -72,6 +72,17 @@ struct ComposeBar: View {
     /// "Create Clip" in the ⋯ menu (shown while the channel is live). nil
     /// hides it.
     let createClip: CreateClipEntry?
+    /// One-shot `@mention` request from the user card. Observed via `.onChange`
+    /// so inserting a mention never pulls draft `@State` up into `ChatScreen`.
+    let pendingMention: PendingMention?
+
+    /// One-shot request to append `@insertionName ` into the draft and focus
+    /// the composer. Each tap creates a fresh `id` so mentioning the same
+    /// chatter twice still triggers `.onChange`.
+    struct PendingMention: Equatable {
+        let id = UUID()
+        let insertionName: String
+    }
 
     /// What the ⋯ menu needs for "Create Clip": whose stream, and what to
     /// do (the parent presents `CreateClipSheet`).
@@ -135,10 +146,12 @@ struct ComposeBar: View {
         mentionPoolProvider: @escaping @MainActor () -> [MentionAutocomplete.Candidate] = { [] },
         onSend: @escaping @MainActor (String) async -> Void,
         onOpenSettings: (() -> Void)? = nil,
-        createClip: CreateClipEntry? = nil
+        createClip: CreateClipEntry? = nil,
+        pendingMention: PendingMention? = nil
     ) {
         self.onOpenSettings = onOpenSettings
         self.createClip = createClip
+        self.pendingMention = pendingMention
         self.channelLoginName = channelLoginName
         self.channelDisplayName = channelDisplayName
         self.tabId = tabId
@@ -207,6 +220,10 @@ struct ComposeBar: View {
         .onAppear {
             recentEmotes = RecentEmotes.load(channel: channelLoginName)
         }
+        .onChange(of: pendingMention) { _, mention in
+            guard let mention else { return }
+            insertMention(mention.insertionName)
+        }
         // Clear the countdown when it runs out, which also drops the ring.
         .task(id: cooldown) {
             guard let cooldown else { return }
@@ -272,6 +289,26 @@ struct ComposeBar: View {
         // the draft persists automatically — no explicit onDraftChange
         // call needed here.
         recentEmotes = RecentEmotes.record(emote, channel: channelLoginName)
+    }
+
+    /// Append `@name ` to the draft and focus the text field (triggered by
+    /// the user card's Mention action).
+    private func insertMention(_ name: String) {
+        composeText = Self.appendingMention(name, to: composeText)
+        if !isSendBlocked {
+            focused = true
+        }
+    }
+
+    /// Pure string splice behind `insertMention(_:)`: guarantees a leading
+    /// space when prior text doesn't end in whitespace, plus a trailing space
+    /// so the user can keep typing immediately.
+    nonisolated static func appendingMention(_ name: String, to text: String) -> String {
+        let token = "@\(name) "
+        if text.isEmpty || text.last?.isWhitespace == true {
+            return text + token
+        }
+        return text + " " + token
     }
 
     /// Opens the full picker with a fresh snapshot of the sections.

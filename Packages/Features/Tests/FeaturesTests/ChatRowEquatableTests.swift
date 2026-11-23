@@ -35,6 +35,14 @@ struct ChatRowEquatableTests {
         #expect(before != after)
     }
 
+    @Test("Gaining or losing onAuthorTapped makes the row unequal")
+    func togglingAuthorTapIsAChange() {
+        let without = ChatRow(line: line, badgeEntries: [])
+        let withTap = ChatRow(line: line, badgeEntries: [], onAuthorTapped: {})
+        #expect(without != withTap)
+        #expect(withTap == ChatRow(line: line, badgeEntries: [], onAuthorTapped: {}))
+    }
+
     @Test("Line, badges and quote suppression still participate")
     func dataFieldsParticipate() {
         let base = ChatRow(line: line, badgeEntries: [])

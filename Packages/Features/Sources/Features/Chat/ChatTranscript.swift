@@ -49,9 +49,6 @@ struct ChatTranscript: View {
     /// value (`ClipLinkRouter.openURLAction`): the list stores it once and
     /// installs it in every hosted cell.
     let openURL: OpenURLAction
-    /// A message was tapped (opens the user card). Taps on links inside a
-    /// message still go to the link.
-    var onLineTapped: (ChatLine) -> Void = { _ in }
     /// Parent-owned: written by the report flow's row callbacks (built in
     /// ChatScreen), read by the confirmation pill overlay here.
     @Binding var showReportConfirmation: Bool
@@ -297,8 +294,7 @@ struct ChatTranscript: View {
                 scrollToBottomToken: scrollToBottomToken,
                 extendsToTop: appearance.edgeToEdge,
                 isVisible: isVisible,
-                channelLoginName: channelLoginName,
-                onLineTapped: onLineTapped
+                channelLoginName: channelLoginName
             )
             .ignoresSafeArea(edges: appearance.edgeToEdge ? .top : [])
         }

@@ -65,4 +65,26 @@ struct UserCardRecentLinesTests {
         #expect(target.id == "a2")
         #expect(target.recentLines.map(\.id) == ["a2", "a1"])
     }
+
+    @Test("Compact subtitle combines handle, join year, and message count cleanly")
+    func compactSubtitleFormatting() {
+        let joined = Date(timeIntervalSince1970: 1_577_836_800) // 2020-01-01 UTC
+        let localized = UserCardSheet.compactSubtitle(
+            displayName: "정서이",
+            login: "jeongseoi",
+            joinedAt: joined,
+            recentCount: 3
+        )
+        #expect(localized.contains("@jeongseoi"))
+        #expect(localized.contains("Joined "))
+        #expect(localized.contains("3 msgs"))
+
+        let sameHandle = UserCardSheet.compactSubtitle(
+            displayName: "Alice",
+            login: "alice",
+            joinedAt: nil,
+            recentCount: 1
+        )
+        #expect(sameHandle == "1 msg")
+    }
 }

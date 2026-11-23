@@ -105,4 +105,11 @@ struct MentionAutocompleteTests {
         let sim = C(login: "sim88", displayName: "Sim88", color: "")
         #expect(MentionAutocomplete.complete("hello ", with: sim) == "hello ")
     }
+
+    @Test("Appending a mention from the user card handles spacing cleanly")
+    func appendingMention() {
+        #expect(ComposeBar.appendingMention("Alice", to: "") == "@Alice ")
+        #expect(ComposeBar.appendingMention("Alice", to: "hey") == "hey @Alice ")
+        #expect(ComposeBar.appendingMention("Alice", to: "hey ") == "hey @Alice ")
+    }
 }
