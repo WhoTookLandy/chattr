@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 import TwitchKit
 import Channels
 import ChatModel
@@ -109,9 +112,9 @@ struct ChatRow: View, Equatable {
     /// parsing isn't free, and rows render by the thousand.
     private static let timestampFormat = Date.VerbatimFormatStyle(
         format: "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)",
-        locale: .current,
-        timeZone: .current,
-        calendar: .current
+        locale: .autoupdatingCurrent,
+        timeZone: .autoupdatingCurrent,
+        calendar: .autoupdatingCurrent
     )
 
     /// Read once per row so the username color recomputes when the user toggles
@@ -377,6 +380,32 @@ struct ChatRow: View, Equatable {
     /// stop — one message becomes 10+ swipes, and a full scrollback
     /// thousands. O(runs) string joins; only rebuilt when the row's body
     /// actually re-evaluates (the Equatable short-circuit still applies).
+    /// True when VoiceOver or Switch Control is active. Computing the joined
+    /// spoken string on every chat row costs O(runs) allocations per render,
+    /// so we skip it when no assistive technology is running.
+    private static var isAssistiveTechRunning: Bool {
+        #if canImport(UIKit)
+        UIAccessibility.isVoiceOverRunning || UIAccessibility.isSwitchControlRunning
+        #else
+        true
+        #endif
+    }
+
+    private struct SpokenRowAccessibility: ViewModifier {
+        let isActive: Bool
+        let label: () -> String
+
+        func body(content: Content) -> some View {
+            if isActive {
+                content
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(label())
+            } else {
+                content
+            }
+        }
+    }
+
     /// Runs read through the shared `LineRun.plainText(.spoken)` mapping.
     private var accessibilityMessageLabel: String {
         let body = line.runs.map { $0.plainText(.spoken) }.joined(separator: " ")
@@ -434,8 +463,9 @@ struct ChatRow: View, Equatable {
         // with a purpose-built read-out (author, badge titles, emote names).
         // Only rebuilt when the row's body re-evaluates — the Equatable
         // short-circuit still gates that.
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityMessageLabel)
+        .modifier(SpokenRowAccessibility(isActive: Self.isAssistiveTechRunning) {
+            accessibilityMessageLabel
+        })
     }
 
     // MARK: - Single-Text rows
@@ -752,8 +782,9 @@ struct ChatRow: View, Equatable {
                 .lineLimit(3)
         }
         .opacity(0.85)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityMessageLabel)
+        .modifier(SpokenRowAccessibility(isActive: Self.isAssistiveTechRunning) {
+            accessibilityMessageLabel
+        })
     }
 
     /// Words joined back into one string, decoration stripped, links kept.

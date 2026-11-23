@@ -17,6 +17,9 @@ struct LandscapeStreamStage: View {
     let tabId: UUID?
     let chatSide: LandscapeChatSide
     let layoutMode: LandscapeLayoutMode
+    /// Width of the chat column so `.overlay` chrome stays inset out from
+    /// underneath the touch-intercepting translucent chat overlay.
+    var chatWidth: CGFloat = 0
 
     @Environment(\.followsStore) private var followsStore
     @Environment(\.channelStatus) private var channelStatus
@@ -91,6 +94,7 @@ struct LandscapeStreamStage: View {
 
                 if chromeVisible {
                     chrome(stream)
+                        .padding(chatSide.edge, layoutMode == .overlay ? chatWidth : 0)
                         .transition(.opacity)
                 }
             }
