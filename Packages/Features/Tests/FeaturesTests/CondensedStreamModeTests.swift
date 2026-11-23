@@ -77,5 +77,30 @@ struct CondensedStreamModeTests {
             channelId: "1", isLive: true, isExpanded: true, audioOnly: true, playback: center
         ) == .audioOnly)
     }
+
+    @Test("ChatHeaderBar hides only while inline video is visible")
+    func headerBarVisibility() {
+        // Watching inline video: expanded + live + not condensed.
+        #expect(ChatHeaderBar.shouldHideForInlineVideo(
+            isLive: true, isExpanded: true, condensedMode: nil
+        ))
+        // Audio-only and PiP keep the smart dock visible.
+        #expect(!ChatHeaderBar.shouldHideForInlineVideo(
+            isLive: true, isExpanded: true, condensedMode: .audioOnly
+        ))
+        #expect(!ChatHeaderBar.shouldHideForInlineVideo(
+            isLive: true, isExpanded: true, condensedMode: .pictureInPicture
+        ))
+        // Chat-only (collapsed) and offline channels keep the smart dock visible.
+        #expect(!ChatHeaderBar.shouldHideForInlineVideo(
+            isLive: true, isExpanded: false, condensedMode: nil
+        ))
+        #expect(!ChatHeaderBar.shouldHideForInlineVideo(
+            isLive: false, isExpanded: true, condensedMode: nil
+        ))
+        #expect(!ChatHeaderBar.shouldHideForInlineVideo(
+            isLive: false, isExpanded: false, condensedMode: nil
+        ))
+    }
 }
 #endif

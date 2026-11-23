@@ -1,9 +1,10 @@
-Fixes for TestFlight Build 34 feedback: viewer list loading and redesigned chat announcements
+Redesigned top header bar for Audio-Only, PiP, and Chat-Only modes
 
-FIXED
-• Viewers sheet loading: Fixed a client-side page size error that caused the Viewers sheet to always fail with "Couldn't load viewers" even for moderators and broadcasters, and added a Try Again button for transient errors.
-• Chat announcements: Announcements (/announce) now render Twitch native emotes and 7TV/BTTV/FFZ emotes inline, highlight @mentions and tappable links, show the sender's badges and colored username, and use a styled card with Twitch's announcement accent color and megaphone header instead of a plain gray info box.
+NEW
+• Unified 44pt Smart Dock: Replaces the cramped 3-island nav bar and stacked compact stream card with a single Liquid Glass dock showing channel name, live viewer count, game, and stream title in one compact row — reclaiming vertical chat height in Chat-Only while matching Audio-Only's height.
+• Embedded playback controls: Audio-Only shows an animated waveform + play/pause and Show Video pill; Chat-Only (live) offers 1-tap Listen (Audio-Only) and Watch Video buttons directly in the dock.
+• Unified Stream Details & Channel Switcher popover: Tap the dock to view the full unwrapped stream title, category, live viewers, uptime, tags, Follow/Share/Subscribe actions, a 1-tap Stop Audio button, and open chats in one popover.
 
 PLEASE TEST
-1. Open a stream where you're a moderator or broadcaster and tap the viewer count — confirm the Viewers list loads and paginates as you scroll.
-2. Trigger or watch a /announce message (including one with channel/7TV emotes and a link) — confirm the card uses the announcement accent bar/tint, shows the sender and emotes inline, and links are tappable.
+1. Switch between Audio-Only, Chat-Only (live), Chat-Only (offline), PiP, and inline video — confirm the 44pt dock updates smoothly, hides when inline video is playing, and edge swipe-back works.
+2. Tap the dock to inspect the full title, tags, Stop Audio button, and open-chats switcher, and try pulling down on the dock to expand straight into video.

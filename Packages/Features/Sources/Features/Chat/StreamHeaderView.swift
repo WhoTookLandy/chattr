@@ -10,8 +10,7 @@ import Nuke
 /// Two layouts, driven by the shared "expanded" preference:
 ///
 /// **Watching** (expanded + live) — the stream plays in-app, flush under a
-/// black status-bar strip (the pager hides the nav bar; see
-/// `ChatNavBarAutoHider`):
+/// black status-bar strip (`ChatHeaderBar` hides while video is showing):
 ///
 ///   ┌────────── video ──────────┐   tap → controls, ‹ back, ⌄ hide video,
 ///   └───────────────────────────┘          tags + Gift / Subscribe (4s)
@@ -122,16 +121,25 @@ struct StreamHeaderView: View {
         Group {
             if isExpanded, let stream {
                 // Audio-only / PiP: no inline video, so the header gives
-                // chat the whole screen; the stream's controls sit in the
-                // nav bar (`NowPlayingToolbarControl`) and the channel pill
-                // shows the mode.
+                // chat the whole screen; stream controls live in
+                // `ChatHeaderBar`.
                 if isAudioOnlyActive || isPictureInPictureActive {
                     hiddenEngine
                 } else {
                     watchingLayout(stream)
                 }
             } else {
+                #if os(iOS)
+                // Chat-only / offline on iOS: `ChatHeaderBar` carries stream
+                // metadata and 1-tap audio/video launch in a single 44pt top
+                // dock, so this header takes 0pt while staying mounted to
+                // drive playback sync.
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 0)
+                #else
                 compactCard
+                #endif
             }
         }
         .animation(.snappy(duration: 0.25), value: chromeVisible)
@@ -452,7 +460,7 @@ struct StreamHeaderView: View {
     /// show inline, so chat takes the whole screen. The engine stays mounted
     /// (the native engine plays Twitch's audio-only rendition; PiP is
     /// driven from its layer / video element), just out of sight. The
-    /// controls are in the nav bar — `NowPlayingToolbarControl`.
+    /// controls live in `ChatHeaderBar`.
     private var hiddenEngine: some View {
         Color.clear
             .frame(maxWidth: .infinity)
@@ -730,8 +738,9 @@ struct StreamHeaderView: View {
         }
     }
 
-    // MARK: - Compact card
+    // MARK: - Compact card (macOS)
 
+    #if !os(iOS)
     private var compactCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
@@ -795,26 +804,8 @@ struct StreamHeaderView: View {
         .contentShape(Rectangle())
     }
 
-    // MARK: - Shared pieces
-
     private var isFollowing: Bool {
         followsStore?.channels.contains { $0.broadcasterId == channel.channelId } ?? false
-    }
-
-    private var tagRow: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 6) {
-                ForEach(tags.prefix(6), id: \.self) { tag in
-                    Text(tag)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.secondary.opacity(0.15), in: Capsule())
-                }
-            }
-        }
-        .scrollIndicators(.hidden)
     }
 
     /// Category · live dot + viewers · ticking uptime — or the offline line.
@@ -870,6 +861,25 @@ struct StreamHeaderView: View {
         }
         return "Offline"
     }
+    #endif
+
+    // MARK: - Shared pieces
+
+    private var tagRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(tags.prefix(6), id: \.self) { tag in
+                    Text(tag)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.secondary.opacity(0.15), in: Capsule())
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+    }
 
     private func avatar(ring: Bool) -> some View {
         LazyImage(request: ImageRequest.avatar(url: profileImageURL, side: 32)) { state in
@@ -890,58 +900,5 @@ struct StreamHeaderView: View {
             }
         }
         .accessibilityHidden(true)
-    }
-}
-
-/// Hides the chat pager's navigation bar while the visible chat is playing
-/// its stream — the header's video overlay carries ‹ back and ⌄ instead,
-/// and the edge swipe still goes back (`SwipeBackEnabler`).
-///
-/// A zero-size view of its own so the live-status reads it needs invalidate
-/// only this, never the pager body. Same derivation as `StreamHeaderView`'s
-/// watching layout: expanded preference + visible channel is live.
-struct ChatNavBarAutoHider: View {
-    let chatTabs: ChatTabsModel
-
-    @Environment(\.followsStore) private var followsStore
-    @Environment(\.channelStatus) private var channelStatus
-    @AppStorage(StreamHeaderView.expandedKey) private var isExpanded = false
-    @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
-    #if os(iOS)
-    @Environment(\.playback) private var playback
-    #endif
-
-    private var hidesBar: Bool {
-        // Audio-only (while the native engine it needs is available) shows
-        // a slim bar, not a video.
-        guard isExpanded, !(audioOnly && PlayerSettings.isNativePlaybackEnabled),
-              let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id,
-              let channelId = chatTabs.tabs.first(where: { $0.id == visibleId })?.channels.first?.channelId
-        else { return false }
-        let live = ChannelStatusStore.liveStream(for: channelId, status: channelStatus, follows: followsStore)
-        #if os(iOS)
-        // In PiP the header is a slim bar, not a video — keep the nav bar.
-        if playback?.controller.isPictureInPictureActive == true,
-           playback?.isPlaying(channelId) == true {
-            return false
-        }
-        // Same stream the header shows, including one playing on through
-        // a single offline reading.
-        if let playback { return playback.stream(for: channelId, live: live) != nil }
-        #endif
-        return live != nil
-    }
-
-    var body: some View {
-        #if os(iOS)
-        SwipeBackEnabler()
-            .frame(width: 0, height: 0)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .toolbar(hidesBar ? .hidden : .automatic, for: .navigationBar)
-            .animation(.snappy(duration: 0.25), value: hidesBar)
-        #else
-        Color.clear.frame(width: 0, height: 0)
-        #endif
     }
 }
