@@ -12,8 +12,14 @@ struct HomeContent: View {
     let liveLoadState: FollowsStore.LoadState
     var recentChannels: [RecentChannelItem] = []
     /// Whether Home → Live is currently the visible foreground destination.
-    /// Drives live video previews so leaving Home stops playback at once.
+    /// Drives live video previews and scroll-to-hide tab bar updates so leaving
+    /// Home stops playback and ignores off-screen scroll events at once.
     var isActive: Bool = true
+    /// Optional override for scroll-to-hide activity when live video previews
+    /// are intentionally kept off (e.g., `UIPreviewRoot`). Defaults to `isActive`.
+    var isTabBarAutoHideActive: Bool? = nil
+    /// Optional binding to auto-hide Home's bottom tab bar on downward scroll.
+    var isTabBarHidden: Binding<Bool>? = nil
     /// The stream card was tapped (`.implicit`) or a quick-menu action chose
     /// how to watch (`.explicit`).
     let onStreamTap: (TwitchStream, ChatOpenIntent) -> Void
@@ -78,6 +84,10 @@ struct HomeContent: View {
             // scrolled video frames never ghost behind the tabs.
             .scrollEdgeEffectStyle(.hard, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
+            .autoHideHomeTabBar(
+                isActive: isTabBarAutoHideActive ?? isActive,
+                isHidden: isTabBarHidden
+            )
             #if os(iOS)
             .coordinateSpace(.named(Self.feedCoordinateSpace))
             .onGeometryChange(for: CGFloat.self) { geo in

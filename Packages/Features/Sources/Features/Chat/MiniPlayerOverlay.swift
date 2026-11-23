@@ -10,6 +10,8 @@ import Nuke
 /// video to resize. Audio-only streams get a compact pill instead.
 struct MiniPlayerOverlay: View {
     let center: PlaybackCenter
+    /// True while Home has auto-hidden the bottom tab bar on scroll down.
+    var isTabBarHidden: Bool = false
     let onOpen: (ChannelDescriptor) -> Void
 
     @State private var dragOffset: CGSize = .zero
@@ -36,9 +38,11 @@ struct MiniPlayerOverlay: View {
                 .offset(dragOffset)
                 .gesture(dragGesture(in: geo.size))
                 .padding(.horizontal, 12)
-                // Clear of the tab bar.
-                .padding(.bottom, 64)
+                // Clear of the tab bar when visible; settle closer to the
+                // bottom safe area when Home has auto-hidden it on scroll.
+                .padding(.bottom, isTabBarHidden ? 12 : 64)
                 .frame(width: geo.size.width, height: geo.size.height, alignment: alignment)
+                .animation(.snappy(duration: 0.25), value: isTabBarHidden)
             }
             .coordinateSpace(.named(Self.area))
             .transition(.scale(scale: 0.8).combined(with: .opacity))

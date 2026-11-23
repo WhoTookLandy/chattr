@@ -22,10 +22,16 @@ struct MiniPlayerHost: View {
         return playback.isPlaying && !chatOnScreen && !playback.controller.isPictureInPictureActive
     }
 
+    /// True while Home has auto-hidden the bottom tab bar on downward scroll,
+    /// letting the mini player settle closer to the bottom edge.
+    private var isTabBarHidden: Bool {
+        navigation.selectedTab == .home && navigation.isHomeTabBarHidden
+    }
+
     var body: some View {
         ZStack {
             if showsMiniPlayer {
-                MiniPlayerOverlay(center: playback) { channel in
+                MiniPlayerOverlay(center: playback, isTabBarHidden: isTabBarHidden) { channel in
                     navigation.openChannel(channel)
                 }
             }

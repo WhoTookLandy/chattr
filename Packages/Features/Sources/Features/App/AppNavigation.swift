@@ -35,6 +35,11 @@ final class AppNavigation {
     /// intent can push Settings.
     var homePath: [HomeRoute] = []
 
+    /// Whether Home's vertical feed scroll has auto-hidden the bottom tab bar.
+    /// Written by `HomeScreen` (and `UIPreviewRoot`), read by `MiniPlayerHost`
+    /// so the floating mini player clears the tab bar only while it's visible.
+    var isHomeTabBarHidden = false
+
     /// Mentions + keyword hits across open chats (the Activity tab).
     let activity = ActivityStore()
 

@@ -15,6 +15,10 @@ import Nuke
 struct FollowingList: View {
     let account: Account
     let accountStore: AccountStore
+    /// Whether Home → Following is currently the visible foreground section.
+    var isActive: Bool = true
+    /// Optional binding to auto-hide Home's bottom tab bar on downward scroll.
+    var isTabBarHidden: Binding<Bool>? = nil
 
     @Environment(\.followsStore) private var followsStore
     @Environment(\.channelStatus) private var channelStatus
@@ -43,6 +47,7 @@ struct FollowingList: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .autoHideHomeTabBar(isActive: isActive, isHidden: isTabBarHidden)
             } else {
                 placeholder
             }
