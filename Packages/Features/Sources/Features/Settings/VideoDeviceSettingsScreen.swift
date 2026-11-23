@@ -12,6 +12,7 @@ struct VideoDeviceSettingsScreen: View {
     @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
     @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
     @AppStorage(PlaybackPreferences.videoOnOpenKey) private var videoOnOpen: VideoOnOpen = .lastUsed
+    @AppStorage(PlaybackPreferences.homePreviewKey) private var homePreview: HomePreviewMode = .wiFiOnly
     @AppStorage(PlaybackPreferences.pictureInPictureKey) private var pictureInPicture: PictureInPictureMode = .whenSoundOn
     @AppStorage(PlayerSettings.systemPictureInPictureKey) private var pictureInPictureLeavingChat = false
     @AppStorage(PlaybackPreferences.keepScreenAwakeKey) private var keepScreenAwake = false
@@ -45,6 +46,22 @@ struct VideoDeviceSettingsScreen: View {
                 }
                 .onChange(of: videoOnOpen) { _, option in
                     if option == .autoplayOnWiFi { NetworkReachability.warmUp() }
+                }
+                Picker(selection: $homePreview) {
+                    ForEach(HomePreviewMode.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                } label: {
+                    SettingLabel(
+                        "Home Live Previews",
+                        systemImage: "play.rectangle.on.rectangle",
+                        subtitle: "Muted live video on Home cards as you scroll",
+                        disabledReason: nativePlaybackEnabled ? nil : "Not available right now"
+                    )
+                }
+                .disabled(!nativePlaybackEnabled)
+                .onChange(of: homePreview) { _, option in
+                    if option == .wiFiOnly { NetworkReachability.warmUp() }
                 }
                 Toggle(isOn: $useNativePlayer) {
                     SettingLabel(

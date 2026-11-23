@@ -44,6 +44,7 @@ struct SettingsRegistryTests {
         #expect(SettingsRegistry.search("lock").map(\.id).contains("keepScreenAwake"))
         #expect(SettingsRegistry.search("pip").map(\.id).contains("pictureInPicture"))
         #expect(SettingsRegistry.search("autoplay").map(\.id).contains("videoOnOpen"))
+        #expect(SettingsRegistry.search("home preview").map(\.id).contains("homeLivePreviews"))
         #expect(SettingsRegistry.search("wifi").map(\.id).contains("videoOnOpen"))
         #expect(SettingsRegistry.search("vibration").map(\.id).contains("haptics"))
     }

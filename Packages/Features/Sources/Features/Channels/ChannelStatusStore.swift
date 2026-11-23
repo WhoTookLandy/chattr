@@ -33,6 +33,11 @@ public final class ChannelStatusStore {
         /// End of the most recent archived broadcast. nil when unknown (VODs
         /// disabled, never streamed, or not fetched yet).
         public var lastLiveAt: Date?
+        /// Title of the most recent archived broadcast, if available.
+        public var lastLiveTitle: String? = nil
+        /// Thumbnail URL template (`%{width}x%{height}`) of the most recent
+        /// archived broadcast, if available.
+        public var lastLiveThumbnailURL: String? = nil
         /// When `stream` was last confirmed (wall clock, for freshness
         /// comparisons against `FollowsStore`).
         public var fetchedAt: Date
@@ -112,7 +117,14 @@ public final class ChannelStatusStore {
         var changed = false
         for (id, status) in statuses where !open.contains(id) {
             if let lastLiveAt = status.lastLiveAt {
-                let cleared = Status(stream: nil, channelInfo: nil, lastLiveAt: lastLiveAt, fetchedAt: .distantPast)
+                let cleared = Status(
+                    stream: nil,
+                    channelInfo: nil,
+                    lastLiveAt: lastLiveAt,
+                    lastLiveTitle: status.lastLiveTitle,
+                    lastLiveThumbnailURL: status.lastLiveThumbnailURL,
+                    fetchedAt: .distantPast
+                )
                 guard cleared != status else { continue }
                 updated[id] = cleared
             } else {
@@ -292,14 +304,25 @@ public final class ChannelStatusStore {
             lastLiveFetchedAt[channelId] = dependencies.now()
             guard let video = page.data.first else { return }
             let end = video.createdAt.addingTimeInterval(Self.seconds(inTwitchDuration: video.duration))
+            let title = video.title.isEmpty ? nil : video.title
+            let thumbnailURL = video.thumbnailUrl.isEmpty ? nil : video.thumbnailUrl
             if statuses[channelId] != nil {
                 statuses[channelId]?.lastLiveAt = end
+                statuses[channelId]?.lastLiveTitle = title
+                statuses[channelId]?.lastLiveThumbnailURL = thumbnailURL
             } else {
                 // First thing we've learned about this channel. `distantPast`
                 // fetchedAt keeps the (unknown) stream state stale, so
                 // `liveStream(for:)` still defers to FollowsStore and the
                 // next `refresh` still fetches it.
-                statuses[channelId] = Status(stream: nil, channelInfo: nil, lastLiveAt: end, fetchedAt: .distantPast)
+                statuses[channelId] = Status(
+                    stream: nil,
+                    channelInfo: nil,
+                    lastLiveAt: end,
+                    lastLiveTitle: title,
+                    lastLiveThumbnailURL: thumbnailURL,
+                    fetchedAt: .distantPast
+                )
             }
         } catch {
             // Non-fatal: the header just says "Offline" without a time.

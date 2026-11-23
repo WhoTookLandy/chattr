@@ -2,47 +2,115 @@ import SwiftUI
 import TwitchKit
 import DesignSystem
 
-/// Home → Live. Presentational: everything arrives as plain values — no
-/// stores, no account — so `#Preview` can drive every state. (Open chats
-/// used to sit above this as an avatar rail; they're Home's Chats section
-/// now.)
+/// Home → Live. Presentational feed with a top horizontal rail of recently
+/// streamed followed channels, category filter chips, and a consistent
+/// full-bleed edge-to-edge live stream feed whose focused card plays a muted
+/// live HLS video preview as you scroll.
 struct HomeContent: View {
     let liveStreams: [TwitchStream]
     let profileImageURLs: [String: URL]
     let liveLoadState: FollowsStore.LoadState
-    /// The stream row was tapped (`.implicit`) or a preview-menu action
-    /// chose how to watch (`.explicit`).
+    var recentChannels: [RecentChannelItem] = []
+    /// Whether Home → Live is currently the visible foreground destination.
+    /// Drives live video previews so leaving Home stops playback at once.
+    var isActive: Bool = true
+    /// The stream card was tapped (`.implicit`) or a quick-menu action chose
+    /// how to watch (`.explicit`).
     let onStreamTap: (TwitchStream, ChatOpenIntent) -> Void
+    var onRecentChannelTap: (RecentChannelItem, ChatOpenIntent) -> Void = { _, _ in }
+    var onRecentChannelAppear: (String) -> Void = { _ in }
 
     /// Category chip selection; nil = All.
     @State private var selectedCategory: String?
 
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    @AppStorage(PlaybackPreferences.homePreviewKey) private var homePreviewMode: HomePreviewMode = .wiFiOnly
+    @State private var previewController = HomeFeedPreviewController()
+
+    private nonisolated static let feedCoordinateSpace = "homeLiveFeed"
+
+    /// A floating video mini player already owns a live video decoder; keep
+    /// the inline feed on static thumbnails while it's showing. An audio-only
+    /// mini player does NOT block muted visual previews (matching Twitch).
+    private var hasActiveVideoMiniPlayer: Bool {
+        guard let playback, playback.isPlaying else { return false }
+        return !playback.audioOnly || playback.controller.nativeFailed
+    }
+    #endif
+
     var body: some View {
-        // Derived once per pass: the chips, the header count and the rows
-        // all read it, and each used to re-total the categories.
         let feed = liveFeed
         ScrollViewReader { proxy in
-            List {
-                liveSection(feed)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if !recentChannels.isEmpty {
+                        RecentChannelsRail(
+                            items: recentChannels,
+                            onTap: { item, intent in
+                                #if os(iOS)
+                                previewController.stop()
+                                #endif
+                                onRecentChannelTap(item, intent)
+                            },
+                            onCardAppear: onRecentChannelAppear
+                        )
+                    }
+
+                    if !feed.categories.isEmpty {
+                        categoryChips(feed)
+                    }
+
+                    if liveStreams.isEmpty {
+                        liveEmptyContent
+                    } else {
+                        ForEach(feed.displayedStreams, id: \.userId) { stream in
+                            liveCard(for: stream)
+                                .id(stream.userId)
+                        }
+                    }
+                }
+                // Extra breathing room above the floating tab bar / mini player.
+                .padding(.bottom, 24)
             }
-            .listStyle(.plain)
-            // Rows stay transparent so the shared chat surface reads through;
-            // the surface itself is drawn behind the list below. Same flat
-            // `Color.chatSurface` the chat screen uses, so Home and Chats share
-            // one background world instead of Home wearing a tinted gradient.
-            .scrollContentBackground(.hidden)
             .background(Color.chatSurface.ignoresSafeArea())
-            // Hard top edge: a defined boundary under the title. The soft
-            // style let scrolled thumbnails ghost through the bar area,
-            // which read as smudge over a media-heavy feed. Bottom stays
-            // soft — content fading toward the tab bar is fine.
+            // Hard top edge: a defined boundary under the section bar so
+            // scrolled video frames never ghost behind the tabs.
             .scrollEdgeEffectStyle(.hard, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
+            #if os(iOS)
+            .coordinateSpace(.named(Self.feedCoordinateSpace))
+            .onGeometryChange(for: CGFloat.self) { geo in
+                geo.size.height
+            } action: { height in
+                previewController.updateViewportHeight(height)
+            }
+            .onAppear {
+                previewController.attach(playback: playback)
+                previewController.setVideoMiniPlayerActive(hasActiveVideoMiniPlayer)
+                previewController.updateStreams(feed.displayedStreams)
+                previewController.setSurfaceActive(isActive)
+            }
+            .onDisappear {
+                previewController.setSurfaceActive(false)
+            }
+            .onChange(of: isActive) { _, active in
+                previewController.setSurfaceActive(active)
+            }
+            .onChange(of: hasActiveVideoMiniPlayer) { _, videoActive in
+                previewController.setVideoMiniPlayerActive(videoActive)
+            }
+            .onChange(of: homePreviewMode) { _, _ in
+                previewController.refreshPolicy()
+            }
+            .onChange(of: feed.displayedStreams.map(\.userId)) { _, _ in
+                previewController.updateStreams(feed.displayedStreams)
+            }
+            #endif
             #if DEBUG
-            // `-uiPreviewScrolled` jumps the list to the bottom so the
+            // `-uiPreviewScrolled` jumps the feed to the bottom so the
             // design-review harness can screenshot the scrolled-state top
-            // edge without driving the UI. Same pattern as
-            // `-uiPreviewChatOpen` in UIPreviewRoot.
+            // edge without driving the UI.
             .task {
                 guard ProcessInfo.processInfo.arguments.contains("-uiPreviewScrolled"),
                       let last = feed.displayedStreams.last else { return }
@@ -53,8 +121,50 @@ struct HomeContent: View {
         }
     }
 
-    /// Leading streams that get the full-width card treatment.
-    private static let featuredCount = 2
+    @ViewBuilder
+    private func liveCard(for stream: TwitchStream) -> some View {
+        let handleOpen: (ChatOpenIntent) -> Void = { intent in
+            #if os(iOS)
+            previewController.stop()
+            #endif
+            onStreamTap(stream, intent)
+        }
+
+        #if os(iOS)
+        LiveStreamCard(
+            stream: stream,
+            profileImageURL: profileImageURLs[stream.userId],
+            onOpen: handleOpen,
+            previewController: previewController
+        )
+        .channelPreviewMenu(
+            name: stream.userName,
+            profileImageURL: profileImageURLs[stream.userId],
+            stream: stream,
+            open: handleOpen
+        )
+        .onGeometryChange(for: CGRect.self) { geo in
+            geo.frame(in: .named(Self.feedCoordinateSpace))
+        } action: { frame in
+            previewController.reportCardFrame(streamID: stream.userId, minY: frame.minY, maxY: frame.maxY)
+        }
+        .onDisappear {
+            previewController.clearCardFrame(streamID: stream.userId)
+        }
+        #else
+        LiveStreamCard(
+            stream: stream,
+            profileImageURL: profileImageURLs[stream.userId],
+            onOpen: handleOpen
+        )
+        .channelPreviewMenu(
+            name: stream.userName,
+            profileImageURL: profileImageURLs[stream.userId],
+            stream: stream,
+            open: handleOpen
+        )
+        #endif
+    }
 
     // MARK: - Categories
 
@@ -67,8 +177,7 @@ struct HomeContent: View {
         let categories: [String]
         /// The selection, ignored once its category has nobody live.
         let activeCategory: String?
-        /// Every live followed channel (in the selected category). No
-        /// preview cap + "See all": the feed is the full list.
+        /// Every live followed channel (in the selected category).
         let displayedStreams: [TwitchStream]
     }
 
@@ -95,74 +204,9 @@ struct HomeContent: View {
         )
     }
 
-    // MARK: - Live now
-
-    @ViewBuilder
-    private func liveSection(_ feed: LiveFeed) -> some View {
-        Section {
-            // A regular row, not a Section header — plain-list headers pin
-            // to the top as a translucent bar that never goes away.
-            liveHeaderRow(feed)
-            if liveStreams.isEmpty {
-                liveEmptyContent
-            } else {
-                if !feed.categories.isEmpty {
-                    categoryChips(feed)
-                }
-                ForEach(Array(feed.displayedStreams.enumerated()), id: \.element.userId) { index, stream in
-                    Button {
-                        onStreamTap(stream, .implicit)
-                    } label: {
-                        if index < Self.featuredCount {
-                            LiveStreamCard(
-                                stream: stream,
-                                profileImageURL: profileImageURLs[stream.userId]
-                            )
-                        } else {
-                            LiveStreamRow(
-                                stream: stream,
-                                profileImageURL: profileImageURLs[stream.userId]
-                            )
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .channelPreviewMenu(
-                        name: stream.userName,
-                        profileImageURL: profileImageURLs[stream.userId],
-                        stream: stream,
-                        open: { intent in onStreamTap(stream, intent) }
-                    )
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(index < Self.featuredCount ? .hidden : .automatic)
-                }
-            }
-        }
-    }
-
-    private func liveHeaderRow(_ feed: LiveFeed) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            sectionHeader("Live now")
-            Spacer()
-            // How many are live. The whole list is right here, so a
-            // count replaces the old "See all" link.
-            if !liveStreams.isEmpty {
-                Text(feed.displayedStreams.count == liveStreams.count
-                     ? "\(liveStreams.count) live"
-                     : "\(feed.displayedStreams.count) of \(liveStreams.count)")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .textCase(nil)
-            }
-        }
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-    }
-
-    /// All / per-category filter chips (Twitch Home's "All · Just Chatting
-    /// · IRL" row), scoped to the Live now preview.
+    /// All / per-category filter chips ("All · Just Chatting · IRL").
     private func categoryChips(_ feed: LiveFeed) -> some View {
-        ScrollView(.horizontal) {
+        ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 chip("All", isSelected: feed.activeCategory == nil) {
                     selectedCategory = nil
@@ -173,12 +217,10 @@ struct HomeContent: View {
                     }
                 }
             }
-            .padding(.vertical, 2)
+            .padding(.horizontal, 14)
+            .padding(.top, 2)
+            .padding(.bottom, 12)
         }
-        .scrollIndicators(.hidden)
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
     }
 
     private func chip(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
@@ -198,9 +240,7 @@ struct HomeContent: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
-    /// Inline placeholder for the Live section's loading / quiet / failed
-    /// states. Compact rows (not full-screen `ContentUnavailableView`) —
-    /// Home still has the chats + follows sections below doing useful work.
+    /// Inline placeholder for the Live feed's loading / quiet / failed states.
     @ViewBuilder
     private var liveEmptyContent: some View {
         Group {
@@ -231,20 +271,7 @@ struct HomeContent: View {
                 }
             }
         }
-        .padding(.vertical, 8)
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-    }
-
-    // MARK: - Shared
-
-    /// Plain-List section headers default to uppercased caption text;
-    /// this keeps them sentence-case and slightly larger, matching the
-    /// inlineLarge title's tone.
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .textCase(nil)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 24)
     }
 }

@@ -77,6 +77,7 @@ enum SettingsRegistry {
         SettingsEntry("showVideo", "Show Video in Chat", keywords: ["stream", "player", "watch"], in: .videoAndDevice),
         SettingsEntry("nativePlayer", "Native Video Player", keywords: ["picture in picture", "pip", "avplayer", "fullscreen"], in: .videoAndDevice),
         SettingsEntry("videoOnOpen", "When a Chat Opens", keywords: ["autoplay", "auto play", "wifi", "wi-fi", "cellular", "start", "closed"], in: .videoAndDevice),
+        SettingsEntry("homeLivePreviews", "Home Live Previews", keywords: ["home", "feed", "preview", "autoplay", "auto play", "thumbnail", "wifi", "wi-fi", "cellular"], in: .videoAndDevice),
         SettingsEntry("maxQuality", "Max Quality", keywords: ["resolution", "1080p", "720p", "data", "bandwidth"], in: .videoAndDevice),
         SettingsEntry("pictureInPicture", "Picture in Picture", keywords: ["pip", "background", "floating", "leave", "sound"], in: .videoAndDevice),
         SettingsEntry("landscapeLayout", "Landscape Layout", keywords: ["landscape", "sideways", "rotate", "horizontal", "chat beside video", "chat over video", "overlay"], in: .videoAndDevice, to: .landscape),

@@ -35,10 +35,16 @@ struct StreamFormattingTests {
         #expect(StreamFormatting.lastLiveShort(now.addingTimeInterval(-15 * 86_400), now: now) == "2w ago")
     }
 
-    @Test("thumbnail template fills width and height")
+    @Test("thumbnail template fills width and height for both live and VOD formats")
     func thumbnail() {
-        let url = StreamFormatting.thumbnailURL("https://x/live_user_a-{width}x{height}.jpg", width: 640, height: 360)
-        #expect(url?.absoluteString == "https://x/live_user_a-640x360.jpg")
+        let liveURL = StreamFormatting.thumbnailURL("https://x/live_user_a-{width}x{height}.jpg", width: 640, height: 360)
+        #expect(liveURL?.absoluteString == "https://x/live_user_a-640x360.jpg")
+
+        let vodURL = StreamFormatting.thumbnailURL("https://x/thumb0-%{width}x%{height}.jpg", width: 320, height: 180)
+        #expect(vodURL?.absoluteString == "https://x/thumb0-320x180.jpg")
+        #expect(StreamFormatting.thumbnailURL("", width: 320, height: 180) == nil)
+        #expect(StreamFormatting.vodThumbnailRequest("https://x/thumb0-%{width}x%{height}.jpg", width: 320, height: 180) != nil)
+        #expect(StreamFormatting.vodThumbnailRequest(nil, width: 320, height: 180) == nil)
     }
 
     @Test("a preview's cache identity holds for its lifetime, then changes")
