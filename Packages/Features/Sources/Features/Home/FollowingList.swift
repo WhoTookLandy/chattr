@@ -58,37 +58,15 @@ struct FollowingList: View {
 
     private func rows(_ channels: [FollowedChannel], followsStore: FollowsStore) -> some View {
         ForEach(channels, id: \.broadcasterId) { channel in
-            let profileURL = followsStore.profileImageURLs[channel.broadcasterId]
-            let stream = ChannelStatusStore.liveStream(
-                for: channel.broadcasterId, status: channelStatus, follows: followsStore
-            )
-            Button {
-                openChannel?(channel: channel, profileImageURL: profileURL)
-            } label: {
-                FollowingRow(
-                    displayName: channel.broadcasterName,
-                    login: channel.broadcasterLogin,
-                    profileImageURL: profileURL,
-                    stream: stream,
-                    lastLiveAt: channelStatus?.statuses[channel.broadcasterId]?.lastLiveAt
-                )
-            }
-            .buttonStyle(.plain)
-            .channelPreviewMenu(
-                name: channel.broadcasterName,
-                profileImageURL: profileURL,
-                stream: stream,
-                open: { intent in openChannel?(channel: channel, profileImageURL: profileURL, intent: intent) }
+            FollowingListItem(
+                channel: channel,
+                account: account,
+                accountStore: accountStore,
+                followsStore: followsStore,
+                channelStatus: channelStatus,
+                openChannel: openChannel
             )
             .listRowBackground(Color.clear)
-            // Only queues the lookup; the store runs it (a few at a time), so
-            // a row scrolling away again neither cancels nor repeats it.
-            .onAppear {
-                guard followsStore.liveStreams[channel.broadcasterId] == nil else { return }
-                channelStatus?.ensureLastLive(
-                    channelId: channel.broadcasterId, account: account, accountStore: accountStore
-                )
-            }
         }
     }
 
@@ -109,6 +87,47 @@ struct FollowingList: View {
                 "Couldn't load channels",
                 systemImage: "exclamationmark.triangle",
                 description: Text("Pull to retry.")
+            )
+        }
+    }
+}
+
+/// Per-row view isolating `channelStatus?.statuses[id]` observation so each
+/// lazy `ensureLastLive` result redraws only its own row instead of re-filtering
+/// and re-diffing the entire `FollowingList`.
+private struct FollowingListItem: View {
+    let channel: FollowedChannel
+    let account: Account
+    let accountStore: AccountStore
+    let followsStore: FollowsStore
+    let channelStatus: ChannelStatusStore?
+    let openChannel: OpenChannelAction?
+
+    var body: some View {
+        let profileURL = followsStore.profileImageURLs[channel.broadcasterId]
+        let stream = followsStore.liveStreams[channel.broadcasterId]
+        Button {
+            openChannel?(channel: channel, profileImageURL: profileURL)
+        } label: {
+            FollowingRow(
+                displayName: channel.broadcasterName,
+                login: channel.broadcasterLogin,
+                profileImageURL: profileURL,
+                stream: stream,
+                lastLiveAt: channelStatus?.statuses[channel.broadcasterId]?.lastLiveAt
+            )
+        }
+        .buttonStyle(.plain)
+        .channelPreviewMenu(
+            name: channel.broadcasterName,
+            profileImageURL: profileURL,
+            stream: stream,
+            open: { intent in openChannel?(channel: channel, profileImageURL: profileURL, intent: intent) }
+        )
+        .onAppear {
+            guard stream == nil else { return }
+            channelStatus?.ensureLastLive(
+                channelId: channel.broadcasterId, account: account, accountStore: accountStore
             )
         }
     }
