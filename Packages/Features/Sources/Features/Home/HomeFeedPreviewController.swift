@@ -67,6 +67,9 @@ final class HomeFeedPreviewController {
     @ObservationIgnored private var unmuteTask: Task<Void, Never>?
     @ObservationIgnored private var previewHold: PlaybackHold?
     @ObservationIgnored private var ownsAudioSession = false
+    /// Bumped each time this controller queues a `PlaybackAudioSession.activate`
+    /// call so a cancelled activation never deactivates a newer one's session.
+    @ObservationIgnored private var audioSessionActivationGeneration = 0
 
     @ObservationIgnored private var deviceSubscriptions: Set<AnyCancellable> = []
     @ObservationIgnored private var itemSubscriptions: Set<AnyCancellable> = []
@@ -165,11 +168,15 @@ final class HomeFeedPreviewController {
                 if let center = self.playbackCenter, center.isPlaying, self.previewHold == nil {
                     self.previewHold = center.holdPlayback(.feedPreview)
                 }
+                self.audioSessionActivationGeneration += 1
+                let activationGen = self.audioSessionActivationGeneration
                 await PlaybackAudioSession.shared.activate(muted: false)
                 guard !Task.isCancelled, self.activeStreamID == streamID, !self.isMuted else {
                     // `activate(muted: false)` already committed an exclusive
-                    // session; undo it if no main stream or preview took over.
-                    if self.playbackCenter?.isPlaying != true {
+                    // session; undo it only if no newer activation or main
+                    // stream has taken over.
+                    if activationGen == self.audioSessionActivationGeneration,
+                       self.playbackCenter?.isPlaying != true {
                         if self.activeStreamID == nil {
                             PlaybackAudioSession.shared.deactivate()
                             self.ownsAudioSession = false
@@ -296,9 +303,13 @@ final class HomeFeedPreviewController {
                 // Only configure the audio session when no main stream already
                 // owns it; keep it mixable so muted previews never cut music.
                 if self.playbackCenter?.isPlaying != true {
+                    self.audioSessionActivationGeneration += 1
+                    let activationGen = self.audioSessionActivationGeneration
                     await PlaybackAudioSession.shared.activate(muted: true)
                     guard !Task.isCancelled, self.targetedStreamID == streamID else {
-                        if self.playbackCenter?.isPlaying != true, self.activeStreamID == nil {
+                        if activationGen == self.audioSessionActivationGeneration,
+                           self.playbackCenter?.isPlaying != true,
+                           self.activeStreamID == nil {
                             PlaybackAudioSession.shared.deactivate()
                             self.ownsAudioSession = false
                         }
