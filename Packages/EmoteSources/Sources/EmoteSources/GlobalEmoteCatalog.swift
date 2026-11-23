@@ -86,7 +86,6 @@ public actor GlobalEmoteCatalog {
             try await self.resolve(provider: provider, key: key)
         }
         inFlight[key] = task
-        defer { inFlight[key] = nil }
         return try await task.value
     }
 
@@ -98,6 +97,10 @@ public actor GlobalEmoteCatalog {
 
     /// Disk (if fresh) → network. Runs inside the coalesced task.
     private func resolve(provider: any EmoteProvider, key: String) async throws -> [Emote] {
+        // Clear `inFlight[key]` atomically on the actor as `resolve` exits so
+        // no concurrent waiter resuming before the initiating caller can
+        // observe and replay an already-failed task.
+        defer { inFlight[key] = nil }
         if entries[key] == nil, let restored = await restoreFromDisk(key: key) {
             entries[key] = restored
         }

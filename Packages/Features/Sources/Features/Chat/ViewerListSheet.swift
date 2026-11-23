@@ -81,13 +81,13 @@ struct ViewerListSheet: View {
                             }
                         }
                     }
-                    if cursor != nil, query.isEmpty {
+                    if let nextCursor = cursor, query.isEmpty {
                         HStack {
                             Spacer()
                             ProgressView()
                             Spacer()
                         }
-                        .task { await loadMore() }
+                        .task(id: nextCursor) { await loadMore() }
                     }
                 } header: {
                     Text(headerText)
@@ -181,8 +181,18 @@ struct ViewerListSheet: View {
         defer { isLoadingMore = false }
         do {
             let page = try await fetchPage(after: after)
-            chatters = (chatters + page.data).sorted { $0.userLogin < $1.userLogin }
+            var seen = Set(chatters.map(\.userId))
+            var merged = chatters
+            for chatter in page.data where seen.insert(chatter.userId).inserted {
+                merged.append(chatter)
+            }
+            chatters = merged.sorted { $0.userLogin < $1.userLogin }
             cursor = page.pagination?.cursor
+        } catch is CancellationError {
+            // Scrolled away or started searching — keep `cursor` so pagination
+            // resumes when the footer re-appears.
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            // URLSession cancellation on view tear-down/search — keep `cursor`.
         } catch {
             cursor = nil
         }

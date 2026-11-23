@@ -127,13 +127,14 @@ struct LiveEventCountdown: View {
     @Environment(\.liveEventCountdownsRunning) private var isRunning
 
     var body: some View {
-        if isRunning {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+        let now = Date.now
+        if isRunning, deadline > now {
+            TimelineView(BoundedCountdownSchedule(until: deadline)) { context in
                 Text(Self.format(deadline.timeIntervalSince(context.date)))
                     .monospacedDigit()
             }
         } else {
-            Text(Self.format(deadline.timeIntervalSinceNow))
+            Text(Self.format(deadline.timeIntervalSince(now)))
                 .monospacedDigit()
         }
     }
@@ -145,6 +146,34 @@ struct LiveEventCountdown: View {
             return String(format: "%d:%02d:%02d", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
         }
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+/// 1 Hz `TimelineSchedule` that stops yielding once `until` is reached, so an
+/// expired poll / prediction / Hype Train banner doesn't keep ticking at 1 Hz
+/// while waiting for conclusion or prune.
+private struct BoundedCountdownSchedule: TimelineSchedule {
+    let until: Date
+
+    struct Entries: Sequence, IteratorProtocol {
+        var current: Date
+        let until: Date
+        var emittedFinal = false
+
+        mutating func next() -> Date? {
+            if current < until {
+                let tick = current
+                current = current.addingTimeInterval(1)
+                return tick
+            }
+            guard !emittedFinal else { return nil }
+            emittedFinal = true
+            return until
+        }
+    }
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> Entries {
+        Entries(current: startDate, until: until)
     }
 }
 

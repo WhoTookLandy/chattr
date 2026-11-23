@@ -21,8 +21,10 @@ public enum ChatLinkDetector {
     ]
 
     /// Punctuation peeled off a word's edges before testing it, so
-    /// "(twitch.tv/foo)." still links.
-    private static let trailingTrim: Set<Character> = [".", ",", "!", "?", ";", ":", ")", "]", "}", "'", "\""]
+    /// "(twitch.tv/foo)." still links. Closing brackets are peeled only when
+    /// unmatched inside the candidate, preserving URLs like Wikipedia links
+    /// that end in balanced parentheses.
+    private static let unconditionalTrailingTrim: Set<Character> = [".", ",", "!", "?", ";", ":", "'", "\""]
     private static let leadingTrim: Set<Character> = ["(", "[", "{", "'", "\""]
 
     /// The URL `word` points at, or nil when it isn't a link.
@@ -32,26 +34,67 @@ public enum ChatLinkDetector {
         guard word.utf8.contains(UInt8(ascii: ".")) else { return nil }
 
         var candidate = Substring(word)
-        while let last = candidate.last, trailingTrim.contains(last) { candidate = candidate.dropLast() }
         while let first = candidate.first, leadingTrim.contains(first) { candidate = candidate.dropFirst() }
-        guard candidate.count >= 4 else { return nil }
+        while let last = candidate.last {
+            if unconditionalTrailingTrim.contains(last) {
+                candidate = candidate.dropLast()
+            } else if let open = matchingOpeningBracket(for: last),
+                      !hasBalancedBracket(open: open, close: last, in: candidate) {
+                candidate = candidate.dropLast()
+            } else {
+                break
+            }
+        }
+        // Re-check for a dot AFTER trimming trailing punctuation so ordinary
+        // sentence-ending words ("hello.", "really...") reject without
+        // allocating `lowercased()` or splitting labels.
+        guard candidate.count >= 4, candidate.utf8.contains(UInt8(ascii: ".")) else { return nil }
 
         let lower = candidate.lowercased()
         if lower.hasPrefix("https://") || lower.hasPrefix("http://") {
             guard let url = URL(string: String(candidate)),
-                  let host = url.host, host.contains(".") else { return nil }
+                  let host = url.host,
+                  Self.hasValidHostLabels(host) else { return nil }
             return url
         }
 
         let hostEnd = lower.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? lower.endIndex
-        let labels = lower[..<hostEnd].split(separator: ".", omittingEmptySubsequences: false)
+        let host = lower[..<hostEnd]
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
         guard labels.count >= 2,
-              labels.allSatisfy({ label in
-                  !label.isEmpty && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
-              }),
+              labels.allSatisfy(Self.isValidHostLabel),
               let tld = labels.last
         else { return nil }
-        guard lower.hasPrefix("www.") || bareDomainTLDs.contains(String(tld)) else { return nil }
+        let isValidWww = lower.hasPrefix("www.") && labels.count >= 3
+        guard isValidWww || bareDomainTLDs.contains(String(tld)) else { return nil }
         return URL(string: "https://" + candidate)
+    }
+
+    private static func matchingOpeningBracket(for closing: Character) -> Character? {
+        switch closing {
+        case ")": return "("
+        case "]": return "["
+        case "}": return "{"
+        default: return nil
+        }
+    }
+
+    private static func hasBalancedBracket(open: Character, close: Character, in s: Substring) -> Bool {
+        var depth = 0
+        for ch in s {
+            if ch == open { depth += 1 }
+            else if ch == close { depth -= 1 }
+        }
+        return depth >= 0
+    }
+
+    private static func hasValidHostLabels(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        return labels.count >= 2 && labels.allSatisfy(isValidHostLabel)
+    }
+
+    private static func isValidHostLabel(_ label: Substring) -> Bool {
+        guard !label.isEmpty, label.first != "-", label.last != "-" else { return false }
+        return label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
     }
 }

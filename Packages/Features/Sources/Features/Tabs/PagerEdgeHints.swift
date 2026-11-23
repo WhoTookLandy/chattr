@@ -39,8 +39,13 @@ struct PagerEdgeHints: View {
         .task(id: currentId) {
             guard tabs.count > 1 else { return }
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { isVisible = true }
-            try? await Task.sleep(for: .seconds(1.6))
-            withAnimation(.easeIn(duration: 0.35)) { isVisible = false }
+            do {
+                try await Task.sleep(for: .seconds(1.6))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            withAnimation(reduceMotion ? nil : .easeIn(duration: 0.35)) { isVisible = false }
         }
     }
 

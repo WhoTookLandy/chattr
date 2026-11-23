@@ -33,51 +33,82 @@ public enum OAuthFlow {
     ///     Registered in Info.plist; the session intercepts navigation matching this scheme.
     ///   - presentationAnchor: The `ASPresentationAnchor` (typically a window) for the sheet.
     /// - Returns: A fully-populated `OAuthToken` ready to hand off to `AccountStore`.
-    /// - Throws: `AppError` on cancellation, server errors, or malformed callback URLs.
+    /// - Throws: `CancellationError` on user/task cancellation, or `AppError` on
+    ///   server errors or malformed callback URLs.
     @MainActor
     public static func run(
         authURL: URL,
         callbackScheme: String,
         presentationAnchor: ASPresentationAnchor
     ) async throws -> OAuthToken {
-        try await withCheckedThrowingContinuation { continuation in
-            // Keep a strong reference for the session's lifetime —
-            // `presentationContextProvider` is a `weak` property on
-            // ASWebAuthenticationSession.
-            let contextProvider = PresentationContextProvider(anchor: presentationAnchor)
-            let session = ASWebAuthenticationSession(
-                url: authURL,
-                callbackURLScheme: callbackScheme
-            ) { callbackURL, error in
-                _ = contextProvider // retain through callback
+        try Task.checkCancellation()
+        let holder = SessionHolder()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                // Keep strong references to both the session and its context
+                // provider on `@MainActor` until completion (Apple requires
+                // callers to strongly retain `ASWebAuthenticationSession`, and
+                // `presentationContextProvider` is weak).
+                let contextProvider = PresentationContextProvider(anchor: presentationAnchor)
+                let session = ASWebAuthenticationSession(
+                    url: authURL,
+                    callbackURLScheme: callbackScheme
+                ) { callbackURL, error in
+                    // Hop back to `@MainActor` to release `session` /
+                    // `contextProvider` (which holds `UIWindow`) on the main
+                    // thread and guarantee the continuation resumes at most once.
+                    Task { @MainActor in
+                        guard holder.claimResume() else { return }
+                        holder.clear()
 
-                if let error {
-                    logger.error("OAuth session failed: \(error.localizedDescription)")
-                    continuation.resume(
-                        throwing: AppError(
-                            message: "Sign in cancelled or failed",
-                            underlying: error
-                        )
-                    )
+                        if let error {
+                            if let authError = error as? ASWebAuthenticationSessionError,
+                               authError.code == .canceledLogin {
+                                logger.info("OAuth session cancelled by user")
+                                continuation.resume(throwing: CancellationError())
+                                return
+                            }
+                            logger.error("OAuth session failed: \(error.localizedDescription)")
+                            continuation.resume(
+                                throwing: AppError(
+                                    message: "Sign in cancelled or failed",
+                                    underlying: error
+                                )
+                            )
+                            return
+                        }
+
+                        guard let callbackURL else {
+                            continuation.resume(throwing: AppError(message: "Sign in returned no URL"))
+                            return
+                        }
+
+                        do {
+                            continuation.resume(returning: try parseCallbackURL(callbackURL))
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+                session.presentationContextProvider = contextProvider
+                session.prefersEphemeralWebBrowserSession = false
+                holder.store(session: session, contextProvider: contextProvider)
+                if Task.isCancelled {
+                    if holder.claimResume() {
+                        holder.clear()
+                        continuation.resume(throwing: CancellationError())
+                    }
                     return
                 }
-
-                guard let callbackURL else {
-                    continuation.resume(throwing: AppError(message: "Sign in returned no URL"))
-                    return
-                }
-
-                do {
-                    continuation.resume(returning: try parseCallbackURL(callbackURL))
-                } catch {
-                    continuation.resume(throwing: error)
+                if !session.start() {
+                    if holder.claimResume() {
+                        holder.clear()
+                        continuation.resume(throwing: AppError(message: "Failed to start ASWebAuthenticationSession"))
+                    }
                 }
             }
-            session.presentationContextProvider = contextProvider
-            session.prefersEphemeralWebBrowserSession = false
-            if !session.start() {
-                continuation.resume(throwing: AppError(message: "Failed to start ASWebAuthenticationSession"))
-            }
+        } onCancel: {
+            holder.cancelOnMainActor()
         }
     }
 
@@ -100,10 +131,11 @@ public enum OAuthFlow {
         let items = components.queryItems ?? []
 
         // Error-path: bridge propagated Twitch's error (user cancel, invalid scope, etc).
+        // `URLComponents.queryItems` already percent-decodes values; don't
+        // double-decode with `.removingPercentEncoding`.
         if let err = items.first(where: { $0.name == "error" })?.value {
             let desc = items.first(where: { $0.name == "error_description" })?.value
-            let decoded = desc?.removingPercentEncoding ?? desc ?? err
-            throw AppError(message: decoded)
+            throw AppError(message: desc ?? err)
         }
 
         // Success-path: tokens in URL query.
@@ -138,6 +170,40 @@ public enum OAuthFlow {
         let anchor: ASPresentationAnchor
         init(anchor: ASPresentationAnchor) { self.anchor = anchor }
         func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor { anchor }
+    }
+
+    /// Holds the active `ASWebAuthenticationSession` and its context provider
+    /// on `@MainActor` so both stay retained until completion and can be
+    /// cancelled safely from `withTaskCancellationHandler.onCancel`.
+    private final class SessionHolder: @unchecked Sendable {
+        @MainActor private var session: ASWebAuthenticationSession?
+        @MainActor private var contextProvider: PresentationContextProvider?
+        @MainActor private var hasResumed = false
+
+        @MainActor
+        func store(session: ASWebAuthenticationSession, contextProvider: PresentationContextProvider) {
+            self.session = session
+            self.contextProvider = contextProvider
+        }
+
+        @MainActor
+        func claimResume() -> Bool {
+            guard !hasResumed else { return false }
+            hasResumed = true
+            return true
+        }
+
+        @MainActor
+        func clear() {
+            session = nil
+            contextProvider = nil
+        }
+
+        nonisolated func cancelOnMainActor() {
+            Task { @MainActor in
+                self.session?.cancel()
+            }
+        }
     }
 }
 

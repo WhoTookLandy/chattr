@@ -98,20 +98,16 @@ public final class ChatBadgeStore {
     /// joins it instead of starting a duplicate pair of Helix fetches (the
     /// `loadedChannelId` guard alone is only set after those awaits, so two
     /// overlapping mounts both used to pass it).
-    @ObservationIgnored private var inFlightLoad: (channelId: String, task: Task<Void, Never>)?
+    @ObservationIgnored private var inFlightLoad: (channelId: String, token: UInt64, task: Task<Void, Never>)?
+    @ObservationIgnored private var nextLoadToken: UInt64 = 0
 
     public init() {}
 
     /// Loads channel-specific badges and merges them on top of the supplied
     /// global slice. The global slice typically comes from `GlobalCatalog`
     /// (pre-fetched at app launch); when it's empty, we fall back to fetching
-    /// global ourselves so chat still works if the catalog hasn't loaded yet.
-    ///
-    /// We could parallelize the two fetches with `async let`, but `Account` is
-    /// a SwiftData `@Model` (non-Sendable), and passing it through `async let`
-    /// trips Swift 6 strict-concurrency's sending check. The total cost is only
-    /// a few hundred ms on a fire-and-forget background load — sequential
-    /// keeps the code simple.
+    /// global ourselves in parallel with channel badges so chat still works
+    /// if the catalog hasn't loaded yet.
     public func load(
         account: Account,
         accountStore: AccountStore,
@@ -130,6 +126,11 @@ public final class ChatBadgeStore {
             return
         }
 
+        // Cancel any superseded load for a different channel.
+        inFlightLoad?.task.cancel()
+        nextLoadToken &+= 1
+        let token = nextLoadToken
+
         // Only Sendable values cross into the load task: the client, the
         // account's stable userId (not the SwiftData @Model), and the
         // MainActor-isolated store itself.
@@ -145,10 +146,11 @@ public final class ChatBadgeStore {
                 accountStore: accountStore,
                 userId: userId,
                 channelId: channelId,
-                globalBadges: globalBadges
+                globalBadges: globalBadges,
+                token: token
             )
         }
-        inFlightLoad = (channelId, task)
+        inFlightLoad = (channelId, token, task)
         await task.value
     }
 
@@ -157,46 +159,52 @@ public final class ChatBadgeStore {
         accountStore: AccountStore,
         userId: String,
         channelId: String,
-        globalBadges: [ChatBadgeKey: ChatBadgeEntry]
+        globalBadges: [ChatBadgeKey: ChatBadgeEntry],
+        token: UInt64
     ) async {
         defer {
-            if inFlightLoad?.channelId == channelId { inFlightLoad = nil }
+            if inFlightLoad?.token == token { inFlightLoad = nil }
         }
 
-        // Use the catalog's global slice when present; fall back to fetching
-        // ourselves so first-channel-open before the catalog finishes still
-        // gets badges (rare but possible on a slow network).
-        let global: [ChatBadgeKey: ChatBadgeEntry]
+        // Use the catalog's global slice when present; otherwise fetch global
+        // and channel badges concurrently so cold starts don't pay two serial
+        // round-trips.
+        let globalResult: (entries: [ChatBadgeKey: ChatBadgeEntry], succeeded: Bool)
+        let channelResult: (entries: [ChatBadgeKey: ChatBadgeEntry], succeeded: Bool)
         if !globalBadges.isEmpty {
-            global = globalBadges
+            globalResult = (globalBadges, true)
+            channelResult = await fetchChannel(client: client, accountStore: accountStore, userId: userId, channelId: channelId)
         } else {
-            global = await fetchGlobal(client: client, accountStore: accountStore, userId: userId)
+            async let g = fetchGlobal(client: client, accountStore: accountStore, userId: userId)
+            async let c = fetchChannel(client: client, accountStore: accountStore, userId: userId, channelId: channelId)
+            (globalResult, channelResult) = await (g, c)
         }
-        let channel = await fetchChannel(client: client, accountStore: accountStore, userId: userId, channelId: channelId)
 
-        // Same cancellation-safety guard as `EmoteIndex.load`: if the load
-        // was cancelled mid-flight, both fetch helpers returned `[:]` (their
-        // `catch is CancellationError` swallows the cancel). Publishing here
-        // would set `entries = [:]` (wiping any prior load) and mark
-        // `loadedChannelId = channelId`, causing the next caller to short-
-        // circuit and the channel's badges to stay permanently empty. The
-        // load no longer runs inside a view's `.task`, so this is now a
-        // belt-and-braces check rather than the common path.
-        guard !Task.isCancelled else {
-            logger.info("ChatBadgeStore load cancelled for channel \(channelId, privacy: .public); not publishing partial entries")
+        guard !Task.isCancelled, token == nextLoadToken else {
+            logger.info("ChatBadgeStore load superseded/cancelled for channel \(channelId, privacy: .public); not publishing")
             return
         }
 
         // Channel overrides global at the (setId, id) granularity. This matches
         // Twitch's documented behavior: a channel's custom "subscriber" badge
         // versions replace the global ones; everything else stays global.
-        var merged = global
-        for (key, entry) in channel {
+        var merged = globalResult.entries
+        for (key, entry) in channelResult.entries {
             merged[key] = entry
         }
-        publish(entries: merged)
-        loadedChannelId = channelId
-        logger.info("Loaded \(merged.count) badge entries for channel \(channelId, privacy: .public) (global=\(global.count), channel=\(channel.count))")
+
+        // Never wipe an existing table with an empty failed result, and only
+        // mark `loadedChannelId` when every required fetch succeeded so a
+        // transient network/auth error retries on the next mount.
+        if !merged.isEmpty || (globalResult.succeeded && channelResult.succeeded) {
+            publish(entries: merged)
+        }
+        if globalResult.succeeded && channelResult.succeeded {
+            loadedChannelId = channelId
+        } else {
+            logger.warning("ChatBadgeStore partial/failed load for channel \(channelId, privacy: .public) (global ok: \(globalResult.succeeded), channel ok: \(channelResult.succeeded)); will retry on next load")
+        }
+        logger.info("Loaded \(merged.count) badge entries for channel \(channelId, privacy: .public) (global=\(globalResult.entries.count), channel=\(channelResult.entries.count))")
     }
 
     /// Replaces the resolved table and drops memoized resolutions, which
@@ -211,6 +219,10 @@ public final class ChatBadgeStore {
     /// and dropping any whose `(setId, id)` aren't in our cached sets (rare —
     /// happens when Twitch ships a new badge type after our last fetch).
     public func entries(for badges: [ChatBadge]) -> [ChatBadgeEntry] {
+        // Register an `@Observable` dependency on `entries` even on cache
+        // hits (since `resolvedCache` is `@ObservationIgnored`), so SwiftUI
+        // views calling `entries(for:)` directly re-render once badges load.
+        _ = entries
         // Badge-less chatters are common; an empty array literal is a shared
         // singleton, so this path allocates nothing either.
         guard !badges.isEmpty else { return [] }
@@ -264,19 +276,19 @@ public final class ChatBadgeStore {
         client: TwitchClient,
         accountStore: AccountStore,
         userId: String
-    ) async -> [ChatBadgeKey: ChatBadgeEntry] {
+    ) async -> (entries: [ChatBadgeKey: ChatBadgeEntry], succeeded: Bool) {
         do {
             let sets = try await accountStore.withTokenRefresh(forUserId: userId) {
                 try await client.api.fetchGlobalBadges()
             }
-            return Self.flatten(sets: sets)
+            return (Self.flatten(sets: sets), true)
         } catch is CancellationError {
             // Expected on view tear-down — silently exit.
-            return [:]
+            return ([:], false)
         } catch {
             // Non-fatal: chat still renders without badges.
             logger.error("Failed to load global badges: \(error.localizedDescription, privacy: .public)")
-            return [:]
+            return ([:], false)
         }
     }
 
@@ -285,20 +297,20 @@ public final class ChatBadgeStore {
         accountStore: AccountStore,
         userId: String,
         channelId: String
-    ) async -> [ChatBadgeKey: ChatBadgeEntry] {
+    ) async -> (entries: [ChatBadgeKey: ChatBadgeEntry], succeeded: Bool) {
         do {
             let sets = try await accountStore.withTokenRefresh(forUserId: userId) {
                 try await client.api.fetchChannelBadges(forBroadcasterID: channelId)
             }
-            return Self.flatten(sets: sets)
+            return (Self.flatten(sets: sets), true)
         } catch is CancellationError {
             // Expected when ChatScreen unmounts mid-fetch — the dual-mount
             // transition on openChannel cancels the badge .task on the first
             // ChatScreen instance. Silently exit instead of polluting logs.
-            return [:]
+            return ([:], false)
         } catch {
             logger.error("Failed to load channel badges for \(channelId, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return [:]
+            return ([:], false)
         }
     }
 

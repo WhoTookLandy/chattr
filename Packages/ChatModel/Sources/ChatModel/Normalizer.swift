@@ -105,7 +105,8 @@ public enum Normalizer {
                 // Twitch already resolved @username for us — extract the
                 // login from the reference, mark `isMe` if it matches.
                 if let mention = fragment.mention {
-                    let isMe = mention.userLogin.caseInsensitiveCompare(currentUserLogin) == .orderedSame
+                    let isMe = !currentUserLogin.isEmpty
+                        && mention.userLogin.caseInsensitiveCompare(currentUserLogin) == .orderedSame
                     if isMe { sawSelfMention = true }
                     flushPendingText()
                     runs.append(.mention(login: mention.userLogin, isMe: isMe))
@@ -280,7 +281,16 @@ public enum Normalizer {
                 viewers: raid.viewerCount
             ))
 
-        case "announcement", "charity_donation", "bits_badge_tier",
+        case "announcement":
+            // Twitch sends an empty `system_message` on chat announcements and
+            // puts the actual announcement copy in `message.text`.
+            let text = notification.message.text.isEmpty
+                ? notification.systemMessage
+                : notification.message.text
+            guard !text.isEmpty else { return nil }
+            kind = .systemBubble(text: text)
+
+        case "charity_donation", "bits_badge_tier",
              "prime_paid_upgrade", "gift_paid_upgrade", "pay_it_forward":
             // Unstructured-but-still-visible notices. Render the
             // Twitch-formatted text in a generic system bubble.

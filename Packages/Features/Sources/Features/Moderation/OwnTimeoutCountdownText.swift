@@ -24,7 +24,7 @@ struct OwnTimeoutCountdownText: View {
     private var isLive: Bool {
         guard scenePhase == .active else { return false }
         guard let tabId else { return true }
-        return chatTabs?.activeTabId == tabId
+        return chatTabs?.isPresented == true && chatTabs?.activeTabId == tabId
     }
 
     var body: some View {

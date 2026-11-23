@@ -95,12 +95,25 @@ private struct KeepScreenAwakeModifier: ViewModifier {
     /// Whether this view currently owns a hold — keeps acquire / release
     /// balanced across appear, change and disappear.
     @State private var holding = false
+    /// Whether this view is currently on screen. Without this guard, an
+    /// `onChange(of: active)` while disappeared (e.g. inactive tab or pushed
+    /// behind another screen) acquires a hold while off-screen that leaks if
+    /// the view is torn down without reappearing.
+    @State private var isVisible = false
 
     func body(content: Content) -> some View {
         content
-            .onAppear { setHolding(active) }
-            .onChange(of: active) { _, newValue in setHolding(newValue) }
-            .onDisappear { setHolding(false) }
+            .onAppear {
+                isVisible = true
+                setHolding(active)
+            }
+            .onChange(of: active) { _, newValue in
+                setHolding(isVisible && newValue)
+            }
+            .onDisappear {
+                isVisible = false
+                setHolding(false)
+            }
     }
 
     private func setHolding(_ wanted: Bool) {

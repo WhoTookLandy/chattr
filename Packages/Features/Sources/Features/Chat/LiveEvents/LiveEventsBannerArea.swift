@@ -31,6 +31,7 @@ struct LiveEventsBannerArea: View {
     let tabId: UUID?
 
     @Environment(\.chatTabs) private var chatTabs
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model = LiveEventsModel()
 
     @AppStorage(LiveEventsSettings.pollsKey) private var showPolls = true
@@ -57,8 +58,12 @@ struct LiveEventsBannerArea: View {
             }
         }
         .padding(.horizontal, 12)
-        // Off-screen: freeze the countdowns (no per-second TimelineView).
-        .environment(\.liveEventCountdownsRunning, active)
+        // Off-screen, popped back to Chats list, or backgrounded: freeze the
+        // countdowns (no per-second TimelineView).
+        .environment(
+            \.liveEventCountdownsRunning,
+            active && scenePhase == .active && (chatTabs?.isPresented ?? true)
+        )
         .animation(.snappy(duration: 0.25), value: model.state)
         .animation(.snappy(duration: 0.25), value: model.expanded)
         .animation(.snappy(duration: 0.25), value: model.dismissedIds)

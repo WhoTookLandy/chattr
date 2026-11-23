@@ -17,16 +17,35 @@ struct DraftStorageTests {
         )
     }
 
-    @Test("scheduleSave defers the write until a flush")
+    private func persistedValue(for id: ChannelDescriptor.ID) -> String? {
+        (UserDefaults.standard.dictionary(forKey: DraftStorage.legacyStorageKey) as? [String: String])?[id]
+    }
+
+    @Test("scheduleSave defers the UserDefaults write until a flush while load sees it immediately")
     func scheduleSaveDefers() {
         let id = channel().id
         defer { DraftStorage.remove(forChannels: [id]) }
 
         DraftStorage.scheduleSave(forChannel: id, text: "hello")
-        #expect(DraftStorage.load(forChannel: id) == "")
+        // Not written to UserDefaults yet, but in-memory load sees the latest text.
+        #expect(persistedValue(for: id) == nil)
+        #expect(DraftStorage.load(forChannel: id) == "hello")
 
         DraftStorage.flushPendingSaves()
+        #expect(persistedValue(for: id) == "hello")
         #expect(DraftStorage.load(forChannel: id) == "hello")
+    }
+
+    @Test("Immediate save cancels any pending debounced save for that channel")
+    func immediateSaveBeatsPending() {
+        let id = channel().id
+        defer { DraftStorage.remove(forChannels: [id]) }
+
+        DraftStorage.scheduleSave(forChannel: id, text: "older")
+        DraftStorage.save(forChannel: id, text: "newer")
+        DraftStorage.flushPendingSaves()
+        #expect(DraftStorage.load(forChannel: id) == "newer")
+        #expect(persistedValue(for: id) == "newer")
     }
 
     @Test("Only the latest scheduled text is written")
@@ -53,9 +72,10 @@ struct DraftStorageTests {
 
         DraftStorage.scheduleSave(forChannel: id, text: "later")
         // Generous upper bound over the 400ms window to stay CI-tolerant.
-        for _ in 0..<30 where DraftStorage.load(forChannel: id).isEmpty {
+        for _ in 0..<30 where persistedValue(for: id) == nil {
             try await Task.sleep(for: .milliseconds(100))
         }
+        #expect(persistedValue(for: id) == "later")
         #expect(DraftStorage.load(forChannel: id) == "later")
     }
 
