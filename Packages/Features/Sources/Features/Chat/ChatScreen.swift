@@ -179,6 +179,11 @@ public struct ChatScreen: View {
     /// nil during previews / detached views just skips the prefetch.
     @Environment(\.chatImagePrefetcher) private var chatImagePrefetcher
 
+    /// Read ONLY inside `.onChange(of: sessionCoordinator.errorMessage)` to
+    /// tag diagnostic snapshots with whether this page is active — never read
+    /// `activeTabId` in `body`, so pager swipes stay isolated from `ChatScreen`.
+    @Environment(\.chatTabs) private var chatTabs
+
     /// The pager tab this page renders, or nil outside the pager (always
     /// active then). Stable for the page's lifetime — deliberately NOT an
     /// `isActive` flag: a flag would change on every swipe, re-creating this
@@ -563,6 +568,7 @@ public struct ChatScreen: View {
         }
         .onChange(of: sessionCoordinator.errorMessage) { _, errorMessage in
             guard let errorMessage else { return }
+            let isVisible = tabId.map { chatTabs?.activeTabId == $0 } ?? true
             ChatDiagnostics.shared.recordPage(ChatPageDiagnosticSnapshot(
                 channelLogin: channelLoginName,
                 channelId: channelId,
@@ -575,7 +581,7 @@ public struct ChatScreen: View {
                 unfilteredLineCount: chatModel.unfilteredLineCount,
                 blockedCount: chatModel.blockedUserCount,
                 changeVersion: chatModel.changeVersion,
-                isVisible: true,
+                isVisible: isVisible,
                 connectionState: connectionStatus.map { String(describing: $0.state) } ?? "nil"
             ))
         }

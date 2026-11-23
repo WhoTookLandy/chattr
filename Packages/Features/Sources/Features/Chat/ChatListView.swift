@@ -107,5 +107,13 @@ struct ChatListView: UIViewControllerRepresentable {
             scrollToBottomToken: scrollToBottomToken
         )
     }
+
+    static func dismantleUIViewController(_ vc: ChatListViewController, coordinator: ()) {
+        guard !vc.channelLoginName.isEmpty else { return }
+        ChatDiagnostics.shared.removeListGeometry(
+            channelLogin: vc.channelLoginName,
+            ownerId: vc.diagnosticsOwnerId
+        )
+    }
 }
 #endif

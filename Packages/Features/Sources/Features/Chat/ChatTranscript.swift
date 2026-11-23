@@ -135,6 +135,7 @@ struct ChatTranscript: View {
             onJumpToLatest: jumpToLatest
         ))
         .onChange(of: connectionStatus?.state) { previous, current in
+            updateDiagnosticSnapshot()
             guard let current else { return }
             connectionBanner = ConnectionBanner.next(previous: previous, current: current)
             liveAgainDismiss?.cancel()
@@ -206,11 +207,15 @@ struct ChatTranscript: View {
         .onChange(of: isVisible) { _, _ in
             recordDiagnostics(reason: "visibilityChanged")
         }
+        .onChange(of: chatModel.changeVersion) { _, _ in
+            updateDiagnosticSnapshot()
+        }
     }
 
-    /// Snapshots the transcript branch + model counts into `ChatDiagnostics`
-    /// and logs state transitions (never called per message).
-    private func recordDiagnostics(reason: String) {
+    /// Updates the stored `ChatDiagnostics` snapshot without emitting a log
+    /// line (safe for routine transcript flushes and connection updates).
+    @discardableResult
+    private func updateDiagnosticSnapshot() -> ChatPageDiagnosticSnapshot {
         let branch = chatModel.isEmpty ? "empty" : "list"
         let attach = String(describing: chatModel.attachState)
         let conn = connectionStatus.map { String(describing: $0.state) } ?? "nil"
@@ -230,7 +235,14 @@ struct ChatTranscript: View {
             connectionState: conn
         )
         ChatDiagnostics.shared.recordPage(snapshot)
-        logger.info("ChatTranscript #\(channelLoginName, privacy: .public) [\(reason, privacy: .public)]: branch=\(branch, privacy: .public) attach=\(attach, privacy: .public) lines=\(snapshot.visibleLineCount)/\(snapshot.unfilteredLineCount) blocked=\(snapshot.blockedCount) vis=\(isVisible) conn=\(conn, privacy: .public)")
+        return snapshot
+    }
+
+    /// Snapshots the transcript branch + model counts into `ChatDiagnostics`
+    /// and logs state transitions (never called per message).
+    private func recordDiagnostics(reason: String) {
+        let snapshot = updateDiagnosticSnapshot()
+        logger.info("ChatTranscript #\(channelLoginName, privacy: .public) [\(reason, privacy: .public)]: branch=\(snapshot.transcriptBranch, privacy: .public) attach=\(snapshot.attachState, privacy: .public) lines=\(snapshot.visibleLineCount)/\(snapshot.unfilteredLineCount) blocked=\(snapshot.blockedCount) vis=\(isVisible) conn=\(snapshot.connectionState, privacy: .public)")
     }
 
     /// The list (either implementation) plus everything both share: the

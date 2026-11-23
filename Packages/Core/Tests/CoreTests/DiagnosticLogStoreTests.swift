@@ -5,13 +5,15 @@ import Testing
 @Suite("DiagnosticLogStore")
 struct DiagnosticLogStoreTests {
 
-    @Test("AppLogMessage redacts .private and .sensitive, preserves .public and unannotated")
+    @Test("AppLogMessage matches OSLog automatic privacy: scalars visible, strings redacted unless .public")
     func messagePrivacyRedaction() {
         let user = "xqc"
         let token = "secret-oauth-token"
         let count = 42
-        let msg: AppLogMessage = "user=\(user, privacy: .public) token=\(token, privacy: .private) pin=\("1234", privacy: .sensitive) count=\(count)"
-        #expect(msg.text == "user=xqc token=<private> pin=<private> count=42")
+        let ratio = 1.5
+        let flag = true
+        let msg: AppLogMessage = "user=\(user, privacy: .public) unannotated=\(token) auto=\(token, privacy: .auto) priv=\(token, privacy: .private) sens=\("1234", privacy: .sensitive) count=\(count) ratio=\(ratio) flag=\(flag) hiddenCount=\(count, privacy: .private)"
+        #expect(msg.text == "user=xqc unannotated=<private> auto=<private> priv=<private> sens=<private> count=42 ratio=1.5 flag=true hiddenCount=<private>")
     }
 
     @Test("in-memory ring buffer returns newest-first and evicts oldest past capacity")
@@ -71,7 +73,9 @@ struct DiagnosticLogStoreTests {
         let previous = run2.previousSessionLog()
         #expect(previous?.contains("run-1-hello") == true)
 
+        #expect(run2.hasCleared == false)
         run2.clear()
+        #expect(run2.hasCleared == true)
         #expect(run2.entries().isEmpty)
         #expect(run2.previousSessionLog() == nil)
     }

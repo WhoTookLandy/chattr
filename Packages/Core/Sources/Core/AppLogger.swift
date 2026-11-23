@@ -39,16 +39,58 @@ public struct AppLogMessage: ExpressibleByStringLiteral, ExpressibleByStringInte
             storage.append(literal)
         }
 
-        public mutating func appendInterpolation<T>(_ value: T) {
+        public mutating func appendInterpolation(_ value: Bool) {
+            storage.append(String(value))
+        }
+
+        public mutating func appendInterpolation(_ value: Bool, privacy: AppLogPrivacy) {
+            switch privacy {
+            case .private, .sensitive:
+                storage.append("<private>")
+            case .public, .auto:
+                storage.append(String(value))
+            }
+        }
+
+        public mutating func appendInterpolation<T: FixedWidthInteger>(_ value: T) {
+            storage.append(String(value))
+        }
+
+        public mutating func appendInterpolation<T: FixedWidthInteger>(_ value: T, privacy: AppLogPrivacy) {
+            switch privacy {
+            case .private, .sensitive:
+                storage.append("<private>")
+            case .public, .auto:
+                storage.append(String(value))
+            }
+        }
+
+        public mutating func appendInterpolation<T: BinaryFloatingPoint>(_ value: T) {
             storage.append(String(describing: value))
         }
 
-        public mutating func appendInterpolation<T>(_ value: T, privacy: AppLogPrivacy) {
+        public mutating func appendInterpolation<T: BinaryFloatingPoint>(_ value: T, privacy: AppLogPrivacy) {
             switch privacy {
             case .private, .sensitive:
                 storage.append("<private>")
             case .public, .auto:
                 storage.append(String(describing: value))
+            }
+        }
+
+        /// Mirrors Apple's `OSLogInterpolation` default privacy: dynamic strings
+        /// and arbitrary objects are redacted unless explicitly marked `.public`,
+        /// preventing accidental credential leaks in memory or disk logs.
+        public mutating func appendInterpolation<T>(_ value: T) {
+            storage.append("<private>")
+        }
+
+        public mutating func appendInterpolation<T>(_ value: T, privacy: AppLogPrivacy) {
+            switch privacy {
+            case .public:
+                storage.append(String(describing: value))
+            case .private, .sensitive, .auto:
+                storage.append("<private>")
             }
         }
     }
@@ -212,7 +254,7 @@ public enum AppLogger {
     ) -> [Entry] {
         guard limit > 0 else { return [] }
         let buffered = DiagnosticLogStore.shared.entries(limit: limit, minLevel: minLevel)
-        if !buffered.isEmpty {
+        if !buffered.isEmpty || DiagnosticLogStore.shared.hasCleared {
             return buffered
         }
         return recentOSLogEntries(limit: limit, minLevel: minLevel)

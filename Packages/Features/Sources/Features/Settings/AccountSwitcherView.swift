@@ -171,7 +171,7 @@ struct AccountSwitcherView: View {
         } catch is CancellationError {
             // User dismissed the auth sheet — leave sheet quiet.
         } catch {
-            logger.error("Re-authorize failed for @\(account.login): \(error.localizedDescription)")
+            logger.error("Re-authorize failed for @\(account.login, privacy: .public): \(error.localizedDescription, privacy: .public)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription
         }
     }
@@ -189,7 +189,7 @@ struct AccountSwitcherView: View {
         } catch is CancellationError {
             // User dismissed the auth sheet — leave sheet quiet.
         } catch {
-            logger.error("Add account failed: \(error.localizedDescription)")
+            logger.error("Add account failed: \(error.localizedDescription, privacy: .public)")
             errorMessage = (error as? AppError)?.message ?? error.localizedDescription
         }
     }
@@ -205,7 +205,7 @@ struct AccountSwitcherView: View {
                 do {
                     try await accountStore.remove(account: account)
                 } catch {
-                    logger.error("Remove account failed: \(error.localizedDescription)")
+                    logger.error("Remove account failed: \(error.localizedDescription, privacy: .public)")
                     errorMessage = "Couldn't remove account: \(error.localizedDescription)"
                 }
             }

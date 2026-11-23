@@ -31,6 +31,10 @@ final class ChatListViewController: UIViewController {
     /// Channel login for diagnostic logs and live geometry snapshots.
     var channelLoginName: String = ""
 
+    /// Ownership token so dismantling a stale controller never removes geometry
+    /// recorded by a newer list instance for the same channel.
+    let diagnosticsOwnerId = UUID()
+
     /// One-shot milestone / anomaly log guards so TestFlight diagnostics
     /// capture initial mount & layout issues without per-message spam.
     private var loggedInitialApply = false
@@ -551,6 +555,7 @@ final class ChatListViewController: UIViewController {
     private func recordDiagnostics() -> ChatListGeometrySnapshot {
         guard isViewLoaded, let collectionView else {
             let unloaded = ChatListGeometrySnapshot(
+                ownerId: diagnosticsOwnerId,
                 isViewLoaded: false,
                 isPinnedToBottom: tailing.isPinnedToBottom,
                 isVisible: tailing.isVisible,
@@ -578,6 +583,7 @@ final class ChatListViewController: UIViewController {
         let sectionCount = collectionView.numberOfSections
         let itemCount = sectionCount > 0 ? collectionView.numberOfItems(inSection: 0) : 0
         let snapshot = ChatListGeometrySnapshot(
+            ownerId: diagnosticsOwnerId,
             isViewLoaded: true,
             inWindow: view.window != nil,
             viewBounds: view.bounds,

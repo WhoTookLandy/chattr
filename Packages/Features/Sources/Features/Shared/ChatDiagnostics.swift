@@ -28,6 +28,7 @@ struct PagerDiagnosticSnapshot: Equatable, Sendable {
 
 /// Snapshot of `ChatListViewController`'s UIKit collection view geometry and tailing state.
 struct ChatListGeometrySnapshot: Equatable, Sendable {
+    var ownerId: UUID = UUID()
     var isViewLoaded: Bool = false
     var inWindow: Bool = false
     var viewBounds: CGRect = .zero
@@ -159,8 +160,12 @@ final class ChatDiagnostics {
         listGeometryByKey[key] = geometry
     }
 
-    func removeListGeometry(channelLogin: String) {
-        listGeometryByKey[channelLogin.lowercased()] = nil
+    func removeListGeometry(channelLogin: String, ownerId: UUID? = nil) {
+        let key = channelLogin.lowercased()
+        if let ownerId, listGeometryByKey[key]?.ownerId != ownerId {
+            return
+        }
+        listGeometryByKey[key] = nil
     }
 
     /// All currently mounted chat pages with their latest `ChatListViewController`

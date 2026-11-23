@@ -34,6 +34,15 @@ final class DevLogModel {
     /// disambiguation when `visibleEntries.isEmpty`.
     private(set) var isLoading = false
 
+    /// Monotonic generation bumped by every `load()` and `clear()` so a
+    /// pre-clear `load()` finishing late can never restore cleared entries.
+    @ObservationIgnored private var loadGeneration: UInt64 = 0
+
+    /// Injectable log reader + clearer (production defaults to `AppLogger`;
+    /// tests inject deterministic closures to drive load/clear interleavings).
+    @ObservationIgnored private let readLogs: @Sendable () async -> ([AppLogger.Entry], String?)
+    @ObservationIgnored private let clearLogs: @Sendable () async -> Void
+
     /// Entries visible after applying severity, category, and search filters.
     var visibleEntries: [AppLogger.Entry] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -54,32 +63,49 @@ final class DevLogModel {
         Array(Set(allEntries.map(\.category))).sorted()
     }
 
-    init(entries: [AppLogger.Entry] = [], previousSessionLog: String? = nil) {
+    init(
+        entries: [AppLogger.Entry] = [],
+        previousSessionLog: String? = nil,
+        readLogs: @escaping @Sendable () async -> ([AppLogger.Entry], String?) = {
+            await Task.detached(priority: .userInitiated) {
+                (
+                    AppLogger.recentEntries(limit: 1_000, minLevel: .debug),
+                    AppLogger.previousSessionLog()
+                )
+            }.value
+        },
+        clearLogs: @escaping @Sendable () async -> Void = {
+            await Task.detached(priority: .userInitiated) {
+                AppLogger.clearRecentEntries()
+            }.value
+        }
+    ) {
         self.allEntries = entries
         self.previousSessionLog = previousSessionLog
+        self.readLogs = readLogs
+        self.clearLogs = clearLogs
     }
 
     /// Re-read recent entries and any rotated previous-session log off-main.
     func load() async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
         isLoading = true
-        defer { isLoading = false }
-        let (snapshot, previous) = await Task.detached(priority: .userInitiated) {
-            (
-                AppLogger.recentEntries(limit: 1_000, minLevel: .debug),
-                AppLogger.previousSessionLog()
-            )
-        }.value
+        let (snapshot, previous) = await readLogs()
+        guard loadGeneration == generation else { return }
         self.allEntries = snapshot
         self.previousSessionLog = previous
+        self.isLoading = false
     }
 
-    /// Clears in-app log memory and rotating files.
+    /// Clears in-app log memory and rotating files, invalidating any in-flight
+    /// `load()` so stale pre-clear snapshots can never reappear.
     func clear() async {
-        await Task.detached(priority: .userInitiated) {
-            AppLogger.clearRecentEntries()
-        }.value
+        loadGeneration &+= 1
+        isLoading = false
         allEntries = []
         previousSessionLog = nil
+        await clearLogs()
     }
 
     /// Builds a shareable plain-text diagnostic report with device/settings

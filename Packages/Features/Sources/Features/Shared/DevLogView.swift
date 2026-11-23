@@ -1,6 +1,22 @@
 import SwiftUI
 import Observation
+import UniformTypeIdentifiers
 import Core
+
+/// On-demand shareable diagnostic report file. Builds the report from live
+/// `ChatDiagnostics` + `DevLogModel` state at the moment the user taps Share,
+/// rather than holding a stale precomputed string or rebuilding per body pass.
+private struct DiagnosticReportTransferable: Transferable {
+    let build: @MainActor @Sendable () -> String
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .plainText) { item in
+            let text = await item.build()
+            return Data(text.utf8)
+        }
+        .suggestedFileName("chattr-diagnostics.txt")
+    }
+}
 
 /// Dev / TestFlight log viewer and diagnostic report exporter.
 ///
@@ -12,7 +28,6 @@ public struct DevLogView: View {
     @State private var model = DevLogModel()
     @State private var showLiveSnapshot = false
     @State private var copiedFeedback = false
-    @State private var shareReport = ""
     @AppStorage(DeveloperSettings.chatDebugHUDKey) private var showChatDebugHUD = false
 
     public init() {}
@@ -53,9 +68,13 @@ public struct DevLogView: View {
                 }
                 .accessibilityLabel("Copy diagnostic report")
 
+                let logModel = model
                 ShareLink(
-                    item: shareReport.isEmpty ? model.buildReport(filteredOnly: false, includePreviousSession: true) : shareReport,
-                    subject: Text("chattr Diagnostic Report (\(DeveloperSettings.versionString))")
+                    item: DiagnosticReportTransferable {
+                        logModel.buildReport(filteredOnly: false, includePreviousSession: true)
+                    },
+                    subject: Text("chattr Diagnostic Report (\(DeveloperSettings.versionString))"),
+                    preview: SharePreview("chattr-diagnostics.txt")
                 ) {
                     Image(systemName: "square.and.arrow.up")
                 }
@@ -72,10 +91,7 @@ public struct DevLogView: View {
                     }
                     Divider()
                     Button(role: .destructive) {
-                        Task {
-                            await model.clear()
-                            shareReport = model.buildReport(filteredOnly: false, includePreviousSession: true)
-                        }
+                        Task { await model.clear() }
                     } label: {
                         Label("Clear Logs", systemImage: "trash")
                     }
@@ -86,14 +102,8 @@ public struct DevLogView: View {
             }
         }
         .appSensoryFeedback(.success, trigger: copiedFeedback) { _, copied in copied }
-        .refreshable {
-            await model.load()
-            shareReport = model.buildReport(filteredOnly: false, includePreviousSession: true)
-        }
-        .task {
-            await model.load()
-            shareReport = model.buildReport(filteredOnly: false, includePreviousSession: true)
-        }
+        .refreshable { await model.load() }
+        .task { await model.load() }
     }
 
     private func copyReport(filteredOnly: Bool) {
@@ -111,31 +121,13 @@ public struct DevLogView: View {
 
     @ViewBuilder
     private var liveStateSection: some View {
-        let pager = ChatDiagnostics.shared.pager
-        let pages = ChatDiagnostics.shared.mergedPages()
         Section {
             DisclosureGroup(isExpanded: $showLiveSnapshot) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(pager?.summaryLine ?? "Pager: (none recorded)")
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                    if pages.isEmpty {
-                        Text("Pages: (none mounted)")
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(pages, id: \.channelLogin) { page in
-                            VStack(alignment: .leading, spacing: 2) {
-                                ForEach(page.summaryLines, id: \.self) { line in
-                                    Text(line)
-                                        .font(.caption2.monospaced())
-                                        .foregroundStyle(.primary)
-                                }
-                            }
-                        }
+                if showLiveSnapshot {
+                    TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                        liveSnapshotContent
                     }
                 }
-                .padding(.vertical, 4)
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "waveform.path.ecg")
@@ -143,12 +135,39 @@ public struct DevLogView: View {
                     Text("Live Chat Snapshot")
                         .font(.subheadline.weight(.medium))
                     Spacer()
-                    Text("\(pages.count) page(s)")
+                    Text("\(ChatDiagnostics.shared.mergedPages().count) page(s)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var liveSnapshotContent: some View {
+        let pager = ChatDiagnostics.shared.pager
+        let pages = ChatDiagnostics.shared.mergedPages()
+        VStack(alignment: .leading, spacing: 6) {
+            Text(pager?.summaryLine ?? "Pager: (none recorded)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            if pages.isEmpty {
+                Text("Pages: (none mounted)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(pages, id: \.channelLogin) { page in
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(page.summaryLines, id: \.self) { line in
+                            Text(line)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder

@@ -35,6 +35,7 @@ public final class DiagnosticLogStore: Sendable {
         var ring: [AppLogger.Entry] = []
         var writeIndex: Int = 0
         var nextId: Int = 1
+        var clearedAt: Date? = nil
     }
 
     private struct DiskState: Sendable {
@@ -171,11 +172,18 @@ public final class DiagnosticLogStore: Sendable {
         return text.isEmpty ? nil : text
     }
 
+    /// True once `clear()` has been invoked in this process, so callers avoid
+    /// falling back to pre-clear `OSLogStore` entries when the buffer is empty.
+    public var hasCleared: Bool {
+        memory.withLock { $0.clearedAt != nil }
+    }
+
     /// Clears the in-memory ring buffer and deletes persisted log files.
     public func clear() {
         memory.withLock { state in
             state.ring.removeAll(keepingCapacity: true)
             state.writeIndex = 0
+            state.clearedAt = Date()
         }
         guard let directory else { return }
         ioQueue.sync {

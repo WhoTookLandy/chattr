@@ -131,4 +131,78 @@ struct ChatDiagnosticsTests {
         model.searchText = "registry"
         #expect(model.visibleEntries.map(\.id) == [3])
     }
+
+    @Test("removeListGeometry only removes geometry owned by the dismantling controller")
+    func removeListGeometryRespectsOwnerId() {
+        let diag = ChatDiagnostics()
+        let firstOwner = UUID()
+        let secondOwner = UUID()
+        diag.recordListGeometry(channelLogin: "xqc", ChatListGeometrySnapshot(ownerId: firstOwner, isViewLoaded: true, itemCount: 10))
+        diag.recordListGeometry(channelLogin: "xqc", ChatListGeometrySnapshot(ownerId: secondOwner, isViewLoaded: true, itemCount: 25))
+
+        // Stale first controller dismantling must not wipe the newer list's snapshot.
+        diag.removeListGeometry(channelLogin: "xqc", ownerId: firstOwner)
+        #expect(diag.hudLines(for: "xqc").bottom.contains("items:25"))
+
+        // Matching owner removes it cleanly.
+        diag.removeListGeometry(channelLogin: "xqc", ownerId: secondOwner)
+        #expect(diag.hudLines(for: "xqc").bottom == "cv:not-mounted")
+    }
+
+    @Test("DevLogModel clear invalidates an in-flight load and allows a subsequent load")
+    func devLogModelClearInvalidatesInFlightLoad() async {
+        actor Gate {
+            private var opened = false
+            private var waiters: [CheckedContinuation<Void, Never>] = []
+            private var calls = 0
+
+            func nextCall() -> Int {
+                calls += 1
+                return calls
+            }
+
+            func wait() async {
+                guard !opened else { return }
+                await withCheckedContinuation { waiters.append($0) }
+            }
+
+            func open() {
+                opened = true
+                let toResume = waiters
+                waiters.removeAll()
+                for waiter in toResume { waiter.resume() }
+            }
+        }
+
+        let gate = Gate()
+        let now = Date()
+        let staleEntry = AppLogger.Entry(id: 1, date: now, level: .info, category: "Old", composedMessage: "stale")
+        let freshEntry = AppLogger.Entry(id: 2, date: now, level: .info, category: "New", composedMessage: "fresh")
+
+        let model = DevLogModel(
+            entries: [staleEntry],
+            readLogs: {
+                let call = await gate.nextCall()
+                if call == 1 {
+                    await gate.wait()
+                    return ([staleEntry], "old-prev")
+                }
+                return ([freshEntry], nil)
+            },
+            clearLogs: {}
+        )
+
+        let loadTask = Task { await model.load() }
+        // Yield so `load()` enters `readLogs` and suspends on `gate`.
+        await Task.yield()
+        await model.clear()
+        await gate.open()
+        await loadTask.value
+
+        #expect(model.allEntries.isEmpty)
+        #expect(model.previousSessionLog == nil)
+
+        await model.load()
+        #expect(model.allEntries.map(\.id) == [2])
+    }
 }
