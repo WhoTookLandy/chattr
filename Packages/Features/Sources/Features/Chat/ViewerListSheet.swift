@@ -90,13 +90,29 @@ struct ViewerListSheet: View {
                             }
                         }
                     }
-                    if let nextCursor = cursor, query.isEmpty {
-                        HStack {
-                            Spacer()
-                            ProgressView()
-                            Spacer()
+                    if let nextCursor = cursor {
+                        if query.isEmpty {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                Spacer()
+                            }
+                            .task(id: nextCursor) { await loadMore() }
+                        } else {
+                            Button {
+                                Task { await loadMore() }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if isLoadingMore {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
+                                    Text(loadMoreSearchLabel)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .disabled(isLoadingMore)
                         }
-                        .task(id: nextCursor) { await loadMore() }
                     }
                 } header: {
                     Text(headerText)
@@ -133,6 +149,13 @@ struct ViewerListSheet: View {
             return "\(shown.formatted()) in chat · \(viewerCount.formatted()) watching"
         }
         return "\(shown.formatted()) in chat"
+    }
+
+    private var loadMoreSearchLabel: String {
+        if let total {
+            return "Load more viewers (\(chatters.count.formatted()) of \(total.formatted()) loaded)"
+        }
+        return "Load more viewers (\(chatters.count.formatted()) loaded)"
     }
 
     private func unavailable(
