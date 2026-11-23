@@ -29,7 +29,7 @@ public struct SevenTVProvider: EmoteProvider {
         let (data, response) = try await urlSession.data(from: Endpoints.SevenTV.globalEmoteSet)
         try ProviderHTTP.requireSuccess(response)
         let body = try JSONDecoder().decode(EmoteSetResponse.self, from: data)
-        return body.emotes.compactMap { Self.map($0, ownerChannelId: nil) }
+        return (body.emotes ?? []).compactMap { Self.map($0, ownerChannelId: nil) }
     }
 
     public func channelEmotes(broadcasterId: String, broadcasterLogin: String) async throws -> [Emote] {
@@ -41,7 +41,7 @@ public struct SevenTVProvider: EmoteProvider {
         // empty. Other non-2xx statuses (429, 5xx) throw.
         if try ProviderHTTP.isNotFound(response) { return [] }
         let user = try JSONDecoder().decode(UserResponse.self, from: data)
-        return user.emote_set?.emotes.compactMap { Self.map($0, ownerChannelId: broadcasterId) } ?? []
+        return (user.emote_set?.emotes ?? []).compactMap { Self.map($0, ownerChannelId: broadcasterId) }
     }
 
     // MARK: - Private decoding shapes
@@ -55,19 +55,22 @@ public struct SevenTVProvider: EmoteProvider {
     }
 
     private struct EmoteSetResponse: Decodable {
-        let emotes: [EmoteJSON]
+        /// Optional because 7TV omits or nulls `emotes` on empty sets.
+        let emotes: [EmoteJSON]?
     }
 
     private struct EmoteJSON: Decodable {
         let id: String
         let name: String
-        /// Bit flags. 0x01 = zero-width (overlays previous emote).
+        /// Active-emote bit flags. 0x01 = zero-width override on the set entry.
         let flags: Int?
         let data: EmoteData?
     }
 
     private struct EmoteData: Decodable {
         let host: EmoteHost?
+        /// Intrinsic emote bit flags. 0x100 (1 << 8) = intrinsic zero-width.
+        let flags: Int?
         /// `true` when at least one variant is animated. 7TV exposes this
         /// at the data level (not per-file) since animation is a property
         /// of the source asset.
@@ -78,7 +81,7 @@ public struct SevenTVProvider: EmoteProvider {
         /// CDN base URL. Sometimes returned as `//cdn.7tv.app/emote/<id>`
         /// (protocol-relative) — we normalize to `https://` in `map(...)`.
         let url: String
-        let files: [EmoteFile]
+        let files: [EmoteFile]?
     }
 
     private struct EmoteFile: Decodable {
@@ -107,7 +110,7 @@ public struct SevenTVProvider: EmoteProvider {
         // historical). iOS 14+ ImageIO can decode static WebP natively, so
         // AsyncImage handles these without an extra dependency.
         var urls: [Emote.Size: URL] = [:]
-        let webpFiles = host.files.filter { $0.format == "WEBP" }
+        let webpFiles = (host.files ?? []).filter { $0.format == "WEBP" }
         for file in webpFiles {
             let size: Emote.Size? = switch file.name {
             case "1x.webp": .x1
@@ -123,7 +126,8 @@ public struct SevenTVProvider: EmoteProvider {
         guard !urls.isEmpty else { return nil }
 
         let flags = j.flags ?? 0
-        let isZeroWidth = (flags & 0x01) != 0
+        let dataFlags = j.data?.flags ?? 0
+        let isZeroWidth = (flags & 0x01) != 0 || (dataFlags & 0x100) != 0
         let isAnimated = j.data?.animated ?? false
 
         // Width÷height is identical across size variants, so any file with
