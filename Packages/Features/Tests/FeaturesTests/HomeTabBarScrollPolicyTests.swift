@@ -24,14 +24,23 @@ struct HomeTabBarScrollPolicyTests {
         var policy = HomeTabBarScrollPolicy()
         policy.updatePhase(.interacting)
 
-        #expect(!policy.update(with: makeSnapshot(offsetY: 0)))
-        #expect(!policy.update(with: makeSnapshot(offsetY: 20)))
+        policy.update(with: makeSnapshot(offsetY: 0))
+        #expect(!policy.isHidden)
+
+        policy.update(with: makeSnapshot(offsetY: 20))
+        #expect(!policy.isHidden)
+
         // First step past topRevealOffset (24): delta = 12 (< 28)
-        #expect(!policy.update(with: makeSnapshot(offsetY: 32)))
+        policy.update(with: makeSnapshot(offsetY: 32))
+        #expect(!policy.isHidden)
+
         // Cumulative downward delta = 24 (< 28)
-        #expect(!policy.update(with: makeSnapshot(offsetY: 44)))
+        policy.update(with: makeSnapshot(offsetY: 44))
+        #expect(!policy.isHidden)
+
         // Cumulative downward delta = 32 (>= 28) -> hides
-        #expect(policy.update(with: makeSnapshot(offsetY: 52)))
+        policy.update(with: makeSnapshot(offsetY: 52))
+        #expect(policy.isHidden)
     }
 
     @Test("Reappears on upward scroll past show threshold")
@@ -40,13 +49,17 @@ struct HomeTabBarScrollPolicyTests {
         policy.updatePhase(.interacting)
 
         // Scroll down until hidden.
-        _ = policy.update(with: makeSnapshot(offsetY: 200))
-        #expect(policy.update(with: makeSnapshot(offsetY: 240)))
+        policy.update(with: makeSnapshot(offsetY: 200))
+        policy.update(with: makeSnapshot(offsetY: 240))
+        #expect(policy.isHidden)
 
         // Small upward jitter below showThreshold (18) keeps it hidden.
-        #expect(policy.update(with: makeSnapshot(offsetY: 230)))
+        policy.update(with: makeSnapshot(offsetY: 230))
+        #expect(policy.isHidden)
+
         // Crossing -18 total upward travel reveals the tab bar.
-        #expect(!policy.update(with: makeSnapshot(offsetY: 220)))
+        policy.update(with: makeSnapshot(offsetY: 220))
+        #expect(!policy.isHidden)
     }
 
     @Test("Direction reversal resets accumulated hysteresis distance")
@@ -54,15 +67,22 @@ struct HomeTabBarScrollPolicyTests {
         var policy = HomeTabBarScrollPolicy()
         policy.updatePhase(.interacting)
 
-        _ = policy.update(with: makeSnapshot(offsetY: 200))
+        policy.update(with: makeSnapshot(offsetY: 200))
         // Down 20pt (below 28pt threshold)
-        #expect(!policy.update(with: makeSnapshot(offsetY: 220)))
+        policy.update(with: makeSnapshot(offsetY: 220))
+        #expect(!policy.isHidden)
+
         // Up 4pt resets accumulated downward delta
-        #expect(!policy.update(with: makeSnapshot(offsetY: 216)))
+        policy.update(with: makeSnapshot(offsetY: 216))
+        #expect(!policy.isHidden)
+
         // Down 20pt again is still below 28pt from the reversal
-        #expect(!policy.update(with: makeSnapshot(offsetY: 236)))
+        policy.update(with: makeSnapshot(offsetY: 236))
+        #expect(!policy.isHidden)
+
         // Down 10pt more reaches 30pt -> hides
-        #expect(policy.update(with: makeSnapshot(offsetY: 246)))
+        policy.update(with: makeSnapshot(offsetY: 246))
+        #expect(policy.isHidden)
     }
 
     @Test("Always reveals near the top, during pull-to-refresh, and on programmatic scroll-to-top")
@@ -70,34 +90,55 @@ struct HomeTabBarScrollPolicyTests {
         var policy = HomeTabBarScrollPolicy()
         policy.updatePhase(.interacting)
 
-        _ = policy.update(with: makeSnapshot(offsetY: 300))
-        #expect(policy.update(with: makeSnapshot(offsetY: 340)))
+        policy.update(with: makeSnapshot(offsetY: 300))
+        policy.update(with: makeSnapshot(offsetY: 340))
+        #expect(policy.isHidden)
 
         // Simulate tapping the status bar to scroll back to top (.animating).
         policy.updatePhase(.animating)
-        #expect(policy.update(with: makeSnapshot(offsetY: 120)))
-        #expect(!policy.update(with: makeSnapshot(offsetY: 10)))
+        policy.update(with: makeSnapshot(offsetY: 120))
+        #expect(policy.isHidden)
+
+        policy.update(with: makeSnapshot(offsetY: 10))
+        #expect(!policy.isHidden)
 
         // Pull-to-refresh overscroll and release back to 0 stay visible.
         policy.updatePhase(.interacting)
-        #expect(!policy.update(with: makeSnapshot(offsetY: -60)))
+        policy.update(with: makeSnapshot(offsetY: -60))
+        #expect(!policy.isHidden)
+
         policy.updatePhase(.decelerating)
-        #expect(!policy.update(with: makeSnapshot(offsetY: 0)))
+        policy.update(with: makeSnapshot(offsetY: 0))
+        #expect(!policy.isHidden)
     }
 
-    @Test("Never hides on short feeds and reveals if content shrinks below scrollable minimum")
-    func staysVisibleOnShortFeeds() {
+    @Test("Stays visible on short feeds, stays hidden across tab-bar inset range shrink, and reveals on real content shrinkage")
+    func shortFeedDetectionStableAcrossInsetChanges() {
         var policy = HomeTabBarScrollPolicy()
         policy.updatePhase(.interacting)
 
-        // Feed only overflows by 80pt (< 120pt minimum).
-        _ = policy.update(with: makeSnapshot(offsetY: 30, maxOffsetY: 80))
-        #expect(!policy.update(with: makeSnapshot(offsetY: 75, maxOffsetY: 80)))
+        // Feed only overflows viewport by 47pt (130 - 83 < 60pt minimum).
+        policy.update(with: makeSnapshot(offsetY: 30, maxOffsetY: 130, bottomInset: 83))
+        policy.update(with: makeSnapshot(offsetY: 75, maxOffsetY: 130, bottomInset: 83))
+        #expect(!policy.isHidden)
 
-        // Hide on a tall feed, then simulate filtering down to a single card.
-        _ = policy.update(with: makeSnapshot(offsetY: 200, maxOffsetY: 1000))
-        #expect(policy.update(with: makeSnapshot(offsetY: 240, maxOffsetY: 1000)))
-        #expect(!policy.update(with: makeSnapshot(offsetY: 40, maxOffsetY: 60)))
+        // With maxOffsetY = 150 and bottomInset = 83 (overflow = 67 >= 60),
+        // scrolling down hides the tab bar.
+        policy.update(with: makeSnapshot(offsetY: 100, maxOffsetY: 150, bottomInset: 83))
+        policy.update(with: makeSnapshot(offsetY: 140, maxOffsetY: 150, bottomInset: 83))
+        #expect(policy.isHidden)
+
+        // Hiding removes 49pt of bottom inset -> maxOffsetY drops 150 -> 101 -> 101.
+        // Content overflow is still 67pt (101 - 34), so the tab bar must stay hidden.
+        policy.update(with: makeSnapshot(offsetY: 101, maxOffsetY: 101, bottomInset: 34))
+        #expect(policy.isHidden)
+        policy.update(with: makeSnapshot(offsetY: 101, maxOffsetY: 101, bottomInset: 34))
+        #expect(policy.isHidden)
+
+        // Genuine content shrinkage (e.g., category filter drops overflow to 26pt)
+        // immediately reveals the tab bar.
+        policy.update(with: makeSnapshot(offsetY: 40, maxOffsetY: 60, bottomInset: 34))
+        #expect(!policy.isHidden)
     }
 
     @Test("Ignores bottom-inset changes and bottom clamps so hiding near the end does not bounce back")
@@ -105,19 +146,22 @@ struct HomeTabBarScrollPolicyTests {
         var policy = HomeTabBarScrollPolicy()
         policy.updatePhase(.interacting)
 
-        _ = policy.update(with: makeSnapshot(offsetY: 940, maxOffsetY: 1000, bottomInset: 83))
+        policy.update(with: makeSnapshot(offsetY: 940, maxOffsetY: 1000, bottomInset: 83))
         // User scrolls down near bottom -> tab bar hides.
-        #expect(policy.update(with: makeSnapshot(offsetY: 980, maxOffsetY: 1000, bottomInset: 83)))
+        policy.update(with: makeSnapshot(offsetY: 980, maxOffsetY: 1000, bottomInset: 83))
+        #expect(policy.isHidden)
 
         // Hiding the tab bar shrinks bottomInset (83 -> 34) and maxOffsetY (1000 -> 951),
         // clamping offsetY upward by 29pt. Must NOT trigger upward reveal.
-        #expect(policy.update(with: makeSnapshot(offsetY: 951, maxOffsetY: 951, bottomInset: 34)))
+        policy.update(with: makeSnapshot(offsetY: 951, maxOffsetY: 951, bottomInset: 34))
+        #expect(policy.isHidden)
 
         // Even if the offset clamp lands on the frame after the inset change,
         // the overscroll guard still prevents a false reveal.
         policy.syncHidden(true)
         policy.recordBaseline(makeSnapshot(offsetY: 980, maxOffsetY: 951, bottomInset: 34))
-        #expect(policy.update(with: makeSnapshot(offsetY: 951, maxOffsetY: 951, bottomInset: 34)))
+        policy.update(with: makeSnapshot(offsetY: 951, maxOffsetY: 951, bottomInset: 34))
+        #expect(policy.isHidden)
     }
 
     @Test("Ignores bottom rubber-band overscroll and bounce-back")
@@ -125,13 +169,17 @@ struct HomeTabBarScrollPolicyTests {
         var policy = HomeTabBarScrollPolicy()
         policy.updatePhase(.interacting)
 
-        _ = policy.update(with: makeSnapshot(offsetY: 940, maxOffsetY: 1000))
-        #expect(policy.update(with: makeSnapshot(offsetY: 980, maxOffsetY: 1000)))
+        policy.update(with: makeSnapshot(offsetY: 940, maxOffsetY: 1000))
+        policy.update(with: makeSnapshot(offsetY: 980, maxOffsetY: 1000))
+        #expect(policy.isHidden)
 
         // Drag past bottom edge into overscroll, then bounce back during deceleration.
-        #expect(policy.update(with: makeSnapshot(offsetY: 1045, maxOffsetY: 1000)))
+        policy.update(with: makeSnapshot(offsetY: 1045, maxOffsetY: 1000))
+        #expect(policy.isHidden)
+
         policy.updatePhase(.decelerating)
-        #expect(policy.update(with: makeSnapshot(offsetY: 1000, maxOffsetY: 1000)))
+        policy.update(with: makeSnapshot(offsetY: 1000, maxOffsetY: 1000))
+        #expect(policy.isHidden)
     }
 
     @Test("Ignores container-height changes and non-user scroll phases")
@@ -140,19 +188,23 @@ struct HomeTabBarScrollPolicyTests {
         policy.updatePhase(.idle)
 
         // Programmatic / idle downward shift does not hide.
-        _ = policy.update(with: makeSnapshot(offsetY: 200))
-        #expect(!policy.update(with: makeSnapshot(offsetY: 300)))
+        policy.update(with: makeSnapshot(offsetY: 200))
+        policy.update(with: makeSnapshot(offsetY: 300))
+        #expect(!policy.isHidden)
 
         // Tracking before active drag does not hide.
         policy.updatePhase(.tracking)
-        #expect(!policy.update(with: makeSnapshot(offsetY: 360)))
+        policy.update(with: makeSnapshot(offsetY: 360))
+        #expect(!policy.isHidden)
 
         // User drags down -> hides.
         policy.updatePhase(.interacting)
-        #expect(policy.update(with: makeSnapshot(offsetY: 400)))
+        policy.update(with: makeSnapshot(offsetY: 400))
+        #expect(policy.isHidden)
 
         // Container resize with offset shift does not reveal.
-        #expect(policy.update(with: makeSnapshot(offsetY: 340, containerHeight: 500)))
+        policy.update(with: makeSnapshot(offsetY: 340, containerHeight: 500))
+        #expect(policy.isHidden)
     }
 
     @Test("syncHidden and recordBaseline allow clean re-hide after an external reset")
@@ -160,8 +212,9 @@ struct HomeTabBarScrollPolicyTests {
         var policy = HomeTabBarScrollPolicy()
         policy.updatePhase(.interacting)
 
-        _ = policy.update(with: makeSnapshot(offsetY: 300))
-        #expect(policy.update(with: makeSnapshot(offsetY: 340)))
+        policy.update(with: makeSnapshot(offsetY: 300))
+        policy.update(with: makeSnapshot(offsetY: 340))
+        #expect(policy.isHidden)
 
         // External section switch reveals tab bar while this page goes off-screen.
         policy.syncHidden(false)
@@ -169,6 +222,7 @@ struct HomeTabBarScrollPolicyTests {
         #expect(!policy.isHidden)
 
         // Returning to this section and scrolling down again hides immediately past threshold.
-        #expect(policy.update(with: makeSnapshot(offsetY: 372, bottomInset: 83)))
+        policy.update(with: makeSnapshot(offsetY: 372, bottomInset: 83))
+        #expect(policy.isHidden)
     }
 }

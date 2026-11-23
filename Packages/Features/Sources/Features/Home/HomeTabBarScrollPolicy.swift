@@ -60,9 +60,12 @@ struct HomeTabBarScrollPolicy: Sendable {
     static let showThreshold: CGFloat = 18
     /// Distance from the top within which the tab bar is always visible.
     static let topRevealOffset: CGFloat = 24
-    /// Minimum scrollable overflow required before auto-hide engages; short
-    /// feeds keep the tab bar visible so the user can never get stuck.
-    static let minScrollableDistance: CGFloat = 120
+    /// Minimum content overflow beyond the viewport (excluding `bottomInset`)
+    /// required before auto-hide engages. Measuring `maxOffsetY - bottomInset`
+    /// keeps the threshold invariant when the tab bar hides or reappears and
+    /// changes `bottomInset`, while still immediately revealing if content
+    /// genuinely shrinks.
+    static let minContentOverflow: CGFloat = 60
     /// Tolerance for treating layout / inset metrics as changed.
     private static let layoutChangeTolerance: CGFloat = 0.5
 
@@ -102,10 +105,12 @@ struct HomeTabBarScrollPolicy: Sendable {
     mutating func update(with snapshot: Snapshot) -> Bool {
         defer { lastSnapshot = snapshot }
 
-        // Always keep the tab bar visible when the feed barely scrolls or
-        // when at / near the top (including pull-to-refresh and status-bar
-        // scroll-to-top animations).
-        if snapshot.maxOffsetY < Self.minScrollableDistance || snapshot.offsetY <= Self.topRevealOffset {
+        // Always keep the tab bar visible when the feed barely overflows the
+        // viewport (independent of bottom-inset changes from the tab bar
+        // itself) or when at / near the top (including pull-to-refresh and
+        // status-bar scroll-to-top animations).
+        let contentOverflow = snapshot.maxOffsetY - snapshot.bottomInset
+        if contentOverflow < Self.minContentOverflow || snapshot.offsetY <= Self.topRevealOffset {
             isHidden = false
             accumulatedDeltaY = 0
             return isHidden
