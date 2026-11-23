@@ -5,9 +5,12 @@ import NukeUI
 import Nuke
 
 /// Floating player shown while a stream keeps playing outside its chat.
-/// Tap → back to the chat; × → stop. Drag it anywhere and it settles in the
-/// nearest corner; fling it down from a bottom corner to stop; pinch the
-/// video to resize. Audio-only streams get a compact pill instead.
+/// Tap → back to the chat; × → stop.
+///
+/// Video stays a corner-snapped, draggable, pinch-resizable PiP tile.
+/// Audio-only streams dock cleanly as a full-width Liquid Glass bar above the
+/// tab/search bar (swipe down to stop) so they never slice across the right
+/// side of list rows.
 struct MiniPlayerOverlay: View {
     let center: PlaybackCenter
     /// True while Home has auto-hidden the bottom tab bar on scroll down.
@@ -22,30 +25,45 @@ struct MiniPlayerOverlay: View {
 
     private static let area = "miniPlayerArea"
 
+    /// Native failed → web engine, which can't play hidden: show the video
+    /// tile instead of the audio dock.
+    private var isAudioOnly: Bool {
+        center.audioOnly && !center.controller.nativeFailed
+    }
+
     var body: some View {
         if let channel = center.channel {
             GeometryReader { geo in
                 Group {
-                    // Native failed → web engine, which can't play hidden:
-                    // show the video tile instead of the audio pill.
-                    if center.audioOnly, !center.controller.nativeFailed {
-                        audioPill(channel)
+                    if isAudioOnly {
+                        audioDock(channel)
+                            .frame(maxWidth: 520)
+                            .offset(y: max(-14, dragOffset.height))
+                            .gesture(audioDismissGesture)
+                            .padding(.horizontal, 12)
+                            // Clear of the floating tab/search bar when visible; settle
+                            // closer to the bottom safe area when Home hides it on scroll.
+                            .padding(.bottom, isTabBarHidden ? 12 : 64)
+                            .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
                     } else {
                         videoTile(channel, maxWidth: geo.size.width - 24)
                             .simultaneousGesture(pinchGesture(maxWidth: geo.size.width - 24))
+                            .offset(dragOffset)
+                            .gesture(dragGesture(in: geo.size))
+                            .padding(.horizontal, 12)
+                            // Clear of the tab bar when visible; settle closer to the
+                            // bottom safe area when Home has auto-hidden it on scroll.
+                            .padding(.bottom, isTabBarHidden ? 12 : 64)
+                            .frame(width: geo.size.width, height: geo.size.height, alignment: alignment)
                     }
                 }
-                .offset(dragOffset)
-                .gesture(dragGesture(in: geo.size))
-                .padding(.horizontal, 12)
-                // Clear of the tab bar when visible; settle closer to the
-                // bottom safe area when Home has auto-hidden it on scroll.
-                .padding(.bottom, isTabBarHidden ? 12 : 64)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: alignment)
                 .animation(.snappy(duration: 0.25), value: isTabBarHidden)
             }
             .coordinateSpace(.named(Self.area))
-            .transition(.scale(scale: 0.8).combined(with: .opacity))
+            .transition(.scale(scale: 0.92).combined(with: .opacity))
+            .onChange(of: isAudioOnly) { _, _ in
+                dragOffset = .zero
+            }
             .onAppear {
                 center.controller.onTap = { onOpen(channel) }
                 center.controller.onSwipeDown = nil
@@ -89,9 +107,17 @@ struct MiniPlayerOverlay: View {
         .accessibilityAction(named: "Open chat") { onOpen(channel) }
     }
 
-    private func audioPill(_ channel: ChannelDescriptor) -> some View {
+    private var audioSubtitle: String {
+        if center.controller.isPaused {
+            return "Audio paused"
+        }
+        let trimmedTitle = center.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? "Audio only" : "Audio only · \(trimmedTitle)"
+    }
+
+    private func audioDock(_ channel: ChannelDescriptor) -> some View {
         HStack(spacing: 10) {
-            LazyImage(request: ImageRequest.avatar(url: center.profileImageURL, side: 32)) { state in
+            LazyImage(request: ImageRequest.avatar(url: center.profileImageURL, side: 34)) { state in
                 if let image = state.image {
                     image.resizable().scaledToFill()
                 } else {
@@ -100,33 +126,47 @@ struct MiniPlayerOverlay: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 32, height: 32)
+            .frame(width: 34, height: 34)
             .clipShape(Circle())
+
             VStack(alignment: .leading, spacing: 1) {
                 Text(channel.channelDisplayName)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
-                Label("Audio only", systemImage: "headphones")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Image(systemName: "headphones")
+                        .font(.caption2.weight(.semibold))
+                    Text(audioSubtitle)
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(.secondary)
             }
+
+            Spacer(minLength: 6)
+
             Button {
                 center.controller.togglePlay()
             } label: {
                 Image(systemName: center.controller.isPaused ? "play.fill" : "pause.fill")
+                    .font(.subheadline.weight(.semibold))
                     .frame(width: 32, height: 32)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(center.controller.isPaused ? "Play" : "Pause")
+
             closeButton
         }
         .padding(.leading, 8)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
+        .padding(.trailing, 8)
+        .padding(.vertical, 7)
         .glassEffect(.regular.interactive(), in: Capsule())
         .contentShape(Capsule())
         .onTapGesture { onOpen(channel) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(channel.channelDisplayName) audio player")
+        .accessibilityAction(named: "Open chat") { onOpen(channel) }
         // The engine must stay attached somewhere to keep playing smoothly.
         .background {
             PlayerHost(center: center)
@@ -150,6 +190,20 @@ struct MiniPlayerOverlay: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Stop playback")
+    }
+
+    /// Vertical swipe-down to dismiss the docked audio-only bar.
+    private var audioDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .named(Self.area))
+            .onChanged { dragOffset = $0.translation }
+            .onEnded { value in
+                withAnimation(.snappy) {
+                    if value.translation.height > 64 || value.predictedEndTranslation.height > 140 {
+                        center.stop()
+                    }
+                    dragOffset = .zero
+                }
+            }
     }
 
     /// Drag anywhere; on release the tile settles in the corner nearest to

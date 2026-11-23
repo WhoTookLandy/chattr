@@ -2,34 +2,39 @@ import SwiftUI
 import Accounts
 import TwitchKit
 import Core
+import DesignSystem
 import Nuke
 import NukeUI
 import os
 
 private let logger = AppLogger.make("Features.AddChannel")
 
-/// Sheet for opening a channel that isn't in your follow list — via
-/// Twitch channel search OR by typing an exact channel name.
+/// Search tab (and legacy "+ Add Channel" sheet) for finding and opening any
+/// Twitch channel — followed or not — via live follows, recent searches,
+/// category browse, Helix channel search, or direct `#login` resolution.
 ///
-/// Presented from `ChannelListScreen`'s toolbar "+" button. On selecting
-/// a result (or resolving a manual entry), it calls the `openChannel`
-/// environment action — the same path the Follows list uses — which adds
-/// a chat tab and switches to the Chat tab. Opening a non-followed
-/// channel works end-to-end because EventSub chat subscriptions don't
-/// require a follow relationship.
+/// When hosted in `AppShell`'s `Tab(role: .search)`, `showsCancelButton` is
+/// false and the system renders the Liquid Glass search bar at the bottom.
 struct AddChannelView: View {
     let account: Account
     let accountStore: AccountStore
     /// False when hosted in the Search tab (a persistent destination has
-    /// nothing to cancel); true for the legacy sheet presentation.
+    /// nothing to cancel); true for the modal sheet presentation.
     var showsCancelButton: Bool = true
+
+    private enum SearchRoute: Hashable {
+        case category(String?)
+    }
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openChannel) private var openChannel
     @Environment(\.followsStore) private var followsStore
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    #endif
 
-    /// Before typing: filters the "Live from your follows" list.
-    @State private var browseCategory: String?
+    @State private var path: [SearchRoute] = []
+    @State private var recentSearches: [RecentSearchItem] = []
 
     @State private var query: String = ""
     @State private var results: [SearchChannel] = []
@@ -46,96 +51,56 @@ struct AddChannelView: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    /// True when the query looks like a plausible Twitch login (4-25
-    /// chars, alphanumeric + underscore). Gates the manual-entry row so
-    /// it doesn't show for partial/invalid input.
+    /// True when the query looks like a plausible Twitch login (1–25 chars,
+    /// alphanumeric + underscore). Gates the manual-entry row so it doesn't
+    /// show for partial/invalid input.
     private var manualLoginIsPlausible: Bool {
         let login = manualLogin
         guard (1...25).contains(login.count) else { return false }
         return login.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
     }
 
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var liveFollows: [TwitchStream] {
+        followsStore?.liveStreamsOrdered ?? []
+    }
+
+    private var browseCategories: [SearchCategorySummary] {
+        SearchBrowseCatalog.categories(from: liveFollows)
+    }
+
+    private var bottomClearance: CGFloat {
+        #if os(iOS)
+        playback?.isPlaying == true ? 96 : 24
+        #else
+        24
+        #endif
+    }
+
     var body: some View {
-        NavigationStack {
-            List {
-                // Nothing typed yet: something useful instead of a blank
-                // page — who you follow that's live, by category.
-                if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    browseSection
-                } else {
-                    followingMatchesSection
-                }
-
-                // Manual-entry affordance: open the exact typed channel.
-                // Shows when the query is a plausible login AND isn't
-                // already the first search result (avoid a redundant row).
-                if manualLoginIsPlausible,
-                   results.first?.broadcasterLogin.lowercased() != manualLogin {
-                    Section {
-                        Button {
-                            Task { await openManual() }
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "number")
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 36, height: 36)
-                                Text("Open #\(manualLogin)")
-                                    .foregroundStyle(.primary)
-                                Spacer()
-                                if isResolvingManual {
-                                    ProgressView()
-                                }
-                            }
-                        }
-                        .disabled(isResolvingManual)
-                    } header: {
-                        Text("Direct")
+        NavigationStack(path: $path) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if trimmedQuery.isEmpty {
+                        hubContent
+                    } else {
+                        activeSearchContent
                     }
                 }
-
-                if !results.isEmpty {
-                    Section {
-                        ForEach(results, id: \.id) { channel in
-                            Button {
-                                open(channel)
-                            } label: {
-                                SearchResultRow(channel: channel)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    } header: {
-                        Text("Search Results")
-                    }
-                } else if isSearching {
-                    Section {
-                        HStack {
-                            ProgressView()
-                            Text("Searching…")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } else if !manualLogin.isEmpty && !manualLoginIsPlausible {
-                    // Typed something that can't be a login and no results.
-                    Section {
-                        ContentUnavailableView.search(text: query)
-                    }
-                }
-
-                if let errorMessage {
-                    Section {
-                        Text(errorMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-                }
+                .padding(.bottom, bottomClearance)
             }
+            .background(Color.chatSurface.ignoresSafeArea())
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
             .navigationTitle(showsCancelButton ? "Add Channel" : "Search")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .searchable(
                 text: $query,
-                prompt: "Search channels or type a name"
+                prompt: "Search channels or #login"
             )
             #if os(iOS)
             .textInputAutocapitalization(.never)
@@ -148,6 +113,22 @@ struct AddChannelView: View {
                     }
                 }
             }
+            .navigationDestination(for: SearchRoute.self) { route in
+                switch route {
+                case .category(let category):
+                    SearchCategoryStreamsScreen(initialCategory: category) { stream, profileURL, intent in
+                        openStream(stream, profileURL: profileURL, intent: intent)
+                    }
+                }
+            }
+            .onAppear {
+                recentSearches = SearchHistoryStorage.load(forAccount: account.userId)
+            }
+            .task(id: account.userId) {
+                recentSearches = SearchHistoryStorage.load(forAccount: account.userId)
+                await followsStore?.refreshLive(account: account, accountStore: accountStore)
+                await followsStore?.loadAllIfNeeded(account: account, accountStore: accountStore)
+            }
             // Debounced search: `.task(id: query)` cancels the prior task
             // on each keystroke; the 300ms sleep absorbs rapid typing so
             // we only hit Helix once the user pauses.
@@ -157,129 +138,409 @@ struct AddChannelView: View {
         }
     }
 
-    // MARK: - Browse (empty query)
+    // MARK: - Zero-State Search Hub
 
-    private var liveFollows: [TwitchStream] {
-        followsStore?.liveStreamsOrdered ?? []
+    @ViewBuilder
+    private var hubContent: some View {
+        if liveFollows.isEmpty && recentSearches.isEmpty {
+            ContentUnavailableView(
+                "Search Twitch",
+                systemImage: "magnifyingglass",
+                description: Text("Find any live or offline channel by name, or jump straight to #login.")
+            )
+            .padding(.top, 72)
+        } else {
+            VStack(alignment: .leading, spacing: 20) {
+                if !liveFollows.isEmpty {
+                    liveFollowsSection
+                }
+
+                if !recentSearches.isEmpty {
+                    recentSearchesSection
+                }
+
+                if !browseCategories.isEmpty {
+                    browseCategoriesSection
+                }
+            }
+            .padding(.top, 8)
+        }
     }
 
-    /// Categories your live follows are in, busiest first.
-    private var browseCategories: [String] {
-        var totals: [String: Int] = [:]
-        for stream in liveFollows where !stream.gameName.isEmpty {
-            totals[stream.gameName, default: 0] += stream.viewerCount
+    private var liveFollowsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader(
+                title: "Live Follows",
+                actionTitle: "See all (\(liveFollows.count))"
+            ) {
+                path.append(.category(nil))
+            }
+
+            SearchLiveFollowsRail(
+                streams: liveFollows,
+                profileImageURLs: followsStore?.profileImageURLs ?? [:],
+                onSelect: { stream, intent in
+                    let profileURL = followsStore?.profileImageURLs[stream.userId]
+                    openStream(stream, profileURL: profileURL, intent: intent)
+                }
+            )
         }
-        return totals.sorted { $0.value > $1.value }.map(\.key)
+    }
+
+    private var recentSearchesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader(title: "Recent Searches", actionTitle: "Clear", actionTone: .secondary) {
+                withAnimation(.snappy(duration: 0.2)) {
+                    SearchHistoryStorage.clear(forAccount: account.userId)
+                    recentSearches = []
+                }
+            }
+
+            VStack(spacing: 0) {
+                ForEach(Array(recentSearches.enumerated()), id: \.element.id) { index, item in
+                    recentRow(item)
+                    if index < recentSearches.count - 1 {
+                        Divider()
+                            .padding(.leading, 54)
+                    }
+                }
+            }
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private func recentRow(_ item: RecentSearchItem) -> some View {
+        let liveStream = item.channelId.flatMap { followsStore?.liveStreams[$0] }
+        let profileURL = item.channelId.flatMap { followsStore?.profileImageURLs[$0] }
+            ?? item.profileImageURL.flatMap(URL.init(string:))
+
+        return HStack(spacing: 10) {
+            Button {
+                openRecent(item)
+            } label: {
+                HStack(spacing: 10) {
+                    recentLeadingIcon(item: item, profileURL: profileURL, isLive: liveStream != nil)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.title)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        if let liveStream {
+                            HStack(spacing: 4) {
+                                Circle().fill(.red).frame(width: 5, height: 5)
+                                Text("Live · \(StreamFormatting.viewers(liveStream.viewerCount))")
+                                    .monospacedDigit()
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        } else {
+                            Text(item.kind == .category ? "Category" : "Channel")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                withAnimation(.snappy(duration: 0.2)) {
+                    recentSearches = SearchHistoryStorage.remove(id: item.id, forAccount: account.userId)
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(item.title) from recent searches")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder
-    private var browseSection: some View {
-        if !liveFollows.isEmpty {
-            Section {
-                if browseCategories.count > 1 {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 8) {
-                            categoryChip(nil, title: "All")
-                            ForEach(browseCategories, id: \.self) { category in
-                                categoryChip(category, title: category)
-                            }
-                        }
-                        .padding(.vertical, 2)
+    private func recentLeadingIcon(item: RecentSearchItem, profileURL: URL?, isLive: Bool) -> some View {
+        switch item.kind {
+        case .channel:
+            if let profileURL {
+                LazyImage(request: ImageRequest.avatar(url: profileURL, side: 32)) { state in
+                    if let image = state.image {
+                        image.resizable().scaledToFill()
+                    } else {
+                        Image(systemName: "clock")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color.primary.opacity(0.06))
                     }
-                    .scrollIndicators(.hidden)
-                    .listRowSeparator(.hidden)
                 }
-                ForEach(liveFollows.filter { browseCategory == nil || $0.gameName == browseCategory }, id: \.userId) { stream in
-                    let profileURL = followsStore?.profileImageURLs[stream.userId]
-                    Button {
-                        openChannel?(stream: stream, profileImageURL: profileURL)
-                        dismiss()
-                    } label: {
-                        FollowingRow(
-                            displayName: stream.userName,
-                            login: stream.userLogin,
-                            profileImageURL: profileURL,
-                            stream: stream,
-                            lastLiveAt: nil
-                        )
+                .frame(width: 32, height: 32)
+                .clipShape(Circle())
+                .padding(isLive ? 1.5 : 0)
+                .overlay {
+                    if isLive {
+                        Circle().strokeBorder(.red, lineWidth: 1.5)
                     }
-                    .buttonStyle(.plain)
-                    .channelPreviewMenu(
-                        name: stream.userName,
-                        profileImageURL: profileURL,
-                        stream: stream,
-                        open: { intent in
-                            openChannel?(stream: stream, profileImageURL: profileURL, intent: intent)
-                            dismiss()
-                        }
-                    )
                 }
-            } header: {
-                Text("Live from your follows")
+            } else {
+                Image(systemName: "clock")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 32)
+                    .background(Color.primary.opacity(0.06), in: Circle())
             }
+        case .category:
+            Image(systemName: "square.grid.2x2")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 32, height: 32)
+                .background(Color.primary.opacity(0.06), in: Circle())
         }
     }
 
-    private func categoryChip(_ category: String?, title: String) -> some View {
-        let selected = browseCategory == category
-        return Button {
-            withAnimation(.snappy(duration: 0.2)) { browseCategory = category }
-        } label: {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(selected ? Color.white : Color.primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary), in: Capsule())
+    private var browseCategoriesSection: some View {
+        let columns = [
+            GridItem(.flexible(), spacing: 10),
+            GridItem(.flexible(), spacing: 10),
+        ]
+        return VStack(alignment: .leading, spacing: 10) {
+            sectionHeader(title: "Browse Categories", actionTitle: "All Live") {
+                path.append(.category(nil))
+            }
+
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(browseCategories) { category in
+                    Button {
+                        if let recent = RecentSearchItem.category(category.name) {
+                            recentSearches = SearchHistoryStorage.record(recent, forAccount: account.userId)
+                        }
+                        path.append(.category(category.name))
+                    } label: {
+                        categoryCard(category)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
         }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func categoryCard(_ category: SearchCategorySummary) -> some View {
+        let tint = Self.categoryTint(for: category.name)
+        let followLabel = category.liveFollowCount == 1 ? "1 follow" : "\(category.liveFollowCount) follows"
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(category.name)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(.red)
+                    .frame(width: 6, height: 6)
+                Text("\(StreamFormatting.viewers(category.viewerCount)) · \(followLabel)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [tint.opacity(0.24), tint.opacity(0.08)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(category.name), \(StreamFormatting.viewers(category.viewerCount)) viewers across \(followLabel)")
+    }
+
+    private enum SectionActionTone {
+        case accent
+        case secondary
+    }
+
+    private func sectionHeader(
+        title: String,
+        actionTitle: String? = nil,
+        actionTone: SectionActionTone = .accent,
+        action: (() -> Void)? = nil
+    ) -> some View {
+        HStack {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            Spacer()
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(actionTone == .accent ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    // MARK: - Active Search Results
+
+    @ViewBuilder
+    private var activeSearchContent: some View {
+        let followingMatches = matchingFollowedChannels
+
+        // Manual-entry affordance: open the exact typed channel.
+        // Shows when the query is a plausible login AND isn't
+        // already the first search result (avoid a redundant row).
+        if manualLoginIsPlausible,
+           results.first?.broadcasterLogin.lowercased() != manualLogin {
+            searchSectionTitle("Direct")
+            Button {
+                Task { await openManual(login: manualLogin) }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "number")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 42, height: 42)
+                        .background(Color.primary.opacity(0.07), in: Circle())
+                    Text("Open #\(manualLogin)")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    if isResolvingManual {
+                        ProgressView()
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isResolvingManual)
+        }
+
+        if !followingMatches.isEmpty {
+            searchSectionTitle("Following")
+            ForEach(Array(followingMatches.enumerated()), id: \.element.broadcasterId) { index, channel in
+                let profileURL = followsStore?.profileImageURLs[channel.broadcasterId]
+                let stream = followsStore?.liveStreams[channel.broadcasterId]
+                Button {
+                    openFollowed(channel, profileURL: profileURL, intent: .implicit)
+                } label: {
+                    SearchChannelRow(
+                        displayName: channel.broadcasterName,
+                        login: channel.broadcasterLogin,
+                        profileImageURL: profileURL,
+                        stream: stream
+                    )
+                }
+                .buttonStyle(.plain)
+                .channelPreviewMenu(
+                    name: channel.broadcasterName,
+                    profileImageURL: profileURL,
+                    stream: stream,
+                    open: { intent in openFollowed(channel, profileURL: profileURL, intent: intent) }
+                )
+
+                if index < followingMatches.count - 1 {
+                    Divider()
+                        .padding(.leading, 70)
+                }
+            }
+        }
+
+        if !results.isEmpty {
+            searchSectionTitle("Search Results")
+            ForEach(Array(results.enumerated()), id: \.element.id) { index, channel in
+                Button {
+                    open(channel)
+                } label: {
+                    SearchResultRow(channel: channel)
+                }
+                .buttonStyle(.plain)
+
+                if index < results.count - 1 {
+                    Divider()
+                        .padding(.leading, 70)
+                }
+            }
+        } else if isSearching {
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Searching…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 20)
+        } else if !manualLogin.isEmpty && !manualLoginIsPlausible && followingMatches.isEmpty {
+            ContentUnavailableView.search(text: query)
+                .padding(.top, 48)
+        }
+
+        if let errorMessage {
+            Text(errorMessage)
+                .font(.footnote)
+                .foregroundStyle(.red)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+        }
+    }
+
+    private func searchSectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
+            .accessibilityAddTraits(.isHeader)
     }
 
     /// While typing: followed channels that match, ahead of the network
     /// search (instant, and usually what you meant).
-    @ViewBuilder
-    private var followingMatchesSection: some View {
-        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let matches: [FollowedChannel] = {
-            guard let followsStore, !needle.isEmpty else { return [] }
-            let channels = followsStore.sortedAllChannels
-            let keys = followsStore.sortedAllChannelSearchKeys
-            var found: [FollowedChannel] = []
-            for (index, key) in keys.enumerated() where index < channels.count && key.contains(needle) {
-                found.append(channels[index])
-                if found.count == 6 { break }
-            }
-            return found
-        }()
-        if !matches.isEmpty {
-            Section {
-                ForEach(matches, id: \.broadcasterId) { channel in
-                    let profileURL = followsStore?.profileImageURLs[channel.broadcasterId]
-                    Button {
-                        openChannel?(channel: channel, profileImageURL: profileURL)
-                        dismiss()
-                    } label: {
-                        FollowingRow(
-                            displayName: channel.broadcasterName,
-                            login: channel.broadcasterLogin,
-                            profileImageURL: profileURL,
-                            stream: followsStore?.liveStreams[channel.broadcasterId],
-                            lastLiveAt: nil
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            } header: {
-                Text("Following")
-            }
+    private var matchingFollowedChannels: [FollowedChannel] {
+        let needle = trimmedQuery.lowercased()
+        guard let followsStore, !needle.isEmpty else { return [] }
+        let channels = followsStore.sortedAllChannels
+        let keys = followsStore.sortedAllChannelSearchKeys
+        var found: [FollowedChannel] = []
+        for (index, key) in keys.enumerated() where index < channels.count && key.contains(needle) {
+            found.append(channels[index])
+            if found.count == 6 { break }
         }
+        return found
     }
 
     // MARK: - Search
 
     private func runSearch() async {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = trimmedQuery
         guard trimmed.count >= 2 else {
             results = []
             isSearching = false
@@ -320,61 +581,154 @@ struct AddChannelView: View {
         }
     }
 
-    // MARK: - Open
+    // MARK: - Open & Recents
+
+    private func recordRecentChannel(
+        id: String,
+        login: String,
+        displayName: String,
+        profileImageURL: URL?
+    ) {
+        guard let item = RecentSearchItem.channel(
+            id: id,
+            login: login,
+            displayName: displayName,
+            profileImageURL: profileImageURL
+        ) else { return }
+        recentSearches = SearchHistoryStorage.record(item, forAccount: account.userId)
+    }
+
+    private func openStream(_ stream: TwitchStream, profileURL: URL?, intent: ChatOpenIntent) {
+        recordRecentChannel(
+            id: stream.userId,
+            login: stream.userLogin,
+            displayName: stream.userName,
+            profileImageURL: profileURL
+        )
+        openChannel?(stream: stream, profileImageURL: profileURL, intent: intent)
+        if showsCancelButton { dismiss() }
+    }
+
+    private func openFollowed(_ channel: FollowedChannel, profileURL: URL?, intent: ChatOpenIntent) {
+        recordRecentChannel(
+            id: channel.broadcasterId,
+            login: channel.broadcasterLogin,
+            displayName: channel.broadcasterName,
+            profileImageURL: profileURL
+        )
+        openChannel?(channel: channel, profileImageURL: profileURL, intent: intent)
+        if showsCancelButton { dismiss() }
+    }
+
+    private func openRecent(_ item: RecentSearchItem) {
+        switch item.kind {
+        case .category:
+            recentSearches = SearchHistoryStorage.record(item, forAccount: account.userId)
+            path.append(.category(item.title))
+        case .channel:
+            guard let login = item.login else { return }
+            if let channelId = item.channelId {
+                let profileURL = followsStore?.profileImageURLs[channelId]
+                    ?? item.profileImageURL.flatMap(URL.init(string:))
+                recordRecentChannel(
+                    id: channelId,
+                    login: login,
+                    displayName: item.title,
+                    profileImageURL: profileURL
+                )
+                openChannel?(ChannelDescriptor(
+                    platform: .twitch,
+                    channelId: channelId,
+                    channelLoginName: login,
+                    channelDisplayName: item.title,
+                    profileImageURL: profileURL
+                ))
+                if showsCancelButton { dismiss() }
+            } else {
+                Task { await openManual(login: login) }
+            }
+        }
+    }
 
     /// Open a search result. thumbnailUrl on SearchChannel is the
     /// broadcaster's profile image (per Twitch docs), so it doubles as
     /// the tab-strip avatar.
     private func open(_ channel: SearchChannel) {
+        let profileURL = URL(string: channel.thumbnailUrl)
+        recordRecentChannel(
+            id: channel.id,
+            login: channel.broadcasterLogin,
+            displayName: channel.displayName,
+            profileImageURL: profileURL
+        )
         openChannel?(ChannelDescriptor(
             platform: .twitch,
             channelId: channel.id,
             channelLoginName: channel.broadcasterLogin,
             channelDisplayName: channel.displayName,
-            profileImageURL: URL(string: channel.thumbnailUrl)
+            profileImageURL: profileURL
         ))
-        dismiss()
+        if showsCancelButton { dismiss() }
     }
 
     /// Resolve a manually-typed login via Helix `fetchUser(login:)`, then
     /// open it. Surfaces a friendly error if the channel doesn't exist.
-    private func openManual() async {
+    private func openManual(login: String) async {
         guard !isResolvingManual else { return }
         isResolvingManual = true
         errorMessage = nil
         defer { isResolvingManual = false }
 
-        let login = manualLogin
         let client = accountStore.client(for: account)
         do {
             let user = try await accountStore.withTokenRefresh(for: account) { [login] in
                 try await client.api.fetchUser(login: login)
             }
+            let profileURL = URL(string: user.profileImageUrl)
+            recordRecentChannel(
+                id: user.id,
+                login: user.login,
+                displayName: user.displayName,
+                profileImageURL: profileURL
+            )
             openChannel?(ChannelDescriptor(
                 platform: .twitch,
                 channelId: user.id,
                 channelLoginName: user.login,
                 channelDisplayName: user.displayName,
-                profileImageURL: URL(string: user.profileImageUrl)
+                profileImageURL: profileURL
             ))
-            dismiss()
+            if showsCancelButton { dismiss() }
         } catch {
             logger.warning("Manual channel resolve failed for \(login, privacy: .public): \(error.localizedDescription)")
             errorMessage = "Couldn't find a channel named \"\(login)\"."
         }
     }
+
+    /// Stable, process-independent tint for a category card so each game keeps
+    /// a consistent subtle jewel tone across launches.
+    private static func categoryTint(for name: String) -> Color {
+        let palette: [Color] = [.purple, .blue, .teal, .indigo, .pink, .orange]
+        var hash: UInt64 = 14695981039346656037
+        for byte in name.lowercased().utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return palette[Int(hash % UInt64(palette.count))]
+    }
 }
 
 // MARK: - Result row
 
-/// One channel search result: avatar + display name + @login, with a
-/// live indicator + stream title when the channel is broadcasting.
+/// One channel search result: avatar (with live ring when broadcasting) +
+/// display name + LIVE pill, with the stream title when live or `@login`
+/// when offline.
 private struct SearchResultRow: View {
     let channel: SearchChannel
 
     var body: some View {
         HStack(spacing: 12) {
-            LazyImage(request: ImageRequest.avatar(url: URL(string: channel.thumbnailUrl), side: 40)) { state in
+            LazyImage(request: ImageRequest.avatar(url: URL(string: channel.thumbnailUrl), side: 42)) { state in
                 if let image = state.image {
                     image.resizable().scaledToFill()
                 } else {
@@ -384,14 +738,21 @@ private struct SearchResultRow: View {
                         .foregroundStyle(.secondary.opacity(0.5))
                 }
             }
-            .frame(width: 40, height: 40)
+            .frame(width: 42, height: 42)
             .clipShape(Circle())
+            .padding(channel.isLive ? 2 : 0)
+            .overlay {
+                if channel.isLive {
+                    Circle().strokeBorder(.red, lineWidth: 2)
+                }
+            }
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(channel.displayName)
-                        .font(.body.weight(.medium))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(.primary)
+                        .lineLimit(1)
                     if channel.isLive {
                         Text("LIVE")
                             .font(.caption2.weight(.bold))
@@ -403,13 +764,15 @@ private struct SearchResultRow: View {
                 }
                 // Live → stream title; offline → @login.
                 Text(channel.isLive && !channel.title.isEmpty ? channel.title : "@\(channel.broadcasterLogin)")
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
-            Spacer()
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
         .contentShape(Rectangle())
     }
 }
