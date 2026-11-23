@@ -84,7 +84,9 @@ struct DiagnosticLogStoreTests {
 
         let store = DiagnosticLogStore(capacity: 100, directory: tempDir, maxFileBytes: 1_024)
         let payload = String(repeating: "x", count: 300)
-        for i in 0..<6 {
+        // Each line is ~348 bytes: lines 0–1 fit (~696 B), line 2 triggers one
+        // rotation moving lines 0–1 into previous.log, and line 3 stays in current.log.
+        for i in 0..<4 {
             store.record(level: .info, category: "Burst", message: "msg-\(i)-\(payload)")
         }
         store.flush()
@@ -92,5 +94,6 @@ struct DiagnosticLogStoreTests {
         let previous = store.previousSessionLog()
         #expect(previous != nil)
         #expect(previous?.contains("msg-0-") == true)
+        #expect(previous?.contains("msg-3-") == false)
     }
 }
