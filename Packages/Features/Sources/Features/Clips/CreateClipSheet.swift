@@ -180,6 +180,11 @@ struct CreateClipSheet: View {
     // MARK: - Request
 
     private func createClip() async {
+        // Guard against SwiftUI re-running `.task(id:)` on re-appearance
+        // (e.g. after dismissing a ShareLink sheet) once a clip was already
+        // created or settled; "Try Again" resets `phase = .creating` before
+        // bumping `attempt`.
+        guard phase == .creating else { return }
         let client = accountStore.client(for: account)
         let broadcasterID = channel.channelId
         do {
