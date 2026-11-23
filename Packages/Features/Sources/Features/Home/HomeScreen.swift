@@ -35,6 +35,27 @@ public struct HomeScreen: View {
     /// The Home stack. Owned by AppNavigation, so a link can push Settings.
     @Binding private var path: [HomeRoute]
 
+    /// Whether scrolling down Home's feed has auto-hidden the bottom tab bar.
+    /// Owned by AppNavigation so `MiniPlayerHost` can adjust its bottom inset
+    /// without observing scroll geometry directly.
+    @Binding private var isTabBarHidden: Bool
+
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    /// Auto-hide only when the tab bar lives at the bottom (iPhone in portrait
+    /// or landscape, and compact iPad Slide Over / Split View). Full-screen
+    /// iPad keeps its top floating tab bar visible.
+    private var canAutoHideTabBar: Bool {
+        horizontalSizeClass == .compact || verticalSizeClass == .compact
+    }
+
+    private var effectiveTabBarHidden: Bool {
+        canAutoHideTabBar && isTabSelected && path.isEmpty && isTabBarHidden
+    }
+    #endif
+
     /// Cap on offline channels surfaced in the top recent-channels rail so
     /// scrolling across it keeps lazy `/videos` lookups bounded.
     private static let recentRailLimit = 20
@@ -45,7 +66,8 @@ public struct HomeScreen: View {
         clientId: String,
         section: Binding<HomeSection>,
         path: Binding<[HomeRoute]>,
-        isTabSelected: Bool = true
+        isTabSelected: Bool = true,
+        isTabBarHidden: Binding<Bool> = .constant(false)
     ) {
         self.account = account
         self.accountStore = accountStore
@@ -53,6 +75,7 @@ public struct HomeScreen: View {
         self._section = section
         self._path = path
         self.isTabSelected = isTabSelected
+        self._isTabBarHidden = isTabBarHidden
     }
 
     public var body: some View {
@@ -70,6 +93,7 @@ public struct HomeScreen: View {
             // The section bar IS the header; no nav-bar title above it.
             #if os(iOS)
             .toolbar(.hidden, for: .navigationBar)
+            .toolbarVisibility(effectiveTabBarHidden ? .hidden : .automatic, for: .tabBar)
             #endif
             .navigationDestination(for: HomeRoute.self) { route in
                 switch route {
@@ -78,6 +102,26 @@ public struct HomeScreen: View {
                 }
             }
         }
+        #if os(iOS)
+        .onChange(of: section) { _, _ in
+            revealTabBar(animated: true)
+        }
+        .onChange(of: path.isEmpty) { _, isEmpty in
+            if !isEmpty {
+                revealTabBar(animated: false)
+            }
+        }
+        .onChange(of: isTabSelected) { _, selected in
+            if !selected {
+                revealTabBar(animated: false)
+            }
+        }
+        .onChange(of: canAutoHideTabBar) { _, allowed in
+            if !allowed {
+                revealTabBar(animated: false)
+            }
+        }
+        #endif
         // Live data whenever Home appears (tab switches included), plus the
         // followed roster (cached on disk) so the top recent-channels rail
         // populates right away. Both run on `@MainActor` and are throttled /
@@ -89,6 +133,19 @@ public struct HomeScreen: View {
             await followsStore?.loadAllIfNeeded(account: account, accountStore: accountStore)
         }
     }
+
+    #if os(iOS)
+    private func revealTabBar(animated: Bool) {
+        guard isTabBarHidden else { return }
+        if animated {
+            withAnimation(.snappy(duration: 0.25)) {
+                isTabBarHidden = false
+            }
+        } else {
+            isTabBarHidden = false
+        }
+    }
+    #endif
 
     /// You → settings, accounts, appearance. The avatar in the corner is
     /// where iOS apps keep the account.
@@ -154,6 +211,14 @@ public struct HomeScreen: View {
             }
     }
 
+    private var tabBarHiddenBinding: Binding<Bool>? {
+        #if os(iOS)
+        canAutoHideTabBar ? $isTabBarHidden : nil
+        #else
+        nil
+        #endif
+    }
+
     @ViewBuilder
     private func sectionContent(_ section: HomeSection) -> some View {
         switch section {
@@ -164,6 +229,7 @@ public struct HomeScreen: View {
                 liveLoadState: followsStore?.liveLoadState ?? .idle,
                 recentChannels: recentChannels,
                 isActive: isTabSelected && self.section == .live && path.isEmpty,
+                isTabBarHidden: tabBarHiddenBinding,
                 onStreamTap: { stream, intent in
                     let profileURL = followsStore?.profileImageURLs[stream.userId]
                     openChannel?(stream: stream, profileImageURL: profileURL, intent: intent)
@@ -193,7 +259,12 @@ public struct HomeScreen: View {
                 await followsStore?.refreshLive(account: account, accountStore: accountStore, force: true)
             }
         case .following:
-            FollowingList(account: account, accountStore: accountStore)
+            FollowingList(
+                account: account,
+                accountStore: accountStore,
+                isActive: isTabSelected && self.section == .following && path.isEmpty,
+                isTabBarHidden: tabBarHiddenBinding
+            )
         }
     }
 }

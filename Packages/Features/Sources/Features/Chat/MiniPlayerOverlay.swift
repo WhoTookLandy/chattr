@@ -13,6 +13,8 @@ import Nuke
 /// side of list rows.
 struct MiniPlayerOverlay: View {
     let center: PlaybackCenter
+    /// True while Home has auto-hidden the bottom tab bar on scroll down.
+    var isTabBarHidden: Bool = false
     let onOpen: (ChannelDescriptor) -> Void
 
     @State private var dragOffset: CGSize = .zero
@@ -32,25 +34,30 @@ struct MiniPlayerOverlay: View {
     var body: some View {
         if let channel = center.channel {
             GeometryReader { geo in
-                if isAudioOnly {
-                    audioDock(channel)
-                        .frame(maxWidth: 520)
-                        .offset(y: max(-14, dragOffset.height))
-                        .gesture(audioDismissGesture)
-                        .padding(.horizontal, 12)
-                        // Clear of the floating tab/search bar.
-                        .padding(.bottom, 64)
-                        .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
-                } else {
-                    videoTile(channel, maxWidth: geo.size.width - 24)
-                        .simultaneousGesture(pinchGesture(maxWidth: geo.size.width - 24))
-                        .offset(dragOffset)
-                        .gesture(dragGesture(in: geo.size))
-                        .padding(.horizontal, 12)
-                        // Clear of the tab bar.
-                        .padding(.bottom, 64)
-                        .frame(width: geo.size.width, height: geo.size.height, alignment: alignment)
+                Group {
+                    if isAudioOnly {
+                        audioDock(channel)
+                            .frame(maxWidth: 520)
+                            .offset(y: max(-14, dragOffset.height))
+                            .gesture(audioDismissGesture)
+                            .padding(.horizontal, 12)
+                            // Clear of the floating tab/search bar when visible; settle
+                            // closer to the bottom safe area when Home hides it on scroll.
+                            .padding(.bottom, isTabBarHidden ? 12 : 64)
+                            .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
+                    } else {
+                        videoTile(channel, maxWidth: geo.size.width - 24)
+                            .simultaneousGesture(pinchGesture(maxWidth: geo.size.width - 24))
+                            .offset(dragOffset)
+                            .gesture(dragGesture(in: geo.size))
+                            .padding(.horizontal, 12)
+                            // Clear of the tab bar when visible; settle closer to the
+                            // bottom safe area when Home has auto-hidden it on scroll.
+                            .padding(.bottom, isTabBarHidden ? 12 : 64)
+                            .frame(width: geo.size.width, height: geo.size.height, alignment: alignment)
+                    }
                 }
+                .animation(.snappy(duration: 0.25), value: isTabBarHidden)
             }
             .coordinateSpace(.named(Self.area))
             .transition(.scale(scale: 0.92).combined(with: .opacity))

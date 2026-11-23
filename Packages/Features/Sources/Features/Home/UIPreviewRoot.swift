@@ -91,6 +91,22 @@ public struct UIPreviewRoot: View {
     @State private var globalCatalog = GlobalCatalog()
     @State private var chatImagePrefetcher = ChatImagePrefetcher()
 
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    private var canAutoHideTabBar: Bool {
+        horizontalSizeClass == .compact || verticalSizeClass == .compact
+    }
+
+    private var effectiveHomeTabBarHidden: Bool {
+        canAutoHideTabBar
+            && navigation.selectedTab == .home
+            && navigation.homePath.isEmpty
+            && navigation.isHomeTabBarHidden
+    }
+    #endif
+
     public init() {
         do {
             container = try ModelContainer(
@@ -119,6 +135,7 @@ public struct UIPreviewRoot: View {
         // The same action the shell injects; Home's mock streams open
         // through it the way `HomeScreen`'s do.
         let openChannel = OpenChannelAction(navigation)
+        let tabBarHiddenBinding = homeTabBarHiddenBinding($navigation.isHomeTabBarHidden)
         TabView(selection: $navigation.selectedTab) {
             // Icon-only tabs — mirrors AppShell's custom-`label` tabs so the
             // design-review harness reflects the shipping tab bar.
@@ -141,6 +158,8 @@ public struct UIPreviewRoot: View {
                                     liveLoadState: .loaded,
                                     recentChannels: HomePreviewData.recentChannels,
                                     isActive: false,
+                                    isTabBarAutoHideActive: navigation.selectedTab == .home && navigation.homePath.isEmpty,
+                                    isTabBarHidden: tabBarHiddenBinding,
                                     onStreamTap: { stream, intent in
                                         openChannel(stream: stream, profileImageURL: nil, intent: intent)
                                     },
@@ -158,7 +177,12 @@ public struct UIPreviewRoot: View {
                                     }
                                 )
                             case .following:
-                                FollowingList(account: account, accountStore: accountStore)
+                                FollowingList(
+                                    account: account,
+                                    accountStore: accountStore,
+                                    isActive: navigation.selectedTab == .home && navigation.homePath.isEmpty,
+                                    isTabBarHidden: tabBarHiddenBinding
+                                )
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -166,6 +190,18 @@ public struct UIPreviewRoot: View {
                     .background(Color.chatSurface.ignoresSafeArea())
                     #if os(iOS)
                     .toolbar(.hidden, for: .navigationBar)
+                    .toolbarVisibility(effectiveHomeTabBarHidden ? .hidden : .automatic, for: .tabBar)
+                    .onChange(of: navigation.homeSection) { _, _ in
+                        withAnimation(.snappy(duration: 0.25)) {
+                            navigation.isHomeTabBarHidden = false
+                        }
+                    }
+                    .onChange(of: navigation.homePath.isEmpty) { _, isEmpty in
+                        if !isEmpty { navigation.isHomeTabBarHidden = false }
+                    }
+                    .onChange(of: navigation.selectedTab) { _, tab in
+                        if tab != .home { navigation.isHomeTabBarHidden = false }
+                    }
                     #endif
                     .navigationDestination(for: HomeRoute.self) { route in
                         switch route {
@@ -209,6 +245,14 @@ public struct UIPreviewRoot: View {
         .environment(\.globalCatalog, globalCatalog)
         .environment(\.blockStore, blockStore)
         .environment(\.chatImagePrefetcher, chatImagePrefetcher)
+    }
+
+    private func homeTabBarHiddenBinding(_ binding: Binding<Bool>) -> Binding<Bool>? {
+        #if os(iOS)
+        canAutoHideTabBar ? binding : nil
+        #else
+        nil
+        #endif
     }
 
     /// Stands in for `HomeScreen`'s avatar button (the mock account has no

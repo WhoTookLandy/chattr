@@ -150,7 +150,8 @@ public struct AppShell: View {
                     clientId: clientId,
                     section: $navigation.homeSection,
                     path: $navigation.homePath,
-                    isTabSelected: navigation.selectedTab == .home
+                    isTabSelected: navigation.selectedTab == .home,
+                    isTabBarHidden: $navigation.isHomeTabBarHidden
                 )
             } label: {
                 Image(systemName: "house")

@@ -1,10 +1,10 @@
-Redesigned top header bar for Audio-Only, PiP, and Chat-Only modes
+Auto-hiding bottom navigation bar on Home
 
 NEW
-• Unified 44pt Smart Dock: Replaces the cramped 3-island nav bar and stacked compact stream card with a single Liquid Glass dock showing channel name, live viewer count, game, and stream title in one compact row — reclaiming vertical chat height in Chat-Only while matching Audio-Only's height.
-• Embedded playback controls: Audio-Only shows an animated waveform + play/pause and Show Video pill; Chat-Only (live) offers 1-tap Listen (Audio-Only) and Watch Video buttons directly in the dock.
-• Unified Stream Details & Channel Switcher popover: Tap the dock to view the full unwrapped stream title, category, live viewers, uptime, tags, Follow/Share/Subscribe actions, a 1-tap Stop Audio button, and open chats in one popover.
+• Auto-hiding bottom tab bar on Home: Scrolling down on Home (Live or Following) smoothly hides the bottom navigation bar so more of the feed is visible; scrolling back up or returning to the top brings it right back.
+• Mini player bottom clearance: When the audio-only pill or floating video mini player is active on Home, it smoothly glides down closer to the bottom edge while the tab bar is hidden and lifts back up when the tab bar reappears.
 
 PLEASE TEST
-1. Switch between Audio-Only, Chat-Only (live), Chat-Only (offline), PiP, and inline video — confirm the 44pt dock updates smoothly, hides when inline video is playing, and edge swipe-back works.
-2. Tap the dock to inspect the full title, tags, Stop Audio button, and open-chats switcher, and try pulling down on the dock to expand straight into video.
+1. Scroll down and back up on both Home → Live and Home → Following — confirm the bottom tab bar hides cleanly on downward scroll, reappears on upward scroll or at the top, and doesn't flicker near the bottom edge.
+2. Play a stream in Audio-Only or mini player mode, return to Home, and scroll down/up — confirm the floating mini player smoothly tracks the tab bar's clearance.
+3. Switch between Live/Following, open Settings from the top-right avatar, or switch tabs while hidden — confirm the tab bar always restores cleanly.
