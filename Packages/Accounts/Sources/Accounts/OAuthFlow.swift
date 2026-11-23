@@ -175,25 +175,23 @@ public enum OAuthFlow {
     /// Holds the active `ASWebAuthenticationSession` and its context provider
     /// on `@MainActor` so both stay retained until completion and can be
     /// cancelled safely from `withTaskCancellationHandler.onCancel`.
-    private final class SessionHolder: @unchecked Sendable {
-        @MainActor private var session: ASWebAuthenticationSession?
-        @MainActor private var contextProvider: PresentationContextProvider?
-        @MainActor private var hasResumed = false
+    @MainActor
+    private final class SessionHolder {
+        private var session: ASWebAuthenticationSession?
+        private var contextProvider: PresentationContextProvider?
+        private var hasResumed = false
 
-        @MainActor
         func store(session: ASWebAuthenticationSession, contextProvider: PresentationContextProvider) {
             self.session = session
             self.contextProvider = contextProvider
         }
 
-        @MainActor
         func claimResume() -> Bool {
             guard !hasResumed else { return false }
             hasResumed = true
             return true
         }
 
-        @MainActor
         func clear() {
             session = nil
             contextProvider = nil
