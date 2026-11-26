@@ -112,6 +112,22 @@ extension ChannelSessionRegistry {
         return new
     }
 
+    /// Returns the shared `ChannelTwitchEmotesStore` for this account × channel
+    /// pair, creating it on first access. Same lifetime and idempotency
+    /// semantics as `badgeStore(...)`.
+    public func channelTwitchEmoteStore(
+        forAccountUserId accountUserId: String,
+        channelId: String
+    ) -> ChannelTwitchEmotesStore {
+        let key = Self.key(accountUserId: accountUserId, channelId: channelId)
+        if let existing = channelTwitchEmoteStores[key] {
+            return existing
+        }
+        let new = ChannelTwitchEmotesStore()
+        channelTwitchEmoteStores[key] = new
+        return new
+    }
+
     /// Returns (creating if needed) the per-account connection-state store. A
     /// `ChatScreen` observes this to drive its "Reconnecting… / Live again"
     /// pill. Same lifetime as the account's event dispatcher: kept while the

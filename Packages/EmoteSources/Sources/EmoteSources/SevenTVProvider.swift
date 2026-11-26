@@ -87,6 +87,10 @@ public struct SevenTVProvider: EmoteProvider {
     private struct EmoteFile: Decodable {
         /// File leaf, e.g. "1x.webp", "2x.webp", "4x.webp", "1x.avif".
         let name: String
+        /// Still-image sibling 7TV serves for animated emotes (e.g. "2x_static.webp").
+        /// Downloading this for the emote picker and static mode avoids pulling
+        /// full multi-frame animations (10-50x larger) and decoding them on CPU.
+        let static_name: String?
         /// "WEBP", "AVIF", "PNG", etc.
         let format: String
         /// Pixel dimensions of this variant. Drives `Emote.aspectRatio`
@@ -105,11 +109,19 @@ public struct SevenTVProvider: EmoteProvider {
         // Normalize to https:// so URL(string:) doesn't choke.
         let hostURL = host.url.hasPrefix("//") ? "https:" + host.url : host.url
 
+        let flags = j.flags ?? 0
+        let dataFlags = j.data?.flags ?? 0
+        let isZeroWidth = (flags & 0x01) != 0 || (dataFlags & 0x100) != 0
+        let isAnimated = j.data?.animated ?? false
+
         // Pick the WebP variants for x1/x2/x4. WebP is 7TV's primary
         // delivery format (AVIF is a fallback and the gif equivalents are
-        // historical). iOS 14+ ImageIO can decode static WebP natively, so
-        // AsyncImage handles these without an extra dependency.
+        // historical). For animated emotes, also capture 7TV's `static_name`
+        // (e.g. `2x_static.webp`) so static surfaces like the emote picker
+        // load a tiny single-frame WebP through Nuke instead of downloading
+        // and ImageIO-decoding the full animation.
         var urls: [Emote.Size: URL] = [:]
+        var staticURLs: [Emote.Size: URL] = [:]
         let webpFiles = (host.files ?? []).filter { $0.format == "WEBP" }
         for file in webpFiles {
             let size: Emote.Size? = switch file.name {
@@ -120,15 +132,17 @@ public struct SevenTVProvider: EmoteProvider {
             }
             if let size, let url = URL(string: "\(hostURL)/\(file.name)") {
                 urls[size] = url
+                if isAnimated,
+                   let staticName = file.static_name,
+                   !staticName.isEmpty,
+                   staticName != file.name,
+                   let staticURL = URL(string: "\(hostURL)/\(staticName)") {
+                    staticURLs[size] = staticURL
+                }
             }
         }
 
         guard !urls.isEmpty else { return nil }
-
-        let flags = j.flags ?? 0
-        let dataFlags = j.data?.flags ?? 0
-        let isZeroWidth = (flags & 0x01) != 0 || (dataFlags & 0x100) != 0
-        let isAnimated = j.data?.animated ?? false
 
         // Width÷height is identical across size variants, so any file with
         // dimensions works — take the first WebP that reports them.
@@ -147,7 +161,8 @@ public struct SevenTVProvider: EmoteProvider {
             isZeroWidth: isZeroWidth,
             source: .sevenTV,
             ownerChannelId: ownerChannelId,
-            aspectRatio: aspectRatio
+            aspectRatio: aspectRatio,
+            staticURLs: staticURLs.isEmpty ? nil : staticURLs
         )
     }
 }

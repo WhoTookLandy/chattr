@@ -11,8 +11,10 @@ struct ChannelEmoteCachePayload: Codable, Sendable {
     /// or when a new field should be backfilled promptly. v2 added
     /// `aspectRatio`; v3 switched the payload from the merged
     /// global+channel table to channel-only (v2 files would otherwise
-    /// resurrect stale globals as if they were channel emotes).
-    static let cacheVersion = 3
+    /// resurrect stale globals as if they were channel emotes); v4 backfills
+    /// 7TV's `static_name` still URLs (`Emote.staticURLs`) so the picker
+    /// avoids downloading full animated WebPs.
+    static let cacheVersion = 4
 
     /// The broadcaster this snapshot belongs to; validated against the cache
     /// filename on load to guard against a mismatched/renamed file.

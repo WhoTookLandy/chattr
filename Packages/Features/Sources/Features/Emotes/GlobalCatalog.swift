@@ -34,6 +34,10 @@ public final class GlobalCatalog {
     /// picker / name-to-ID resolution when sending messages.
     public private(set) var globalEmotes: [String: TwitchEmote] = [:]
 
+    /// Monotonically bumped whenever `globalEmotes` changes, giving the emote
+    /// picker an O(1) cache key instead of element-by-element dictionary checks.
+    public private(set) var emoteVersion: Int = 0
+
     /// True once BOTH globals are current — fetched from the network, or
     /// restored fresh from disk. Subsequent triggers from `.task(id:)` no-op so
     /// we don't refetch on every account swap. A failed (or half-failed) load
@@ -94,7 +98,10 @@ public final class GlobalCatalog {
             version: GlobalsCachePayload.cacheVersion, ttl: Self.cacheTTL
         ) {
             globalBadges = hit.payload.badgeDictionary
-            globalEmotes = hit.payload.emotes
+            if globalEmotes != hit.payload.emotes {
+                globalEmotes = hit.payload.emotes
+                emoteVersion &+= 1
+            }
             if hit.isFresh {
                 hasLoaded = true
                 logger.info("GlobalCatalog restored fresh from disk: \(self.globalBadges.count) badges, \(self.globalEmotes.count) emotes")
@@ -158,7 +165,10 @@ public final class GlobalCatalog {
         let mergedEmotes = emotes ?? globalEmotes
 
         globalBadges = mergedBadges
-        globalEmotes = mergedEmotes
+        if globalEmotes != mergedEmotes {
+            globalEmotes = mergedEmotes
+            emoteVersion &+= 1
+        }
         hasLoaded = badges != nil && emotes != nil
 
         // Persist only a complete result. The disk entry has ONE freshness

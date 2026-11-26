@@ -159,6 +159,60 @@ struct SevenTVDecodingTests {
         try #require(emotes.count == 1)
         #expect(emotes[0].isZeroWidth == true)
         #expect(emotes[0].isAnimated == true)
+        #expect(emotes[0].staticURLs == nil)
+    }
+
+    @Test("Captures static_name still URLs for animated 7TV emotes")
+    func parsesStaticNameForAnimatedEmote() async throws {
+        let json = """
+        {
+          "emotes": [
+            {
+              "id": "A0001",
+              "name": "catJAM",
+              "flags": 0,
+              "data": {
+                "animated": true,
+                "host": {
+                  "url": "//cdn.7tv.app/emote/A0001",
+                  "files": [
+                    {"name": "1x.webp", "static_name": "1x_static.webp", "format": "WEBP", "width": 32, "height": 32},
+                    {"name": "2x.webp", "static_name": "2x_static.webp", "format": "WEBP", "width": 64, "height": 64},
+                    {"name": "4x.webp", "static_name": "4x_static.webp", "format": "WEBP", "width": 128, "height": 128}
+                  ]
+                }
+              }
+            },
+            {
+              "id": "S0001",
+              "name": "StaticGuy",
+              "flags": 0,
+              "data": {
+                "animated": false,
+                "host": {
+                  "url": "//cdn.7tv.app/emote/S0001",
+                  "files": [
+                    {"name": "2x.webp", "static_name": "2x_static.webp", "format": "WEBP", "width": 64, "height": 64}
+                  ]
+                }
+              }
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+        let provider = SevenTVProvider(urlSession: mockedSession(
+            url: "https://7tv.io/v3/emote-sets/global",
+            data: json
+        ))
+        let emotes = try await provider.globalEmotes()
+        try #require(emotes.count == 2)
+        let animated = emotes[0]
+        #expect(animated.isAnimated == true)
+        #expect(animated.staticURLs?[.x1]?.absoluteString == "https://cdn.7tv.app/emote/A0001/1x_static.webp")
+        #expect(animated.staticURLs?[.x2]?.absoluteString == "https://cdn.7tv.app/emote/A0001/2x_static.webp")
+        #expect(animated.staticURLs?[.x4]?.absoluteString == "https://cdn.7tv.app/emote/A0001/4x_static.webp")
+        // Non-animated emotes don't need separate staticURLs.
+        #expect(emotes[1].staticURLs == nil)
     }
 
     @Test("Carries the file dimensions through as an aspect ratio")

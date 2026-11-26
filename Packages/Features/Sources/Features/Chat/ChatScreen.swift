@@ -104,6 +104,15 @@ public struct ChatScreen: View {
         )
     }
 
+    /// Convenience: pull the registry-owned Twitch channel-emote store
+    /// (follower / channel emotes) for this channel.
+    private var channelTwitchEmoteStore: ChannelTwitchEmotesStore? {
+        channelSessionRegistry?.channelTwitchEmoteStore(
+            forAccountUserId: account.userId,
+            channelId: channelId
+        )
+    }
+
     /// Convenience: pull the registry-owned per-account connection-state store.
     /// Same nil semantics as `badgeStore` / `emoteIndex` above. Observed to
     /// drive the "Reconnecting… / Live again" pill.
@@ -541,9 +550,21 @@ public struct ChatScreen: View {
                 channelId: channelId,
                 channelLoginName: channelLoginName
             )
-            let count = index.snapshot().count
-            signposter.endInterval("emote-load", state, "count=\(count)")
-            logger.info("EmoteIndex loaded for #\(channelLoginName, privacy: .public): \(count) emotes")
+            let snapshot = index.snapshot()
+            signposter.endInterval("emote-load", state, "count=\(snapshot.count)")
+            logger.info("EmoteIndex loaded for #\(channelLoginName, privacy: .public): \(snapshot.count) emotes")
+            // Warm Nuke's disk cache with static thumbnails for the channel's
+            // leading third-party emotes so the emote picker paints immediately.
+            chatImagePrefetcher?.prefetchChannelThirdPartyStills(Array(snapshot.values))
+        }
+        // Load this channel's Twitch native emotes (follower / sub / bits) so
+        // the emote picker can include unlocked follower emotes right away.
+        .task {
+            await channelTwitchEmoteStore?.load(
+                account: account,
+                accountStore: accountStore,
+                channelId: channelId
+            )
         }
         // Detach is now handled inside the .task(id: channelId) above —
         // structurally bound to view lifetime via CancellationError, no
@@ -607,10 +628,13 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var composeBarView: some View {
         let resolvedEmoteIndex = emoteIndex
-        let resolvedTwitchGlobals = globalCatalog?.globalEmotes ?? [:]
+        let resolvedChannelTwitchEmotes = channelTwitchEmoteStore
         ComposeBar(
+            channelId: channelId,
             channelLoginName: channelLoginName,
             channelDisplayName: channelDisplayName,
+            account: account,
+            accountStore: accountStore,
             tabId: tabId,
             replyContext: chatModel.replyContext,
             chatRestrictions: chatModel.chatRestrictions,
@@ -629,16 +653,8 @@ public struct ChatScreen: View {
             onDraftChange: { [channelKey = channel.id] newDraft in
                 DraftStorage.scheduleSave(forChannel: channelKey, text: newDraft)
             },
-            // Captures the concrete EmoteIndex instance + globals dict
-            // (resolved above), NOT @Environment — so it returns real
-            // emotes when invoked on the button tap. Built on demand
-            // (the snapshot read + section build runs only when tapped).
-            emoteSectionsProvider: {
-                EmoteCatalog.buildSections(
-                    emoteIndex: resolvedEmoteIndex,
-                    twitchGlobal: resolvedTwitchGlobals
-                )
-            },
+            emoteIndex: resolvedEmoteIndex,
+            channelTwitchEmotes: resolvedChannelTwitchEmotes,
             // Read on demand (when an @mention starts), so the transcript
             // read stays off this body's dependency list.
             mentionPoolProvider: { [chatModel, channelLoginName, channelDisplayName] in

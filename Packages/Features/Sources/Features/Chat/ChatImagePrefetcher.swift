@@ -3,6 +3,7 @@ import Network
 import SwiftUI
 import Accounts
 import Channels
+import EmoteSources
 import TwitchKit
 import Core
 import Nuke
@@ -129,12 +130,22 @@ public final class ChatImagePrefetcher {
         var animatedRequests: [ImageRequest] = []
         for emote in emotes {
             let source = EmoteImageSource.twitch(id: emote.id, formats: emote.format, animate: animate)
-            guard let url = source.url, submitted.insert(url).inserted else { continue }
-            let request = Self.prefetchRequest(for: url)
+            if let url = source.url, submitted.insert(url).inserted {
+                let request = Self.prefetchRequest(for: url)
+                if source.isAnimated {
+                    animatedRequests.append(request)
+                } else {
+                    staticRequests.append(request)
+                }
+            }
+            // The emote picker always renders static Twitch thumbnails; when
+            // chat rows ask for animated variants, warm the tiny static URL
+            // on disk too so opening the picker is an instant cache hit.
             if source.isAnimated {
-                animatedRequests.append(request)
-            } else {
-                staticRequests.append(request)
+                let still = EmoteImageSource.twitch(id: emote.id, formats: emote.format, animate: false)
+                if let stillURL = still.url, submitted.insert(stillURL).inserted {
+                    animatedRequests.append(Self.prefetchRequest(for: stillURL))
+                }
             }
         }
         if !staticRequests.isEmpty {
@@ -319,6 +330,78 @@ public final class ChatImagePrefetcher {
         guard userEmoteQueueAccount == userId else { return }
         userEmoteQueueAccount = nil
         userEmotePrefetcher = nil
+    }
+
+    /// Disk-prefetch the images for the user's already-fetched emotes (from
+    /// `UserEmoteStore`), avoiding a second paginated Helix walk. Warms the
+    /// picker's static thumbnail URLs (and animated URLs for chat when
+    /// animated emotes are enabled) at `.veryLow` priority, at most once a day
+    /// per account and never on metered networks.
+    public func prefetchUserEmotes(_ emotes: [UserTwitchEmote], forAccount userId: String) {
+        if let queued = userEmoteQueueAccount, queued != userId {
+            userEmotePrefetcher?.stopPrefetching()
+            userEmotePrefetcher = nil
+            userEmoteQueueAccount = nil
+            Self.setWalkStamp(nil, forAccount: queued)
+            logger.notice("Stopped the previous account's emote prefetch on account switch")
+        }
+
+        guard !emotes.isEmpty else { return }
+        guard Self.isWalkDue(lastWalk: Self.walkStamp(forAccount: userId), now: Date()) else { return }
+        guard !Self.networkIsCostly else {
+            logger.info("User emote image prefetch skipped: expensive or constrained network")
+            return
+        }
+
+        let animate = Self.rowsAnimateEmotes()
+        var seen: Set<URL> = []
+        var requests: [ImageRequest] = []
+        for emote in emotes {
+            // Static thumbnail (what the emote picker renders — tiny PNGs).
+            if let stillURL = EmoteImageSource.twitch(id: emote.id, formats: emote.format, animate: false).url,
+               seen.insert(stillURL).inserted {
+                requests.append(Self.prefetchRequest(for: stillURL))
+            }
+            // Animated variant for inline chat when enabled.
+            if animate, emote.format.contains("animated"),
+               let animURL = EmoteImageSource.twitch(id: emote.id, formats: emote.format, animate: true).url,
+               seen.insert(animURL).inserted {
+                requests.append(Self.prefetchRequest(for: animURL))
+            }
+        }
+
+        Self.setWalkStamp(Date(), forAccount: userId)
+        guard !requests.isEmpty else { return }
+        let prefetcher = Self.makePrefetcher(.diskCache)
+        prefetcher.didComplete = { [weak self] in
+            self?.userEmoteQueueDidDrain(forAccount: userId)
+        }
+        userEmotePrefetcher = prefetcher
+        userEmoteQueueAccount = userId
+        prefetcher.startPrefetching(with: requests)
+        logger.info("Prefetching \(requests.count) user emote image(s) (disk) from UserEmoteStore")
+    }
+
+    // MARK: - Channel third-party emote stills (picker warm-up)
+
+    /// Warm the disk cache with static thumbnail URLs for the first screenfuls
+    /// of a channel's third-party emotes (7TV / BTTV / FFZ). Capped so huge
+    /// 1,000-emote channels don't flood the queue; only prefetches emotes that
+    /// have a cheap static image (all static emotes + 7TV/FFZ animated emotes
+    /// with static variants).
+    public func prefetchChannelThirdPartyStills(_ emotes: [Emote], limit: Int = 80) {
+        guard !Self.networkIsCostly else { return }
+        var requests: [ImageRequest] = []
+        requests.reserveCapacity(min(emotes.count, limit))
+        for emote in emotes where emote.ownerChannelId != nil {
+            let source = EmoteImageSource.thirdParty(emote, animate: false)
+            guard !source.isAnimated, let url = source.url, submitted.insert(url).inserted else { continue }
+            requests.append(Self.prefetchRequest(for: url))
+            if requests.count >= limit { break }
+        }
+        guard !requests.isEmpty else { return }
+        diskPrefetcher.startPrefetching(with: requests)
+        logger.info("Prefetching \(requests.count) channel third-party emote still(s) (disk)")
     }
 
     // MARK: - Channel badges (per-channel entry)

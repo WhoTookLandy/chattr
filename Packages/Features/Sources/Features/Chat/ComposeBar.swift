@@ -1,6 +1,8 @@
+import Accounts
 import Channels
 import Core
 import DesignSystem
+import EmoteSources
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
@@ -27,8 +29,11 @@ import UIKit
 /// suggestions, the reply quote card, or (while focused) your recent
 /// emotes. During a slow-mode wait a countdown ring joins the pill.
 struct ComposeBar: View {
+    let channelId: String
     let channelLoginName: String
     let channelDisplayName: String
+    let account: Account?
+    let accountStore: AccountStore?
     /// The pager tab this bar's chat lives in — what the ⋯ menu's "Close
     /// Chat" closes. nil outside the pager, which hides the item.
     let tabId: UUID?
@@ -59,9 +64,12 @@ struct ComposeBar: View {
     /// Instead the bar owns its @State internally and notifies via
     /// callback, which doesn't propagate as a dependency change.
     let onDraftChange: (String) -> Void
-    /// Builds the emote-picker sections on demand (when the emote button
-    /// is tapped) so we don't recompute them on every body eval.
-    let emoteSectionsProvider: () -> [EmoteSection]
+    /// Per-channel third-party emote index (7TV / BTTV / FFZ) passed live into
+    /// `EmotePickerView` so the picker updates reactively as emotes load.
+    let emoteIndex: EmoteIndex?
+    /// Per-channel Twitch emote store (follower / channel emotes) passed live
+    /// into `EmotePickerView`.
+    let channelTwitchEmotes: ChannelTwitchEmotesStore?
     /// Builds the pool of people the `@` suggestions draw from (recent
     /// chatters + the broadcaster). Called once when a mention starts, not
     /// per keystroke — the strip then filters that snapshot as you type.
@@ -105,10 +113,8 @@ struct ComposeBar: View {
     @State private var isSending: Bool = false
     @FocusState private var focused: Bool
 
-    /// Picker presentation + its snapshot of sections (captured when the
-    /// emote button is tapped, so the grid is stable while open).
+    /// Emote picker presentation.
     @State private var showingEmotePicker = false
-    @State private var pickerSections: [EmoteSection] = []
 
     /// Snapshot of mention candidates, taken when the draft starts an
     /// `@mention` and dropped when it ends. nil = no mention in progress.
@@ -132,8 +138,11 @@ struct ComposeBar: View {
     /// This gives us "load on first mount, never clobber typing"
     /// without a Binding.
     init(
+        channelId: String = "",
         channelLoginName: String,
         channelDisplayName: String,
+        account: Account? = nil,
+        accountStore: AccountStore? = nil,
         tabId: UUID? = nil,
         replyContext: ChatTranscriptModel.ReplyContext?,
         chatRestrictions: ChatRestrictions?,
@@ -142,13 +151,17 @@ struct ComposeBar: View {
         seedDraft: String,
         onCancelReply: @escaping () -> Void,
         onDraftChange: @escaping (String) -> Void,
-        emoteSectionsProvider: @escaping () -> [EmoteSection],
+        emoteIndex: EmoteIndex? = nil,
+        channelTwitchEmotes: ChannelTwitchEmotesStore? = nil,
         mentionPoolProvider: @escaping @MainActor () -> [MentionAutocomplete.Candidate] = { [] },
         onSend: @escaping @MainActor (String) async -> Void,
         onOpenSettings: (() -> Void)? = nil,
         createClip: CreateClipEntry? = nil,
         pendingMention: PendingMention? = nil
     ) {
+        self.channelId = channelId
+        self.account = account
+        self.accountStore = accountStore
         self.onOpenSettings = onOpenSettings
         self.createClip = createClip
         self.pendingMention = pendingMention
@@ -161,7 +174,8 @@ struct ComposeBar: View {
         self.slowModeExempt = slowModeExempt
         self.onCancelReply = onCancelReply
         self.onDraftChange = onDraftChange
-        self.emoteSectionsProvider = emoteSectionsProvider
+        self.emoteIndex = emoteIndex
+        self.channelTwitchEmotes = channelTwitchEmotes
         self.mentionPoolProvider = mentionPoolProvider
         self.onSend = onSend
         self._composeText = State(initialValue: seedDraft)
@@ -231,12 +245,32 @@ struct ComposeBar: View {
             guard !Task.isCancelled else { return }
             self.cooldown = nil
         }
-        // Emote picker. Stays open while you tap (so you can stack
-        // several emotes); inserts each emote's name into the composer.
+        // Emote picker. Stays open while you tap (so you can stack several
+        // emotes); inserts each emote's name into the composer and shows a
+        // compact draft bar so you can undo or send right from the sheet.
         .sheet(isPresented: $showingEmotePicker) {
-            EmotePickerView(sections: pickerSections) { emote in
-                insertEmote(emote)
-            }
+            EmotePickerView(
+                channelId: channelId,
+                channelLoginName: channelLoginName,
+                channelDisplayName: channelDisplayName,
+                account: account,
+                accountStore: accountStore,
+                emoteIndex: emoteIndex,
+                channelTwitchEmotes: channelTwitchEmotes,
+                recentEmotes: recentEmotes,
+                draftText: composeText,
+                canSend: !isSendBlocked && !isCoolingDown && !isSending,
+                onSelect: { emote in
+                    insertEmote(emote)
+                },
+                onRemoveLastToken: {
+                    removeLastDraftToken()
+                },
+                onSend: {
+                    Task { await sendDraft() }
+                    focused = false
+                }
+            )
         }
     }
 
@@ -311,10 +345,27 @@ struct ComposeBar: View {
         return text + " " + token
     }
 
-    /// Opens the full picker with a fresh snapshot of the sections.
+    /// Opens the full picker immediately (no synchronous sorting on tap).
     private func openEmotePicker() {
-        pickerSections = emoteSectionsProvider()
         showingEmotePicker = true
+    }
+
+    /// Removes the last whitespace-delimited token from `composeText` — used
+    /// by the emote picker's compact draft bar to undo an inserted emote.
+    private func removeLastDraftToken() {
+        var trimmed = composeText
+        while trimmed.last?.isWhitespace == true {
+            trimmed.removeLast()
+        }
+        guard !trimmed.isEmpty else {
+            composeText = ""
+            return
+        }
+        if let lastSpace = trimmed.lastIndex(where: \.isWhitespace) {
+            composeText = String(trimmed[...lastSpace])
+        } else {
+            composeText = ""
+        }
     }
 
     /// The quick-emote row: your recent emotes in this channel on one glass
@@ -829,7 +880,6 @@ private struct SlowModeRing: View {
             seedDraft: "",
             onCancelReply: {},
             onDraftChange: { _ in },
-            emoteSectionsProvider: { [] },
             onSend: { _ in }
         )
     }
@@ -847,7 +897,6 @@ private struct SlowModeRing: View {
             seedDraft: "Okay",
             onCancelReply: {},
             onDraftChange: { _ in },
-            emoteSectionsProvider: { [] },
             onSend: { _ in }
         )
     }

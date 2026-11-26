@@ -142,4 +142,162 @@ struct EmotePickerSectionTests {
         #expect(complete.first?.pendingBuild == nil)
         #expect(await EmoteCatalog.resolve(complete) == complete)
     }
+
+    @Test("Full catalog orders recents, current channel Twitch + 3P by provider, sub channels, unlocked, and globals")
+    func fullCatalogSectionOrderingAndGrouping() throws {
+        let globalKappa = try JSONDecoder().decode(
+            TwitchEmote.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "id": "25", "name": "Kappa", "format": ["static"], "scale": ["1.0"], "themeMode": ["dark"],
+            ])
+        )
+        let followerEmote = try JSONDecoder().decode(
+            TwitchEmote.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "id": "f1", "name": "curFollow", "format": ["static"], "scale": ["1.0"], "themeMode": ["dark"],
+                "emoteType": "follower", "emoteSetId": "set-f",
+            ])
+        )
+        let sevenTVChan = Emote(
+            id: "7tv:c1", name: "catJAM",
+            urls: [.x2: URL(string: "https://cdn.7tv.app/emote/c1/2x.webp")!],
+            isAnimated: true, isZeroWidth: false, source: .sevenTV, ownerChannelId: "100",
+            staticURLs: [.x2: URL(string: "https://cdn.7tv.app/emote/c1/2x_static.webp")!]
+        )
+        let bttvChan = Emote(
+            id: "bttv:c2", name: "POGGERS",
+            urls: [.x2: URL(string: "https://cdn.betterttv.net/emote/c2/2x")!],
+            isAnimated: false, isZeroWidth: false, source: .bttv, ownerChannelId: "100"
+        )
+        let sevenTVGlobal = Emote(
+            id: "7tv:g1", name: "Clap",
+            urls: [.x2: URL(string: "https://cdn.7tv.app/emote/g1/2x.webp")!],
+            isAnimated: false, isZeroWidth: false, source: .sevenTV, ownerChannelId: nil
+        )
+
+        let userEmotes: [UserTwitchEmote] = [
+            UserTwitchEmote(id: "sub-cur", name: "curSub", emoteType: "subscriptions", ownerId: "100", format: ["static", "animated"]),
+            UserTwitchEmote(id: "sub-b", name: "betaSub", emoteType: "subscriptions", ownerId: "300"),
+            UserTwitchEmote(id: "sub-a", name: "alphaSub", emoteType: "subscriptions", ownerId: "200"),
+            // Follower emote from ANOTHER channel should be filtered out.
+            UserTwitchEmote(id: "other-follow", name: "otherFollow", emoteType: "follower", ownerId: "200"),
+            // Prime unlocked emote (ownerId "0") goes in Unlocked, not duplicated in Globals.
+            UserTwitchEmote(id: "prime-1", name: "PrimeMe", emoteType: "prime", ownerId: "0"),
+            // Duplicate of global Kappa should not appear in Unlocked.
+            UserTwitchEmote(id: "25", name: "Kappa", emoteType: "globals", ownerId: "0"),
+        ]
+
+        let owners: [String: EmoteChannelInfo] = [
+            "200": EmoteChannelInfo(id: "200", login: "alpha", displayName: "AlphaTV", profileImageURL: URL(string: "https://img/a.png")),
+            "300": EmoteChannelInfo(id: "300", login: "zeta", displayName: "ZetaStream", profileImageURL: URL(string: "https://img/z.png")),
+        ]
+
+        let input = EmoteCatalog.BuildInput(
+            channelId: "100",
+            channelDisplayName: "CurrentChan",
+            channelAvatarURL: URL(string: "https://img/cur.png"),
+            recentEmotes: [PickerEmote(id: "r1", name: "RecentOne")],
+            thirdParty: [
+                "catJAM": sevenTVChan,
+                "POGGERS": bttvChan,
+                "Clap": sevenTVGlobal,
+            ],
+            thirdPartyGeneration: 10,
+            twitchGlobal: ["25": globalKappa],
+            twitchGlobalVersion: 1,
+            userEmotes: userEmotes,
+            userEmoteOwners: owners,
+            userEmotesVersion: 1,
+            channelTwitchEmotes: [followerEmote],
+            channelTwitchVersion: 1,
+            isFollowingChannel: true,
+            isBroadcaster: false
+        )
+
+        let sections = EmoteCatalog.buildSections(from: input)
+
+        #expect(sections.map(\.id) == [
+            "recent",
+            "channel-twitch-100",
+            "channel-sevenTV",
+            "channel-bttv",
+            "sub-200",
+            "sub-300",
+            "twitch-unlocked",
+            "twitch-global",
+            "global-sevenTV",
+        ])
+
+        // Current channel Twitch includes both sub emote and unlocked follower emote.
+        #expect(sections[1].emotes.map(\.name) == ["curFollow", "curSub"])
+        #expect(sections[1].avatarURL?.absoluteString == "https://img/cur.png")
+
+        // Subscribed channels sorted alphabetically, excluding other-channel follower emotes.
+        #expect(sections[4].title == "AlphaTV")
+        #expect(sections[4].emotes.map(\.name) == ["alphaSub"])
+        #expect(sections[5].title == "ZetaStream")
+        #expect(sections[5].emotes.map(\.name) == ["betaSub"])
+
+        // Unlocked holds PrimeMe and does not duplicate global Kappa.
+        #expect(sections[6].emotes.map(\.name) == ["PrimeMe"])
+
+        // Fast O(1) cache hit returns the exact built sections.
+        #expect(EmoteCatalog.cachedSections(for: input) == sections)
+    }
+
+    @Test("Search ranks prefix matches first and omits the duplicate Recently Used section")
+    func searchRankingAndRecentOmission() {
+        let sections = [
+            EmoteSection(id: "recent", title: "Recently Used", kind: .recent, emotes: [
+                PickerEmote(id: "1", name: "PepeLaugh"),
+            ]),
+            EmoteSection(id: "channel-sevenTV", title: "7TV Channel", kind: .channelThirdParty(.sevenTV), emotes: [
+                PickerEmote(id: "2", name: "WidePepeHappy"),
+                PickerEmote(id: "1", name: "PepeLaugh"),
+                PickerEmote(id: "3", name: "KEKW"),
+            ]),
+        ]
+
+        let filtered = EmoteCatalog.filter(sections, needle: "pepe")
+        #expect(filtered.map(\.id) == ["channel-sevenTV"])
+        #expect(filtered.first?.emotes.map(\.name) == ["PepeLaugh", "WidePepeHappy"])
+    }
+
+    @Test("UserEmoteStore decodes Helix /chat/emotes/user JSON including owner_id and cursor")
+    func userEmotePageDecoding() throws {
+        let json = """
+        {
+          "data": [
+            {
+              "id": "emotesv2_123",
+              "name": "lirikH",
+              "emote_type": "subscriptions",
+              "emote_set_id": "42",
+              "owner_id": "23161357",
+              "format": ["static", "animated"],
+              "scale": ["1.0", "2.0", "3.0"],
+              "theme_mode": ["dark", "light"]
+            },
+            {
+              "id": "25",
+              "name": "Kappa"
+            }
+          ],
+          "pagination": {
+            "cursor": "eyJiIjpudWxsfQ"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try UserEmoteStore.decodePage(json)
+        #expect(decoded.nextCursor == "eyJiIjpudWxsfQ")
+        #expect(decoded.emotes.count == 2)
+        #expect(decoded.emotes[0].ownerId == "23161357")
+        #expect(decoded.emotes[0].emoteType == "subscriptions")
+        #expect(decoded.emotes[0].format == ["static", "animated"])
+        #expect(!decoded.emotes[0].isTwitchOwned)
+        // Missing optional fields fall back safely without failing decode.
+        #expect(decoded.emotes[1].ownerId == "0")
+        #expect(decoded.emotes[1].isTwitchOwned)
+    }
 }
