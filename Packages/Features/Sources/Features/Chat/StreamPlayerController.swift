@@ -420,6 +420,22 @@ final class StreamPlayerController {
         PlaybackAudioSession.shared.setMuted(player.isMuted)
     }
 
+    /// Sets mute explicitly on the native path (or while it's still loading).
+    /// Used when switching an already-playing native stream into audio-only,
+    /// where the UI has no mute button.
+    func setMuted(_ muted: Bool) {
+        guard let player = avPlayer else {
+            startsMuted = muted
+            update(\.isMuted, to: muted)
+            return
+        }
+        if player.isMuted != muted {
+            player.isMuted = muted
+        }
+        update(\.isMuted, to: player.isMuted)
+        PlaybackAudioSession.shared.setMuted(player.isMuted)
+    }
+
     func togglePictureInPicture() {
         guard avPlayer != nil else { return run("pip") }
         guard let pip = pictureInPicture else { return }
@@ -463,11 +479,11 @@ final class StreamPlayerController {
     /// the user's cap, cellular, a power-saving or hot device, and video
     /// nobody sees (`PlaybackLimits`). Applied to each new item, and again
     /// through `applyQuality` when any of those change.
-    func applyQualityLimits(to item: AVPlayerItem) {
+    func applyQualityLimits(to item: AVPlayerItem, videoIsHidden: Bool? = nil) {
         let limits = PlaybackLimits.resolve(
             quality: preferredQuality,
             deviceIsConstrained: PlaybackLimits.deviceIsConstrained,
-            videoIsHidden: playsVideoHidden
+            videoIsHidden: videoIsHidden ?? playsVideoHidden
         )
         item.preferredMaximumResolution = limits.maximumResolution
         item.preferredMaximumResolutionForExpensiveNetworks = limits.maximumResolutionOnExpensiveNetworks

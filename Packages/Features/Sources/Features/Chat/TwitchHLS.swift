@@ -26,6 +26,9 @@ enum TwitchHLS {
         let clientId: String
     }
 
+    /// Shared short-lived playlist cache across native playback surfaces.
+    static let sharedCache = StreamPlaylistCache()
+
     /// The resolver the native engine uses unless it's handed another.
     struct Resolver: StreamPlaylistResolving {
         /// Read per playlist, so signing in or out applies to the next
@@ -33,9 +36,33 @@ enum TwitchHLS {
         var auth: @Sendable () async -> Auth? = { await TwitchHLS.currentAuth() }
         /// A renewed `Auth` after Twitch rejected one, or nil.
         var renewAuth: @Sendable (Auth) async -> Auth? = { await TwitchHLS.renewedAuth(after: $0) }
+        var cache: StreamPlaylistCache = TwitchHLS.sharedCache
 
         func playlist(login: String, audioOnly: Bool) async throws -> StreamPlaylist {
-            try await TwitchHLS.playlist(login: login, audioOnly: audioOnly, auth: await auth(), renewAuth: renewAuth)
+            try await TwitchHLS.playlist(
+                login: login,
+                audioOnly: audioOnly,
+                auth: await auth(),
+                renewAuth: renewAuth,
+                cache: cache
+            )
+        }
+
+        func warmAudioOnlyVariant(for masterURL: URL, login: String) async throws -> AudioOnlyVariantProbe {
+            let probe = try await TwitchHLS.probeAudioOnlyVariant(in: masterURL)
+            switch probe {
+            case .available(let variant):
+                await cache.recordAudioOnlyProbe(login: login, masterURL: masterURL, audioOnlyURL: variant)
+            case .unavailable:
+                await cache.recordAudioOnlyProbe(login: login, masterURL: masterURL, audioOnlyURL: nil)
+            case .failed:
+                break
+            }
+            return probe
+        }
+
+        func invalidate(login: String) async {
+            await cache.invalidate(login: login)
         }
     }
 
@@ -111,8 +138,76 @@ enum TwitchHLS {
         login: String,
         audioOnly: Bool = false,
         auth: Auth? = nil,
-        renewAuth: @Sendable (Auth) async -> Auth? = { _ in nil }
+        renewAuth: @Sendable (Auth) async -> Auth? = { _ in nil },
+        cache: StreamPlaylistCache? = nil
     ) async throws -> StreamPlaylist {
+        let fingerprint = authFingerprint(for: auth)
+        if let cache, let cached = await cache.entry(for: login, authFingerprint: fingerprint) {
+            if !audioOnly {
+                return StreamPlaylist(
+                    url: cached.masterURL,
+                    isAudioOnlyRendition: false,
+                    masterURL: cached.masterURL,
+                    audioOnlyURL: cached.audioOnlyURL,
+                    didProbeAudioOnly: cached.didProbeAudioOnly
+                )
+            }
+            if cached.didProbeAudioOnly {
+                if let variant = cached.audioOnlyURL {
+                    return StreamPlaylist(
+                        url: variant,
+                        isAudioOnlyRendition: true,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: variant,
+                        didProbeAudioOnly: true
+                    )
+                }
+                return StreamPlaylist(
+                    url: cached.masterURL,
+                    isAudioOnlyRendition: false,
+                    masterURL: cached.masterURL,
+                    audioOnlyURL: nil,
+                    didProbeAudioOnly: true
+                )
+            }
+            // Master URL is cached from video mode; try probing its audio_only
+            // variant before falling back to a fresh GQL token.
+            do {
+                let probe = try await probeAudioOnlyVariant(in: cached.masterURL)
+                switch probe {
+                case .available(let variant):
+                    await cache.recordAudioOnlyProbe(login: login, masterURL: cached.masterURL, audioOnlyURL: variant)
+                    return StreamPlaylist(
+                        url: variant,
+                        isAudioOnlyRendition: true,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: variant,
+                        didProbeAudioOnly: true
+                    )
+                case .unavailable:
+                    await cache.recordAudioOnlyProbe(login: login, masterURL: cached.masterURL, audioOnlyURL: nil)
+                    return StreamPlaylist(
+                        url: cached.masterURL,
+                        isAudioOnlyRendition: false,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: nil,
+                        didProbeAudioOnly: true
+                    )
+                case .failed:
+                    return StreamPlaylist(
+                        url: cached.masterURL,
+                        isAudioOnlyRendition: false,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: nil,
+                        didProbeAudioOnly: false
+                    )
+                }
+            } catch StreamPlaylistError.forbidden {
+                // Cached token expired: clear and resolve a fresh one below.
+                await cache.invalidate(login: login)
+            }
+        }
+
         let token = try await accessToken(login: login, auth: auth, renewAuth: renewAuth)
 
         guard let playlistURL = Endpoints.TwitchPlayer.livePlaylist(login: login),
@@ -130,13 +225,76 @@ enum TwitchHLS {
             URLQueryItem(name: "p", value: String(Int.random(in: 1_000_000...9_999_999))),
         ]
         guard let url = components.url else { throw StreamPlaylistError.unavailable }
-        guard audioOnly else { return StreamPlaylist(url: url, isAudioOnlyRendition: false) }
+        guard audioOnly else {
+            await cache?.store(
+                login: login,
+                masterURL: url,
+                audioOnlyURL: nil,
+                didProbeAudioOnly: false,
+                authFingerprint: fingerprint
+            )
+            return StreamPlaylist(
+                url: url,
+                isAudioOnlyRendition: false,
+                masterURL: url,
+                audioOnlyURL: nil,
+                didProbeAudioOnly: false
+            )
+        }
         // Audio-only: pick the `audio_only` variant out of the master
         // playlist. If Twitch didn't offer one, the full stream still plays.
-        if let variant = try await audioOnlyVariant(in: url) {
-            return StreamPlaylist(url: variant, isAudioOnlyRendition: true)
+        switch try await probeAudioOnlyVariant(in: url) {
+        case .available(let variant):
+            await cache?.store(
+                login: login,
+                masterURL: url,
+                audioOnlyURL: variant,
+                didProbeAudioOnly: true,
+                authFingerprint: fingerprint
+            )
+            return StreamPlaylist(
+                url: variant,
+                isAudioOnlyRendition: true,
+                masterURL: url,
+                audioOnlyURL: variant,
+                didProbeAudioOnly: true
+            )
+        case .unavailable:
+            await cache?.store(
+                login: login,
+                masterURL: url,
+                audioOnlyURL: nil,
+                didProbeAudioOnly: true,
+                authFingerprint: fingerprint
+            )
+            return StreamPlaylist(
+                url: url,
+                isAudioOnlyRendition: false,
+                masterURL: url,
+                audioOnlyURL: nil,
+                didProbeAudioOnly: true
+            )
+        case .failed:
+            await cache?.store(
+                login: login,
+                masterURL: url,
+                audioOnlyURL: nil,
+                didProbeAudioOnly: false,
+                authFingerprint: fingerprint
+            )
+            return StreamPlaylist(
+                url: url,
+                isAudioOnlyRendition: false,
+                masterURL: url,
+                audioOnlyURL: nil,
+                didProbeAudioOnly: false
+            )
         }
-        return StreamPlaylist(url: url, isAudioOnlyRendition: false)
+    }
+
+    private static func authFingerprint(for auth: Auth?) -> String {
+        guard let auth, !auth.token.isEmpty else { return "anon" }
+        return "\(auth.clientId):\(auth.token)"
     }
 
     /// As `auth`; renewed once if Twitch rejects it; failing that, logged
@@ -183,18 +341,29 @@ enum TwitchHLS {
         return (token.value, token.signature)
     }
 
-    /// nil when the master playlist lists no audio-only variant, or
-    /// couldn't be read at all (the player then loads it itself). Throws
-    /// only for what Twitch's status says outright: offline, or refused.
-    private static func audioOnlyVariant(in master: URL) async throws -> URL? {
-        guard let (data, response) = try? await URLSession.shared.data(from: master) else { return nil }
-        switch (response as? HTTPURLResponse)?.statusCode {
-        case 404: throw StreamPlaylistError.offline
-        case 401, 403: throw StreamPlaylistError.forbidden
-        default: break
+    /// Probes the master playlist for an `audio_only` variant, distinguishing
+    /// a confirmed absence from a transient fetch error so callers only cache
+    /// confirmed results. Throws only for what Twitch's status says outright:
+    /// offline, or refused.
+    static func probeAudioOnlyVariant(in master: URL) async throws -> AudioOnlyVariantProbe {
+        guard let (data, response) = try? await URLSession.shared.data(from: master) else {
+            return .failed
         }
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        return HLSMasterPlaylist.audioOnlyVariant(in: text, relativeTo: master)
+        guard let http = response as? HTTPURLResponse else { return .failed }
+        switch http.statusCode {
+        case 200:
+            guard let text = String(data: data, encoding: .utf8) else { return .failed }
+            if let variant = HLSMasterPlaylist.audioOnlyVariant(in: text, relativeTo: master) {
+                return .available(variant)
+            }
+            return .unavailable
+        case 404:
+            throw StreamPlaylistError.offline
+        case 401, 403:
+            throw StreamPlaylistError.forbidden
+        default:
+            return .failed
+        }
     }
 }
 #endif

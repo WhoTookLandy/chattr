@@ -66,3 +66,95 @@ struct StreamPlaylistParserTests {
         #expect(HLSMasterPlaylist.audioOnlyVariant(in: text, relativeTo: Self.master) == nil)
     }
 }
+
+@Suite("Stream playlist cache")
+struct StreamPlaylistCacheTests {
+    static let master = URL(string: "https://usher.ttvnw.net/api/channel/hls/somechannel.m3u8?sig=abc&token=def")!
+    static let audioOnly = URL(string: "https://video-weaver.example.net/v1/playlist/audio_only.m3u8")!
+
+    @Test("Returns cached entry for matching channel and auth within TTL")
+    func hitsWithinTTL() async {
+        let cache = StreamPlaylistCache(ttl: .seconds(600))
+        let t0 = ContinuousClock.now
+        await cache.store(
+            login: "SomeChannel",
+            masterURL: Self.master,
+            audioOnlyURL: nil,
+            didProbeAudioOnly: false,
+            authFingerprint: "client:tok",
+            now: t0
+        )
+
+        let entry = await cache.entry(
+            for: "somechannel",
+            authFingerprint: "client:tok",
+            now: t0.advanced(by: .seconds(300))
+        )
+        #expect(entry?.masterURL == Self.master)
+        #expect(entry?.audioOnlyURL == nil)
+        #expect(entry?.didProbeAudioOnly == false)
+    }
+
+    @Test("Records background audio_only probe on matching master URL")
+    func recordsAudioOnlyProbe() async {
+        let cache = StreamPlaylistCache(ttl: .seconds(600))
+        let t0 = ContinuousClock.now
+        await cache.store(
+            login: "somechannel",
+            masterURL: Self.master,
+            audioOnlyURL: nil,
+            didProbeAudioOnly: false,
+            authFingerprint: "anon",
+            now: t0
+        )
+        await cache.recordAudioOnlyProbe(
+            login: "somechannel",
+            masterURL: Self.master,
+            audioOnlyURL: Self.audioOnly
+        )
+
+        let entry = await cache.entry(for: "somechannel", authFingerprint: "anon", now: t0)
+        #expect(entry?.audioOnlyURL == Self.audioOnly)
+        #expect(entry?.didProbeAudioOnly == true)
+    }
+
+    @Test("Expires entries past TTL and evicts on auth change or invalidation")
+    func expiresAndEvicts() async {
+        let cache = StreamPlaylistCache(ttl: .seconds(60))
+        let t0 = ContinuousClock.now
+        await cache.store(
+            login: "somechannel",
+            masterURL: Self.master,
+            audioOnlyURL: Self.audioOnly,
+            didProbeAudioOnly: true,
+            authFingerprint: "client:a",
+            now: t0
+        )
+
+        // Auth changed → evicted.
+        #expect(await cache.entry(for: "somechannel", authFingerprint: "client:b", now: t0) == nil)
+
+        // Past TTL → evicted.
+        await cache.store(
+            login: "somechannel",
+            masterURL: Self.master,
+            audioOnlyURL: Self.audioOnly,
+            didProbeAudioOnly: true,
+            authFingerprint: "client:b",
+            now: t0
+        )
+        #expect(await cache.entry(for: "somechannel", authFingerprint: "client:b", now: t0.advanced(by: .seconds(61))) == nil)
+
+        // Explicit invalidation.
+        await cache.store(
+            login: "somechannel",
+            masterURL: Self.master,
+            audioOnlyURL: Self.audioOnly,
+            didProbeAudioOnly: true,
+            authFingerprint: "client:b",
+            now: t0
+        )
+        await cache.invalidate(login: "SOMECHANNEL")
+        #expect(await cache.entry(for: "somechannel", authFingerprint: "client:b", now: t0) == nil)
+    }
+}

@@ -248,7 +248,8 @@ final class PlaybackCenter {
         // The user just asked to listen: audio-only surfaces have no mute
         // control, so a muted video (Wi-Fi autoplay) must not stay muted.
         let entersAudioOnly = audioOnly && !self.audioOnly
-        if self.audioOnly != audioOnly { self.audioOnly = audioOnly }
+        let audioOnlyChanged = self.audioOnly != audioOnly
+        if audioOnlyChanged { self.audioOnly = audioOnly }
         lastQuality = quality
         lastNative = native
         // Asked to play: it's live (or it's another stream altogether), so
@@ -261,9 +262,23 @@ final class PlaybackCenter {
         let sameChannel = self.channel?.channelId == channel.channelId
         let nativeEnabled = PlayerSettings.isNativePlaybackEnabled
         let useNative = native && nativeEnabled && !(sameChannel && controller.nativeFailed)
-        let key = "\(channel.channelLoginName)|\(useNative)|\(useNative && audioOnly)"
+        // Native audio-only ↔ video switches happen in place on the running
+        // `NativeStreamEngine`, so `audioOnly` doesn't force an engine rebuild.
+        let key = "\(channel.channelLoginName)|\(useNative)"
         guard key != engineKey else {
-            controller.applyQuality(quality)
+            if audioOnlyChanged {
+                if entersAudioOnly, controller.isMuted {
+                    controller.setMuted(false)
+                }
+                if useNative {
+                    engine?.setAudioOnly(audioOnly, quality: quality)
+                } else {
+                    controller.applyQuality(quality)
+                }
+                refreshNowPlaying()
+            } else {
+                controller.applyQuality(quality)
+            }
             return
         }
 

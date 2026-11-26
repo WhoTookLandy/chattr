@@ -85,6 +85,70 @@ struct PlaybackCenterEngineTests {
         #expect(center.controller.preferredQuality == .p480)
     }
 
+    @Test("Native audio-only ↔ video switches in place without rebuilding, preserves holds, and unmutes entering audio-only")
+    func nativeAudioOnlySwitchesInPlace() {
+        let engines = FakeStreamEngines()
+        let center = engines.center()
+        center.startNextStreamMuted = true
+        play(Self.channel, on: center, native: true, quality: .p720)
+        defer { center.stop() }
+
+        let hold = center.holdPlayback(.clip)
+        #expect(hold != nil)
+        #expect(center.controller.isMuted)
+        #expect(center.holdsScreenAwake)
+
+        // Video (muted) → Audio-Only: same engine, no teardown, unmuted, hold kept.
+        center.play(
+            Self.channel, title: "x", profileImageURL: nil,
+            native: true, audioOnly: true, quality: .p720
+        )
+        #expect(engines.built.count == 1)
+        #expect(engines.built.first?.teardownCount == 0)
+        #expect(center.audioOnly)
+        #expect(!center.controller.isMuted)
+        #expect(!center.holdsScreenAwake)
+        #expect(center.controller.isHeld)
+        #expect(engines.built.first?.audioOnlyChanges.count == 1)
+        #expect(engines.built.first?.audioOnlyChanges.first?.audioOnly == true)
+        #expect(engines.built.first?.audioOnlyChanges.first?.quality == .p720)
+
+        // Audio-Only → Video: still same engine, no teardown, hold kept.
+        center.play(
+            Self.channel, title: "x", profileImageURL: nil,
+            native: true, audioOnly: false, quality: .p1080
+        )
+        #expect(engines.built.count == 1)
+        #expect(engines.built.first?.teardownCount == 0)
+        #expect(!center.audioOnly)
+        #expect(center.holdsScreenAwake)
+        #expect(center.controller.isHeld)
+        #expect(engines.built.first?.audioOnlyChanges.count == 2)
+        #expect(engines.built.first?.audioOnlyChanges.last?.audioOnly == false)
+        #expect(engines.built.first?.audioOnlyChanges.last?.quality == .p1080)
+
+        if let hold { center.releaseHold(hold) }
+        #expect(!center.controller.isHeld)
+    }
+
+    @Test("Switching between web video and native audio-only still swaps engines")
+    func webToNativeAudioOnlyRebuilds() {
+        let engines = FakeStreamEngines()
+        let center = engines.center()
+        play(Self.channel, on: center, native: false)
+        defer { center.stop() }
+        #expect(center.engine?.kind == .web)
+
+        center.play(
+            Self.channel, title: "x", profileImageURL: nil,
+            native: true, audioOnly: true, quality: .auto
+        )
+        #expect(engines.built.count == 2)
+        #expect(engines.built.first?.teardownCount == 1)
+        #expect(center.engine?.kind == .native)
+        #expect(center.audioOnly)
+    }
+
     @Test("Another channel: the old engine is torn down, a new one built, and a hold on the old stream lapses")
     func channelChangeRebuilds() {
         let engines = FakeStreamEngines()

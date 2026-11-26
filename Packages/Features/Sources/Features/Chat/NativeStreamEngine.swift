@@ -32,6 +32,10 @@ final class NativeStreamEngine: StreamEngine {
         coordinator.load(login: login, audioOnly: audioOnly, quality: quality, into: playerView)
     }
 
+    func setAudioOnly(_ audioOnly: Bool, quality: PlayerQuality) {
+        coordinator.setAudioOnly(audioOnly, quality: quality)
+    }
+
     func teardown() {
         coordinator.teardown()
         playerView.playerLayer.player = nil
