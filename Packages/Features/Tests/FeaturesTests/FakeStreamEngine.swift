@@ -18,6 +18,8 @@ final class FakeStreamEngine: StreamEngine {
     let autoplay: Bool?
     /// The controller's `startsMuted` when this engine was built.
     let startedMuted: Bool
+    /// In-place `setAudioOnly(_:quality:)` calls received by this engine.
+    private(set) var audioOnlyChanges: [(audioOnly: Bool, quality: PlayerQuality)] = []
     private(set) var teardownCount = 0
 
     init(_ request: StreamEngineRequest, controller: StreamPlayerController) {
@@ -33,6 +35,10 @@ final class FakeStreamEngine: StreamEngine {
             // (`WebStreamEngine.init`).
             autoplay = controller.beginWebEngineLoad()
         }
+    }
+
+    func setAudioOnly(_ audioOnly: Bool, quality: PlayerQuality) {
+        audioOnlyChanges.append((audioOnly, quality))
     }
 
     func teardown() {

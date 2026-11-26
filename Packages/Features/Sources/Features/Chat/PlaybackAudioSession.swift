@@ -29,10 +29,16 @@ final class PlaybackAudioSession: @unchecked Sendable {
     /// Sets the session up for a stream that is `muted` or not and activates
     /// it. Returns once that's done, so the player can be started into the
     /// right category.
-    func activate(muted: Bool) async {
+    ///
+    /// When `force` is false and this object already has the session active
+    /// with the exact category, mode and options requested, skips the
+    /// redundant `setActive(true)` IPC. Pass `force: true` after an audio
+    /// interruption, when the system may have deactivated the session without
+    /// telling this object.
+    func activate(muted: Bool, force: Bool = false) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async {
-                self.configure(mixable: muted)
+                self.configure(mixable: muted, forceActivate: force)
                 continuation.resume()
             }
         }
@@ -43,7 +49,7 @@ final class PlaybackAudioSession: @unchecked Sendable {
     func setMuted(_ muted: Bool) {
         queue.async {
             guard self.isActive else { return }
-            self.configure(mixable: muted)
+            self.configure(mixable: muted, forceActivate: false)
         }
     }
 
@@ -68,22 +74,27 @@ final class PlaybackAudioSession: @unchecked Sendable {
         }
     }
 
-    private func configure(mixable: Bool) {
+    private func configure(mixable: Bool, forceActivate: Bool) {
         let session = AVAudioSession.sharedInstance()
         let options: AVAudioSession.CategoryOptions = mixable ? [.mixWithOthers] : []
         do {
             // Compared against the session itself, not a remembered value:
             // a media services reset, or other audio in the app, can have
             // changed it since.
-            if session.category != .playback
+            let needsCategory = session.category != .playback
                 || session.mode != .moviePlayback
-                || session.categoryOptions != options {
+                || session.categoryOptions != options
+            if needsCategory {
                 try session.setCategory(.playback, mode: .moviePlayback, options: options)
             }
-            // Also after an interruption, when the system took the session
-            // down without telling this object.
-            try session.setActive(true)
-            isActive = true
+            // Skip redundant `setActive(true)` IPC when the session is already
+            // active with the requested category (e.g. an in-place audio-only ↔
+            // video switch). `forceActivate` still brings it back up after an
+            // interruption, when the system took it down without telling us.
+            if forceActivate || !isActive || needsCategory {
+                try session.setActive(true)
+                isActive = true
+            }
         } catch {
             logger.warning("Audio session setup failed: \(error.localizedDescription, privacy: .public)")
         }

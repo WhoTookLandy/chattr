@@ -2,6 +2,7 @@ import SwiftUI
 import Core
 #if os(iOS)
 import UIKit
+import QuartzCore
 import AVKit
 import AVFoundation
 import Combine
@@ -17,6 +18,39 @@ enum NativePlayer {
     final class PlayerLayerView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        /// Temporary video layer used during a warm Audio-Only → Video swap so
+        /// the incoming `AVPlayer` decodes at full view size and bridges the
+        /// handoff until `playerLayer` has painted its first frame.
+        private(set) var standbyLayer: AVPlayerLayer?
+
+        func installStandbyLayer(_ layer: AVPlayerLayer) {
+            removeStandbyLayer()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.frame = bounds
+            self.layer.addSublayer(layer)
+            CATransaction.commit()
+            standbyLayer = layer
+        }
+
+        func removeStandbyLayer() {
+            guard let existing = standbyLayer else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            existing.player = nil
+            existing.removeFromSuperlayer()
+            CATransaction.commit()
+            standbyLayer = nil
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let standbyLayer else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            standbyLayer.frame = bounds
+            CATransaction.commit()
+        }
     }
 
     @MainActor
@@ -30,13 +64,38 @@ enum NativePlayer {
         /// How long a stalled player gets to recover by itself before the
         /// playlist is resolved again.
         static let stallPatience: Duration = .seconds(10)
+        /// How long a warm-swap standby player gets to reach `.playing` before
+        /// we invalidate the cached URL and resolve fresh.
+        private static let standbyTimeout: Duration = .seconds(8)
+        /// Once a video standby hits `.playing`, how long to wait for
+        /// `isReadyForDisplay` before committing anyway.
+        private static let standbyFrameGrace: Duration = .milliseconds(1200)
+        /// Delay before showing the buffering spinner during a warm video
+        /// transition so fast switches stay spinner-free.
+        private static let standbyBufferingDelay: Duration = .milliseconds(700)
+        /// Compact forward buffer target while warming up a standby player so
+        /// it transitions to `.playing` quickly; reset to `0` on commit.
+        private static let warmStartBufferDuration: TimeInterval = 2
+        /// Maximum time the standby cover layer stays after promoting the
+        /// primary `AVPlayerLayer` while waiting for `isReadyForDisplay`.
+        private static let coverMaxLifetime: Duration = .milliseconds(250)
 
         private let resolver: any StreamPlaylistResolving
         private var login = ""
+        /// Desired audio-only state.
         private var audioOnly = false
+        /// Mode currently playing on `controller.avPlayer`.
+        private var activeAudioOnly = false
         private weak var playerView: PlayerLayerView?
         /// Between `load` and `teardown`.
         private var isLoaded = false
+
+        /// Most recently resolved playlist for this channel, kept in memory so
+        /// audio-only ↔ video toggles skip auth, GQL and Usher round-trips.
+        private var cachedPlaylist: StreamPlaylist?
+        private var cachedPlaylistAt: ContinuousClock.Instant?
+        private var warmAudioOnlyTask: Task<Void, Never>?
+        private var modeSwitchTask: Task<Void, Never>?
 
         private var loadTask: Task<Void, Never>?
         private var stallTask: Task<Void, Never>?
@@ -47,6 +106,21 @@ enum NativePlayer {
         /// When the player last went to paused; nil while it isn't.
         private var pausedAt: ContinuousClock.Instant?
         private var resumesAfterInterruption = false
+
+        // MARK: Overlapped warm-swap state
+        private var standbyPlayer: AVPlayer?
+        private var standbySubscriptions: Set<AnyCancellable> = []
+        private var standbyGeneration = 0
+        private var standbyTargetAudioOnly = false
+        private var standbyIsAudioOnlyRendition = false
+        private var standbyUsedCachedURL = false
+        private var standbyIsPlaying = false
+        private var standbyFrameReady = false
+        private var standbyTimeoutTask: Task<Void, Never>?
+        private var standbyFrameGraceTask: Task<Void, Never>?
+        private var standbyBufferingTask: Task<Void, Never>?
+        private var coverSubscription: AnyCancellable?
+        private var coverCleanupTask: Task<Void, Never>?
 
         /// Audio session and device state, for the engine's whole life.
         private var subscriptions: Set<AnyCancellable> = []
@@ -66,6 +140,7 @@ enum NativePlayer {
             loadedKey = Self.key(login, audioOnly)
             self.login = login
             self.audioOnly = audioOnly
+            self.activeAudioOnly = audioOnly
             playerView = view
             isLoaded = true
             recovery = PlaybackRecovery()
@@ -75,11 +150,87 @@ enum NativePlayer {
             resolveAndStart(after: nil)
         }
 
+        /// Switches between audio-only and video without tearing down the
+        /// engine or interrupting audio. While playing, warms the incoming
+        /// rendition on a muted standby `AVPlayer` using the cached playlist
+        /// URL and swaps atomically once it is ready.
+        func setAudioOnly(_ newAudioOnly: Bool, quality: PlayerQuality) {
+            guard isLoaded else { return }
+            controller.preferredQuality = quality
+            loadedKey = Self.key(login, newAudioOnly)
+            let modeChanged = audioOnly != newAudioOnly
+            audioOnly = newAudioOnly
+            guard modeChanged else {
+                controller.applyQuality(quality)
+                return
+            }
+
+            // Still resolving the initial playlist (no AVPlayer yet): restart
+            // the resolve for the newly requested mode.
+            guard let currentPlayer = controller.avPlayer else {
+                cancelStandby()
+                resolveAndStart(after: nil)
+                return
+            }
+
+            // Rapid toggle back to the mode already playing on the primary
+            // player: drop any in-flight standby and keep playing seamlessly.
+            if newAudioOnly == activeAudioOnly {
+                cancelStandby()
+                currentPlayer.audiovisualBackgroundPlaybackPolicy = newAudioOnly ? .continuesIfPossible : .automatic
+                controller.applyQuality(quality)
+                return
+            }
+
+            cancelStandby()
+
+            // Entering audio-only: allow background audio immediately so
+            // locking the screen during the brief handoff doesn't pause it.
+            if newAudioOnly {
+                currentPlayer.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+            }
+
+            // Already playing the master playlist with hidden video (Twitch
+            // offered no `audio_only` variant): returning to video is an
+            // instant cap removal on the same live item.
+            if !newAudioOnly, controller.playsVideoHidden, let currentItem = currentPlayer.currentItem {
+                activeAudioOnly = false
+                controller.playsVideoHidden = false
+                currentPlayer.audiovisualBackgroundPlaybackPolicy = .automatic
+                controller.applyQualityLimits(to: currentItem)
+                return
+            }
+
+            // Entering audio-only when we already confirmed Twitch has no
+            // `audio_only` variant for this channel: drop the bitrate cap in
+            // place on the existing item with zero interruption.
+            if newAudioOnly,
+               let cached = freshCachedPlaylist,
+               cached.didProbeAudioOnly,
+               cached.audioOnlyURL == nil,
+               let currentItem = currentPlayer.currentItem {
+                activeAudioOnly = true
+                controller.playsVideoHidden = true
+                controller.applyQualityLimits(to: currentItem)
+                return
+            }
+
+            let bridgeLiveAudio = controller.startsPlaying && currentPlayer.timeControlStatus != .paused
+            transitionToMode(audioOnly: newAudioOnly, bridgeLiveAudio: bridgeLiveAudio)
+        }
+
         // MARK: Resolve, start, retry
+
+        private var freshCachedPlaylist: StreamPlaylist? {
+            guard let cachedPlaylist, let cachedPlaylistAt,
+                  ContinuousClock.now - cachedPlaylistAt < StreamPlaylistCache.defaultTTL
+            else { return nil }
+            return cachedPlaylist
+        }
 
         /// Resolves the playlist (after `delay`, for a retry) and starts
         /// it — on the player that's already there, if one is.
-        private func resolveAndStart(after delay: Duration?) {
+        private func resolveAndStart(after delay: Duration?, invalidateCache: Bool = false) {
             loadTask?.cancel()
             // A report that was already on its way to the main queue when
             // the engine was torn down must not start it again.
@@ -88,6 +239,10 @@ enum NativePlayer {
             let login = self.login
             let audioOnly = self.audioOnly
             loadTask = Task { [weak self] in
+                if invalidateCache {
+                    await resolver.invalidate(login: login)
+                    guard !Task.isCancelled else { return }
+                }
                 if let delay {
                     try? await Task.sleep(for: delay)
                     guard !Task.isCancelled else { return }
@@ -110,6 +265,10 @@ enum NativePlayer {
 
         private func start(_ playlist: StreamPlaylist) {
             guard isLoaded, let view = playerView else { return }
+            cancelStandby()
+            cachedPlaylist = playlist
+            cachedPlaylistAt = ContinuousClock.now
+            activeAudioOnly = audioOnly
             controller.playsVideoHidden = audioOnly && !playlist.isAudioOnlyRendition
 
             let item = AVPlayerItem(url: playlist.url)
@@ -123,9 +282,10 @@ enum NativePlayer {
 
             let player: AVPlayer
             if let existing = controller.avPlayer {
-                // A retry: the same player (and PiP controller), a fresh
-                // playlist.
+                // A retry or paused mode switch: the same player (and PiP
+                // controller), a fresh playlist.
                 player = existing
+                player.audiovisualBackgroundPlaybackPolicy = audioOnly ? .continuesIfPossible : .automatic
                 player.replaceCurrentItem(with: item)
             } else {
                 player = AVPlayer(playerItem: item)
@@ -133,6 +293,7 @@ enum NativePlayer {
                 // start (`reset()` mirrors it, `toggleMute` keeps both in
                 // step while loading), the stream's own after a rebuild.
                 player.isMuted = controller.isMuted
+                player.audiovisualBackgroundPlaybackPolicy = audioOnly ? .continuesIfPossible : .automatic
                 view.playerLayer.player = player
                 controller.avPlayer = player
 
@@ -155,6 +316,412 @@ enum NativePlayer {
             } else {
                 controller.update(\.isPaused, to: true)
                 controller.update(\.isBuffering, to: false)
+            }
+
+            warmAudioOnlyVariantIfNeeded()
+        }
+
+        // MARK: Overlapped warm swap (audio-only ↔ video)
+
+        /// Quietly probes the `audio_only` media playlist URL from the master
+        /// playlist once video playback has started so a later Video → Audio-Only
+        /// switch needs zero network resolution.
+        private func warmAudioOnlyVariantIfNeeded() {
+            guard isLoaded, !audioOnly, warmAudioOnlyTask == nil,
+                  let cached = freshCachedPlaylist, !cached.didProbeAudioOnly
+            else { return }
+            let resolver = self.resolver
+            let login = self.login
+            let masterURL = cached.masterURL
+            warmAudioOnlyTask = Task { [weak self] in
+                let probe = try? await resolver.warmAudioOnlyVariant(for: masterURL, login: login)
+                guard !Task.isCancelled, let self, self.isLoaded else { return }
+                self.warmAudioOnlyTask = nil
+                guard let current = self.cachedPlaylist, current.masterURL == masterURL else { return }
+                switch probe {
+                case .available(let variant):
+                    self.cachedPlaylist = StreamPlaylist(
+                        url: current.url,
+                        isAudioOnlyRendition: current.isAudioOnlyRendition,
+                        masterURL: masterURL,
+                        audioOnlyURL: variant,
+                        didProbeAudioOnly: true
+                    )
+                case .unavailable:
+                    self.cachedPlaylist = StreamPlaylist(
+                        url: current.url,
+                        isAudioOnlyRendition: current.isAudioOnlyRendition,
+                        masterURL: masterURL,
+                        audioOnlyURL: nil,
+                        didProbeAudioOnly: true
+                    )
+                case .failed, nil:
+                    break
+                }
+            }
+        }
+
+        private func transitionToMode(audioOnly targetAudioOnly: Bool, bridgeLiveAudio: Bool) {
+            if let cached = freshCachedPlaylist {
+                if !targetAudioOnly {
+                    let target = StreamPlaylist(
+                        url: cached.masterURL,
+                        isAudioOnlyRendition: false,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: cached.audioOnlyURL,
+                        didProbeAudioOnly: cached.didProbeAudioOnly
+                    )
+                    if bridgeLiveAudio {
+                        beginWarmSwap(to: target, targetAudioOnly: false, usedCachedURL: true)
+                    } else {
+                        start(target)
+                    }
+                    return
+                }
+                if let audioURL = cached.audioOnlyURL {
+                    let target = StreamPlaylist(
+                        url: audioURL,
+                        isAudioOnlyRendition: true,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: audioURL,
+                        didProbeAudioOnly: true
+                    )
+                    if bridgeLiveAudio {
+                        beginWarmSwap(to: target, targetAudioOnly: true, usedCachedURL: true)
+                    } else {
+                        start(target)
+                    }
+                    return
+                }
+            }
+
+            // Need to probe Usher (if background warm probe hasn't finished yet)
+            // or refresh an expired token — keep the active player running
+            // uninterrupted while resolving.
+            let resolver = self.resolver
+            let login = self.login
+            let cachedForProbe = freshCachedPlaylist
+            modeSwitchTask = Task { [weak self] in
+                do {
+                    if targetAudioOnly, let cached = cachedForProbe, !cached.didProbeAudioOnly {
+                        do {
+                            let probe = try await resolver.warmAudioOnlyVariant(for: cached.masterURL, login: login)
+                            guard !Task.isCancelled, let self, self.isLoaded, self.audioOnly == targetAudioOnly else { return }
+                            switch probe {
+                            case .available(let variant):
+                                let target = StreamPlaylist(
+                                    url: variant,
+                                    isAudioOnlyRendition: true,
+                                    masterURL: cached.masterURL,
+                                    audioOnlyURL: variant,
+                                    didProbeAudioOnly: true
+                                )
+                                self.cachedPlaylist = target
+                                self.applyResolvedModeSwitch(target, targetAudioOnly: true, usedCachedURL: true, bridgeLiveAudio: bridgeLiveAudio)
+                                return
+                            case .unavailable:
+                                self.cachedPlaylist = StreamPlaylist(
+                                    url: cached.masterURL,
+                                    isAudioOnlyRendition: false,
+                                    masterURL: cached.masterURL,
+                                    audioOnlyURL: nil,
+                                    didProbeAudioOnly: true
+                                )
+                                if let currentItem = self.controller.avPlayer?.currentItem {
+                                    self.activeAudioOnly = true
+                                    self.controller.playsVideoHidden = true
+                                    self.controller.applyQualityLimits(to: currentItem)
+                                }
+                                return
+                            case .failed:
+                                break
+                            }
+                        } catch StreamPlaylistError.forbidden {
+                            await resolver.invalidate(login: login)
+                            guard !Task.isCancelled else { return }
+                        }
+                    }
+
+                    let playlist = try await resolver.playlist(login: login, audioOnly: targetAudioOnly)
+                    guard !Task.isCancelled, let self, self.isLoaded, self.audioOnly == targetAudioOnly else { return }
+                    self.cachedPlaylist = playlist
+                    self.cachedPlaylistAt = ContinuousClock.now
+                    self.applyResolvedModeSwitch(playlist, targetAudioOnly: targetAudioOnly, usedCachedURL: false, bridgeLiveAudio: bridgeLiveAudio)
+                } catch {
+                    guard !Task.isCancelled, let self, self.isLoaded, self.audioOnly == targetAudioOnly else { return }
+                    self.playbackFailed(error)
+                }
+            }
+        }
+
+        private func applyResolvedModeSwitch(
+            _ playlist: StreamPlaylist,
+            targetAudioOnly: Bool,
+            usedCachedURL: Bool,
+            bridgeLiveAudio: Bool
+        ) {
+            if targetAudioOnly, !playlist.isAudioOnlyRendition,
+               !activeAudioOnly, let currentItem = controller.avPlayer?.currentItem {
+                activeAudioOnly = true
+                controller.playsVideoHidden = true
+                controller.applyQualityLimits(to: currentItem)
+                return
+            }
+            if bridgeLiveAudio, controller.avPlayer != nil, controller.startsPlaying {
+                beginWarmSwap(to: playlist, targetAudioOnly: targetAudioOnly, usedCachedURL: usedCachedURL)
+            } else {
+                start(playlist)
+            }
+        }
+
+        private func beginWarmSwap(to playlist: StreamPlaylist, targetAudioOnly: Bool, usedCachedURL: Bool) {
+            guard isLoaded, let view = playerView else { return }
+            standbyGeneration += 1
+            let generation = standbyGeneration
+            standbyTargetAudioOnly = targetAudioOnly
+            standbyIsAudioOnlyRendition = playlist.isAudioOnlyRendition
+            standbyUsedCachedURL = usedCachedURL
+            standbyIsPlaying = false
+            standbyFrameReady = targetAudioOnly
+
+            let item = AVPlayerItem(url: playlist.url)
+            item.automaticallyPreservesTimeOffsetFromLive = true
+            item.configuredTimeOffsetFromLive = StreamPlayerController.liveOffset
+            item.preferredForwardBufferDuration = Self.warmStartBufferDuration
+            controller.applyQualityLimits(to: item, videoIsHidden: targetAudioOnly && !playlist.isAudioOnlyRendition)
+
+            let standby = AVPlayer(playerItem: item)
+            standby.isMuted = true
+            standby.audiovisualBackgroundPlaybackPolicy = targetAudioOnly ? .continuesIfPossible : .automatic
+            standbyPlayer = standby
+
+            if !targetAudioOnly {
+                let layer = AVPlayerLayer(player: standby)
+                layer.videoGravity = .resizeAspect
+                layer.opacity = 0
+                view.installStandbyLayer(layer)
+
+                layer.publisher(for: \.isReadyForDisplay)
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] ready in
+                        guard let self, generation == self.standbyGeneration, ready else { return }
+                        self.standbyFrameReady = true
+                        self.tryCommitStandby(generation: generation)
+                    }
+                    .store(in: &standbySubscriptions)
+
+                standbyBufferingTask = Task { [weak self] in
+                    try? await Task.sleep(for: Self.standbyBufferingDelay)
+                    guard !Task.isCancelled, let self,
+                          generation == self.standbyGeneration,
+                          !self.standbyFrameReady,
+                          self.controller.startsPlaying
+                    else { return }
+                    self.controller.update(\.isBuffering, to: true)
+                }
+            }
+
+            standby.publisher(for: \.timeControlStatus)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] status in
+                    guard let self, generation == self.standbyGeneration, status == .playing else { return }
+                    self.standbyIsPlaying = true
+                    if !self.standbyFrameReady, self.standbyFrameGraceTask == nil {
+                        self.standbyFrameGraceTask = Task { [weak self] in
+                            try? await Task.sleep(for: Self.standbyFrameGrace)
+                            guard !Task.isCancelled, let self, generation == self.standbyGeneration else { return }
+                            self.standbyFrameReady = true
+                            self.tryCommitStandby(generation: generation)
+                        }
+                    }
+                    self.tryCommitStandby(generation: generation)
+                }
+                .store(in: &standbySubscriptions)
+
+            item.publisher(for: \.status)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self, weak item] status in
+                    guard let self, generation == self.standbyGeneration, status == .failed else { return }
+                    self.standbyFailed(generation: generation, error: item?.error)
+                }
+                .store(in: &standbySubscriptions)
+
+            NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime, object: item)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] notification in
+                    guard let self, generation == self.standbyGeneration else { return }
+                    let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? any Error
+                    self.standbyFailed(generation: generation, error: error)
+                }
+                .store(in: &standbySubscriptions)
+
+            standbyTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.standbyTimeout)
+                guard !Task.isCancelled, let self, generation == self.standbyGeneration else { return }
+                self.standbyFailed(generation: generation, error: nil)
+            }
+
+            standby.play()
+        }
+
+        private func tryCommitStandby(generation: Int) {
+            guard isLoaded, generation == standbyGeneration, standbyIsPlaying, standbyFrameReady else { return }
+            guard let standby = standbyPlayer, let item = standby.currentItem, let view = playerView else { return }
+
+            let targetAudioOnly = standbyTargetAudioOnly
+            let isAudioOnlyRendition = standbyIsAudioOnlyRendition
+            let incomingLayer = view.standbyLayer
+
+            // Detach standby bookkeeping before promoting `standby` to primary.
+            standbyGeneration += 1
+            standbySubscriptions.removeAll()
+            standbyTimeoutTask?.cancel()
+            standbyTimeoutTask = nil
+            standbyFrameGraceTask?.cancel()
+            standbyFrameGraceTask = nil
+            standbyBufferingTask?.cancel()
+            standbyBufferingTask = nil
+            standbyPlayer = nil
+
+            if let incomingLayer {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                incomingLayer.opacity = 1
+                CATransaction.commit()
+            }
+
+            // Atomic handoff: unmute incoming player and silence the outgoing one
+            // back-to-back on the main actor so there is no gap.
+            stallTask?.cancel()
+            stallTask = nil
+            playerSubscriptions.removeAll()
+            itemSubscriptions.removeAll()
+            pausedAt = nil
+
+            let oldPlayer = controller.avPlayer
+            let shouldPlay = controller.startsPlaying
+            oldPlayer?.isMuted = true
+            standby.isMuted = controller.isMuted
+            standby.audiovisualBackgroundPlaybackPolicy = targetAudioOnly ? .continuesIfPossible : .automatic
+
+            oldPlayer?.pause()
+            oldPlayer?.replaceCurrentItem(with: nil)
+
+            item.preferredForwardBufferDuration = 0
+            activeAudioOnly = targetAudioOnly
+            controller.playsVideoHidden = targetAudioOnly && !isAudioOnlyRendition
+            controller.applyQualityLimits(to: item)
+            controller.avPlayer = standby
+            view.playerLayer.player = standby
+
+            if controller.pictureInPicture == nil,
+               AVPictureInPictureController.isPictureInPictureSupported(),
+               let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
+                pip.canStartPictureInPictureAutomaticallyFromInline = true
+                pip.delegate = self
+                controller.pictureInPicture = pip
+                controller.update(\.canPictureInPicture, to: true)
+            }
+            controller.refreshAutomaticPictureInPicture()
+
+            observePlayer(standby)
+            observeItem(item)
+
+            if shouldPlay {
+                controller.update(\.isPaused, to: false)
+                controller.update(\.isBuffering, to: false)
+                controller.noteDidPlay()
+            } else {
+                standby.pause()
+                controller.update(\.isPaused, to: true)
+                controller.update(\.isBuffering, to: false)
+            }
+
+            if incomingLayer != nil {
+                scheduleStandbyCoverRemoval(on: view)
+            }
+            warmAudioOnlyVariantIfNeeded()
+        }
+
+        /// Keeps the already-painted `standbyLayer` covering `view.playerLayer`
+        /// until `view.playerLayer.isReadyForDisplay` flips true (typically
+        /// one frame) so removing the standby layer never blinks the poster.
+        private func scheduleStandbyCoverRemoval(on view: PlayerLayerView) {
+            coverSubscription?.cancel()
+            coverSubscription = nil
+            coverCleanupTask?.cancel()
+            coverCleanupTask = nil
+
+            if view.playerLayer.isReadyForDisplay {
+                view.removeStandbyLayer()
+                return
+            }
+
+            coverSubscription = view.playerLayer.publisher(for: \.isReadyForDisplay)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self, weak view] ready in
+                    guard ready else { return }
+                    self?.clearStandbyCover(on: view)
+                }
+
+            coverCleanupTask = Task { [weak self, weak view] in
+                try? await Task.sleep(for: Self.coverMaxLifetime)
+                guard !Task.isCancelled else { return }
+                self?.clearStandbyCover(on: view)
+            }
+        }
+
+        private func clearStandbyCover(on view: PlayerLayerView?) {
+            coverSubscription?.cancel()
+            coverSubscription = nil
+            coverCleanupTask?.cancel()
+            coverCleanupTask = nil
+            view?.removeStandbyLayer()
+        }
+
+        private func standbyFailed(generation: Int, error: (any Error)?) {
+            guard isLoaded, generation == standbyGeneration else { return }
+            let targetAudioOnly = standbyTargetAudioOnly
+            let wasCached = standbyUsedCachedURL
+            cancelStandby()
+
+            if wasCached {
+                // Cached token/playlist may have expired: evict and retry once
+                // with fresh credentials while keeping the current player live.
+                cachedPlaylist = nil
+                cachedPlaylistAt = nil
+                let resolver = self.resolver
+                let login = self.login
+                modeSwitchTask = Task { [weak self] in
+                    await resolver.invalidate(login: login)
+                    guard !Task.isCancelled, let self, self.isLoaded, self.audioOnly == targetAudioOnly else { return }
+                    let bridgeLiveAudio = self.controller.startsPlaying && self.controller.avPlayer?.timeControlStatus != .paused
+                    self.transitionToMode(audioOnly: targetAudioOnly, bridgeLiveAudio: bridgeLiveAudio)
+                }
+            } else {
+                playbackFailed(error)
+            }
+        }
+
+        private func cancelStandby() {
+            standbyGeneration += 1
+            modeSwitchTask?.cancel()
+            modeSwitchTask = nil
+            standbyTimeoutTask?.cancel()
+            standbyTimeoutTask = nil
+            standbyFrameGraceTask?.cancel()
+            standbyFrameGraceTask = nil
+            standbyBufferingTask?.cancel()
+            standbyBufferingTask = nil
+            standbySubscriptions.removeAll()
+            if let standby = standbyPlayer {
+                standby.pause()
+                standby.replaceCurrentItem(with: nil)
+                standbyPlayer = nil
+            }
+            clearStandbyCover(on: playerView)
+            if let primary = controller.avPlayer {
+                controller.update(\.isBuffering, to: primary.timeControlStatus == .waitingToPlayAtSpecifiedRate)
             }
         }
 
@@ -259,6 +826,11 @@ enum NativePlayer {
             itemSubscriptions.removeAll()
             stallTask?.cancel()
             stallTask = nil
+            warmAudioOnlyTask?.cancel()
+            warmAudioOnlyTask = nil
+            cancelStandby()
+            cachedPlaylist = nil
+            cachedPlaylistAt = nil
 
             if let refusal = error as? StreamPlaylistError, refusal == .offline {
                 controller.onStreamEnded?()
@@ -268,7 +840,7 @@ enum NativePlayer {
             switch recovery.step(after: error, staysNative: staysNative) {
             case .retry(let delay):
                 controller.update(\.isBuffering, to: true)
-                resolveAndStart(after: delay)
+                resolveAndStart(after: delay, invalidateCache: true)
             case .giveUp:
                 controller.onNativeFailure?()
             }
@@ -348,7 +920,7 @@ enum NativePlayer {
         private func reactivateAndResume() {
             Task { [weak self] in
                 guard let muted = self?.controller.isMuted else { return }
-                await PlaybackAudioSession.shared.activate(muted: muted)
+                await PlaybackAudioSession.shared.activate(muted: muted, force: true)
                 guard let self, self.isLoaded,
                       self.controller.avPlayer != nil, self.controller.startsPlaying
                 else { return }
@@ -381,11 +953,14 @@ enum NativePlayer {
             PlaybackAudioSession.shared.invalidate()
             controller.pictureInPictureEndedAmbiguously()
             controller.update(\.canPictureInPicture, to: false)
+            cachedPlaylist = nil
+            cachedPlaylistAt = nil
             discardPlayer()
-            resolveAndStart(after: nil)
+            resolveAndStart(after: nil, invalidateCache: true)
         }
 
         private func discardPlayer() {
+            cancelStandby()
             stallTask?.cancel()
             stallTask = nil
             itemGeneration += 1
@@ -408,6 +983,10 @@ enum NativePlayer {
             isLoaded = false
             loadTask?.cancel()
             loadTask = nil
+            warmAudioOnlyTask?.cancel()
+            warmAudioOnlyTask = nil
+            cachedPlaylist = nil
+            cachedPlaylistAt = nil
             subscriptions.removeAll()
             resumesAfterInterruption = false
             discardPlayer()

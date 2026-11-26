@@ -11,7 +11,14 @@ protocol StreamEngine: AnyObject {
     /// Which player this is. `PlaybackCenter` asks this, not the engine's
     /// type, so a stand-in engine can be either.
     var kind: StreamEngineKind { get }
+    /// Switches between audio-only and video in place for the same channel,
+    /// keeping playback alive instead of tearing the engine down.
+    func setAudioOnly(_ audioOnly: Bool, quality: PlayerQuality)
     func teardown()
+}
+
+extension StreamEngine {
+    func setAudioOnly(_ audioOnly: Bool, quality: PlayerQuality) {}
 }
 
 /// The two players a stream can be on.
