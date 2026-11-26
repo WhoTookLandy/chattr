@@ -140,7 +140,8 @@ public actor GlobalEmoteCatalog {
 
 /// On-disk representation of one provider's global emote set.
 struct GlobalEmoteCachePayload: Codable, Sendable {
-    static let cacheVersion = 1
+    /// v2 backfills 7TV's `static_name` still URLs (`Emote.staticURLs`).
+    static let cacheVersion = 2
 
     /// Validated against the requested key on load.
     let providerKey: String

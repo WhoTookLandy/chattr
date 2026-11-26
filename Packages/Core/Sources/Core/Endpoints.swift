@@ -260,5 +260,11 @@ public enum Endpoints {
     public enum Helix {
         /// `GET /moderation/banned`: one user's ban state in a channel.
         public static let bannedUsers = URL(string: "https://api.twitch.tv/helix/moderation/banned")!
+
+        /// `GET /chat/emotes/user`: every Twitch emote the signed-in user can
+        /// use (subscriptions, bits tiers, follower emotes, globals, specials),
+        /// including `owner_id` so the picker can group subscriber emotes by
+        /// channel (TwitchKit's `TwitchEmote` omits `owner_id`).
+        public static let userEmotes = URL(string: "https://api.twitch.tv/helix/chat/emotes/user")!
     }
 }

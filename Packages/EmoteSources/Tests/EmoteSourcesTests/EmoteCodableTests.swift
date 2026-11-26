@@ -102,7 +102,7 @@ struct ChannelEmoteCachePayloadTests {
 
         #expect(decoded.broadcasterId == "99")
         #expect(decoded.byName["ZULUL"] == emote)
-        #expect(ChannelEmoteCachePayload.cacheVersion == 3)
+        #expect(ChannelEmoteCachePayload.cacheVersion == 4)
     }
 
     @Test("payload round-trips its provider set and fetch time")

@@ -71,6 +71,12 @@ public struct RootView: View {
     /// keeping the data across sign-outs is also fine since it's not auth-specific).
     @State private var globalCatalog = GlobalCatalog()
 
+    /// App-wide store of the active account's accessible Twitch emotes
+    /// (subscriber emotes grouped by channel, bits-tier, unlocked specials).
+    /// Restores from disk instantly on launch and feeds both the emote picker
+    /// and the background image prefetcher.
+    @State private var userEmoteStore = UserEmoteStore()
+
     /// Per-active-account blocked-user store. Re-created when the active
     /// account changes. Seeded in a launch .task and injected via the
     /// environment, like globalCatalog.
@@ -176,6 +182,7 @@ public struct RootView: View {
             }
         }
         .environment(\.globalCatalog, globalCatalog)
+        .environment(\.userEmoteStore, userEmoteStore)
         .environment(\.blockStore, blockStore)
         .environment(\.followsStore, followsStore)
         .environment(\.channelStatus, channelStatus)
@@ -240,30 +247,25 @@ public struct RootView: View {
             chatImagePrefetcher.prefetchGlobalEmotes(Array(globalCatalog.globalEmotes.values))
             chatImagePrefetcher.prefetchGlobalBadges(globalCatalog.globalBadges)
         }
-        // User-subscribed emote image prefetch. Walks Helix's paginated
-        // `/chat/emotes/user` endpoint and disk-caches every URL. Runs
-        // INDEPENDENTLY from the global catalog load — they're two
-        // different endpoints with no data dependency between them.
-        //
-        // Requires the `user:read:emotes` scope (added to SignInView).
-        // Accounts that signed in before we added the scope will get
-        // an `unauthorized` error which the prefetcher handles
-        // silently — the app keeps working, just falls back to
-        // fetch-on-first-display.
-        //
-        // Deferred a few seconds: it's pure cache warming (every page of
-        // the endpoint, then hundreds of image downloads), and Nuke's
-        // `.veryLow` priority only orders QUEUED requests — downloads already
-        // running kept their bandwidth while the restored chat's emotes,
-        // badges and history were loading.
+        // Load the active account's accessible Twitch emotes (subscribed
+        // channels, bits-tier, unlocked specials) immediately on launch —
+        // disk-cached so cold launches are instant, revalidated in background
+        // when stale. After a short delay (so initial chat images win bandwidth),
+        // hand the loaded metadata to `ChatImagePrefetcher` to warm the disk
+        // image cache without walking `/chat/emotes/user` a second time.
         .task(id: activeAccount?.userId) {
-            guard activeAccount != nil else { return }
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled, let active = activeAccount else { return }
-            await chatImagePrefetcher.prefetchUserSubscribedEmotes(
+            guard let active = activeAccount else { return }
+            let userId = active.userId
+            await accountStore.refreshTokensIfExpiringSoon(for: active)
+            guard !Task.isCancelled else { return }
+            await userEmoteStore.load(
                 account: active,
-                accountStore: accountStore
+                accountStore: accountStore,
+                followsStore: followsStore
             )
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, activeAccount?.userId == userId else { return }
+            chatImagePrefetcher.prefetchUserEmotes(userEmoteStore.emotes, forAccount: userId)
         }
         // Cold-start EventSub zombie cleanup. Reap dead subscriptions a previous
         // crash/force-quit left behind so they stop counting against Twitch's

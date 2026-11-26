@@ -10,6 +10,10 @@ public enum CacheSubdirectory {
     public static let emoteGlobals = "emote-cache"
     /// Per-channel third-party emote metadata (one file per broadcasterId).
     public static let emoteChannels = "emote-cache/channels"
+    /// Per-account user-accessible Twitch emotes (subscriptions, bits, etc.,
+    /// one file per userId). Nested under `emote-cache/` so Storage's single
+    /// root measurement and Clear Cache cover it automatically.
+    public static let emoteUsers = "emote-cache/users"
     /// Rotating in-app diagnostic logs (`current.log` / `previous.log`).
     public static let diagnosticLogs = "diagnostic-logs"
 }

@@ -263,6 +263,7 @@ public final class ChannelSessionRegistry {
 
     var emoteIndexes: [SessionKey: EmoteIndex] = [:]
     var badgeStores: [SessionKey: ChatBadgeStore] = [:]
+    var channelTwitchEmoteStores: [SessionKey: ChannelTwitchEmotesStore] = [:]
 
     /// One pending "the emote table changed" notification per key, so a
     /// load that publishes several interim tables in quick succession
@@ -701,6 +702,7 @@ public final class ChannelSessionRegistry {
         // also waste memory across closed-then-reopened tabs.
         emoteIndexes[key] = nil
         badgeStores[key] = nil
+        channelTwitchEmoteStores[key] = nil
 
         let id = nextToken()
         let work: Task<Void, Never>

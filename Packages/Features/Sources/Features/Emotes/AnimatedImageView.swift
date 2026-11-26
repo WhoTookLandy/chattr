@@ -742,7 +742,7 @@ actor AnimatedEmoteDecoder {
 
     private var inFlight: [String: InFlight] = [:]
 
-    private static let maxConcurrentDecodes = 2
+    private static let maxConcurrentDecodes = 4
     /// Decode slots taken, and the tasks queued for one (FIFO). Actor state.
     private var activeDecodes = 0
     private var decodeQueue: [CheckedContinuation<Void, Never>] = []
@@ -809,6 +809,10 @@ actor AnimatedEmoteDecoder {
         if let cached = DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly) {
             return cached
         }
+        if posterOnly,
+           let fullCached = DecodedAnimationCache.shared.decoded(for: url, maxPixelSize: maxPixelSize, posterOnly: false) {
+            return fullCached
+        }
         let key = DecodedAnimationCache.key(url: url, maxPixelSize: maxPixelSize, posterOnly: posterOnly)
         let task: Task<DecodedAnimation?, any Error>
         if var existing = inFlight[key] {
@@ -816,7 +820,11 @@ actor AnimatedEmoteDecoder {
             inFlight[key] = existing
             task = existing.task
         } else {
-            task = Task.detached(priority: .utility) {
+            // Poster-only decodes (e.g. visible emote picker cells for BTTV GIFs)
+            // extract 1–2 frames and sit directly in front of the user, so run
+            // them at `.userInitiated` rather than starving behind `.utility`.
+            let priority: TaskPriority = posterOnly ? .userInitiated : .utility
+            task = Task.detached(priority: priority) {
                 let (data, _) = try await ImagePipeline.shared.data(for: ImageRequest(url: url))
                 try Task.checkCancellation()
                 let cache = DecodedAnimationCache.shared

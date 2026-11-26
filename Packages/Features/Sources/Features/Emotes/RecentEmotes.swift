@@ -48,12 +48,23 @@ public enum RecentEmotes {
 
 extension PickerEmote {
     /// Direct construction, for tests and previews.
-    init(id: String, name: String, imageURL: URL? = nil, isAnimated: Bool = false) {
+    init(
+        id: String,
+        name: String,
+        imageURL: URL? = nil,
+        isAnimated: Bool = false,
+        aspectRatio: Double? = nil,
+        animatedURL: URL? = nil,
+        sourceLabel: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.imageURL = imageURL
         self.isAnimated = isAnimated
         self.searchKey = name.lowercased()
+        self.aspectRatio = aspectRatio
+        self.animatedURL = animatedURL
+        self.sourceLabel = sourceLabel
     }
 }
 
