@@ -786,6 +786,7 @@ struct ComposeBar: View {
             .trimmingCharacters(in: .whitespaces)
         guard !draft.isEmpty else { return }
         guard !isSending else { return }
+        guard !isSendBlocked else { return }
         guard !isCoolingDown else { return }
 
         isSending = true

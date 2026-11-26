@@ -26,8 +26,19 @@ public final class ChannelTwitchEmotesStore {
     /// The channel's Twitch emotes (follower, subscriber, bits-tier).
     public private(set) var emotes: [TwitchEmote] = []
 
+    /// Process-wide version source so a replacement store for the same channel
+    /// can never reuse an earlier store's cache key.
+    private static let versionSource = OSAllocatedUnfairLock<Int>(initialState: 0)
+
     /// Monotonically bumped on every publish — O(1) cache key for the picker.
     public private(set) var version: Int = 0
+
+    private static func nextVersion() -> Int {
+        versionSource.withLock { value in
+            value += 1
+            return value
+        }
+    }
 
     private var loadedChannelId: String?
     @ObservationIgnored private var inFlightLoad: (channelId: String, token: UInt64, task: Task<Void, Never>)?
@@ -87,7 +98,7 @@ public final class ChannelTwitchEmotesStore {
             guard !Task.isCancelled, token == nextLoadToken else { return }
             if fetched != emotes {
                 emotes = fetched
-                version &+= 1
+                version = Self.nextVersion()
             }
             loadedChannelId = channelId
             logger.info("Loaded \(fetched.count) Twitch channel emote(s) for \(channelId, privacy: .public)")

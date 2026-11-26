@@ -235,7 +235,7 @@ public final class UserEmoteStore {
         force: Bool,
         expectedGeneration: Int
     ) async {
-        // 1. Instant disk restore when memory is empty.
+        // 1. Instant disk restore when memory is empty (only within 24h TTL).
         var diskFreshForRevalidate = false
         if emotes.isEmpty,
            let hit = await cache.load(
@@ -244,6 +244,7 @@ public final class UserEmoteStore {
             version: UserEmotesCachePayload.cacheVersion,
             ttl: Self.cacheTTL
            ),
+           hit.isFresh,
            hit.payload.userId == userId {
             guard !Task.isCancelled, generation == expectedGeneration else { return }
             if !hit.payload.emotes.isEmpty {
@@ -264,6 +265,10 @@ public final class UserEmoteStore {
             enrichOwnersFromFollows(followsStore)
             return
         }
+
+        // Re-check after the cache.load suspension so a superseded account's
+        // cache-miss path cannot flip `isLoading = true` on the new account.
+        guard !Task.isCancelled, generation == expectedGeneration else { return }
 
         isLoading = true
         defer {
@@ -296,13 +301,16 @@ public final class UserEmoteStore {
         }
 
         // 3. Walk paginated GET /chat/emotes/user?user_id=...
+        //    Uses `while true` (not `repeat/while cursor != nil`) so retrying
+        //    page 1 after a 401 token refresh (`cursor == nil`) re-runs the
+        //    request instead of exiting the loop with an empty result.
         var collected: [UserTwitchEmote] = []
         var seenIds: Set<String> = []
         var cursor: String? = nil
         var pageCount = 0
         var didRefreshToken = false
 
-        repeat {
+        while true {
             guard !Task.isCancelled, generation == expectedGeneration else { return }
             do {
                 let page = try await fetchPage(
@@ -316,6 +324,9 @@ public final class UserEmoteStore {
                     collected.append(emote)
                 }
                 cursor = page.nextCursor
+                if cursor == nil || pageCount >= Self.maxPages {
+                    break
+                }
             } catch FetchError.unauthorized {
                 if !didRefreshToken {
                     didRefreshToken = true
@@ -338,7 +349,7 @@ public final class UserEmoteStore {
                 logger.warning("UserEmoteStore page \(pageCount) failed for @\(login, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 return
             }
-        } while cursor != nil && pageCount < Self.maxPages
+        }
 
         guard !Task.isCancelled, generation == expectedGeneration else { return }
 

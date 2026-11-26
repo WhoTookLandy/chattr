@@ -191,10 +191,14 @@ final class EmoteGridViewController: UIViewController {
 
         // Only rebuild & apply snapshot when the section list actually changed.
         if newSections != sections {
+            let previousSectionsById = sectionById
+            let previousEmoteByItemId = emoteByItemId
+
             sections = newSections
             var newSectionById: [String: EmoteSection] = [:]
             newSectionById.reserveCapacity(newSections.count)
             var newEmoteByItemId: [ItemID: PickerEmote] = [:]
+            var changedItemIds: [ItemID] = []
 
             var snapshot = NSDiffableDataSourceSnapshot<String, ItemID>()
             for section in newSections {
@@ -209,13 +213,36 @@ final class EmoteGridViewController: UIViewController {
                     let itemId = ItemID(sectionId: section.id, emoteId: emote.id)
                     newEmoteByItemId[itemId] = emote
                     itemIds.append(itemId)
+                    if let previous = previousEmoteByItemId[itemId], previous != emote {
+                        changedItemIds.append(itemId)
+                    }
                 }
                 snapshot.appendItems(itemIds, toSection: section.id)
+            }
+
+            if !changedItemIds.isEmpty {
+                snapshot.reconfigureItems(changedItemIds)
             }
 
             sectionById = newSectionById
             emoteByItemId = newEmoteByItemId
             dataSource.apply(snapshot, animatingDifferences: false)
+
+            // Refresh any visible section header whose metadata (title, badge,
+            // avatar, or emote count) changed without its section ID changing.
+            for (sectionIndex, section) in newSections.enumerated() {
+                if let previous = previousSectionsById[section.id],
+                   previous.title != section.title
+                    || previous.badge != section.badge
+                    || previous.avatarURL != section.avatarURL
+                    || previous.emotes.count != section.emotes.count,
+                   let header = collectionView.supplementaryView(
+                    forElementKind: UICollectionView.elementKindSectionHeader,
+                    at: IndexPath(item: 0, section: sectionIndex)
+                   ) as? EmoteSectionHeaderView {
+                    header.configure(with: section)
+                }
+            }
 
             // Seed the first screenful into Nuke's memory cache immediately.
             prefetchLeadingEmotes(from: newSections)
@@ -821,6 +848,9 @@ struct EmoteGridView: View {
                             .padding(.vertical, 6)
                             .background(.bar)
                             .id(section.id)
+                            .onAppear {
+                                onActiveSectionChanged(section.id)
+                            }
                         }
                     }
                 }

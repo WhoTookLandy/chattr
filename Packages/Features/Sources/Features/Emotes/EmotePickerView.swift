@@ -6,6 +6,9 @@ import EmoteSources
 import Nuke
 import NukeUI
 import TwitchKit
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// Emote picker sheet — Apple iOS 26 Liquid Glass half/full sheet showing every
 /// usable emote for the current channel:
@@ -83,24 +86,27 @@ struct EmotePickerView: View {
     /// source updates while the picker is open.
     private struct RebuildKey: Equatable {
         let channelId: String
+        let channelAvatarURL: URL?
         let thirdPartyGeneration: Int
         let twitchGlobalVersion: Int
         let userEmotesVersion: Int
         let channelTwitchVersion: Int
         let isFollowing: Bool
-        let recentIds: [String]
+        let recentEmotes: [PickerEmote]
         let tick: Int
     }
 
     private var rebuildKey: RebuildKey {
         RebuildKey(
             channelId: channelId,
+            channelAvatarURL: followsStore?.profileImageURLs[channelId]
+                ?? userEmoteStore?.owners[channelId]?.profileImageURL,
             thirdPartyGeneration: emoteIndex?.generation ?? 0,
             twitchGlobalVersion: globalCatalog?.emoteVersion ?? 0,
             userEmotesVersion: userEmoteStore?.version ?? 0,
             channelTwitchVersion: channelTwitchEmotes?.version ?? 0,
             isFollowing: followsStore?.followedChannelIds.contains(channelId) ?? false,
-            recentIds: recentEmotes.map(\.id),
+            recentEmotes: recentEmotes,
             tick: emoteIndexTick
         )
     }
@@ -478,7 +484,7 @@ struct EmotePickerView: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Delete last emote")
+                .accessibilityLabel("Delete last token")
 
                 Button {
                     onSend()
@@ -550,6 +556,9 @@ struct EmotePickerView: View {
                     Button {
                         #if os(iOS)
                         UIPasteboard.general.string = emote.name
+                        #elseif canImport(AppKit)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(emote.name, forType: .string)
                         #endif
                         inspectedEmote = nil
                     } label: {
@@ -655,6 +664,10 @@ struct EmotePickerView: View {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        let globalTask = Task { @MainActor in
+            guard let account, let accountStore, let globalCatalog, !globalCatalog.hasLoaded else { return }
+            await globalCatalog.load(account: account, accountStore: accountStore)
+        }
         let userTask = Task { @MainActor in
             guard let account, let accountStore, let userEmoteStore else { return }
             await userEmoteStore.load(
@@ -682,10 +695,12 @@ struct EmotePickerView: View {
             }
         }
         await withTaskCancellationHandler {
+            await globalTask.value
             await userTask.value
             await channelTwitchTask.value
             await thirdPartyTask.value
         } onCancel: {
+            globalTask.cancel()
             userTask.cancel()
             channelTwitchTask.cancel()
             thirdPartyTask.cancel()
@@ -693,6 +708,7 @@ struct EmotePickerView: View {
     }
 
     private func reapplySearchIfNeeded() {
+        searchTask?.cancel()
         let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             filtered = nil

@@ -216,7 +216,7 @@ struct EmotePickerSectionTests {
 
         let sections = EmoteCatalog.buildSections(from: input)
 
-        #expect(sections.map(\.id) == [
+        try #require(sections.map(\.id) == [
             "recent",
             "channel-twitch-100",
             "channel-sevenTV",
@@ -291,7 +291,7 @@ struct EmotePickerSectionTests {
 
         let decoded = try UserEmoteStore.decodePage(json)
         #expect(decoded.nextCursor == "eyJiIjpudWxsfQ")
-        #expect(decoded.emotes.count == 2)
+        try #require(decoded.emotes.count == 2)
         #expect(decoded.emotes[0].ownerId == "23161357")
         #expect(decoded.emotes[0].emoteType == "subscriptions")
         #expect(decoded.emotes[0].format == ["static", "animated"])

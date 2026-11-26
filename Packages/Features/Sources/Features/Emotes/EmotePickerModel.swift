@@ -261,6 +261,8 @@ public enum EmoteCatalog {
 
         // Partition user-accessible Twitch emotes by owner & type.
         let globalTwitchIds = Set(input.twitchGlobal.keys)
+        var fallbackGlobals: [PickerEmote] = []
+        var fallbackGlobalSeenIds: Set<String> = []
         var currentChannelTwitch: [PickerEmote] = []
         var currentChannelSeenIds: Set<String> = []
         var otherChannelsByOwner: [String: [UserTwitchEmote]] = [:]
@@ -270,8 +272,17 @@ public enum EmoteCatalog {
         let currentOwnerLabel = input.channelDisplayName.isEmpty ? "Channel" : input.channelDisplayName
         for emote in input.userEmotes {
             if emote.isTwitchOwned {
-                // Globals already appear in the Twitch Global section.
-                guard emote.emoteType != "globals", !globalTwitchIds.contains(emote.id) else { continue }
+                if emote.emoteType == "globals" {
+                    // Prefer GlobalCatalog when present; keep user-emote
+                    // globals as an ID-deduplicated fallback if GlobalCatalog
+                    // hasn't loaded or is missing an entry.
+                    if !globalTwitchIds.contains(emote.id),
+                       fallbackGlobalSeenIds.insert(emote.id).inserted {
+                        fallbackGlobals.append(PickerEmote(userTwitch: emote, sourceLabel: "Twitch Global"))
+                    }
+                    continue
+                }
+                guard !globalTwitchIds.contains(emote.id) else { continue }
                 if unlockedSeenIds.insert(emote.id).inserted {
                     unlockedSpecial.append(PickerEmote(
                         userTwitch: emote,
@@ -382,9 +393,11 @@ public enum EmoteCatalog {
             ))
         }
 
-        // 6. Twitch Global (Kappa, LUL, PogChamp…).
-        if !input.twitchGlobal.isEmpty {
+        // 6. Twitch Global (Kappa, LUL, PogChamp…), merging any user-emote
+        //    globals missing from GlobalCatalog as a fallback.
+        if !input.twitchGlobal.isEmpty || !fallbackGlobals.isEmpty {
             let pickerGlobals = input.twitchGlobal.values.map { PickerEmote(twitch: $0, sourceLabel: "Twitch Global") }
+                + fallbackGlobals
             sections.append(EmoteSection(
                 id: "twitch-global",
                 title: "Twitch Global",
@@ -420,33 +433,64 @@ public enum EmoteCatalog {
 
     /// Filters `sections` against a trimmed, lowercased `needle`. Prefix
     /// matches come before mid-word matches so typing `"pepe"` surfaces
-    /// `PepeLaugh` ahead of `WidePepe`. Drops empty sections and skips the
-    /// duplicate "Recently Used" section when searching so results aren't
-    /// repeated twice.
+    /// `PepeLaugh` ahead of `WidePepe`. Drops empty sections and suppresses a
+    /// match in "Recently Used" only when the same emote ID already appears in
+    /// another matching section (preserving persisted recents whose provider
+    /// hasn't loaded yet).
     public static func filter(_ sections: [EmoteSection], needle: String) -> [EmoteSection] {
         guard !needle.isEmpty else { return sections }
-        return sections.compactMap { section in
-            if section.kind == .recent { return nil }
-            var prefixMatches: [PickerEmote] = []
-            var containsMatches: [PickerEmote] = []
-            for emote in section.emotes {
-                if emote.searchKey.hasPrefix(needle) {
-                    prefixMatches.append(emote)
-                } else if emote.searchKey.contains(needle) {
-                    containsMatches.append(emote)
-                }
+
+        var nonRecentMatchedIds: Set<String> = []
+        var nonRecentResults: [EmoteSection] = []
+        var recentSection: EmoteSection?
+
+        for section in sections {
+            if section.kind == .recent {
+                recentSection = section
+                continue
             }
-            let combined = prefixMatches + containsMatches
-            guard !combined.isEmpty else { return nil }
-            return EmoteSection(
+            let combined = matchingEmotes(in: section.emotes, needle: needle)
+            guard !combined.isEmpty else { continue }
+            for emote in combined { nonRecentMatchedIds.insert(emote.id) }
+            nonRecentResults.append(EmoteSection(
                 id: section.id,
                 title: section.title,
                 badge: section.badge,
                 avatarURL: section.avatarURL,
                 kind: section.kind,
                 emotes: combined
-            )
+            ))
         }
+
+        if let recentSection {
+            let uniqueRecents = matchingEmotes(in: recentSection.emotes, needle: needle)
+                .filter { !nonRecentMatchedIds.contains($0.id) }
+            if !uniqueRecents.isEmpty {
+                let filteredRecent = EmoteSection(
+                    id: recentSection.id,
+                    title: recentSection.title,
+                    badge: recentSection.badge,
+                    avatarURL: recentSection.avatarURL,
+                    kind: recentSection.kind,
+                    emotes: uniqueRecents
+                )
+                return [filteredRecent] + nonRecentResults
+            }
+        }
+        return nonRecentResults
+    }
+
+    private static func matchingEmotes(in emotes: [PickerEmote], needle: String) -> [PickerEmote] {
+        var prefixMatches: [PickerEmote] = []
+        var containsMatches: [PickerEmote] = []
+        for emote in emotes {
+            if emote.searchKey.hasPrefix(needle) {
+                prefixMatches.append(emote)
+            } else if emote.searchKey.contains(needle) {
+                containsMatches.append(emote)
+            }
+        }
+        return prefixMatches + containsMatches
     }
 
     // MARK: - Legacy entry points (kept for tests & bare-table callers)
@@ -498,7 +542,7 @@ public enum EmoteCatalog {
         let channelId: String
         let channelDisplayName: String
         let channelAvatarURL: URL?
-        let recentIds: [String]
+        let recentEmotes: [PickerEmote]
         let thirdPartyGeneration: Int
         let twitchGlobalVersion: Int
         let userEmotesVersion: Int
@@ -515,7 +559,7 @@ public enum EmoteCatalog {
             self.channelId = input.channelId
             self.channelDisplayName = input.channelDisplayName
             self.channelAvatarURL = input.channelAvatarURL
-            self.recentIds = input.recentEmotes.map(\.id)
+            self.recentEmotes = input.recentEmotes
             self.thirdPartyGeneration = tpGen
             self.twitchGlobalVersion = tgVer
             self.userEmotesVersion = ueVer
