@@ -409,10 +409,11 @@ public enum EmoteCatalog {
             ))
         }
 
+        let built = sections
         if let key = FastCacheKey(input) {
-            fastCache.withLock { $0.store(sections, for: key) }
+            fastCache.withLock { $0.store(built, for: key) }
         }
-        return sections
+        return built
     }
 
     // MARK: - Search filtering
