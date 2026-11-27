@@ -581,7 +581,7 @@ struct PlaybackCenterPinnedTests {
     }
 
     @Test("Fallback web primary alongside pinned audio is held on backgrounding")
-    func fallbackWebPrimaryWithPinnedAudioIsHeldInBackground() {
+    func fallbackWebPrimaryWithPinnedAudioIsHeldInBackground() async {
         let engines = FakeStreamEngines()
         let center = engines.center()
         defer { center.stopAll() }
@@ -596,6 +596,15 @@ struct PlaybackCenterPinnedTests {
         center.lifecycle?.didEnterBackground()
         #expect(center.primary?.controller.holds.contains(.background) == true)
         #expect(center.pinnedSlot(for: Self.chB.channelId)?.controller.isHeld == false)
+
+        // Even a Home preview update without an explicit `inBackground` parameter
+        // observes the live background flag when `PlaybackAudioSession` applies it.
+        await engines.audioSession.updateClient(.homePreview, state: .inactive)
+        #expect(engines.audioDriver.actions.last?.inBackground == true)
+
+        center.lifecycle?.willEnterForeground()
+        await engines.audioSession.updateClient(.homePreview, state: .inactive)
+        #expect(engines.audioDriver.actions.last?.inBackground == false)
     }
 }
 #endif

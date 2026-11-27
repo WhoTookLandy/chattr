@@ -22,12 +22,13 @@ extension PlaybackCenter {
     }
 
     /// Pushes `PlaybackCenter`'s aggregate audio state to `PlaybackAudioSession`.
+    /// Background state is read live by `PlaybackAudioSession` when the driver
+    /// applies the action on its serial queue.
     func reconcileAudioSession(force: Bool = false) {
         audioSession.updateClientAsync(
             .playback,
             state: currentAudioSessionState,
-            force: force,
-            inBackground: lifecycle?.isInBackground ?? false
+            force: force
         )
     }
 
@@ -47,8 +48,7 @@ extension PlaybackCenter {
         await audioSession.updateClient(
             .playback,
             state: state,
-            force: true,
-            inBackground: lifecycle?.isInBackground ?? false
+            force: true
         )
     }
 
@@ -110,8 +110,7 @@ extension PlaybackCenter {
                 await self.audioSession.updateClient(
                     .playback,
                     state: self.currentAudioSessionState,
-                    force: true,
-                    inBackground: self.lifecycle?.isInBackground ?? false
+                    force: true
                 )
                 for id in slotIDsToResume {
                     guard let slot = self.slot(withID: id),
@@ -213,6 +212,7 @@ extension PlaybackCenter {
                 if slot.controller.isPaused || !slot.controller.wantsPlayback {
                     slot.controller.remotePlay()
                 }
+                lifecycle?.noteSlotResumedInBackground(slot.id)
             } else {
                 if !slot.controller.isPaused || slot.controller.wantsPlayback {
                     slot.controller.remotePause()

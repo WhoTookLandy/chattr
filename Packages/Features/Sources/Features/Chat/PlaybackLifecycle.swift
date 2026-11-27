@@ -91,6 +91,14 @@ final class PlaybackLifecycleObserver: NSObject {
         }
     }
 
+    /// Enrolls a slot that began playing while the app was already in the
+    /// background (e.g. via Lock Screen Play) so foreground recovery still
+    /// protects it if iOS pauses it before `willEnterForeground`.
+    func noteSlotResumedInBackground(_ slotID: UUID) {
+        guard isInBackground else { return }
+        pendingForegroundResumeSlotIDs.insert(slotID)
+    }
+
     /// Internal (not private) so tests can drive it without posting app-wide notifications.
     @objc func willResignActive() {
         guard let center else { return }
@@ -108,6 +116,7 @@ final class PlaybackLifecycleObserver: NSObject {
     /// Internal (not private) so tests can drive it without posting app-wide notifications.
     @objc func didEnterBackground() {
         isInBackground = true
+        center?.audioSession.setInBackground(true)
         guard let center, center.hasAnyPlayback else { return }
         pendingForegroundResumeSlotIDs = Set(
             center.allSlots.compactMap { slot in
@@ -126,6 +135,7 @@ final class PlaybackLifecycleObserver: NSObject {
 
     @objc func willEnterForeground() {
         isInBackground = false
+        center?.audioSession.setInBackground(false)
         guard let center else { return }
         // Also capture any slot that started playing while in background (e.g.
         // via Lock Screen Play) so `didBecomeActive` can recover it if the

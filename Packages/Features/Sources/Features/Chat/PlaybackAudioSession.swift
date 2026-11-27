@@ -58,9 +58,19 @@ final class PlaybackAudioSession: @unchecked Sendable {
     private let driver: any PlaybackAudioSessionDriver
     private let queue = DispatchQueue(label: "com.andrewbeshay.chattr.playback-audio", qos: .userInitiated)
     private var clients: [AudioSessionClientID: AudioSessionClientState] = [:]
+    /// Live background flag updated synchronously from the main actor on
+    /// `didEnterBackground` / `willEnterForeground` and read on `queue` at the
+    /// moment `driver.apply` runs, so every client (including Home preview
+    /// fallbacks and queued `willResignActive` reconciles) observes the latest
+    /// background state without race windows.
+    private let backgroundFlag = OSAllocatedUnfairLock(initialState: false)
 
     init(driver: any PlaybackAudioSessionDriver = SystemDriver()) {
         self.driver = driver
+    }
+
+    func setInBackground(_ inBackground: Bool) {
+        backgroundFlag.withLock { $0 = inBackground }
     }
 
     /// Pure decision function over the union of all registered clients.
@@ -127,8 +137,9 @@ final class PlaybackAudioSession: @unchecked Sendable {
         } else {
             clients[client] = state
         }
+        let effectiveInBackground = inBackground || backgroundFlag.withLock { $0 }
         let resolved = Self.resolveAction(for: clients)
-        driver.apply(resolved, force: force, inBackground: inBackground)
+        driver.apply(resolved, force: force, inBackground: effectiveInBackground)
     }
 
     // MARK: - Legacy single-stream shims
