@@ -69,8 +69,7 @@ enum ChatOpenVideoPolicy {
     }
 
     private static func isPlaying(_ tab: ChatTab, in playback: PlaybackCenter) -> Bool {
-        guard let playing = playback.channel else { return false }
-        return tab.channels.contains { $0.channelId == playing.channelId }
+        tab.channels.contains { playback.isPlayingOrPinned($0.channelId) }
     }
 
     /// Open and muted on an unmetered connection, closed otherwise.

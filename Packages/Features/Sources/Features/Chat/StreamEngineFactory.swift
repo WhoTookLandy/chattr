@@ -3,7 +3,12 @@ import WebKit
 
 /// What `PlaybackCenter` asks its engine factory for.
 enum StreamEngineRequest {
-    case native(login: String, audioOnly: Bool, quality: PlayerQuality)
+    case native(
+        login: String,
+        audioOnly: Bool,
+        quality: PlayerQuality,
+        allowsPictureInPicture: Bool = true
+    )
     /// `reusing`: the web view of the web engine this one replaces
     /// (`WebStreamEngine.releaseWebView()`), if there was one.
     case web(login: String, reusing: WKWebView?)

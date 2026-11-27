@@ -43,13 +43,14 @@ struct PlaybackCenterEngineTests {
 
         #expect(engines.built.count == 1)
         #expect(center.engine?.kind == .native)
-        guard case .native(let login, let audioOnly, let quality)? = engines.built.first?.request else {
+        guard case .native(let login, let audioOnly, let quality, let allowsPiP)? = engines.built.first?.request else {
             Issue.record("Expected a native engine request")
             return
         }
         #expect(login == "x")
         #expect(!audioOnly)
         #expect(quality == .p720)
+        #expect(allowsPiP)
     }
 
     @Test("Native not asked for: a web page, built to autoplay, with no web view to reuse")

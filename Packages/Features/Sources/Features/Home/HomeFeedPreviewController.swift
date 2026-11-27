@@ -163,40 +163,40 @@ final class HomeFeedPreviewController {
             isMuted = false
             unmuteTask = Task { [weak self] in
                 guard let self else { return }
-                // Pause any active audio-only mini player while the user listens
-                // to this inline preview; muting or scrolling away resumes it.
-                if let center = self.playbackCenter, center.isPlaying, self.previewHold == nil {
+                // Pause any active stream (primary or pinned background audio)
+                // while the user listens to this inline preview; muting or
+                // scrolling away resumes them.
+                if let center = self.playbackCenter, center.hasAnyPlayback, self.previewHold == nil {
                     self.previewHold = center.holdPlayback(.feedPreview)
                 }
                 self.audioSessionActivationGeneration += 1
                 let activationGen = self.audioSessionActivationGeneration
-                await PlaybackAudioSession.shared.activate(muted: false)
+                await PlaybackAudioSession.shared.updateClient(
+                    .homePreview,
+                    state: AudioSessionClientState(hasActiveNative: true, hasAudibleNative: true, hasAudibleWeb: false)
+                )
                 guard !Task.isCancelled, self.activeStreamID == streamID, !self.isMuted else {
-                    // `activate(muted: false)` already committed an exclusive
-                    // session; undo it only if no newer activation or main
-                    // stream has taken over.
-                    if activationGen == self.audioSessionActivationGeneration,
-                       self.playbackCenter?.isPlaying != true {
-                        if self.activeStreamID == nil {
-                            PlaybackAudioSession.shared.deactivate()
-                            self.ownsAudioSession = false
-                        } else if self.isMuted {
-                            PlaybackAudioSession.shared.setMuted(true)
-                        }
+                    if activationGen == self.audioSessionActivationGeneration {
+                        let fallback: AudioSessionClientState = self.activeStreamID == nil
+                            ? .inactive
+                            : AudioSessionClientState(hasActiveNative: true, hasAudibleNative: false, hasAudibleWeb: false)
+                        PlaybackAudioSession.shared.updateClientAsync(.homePreview, state: fallback)
+                        self.ownsAudioSession = fallback.hasActiveNative
                     }
                     return
                 }
-                if self.playbackCenter?.isPlaying != true {
-                    self.ownsAudioSession = true
-                }
+                self.ownsAudioSession = true
                 self.player.isMuted = false
             }
         } else {
             isMuted = true
             player.isMuted = true
             releasePreviewHold()
-            if ownsAudioSession, playbackCenter?.isPlaying != true {
-                PlaybackAudioSession.shared.setMuted(true)
+            if ownsAudioSession {
+                PlaybackAudioSession.shared.updateClientAsync(
+                    .homePreview,
+                    state: AudioSessionClientState(hasActiveNative: true, hasAudibleNative: false, hasAudibleWeb: false)
+                )
             }
         }
     }
@@ -221,8 +221,8 @@ final class HomeFeedPreviewController {
         player.isMuted = true
         player.replaceCurrentItem(with: nil)
         releasePreviewHold()
-        if ownsAudioSession, playbackCenter?.isPlaying != true {
-            PlaybackAudioSession.shared.deactivate()
+        if ownsAudioSession {
+            PlaybackAudioSession.shared.updateClientAsync(.homePreview, state: .inactive)
         }
         ownsAudioSession = false
     }
@@ -300,23 +300,23 @@ final class HomeFeedPreviewController {
                 let playlist = try await resolver.playlist(login: login, audioOnly: false)
                 guard !Task.isCancelled, self.targetedStreamID == streamID else { return }
 
-                // Only configure the audio session when no main stream already
-                // owns it; keep it mixable so muted previews never cut music.
-                if self.playbackCenter?.isPlaying != true {
-                    self.audioSessionActivationGeneration += 1
-                    let activationGen = self.audioSessionActivationGeneration
-                    await PlaybackAudioSession.shared.activate(muted: true)
-                    guard !Task.isCancelled, self.targetedStreamID == streamID else {
-                        if activationGen == self.audioSessionActivationGeneration,
-                           self.playbackCenter?.isPlaying != true,
-                           self.activeStreamID == nil {
-                            PlaybackAudioSession.shared.deactivate()
-                            self.ownsAudioSession = false
-                        }
-                        return
+                // Register the muted preview through the shared audio-session
+                // arbiter so it never deactivates or clobbers pinned streams.
+                self.audioSessionActivationGeneration += 1
+                let activationGen = self.audioSessionActivationGeneration
+                await PlaybackAudioSession.shared.updateClient(
+                    .homePreview,
+                    state: AudioSessionClientState(hasActiveNative: true, hasAudibleNative: false, hasAudibleWeb: false)
+                )
+                guard !Task.isCancelled, self.targetedStreamID == streamID else {
+                    if activationGen == self.audioSessionActivationGeneration,
+                       self.activeStreamID == nil {
+                        PlaybackAudioSession.shared.updateClientAsync(.homePreview, state: .inactive)
+                        self.ownsAudioSession = false
                     }
-                    self.ownsAudioSession = true
+                    return
                 }
+                self.ownsAudioSession = true
 
                 self.play(playlist: playlist, streamID: streamID)
             } catch {

@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import os
 @testable import Features
 
 /// Stands in for a player engine in `PlaybackCenter` tests: no `WKWebView`,
@@ -18,19 +19,29 @@ final class FakeStreamEngine: StreamEngine {
     let autoplay: Bool?
     /// The controller's `startsMuted` when this engine was built.
     let startedMuted: Bool
+    /// Whether this native engine was built eligible for PiP / interactive video.
+    let allowsPictureInPicture: Bool
+    /// Configurable for interruption / route-change unit tests.
+    var fakeWasPlayingJustNow = true
+    var wasPlayingJustNow: Bool { fakeWasPlayingJustNow }
     /// In-place `setAudioOnly(_:quality:)` calls received by this engine.
     private(set) var audioOnlyChanges: [(audioOnly: Bool, quality: PlayerQuality)] = []
+    /// `setInteractive(_:)` calls received on promote/demote.
+    private(set) var interactiveChanges: [Bool] = []
+    private(set) var mediaResetCount = 0
     private(set) var teardownCount = 0
 
     init(_ request: StreamEngineRequest, controller: StreamPlayerController) {
         self.request = request
         startedMuted = controller.startsMuted
         switch request {
-        case .native:
+        case .native(_, _, _, let allowsPiP):
             kind = .native
             autoplay = nil
+            allowsPictureInPicture = allowsPiP
         case .web:
             kind = .web
+            allowsPictureInPicture = true
             // The first step of the web engine's startup sequence
             // (`WebStreamEngine.init`).
             autoplay = controller.beginWebEngineLoad()
@@ -41,8 +52,37 @@ final class FakeStreamEngine: StreamEngine {
         audioOnlyChanges.append((audioOnly, quality))
     }
 
+    func setInteractive(_ interactive: Bool) {
+        interactiveChanges.append(interactive)
+    }
+
+    func handleMediaServicesReset() {
+        mediaResetCount += 1
+    }
+
     func teardown() {
         teardownCount += 1
+    }
+}
+
+/// Thread-safe recorder for `PlaybackAudioSession` actions in unit tests.
+final class RecordingAudioSessionDriver: PlaybackAudioSessionDriver, @unchecked Sendable {
+    private let state = OSAllocatedUnfairLock(initialState: (actions: [(action: AudioSessionAction, force: Bool)](), invalidations: 0))
+
+    var actions: [(action: AudioSessionAction, force: Bool)] {
+        state.withLock { $0.actions }
+    }
+
+    var invalidations: Int {
+        state.withLock { $0.invalidations }
+    }
+
+    func apply(_ action: AudioSessionAction, force: Bool) {
+        state.withLock { $0.actions.append((action, force)) }
+    }
+
+    func invalidate() {
+        state.withLock { $0.invalidations += 1 }
     }
 }
 
@@ -51,6 +91,8 @@ final class FakeStreamEngine: StreamEngine {
 @MainActor
 final class FakeStreamEngines {
     private(set) var built: [FakeStreamEngine] = []
+    let audioDriver = RecordingAudioSessionDriver()
+    lazy var audioSession = PlaybackAudioSession(driver: audioDriver)
 
     var factory: StreamEngineFactory {
         return { [self] (request: StreamEngineRequest, controller: StreamPlayerController) -> any StreamEngine in
@@ -60,9 +102,9 @@ final class FakeStreamEngines {
         }
     }
 
-    /// A center that can only build fake engines.
+    /// A center that builds fake engines and records audio-session actions.
     func center() -> PlaybackCenter {
-        PlaybackCenter(makeEngine: factory)
+        PlaybackCenter(makeEngine: factory, audioSession: audioSession)
     }
 }
 #endif

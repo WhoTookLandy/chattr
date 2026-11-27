@@ -77,7 +77,7 @@ struct LandscapeStageLayout: ViewModifier {
     /// "show video" on, the channel live, not listening audio-only, and
     /// not in picture in picture.
     private var stageActive: Bool {
-        guard isLandscape, isExpanded, !isAudioOnlyActive, !isPictureInPictureActive else { return false }
+        guard isLandscape, isExpanded, !isAudioOnlyActive, !isPinnedAudio, !isPictureInPictureActive else { return false }
         let live = ChannelStatusStore.liveStream(
             for: channel.channelId,
             status: channelStatus,
@@ -118,6 +118,15 @@ struct LandscapeStageLayout: ViewModifier {
         #if os(iOS)
         guard let playback else { return false }
         return playback.pictureInPictureFlag(for: channel.channelId).isActive
+        #else
+        false
+        #endif
+    }
+
+    private var isPinnedAudio: Bool {
+        #if os(iOS)
+        guard let playback else { return false }
+        return playback.pinnedAudioFlag(for: channel.channelId).isPinned
         #else
         false
         #endif
@@ -194,6 +203,7 @@ struct LandscapeStageLayout: ViewModifier {
         }
         #if os(iOS)
         .retainsPictureInPictureFlag(for: channel.channelId, in: playback)
+        .retainsPinnedAudioFlag(for: channel.channelId, in: playback)
         #endif
     }
 

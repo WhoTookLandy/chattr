@@ -81,6 +81,7 @@ enum NativePlayer {
         private static let coverMaxLifetime: Duration = .milliseconds(250)
 
         private let resolver: any StreamPlaylistResolving
+        private var allowsPictureInPicture: Bool
         private var login = ""
         /// Desired audio-only state.
         private var audioOnly = false
@@ -105,7 +106,6 @@ enum NativePlayer {
         private var itemGeneration = 0
         /// When the player last went to paused; nil while it isn't.
         private var pausedAt: ContinuousClock.Instant?
-        private var resumesAfterInterruption = false
 
         // MARK: Overlapped warm-swap state
         private var standbyPlayer: AVPlayer?
@@ -127,9 +127,39 @@ enum NativePlayer {
         private var playerSubscriptions: Set<AnyCancellable> = []
         private var itemSubscriptions: Set<AnyCancellable> = []
 
-        init(controller: StreamPlayerController, resolver: any StreamPlaylistResolving = TwitchHLS.Resolver()) {
+        init(
+            controller: StreamPlayerController,
+            resolver: any StreamPlaylistResolving = TwitchHLS.Resolver(),
+            allowsPictureInPicture: Bool = true
+        ) {
             self.controller = controller
             self.resolver = resolver
+            self.allowsPictureInPicture = allowsPictureInPicture
+        }
+
+        func setAllowsPictureInPicture(_ allowed: Bool) {
+            guard allowsPictureInPicture != allowed else { return }
+            allowsPictureInPicture = allowed
+            if !allowed {
+                if let pip = controller.pictureInPicture {
+                    if pip.isPictureInPictureActive {
+                        pip.stopPictureInPicture()
+                    }
+                    pip.delegate = nil
+                }
+                controller.pictureInPicture = nil
+                controller.update(\.canPictureInPicture, to: false)
+                controller.pictureInPictureEndedAmbiguously()
+            } else if controller.pictureInPicture == nil,
+                      controller.avPlayer != nil,
+                      let view = playerView,
+                      AVPictureInPictureController.isPictureInPictureSupported(),
+                      let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
+                pip.canStartPictureInPictureAutomaticallyFromInline = true
+                pip.delegate = self
+                controller.pictureInPicture = pip
+                controller.update(\.canPictureInPicture, to: true)
+            }
         }
 
         @objc func tapped() { controller.onTap?() }
@@ -253,7 +283,11 @@ enum NativePlayer {
                     // Before the player exists: one started first brings
                     // the session up in whatever category it was left in,
                     // and a muted autoplay would cut the user's music.
-                    await PlaybackAudioSession.shared.activate(muted: self.controller.isMuted)
+                    if let prepare = self.controller.onPrepareAudioSession {
+                        await prepare()
+                    } else {
+                        await PlaybackAudioSession.shared.activate(muted: self.controller.isMuted)
+                    }
                     guard !Task.isCancelled else { return }
                     self.start(playlist)
                 } catch {
@@ -293,11 +327,13 @@ enum NativePlayer {
                 // start (`reset()` mirrors it, `toggleMute` keeps both in
                 // step while loading), the stream's own after a rebuild.
                 player.isMuted = controller.isMuted
+                player.volume = controller.volume
                 player.audiovisualBackgroundPlaybackPolicy = audioOnly ? .continuesIfPossible : .automatic
                 view.playerLayer.player = player
                 controller.avPlayer = player
 
-                if AVPictureInPictureController.isPictureInPictureSupported(),
+                if allowsPictureInPicture,
+                   AVPictureInPictureController.isPictureInPictureSupported(),
                    let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
                     pip.canStartPictureInPictureAutomaticallyFromInline = true
                     pip.delegate = self
@@ -602,6 +638,7 @@ enum NativePlayer {
             let shouldPlay = controller.startsPlaying
             oldPlayer?.isMuted = true
             standby.isMuted = controller.isMuted
+            standby.volume = controller.volume
             standby.audiovisualBackgroundPlaybackPolicy = targetAudioOnly ? .continuesIfPossible : .automatic
 
             oldPlayer?.pause()
@@ -614,7 +651,8 @@ enum NativePlayer {
             controller.avPlayer = standby
             view.playerLayer.player = standby
 
-            if controller.pictureInPicture == nil,
+            if allowsPictureInPicture,
+               controller.pictureInPicture == nil,
                AVPictureInPictureController.isPictureInPictureSupported(),
                let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
                 pip.canStartPictureInPictureAutomaticallyFromInline = true
@@ -753,8 +791,11 @@ enum NativePlayer {
                     // The player's value now, not the one delivered: two
                     // quick toggles would otherwise replay the first.
                     guard let self, let player = self.controller.avPlayer else { return }
+                    let changed = self.controller.isMuted != player.isMuted
                     self.controller.update(\.isMuted, to: player.isMuted)
-                    PlaybackAudioSession.shared.setMuted(player.isMuted)
+                    if changed {
+                        self.controller.onAudioStateChange?(false)
+                    }
                 }
                 .store(in: &playerSubscriptions)
         }
@@ -846,28 +887,15 @@ enum NativePlayer {
             }
         }
 
-        // MARK: Audio session and device
+        // MARK: Device state & centralized audio-session hooks
 
         private func observeSessionAndDevice() {
             let notifications = NotificationCenter.default
 
-            notifications.publisher(for: AVAudioSession.interruptionNotification)
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] notification in self?.audioSessionInterrupted(notification) }
-                .store(in: &subscriptions)
-
-            notifications.publisher(for: AVAudioSession.routeChangeNotification)
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] notification in self?.audioRouteChanged(notification) }
-                .store(in: &subscriptions)
-
-            notifications.publisher(for: AVAudioSession.mediaServicesWereResetNotification)
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in self?.mediaServicesWereReset() }
-                .store(in: &subscriptions)
-
             // Low Power Mode or heat changed: the caps go through the same
-            // path as a quality change.
+            // path as a quality change. Interruption, route-change, and
+            // media-services-reset notifications are handled once by
+            // `PlaybackCenter` across all active slots.
             notifications.publisher(for: .NSProcessInfoPowerStateDidChange)
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] _ in self?.reapplyQuality() }
@@ -887,70 +915,16 @@ enum NativePlayer {
         /// happened. The system's own pause for an interruption or a route
         /// change can land a moment before its notification does, so a
         /// pause that fresh counts as "was playing".
-        private var wasPlayingJustNow: Bool {
+        var wasPlayingJustNow: Bool {
             guard controller.startsPlaying else { return false }
             guard let pausedAt else { return true }
             return ContinuousClock.now - pausedAt < .seconds(2)
         }
 
-        private func audioSessionInterrupted(_ notification: Notification) {
-            guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  let type = AVAudioSession.InterruptionType(rawValue: raw)
-            else { return }
-            switch type {
-            case .began:
-                // The system pauses the player. Only what was playing
-                // comes back afterwards.
-                resumesAfterInterruption = wasPlayingJustNow
-            case .ended:
-                let resumes = resumesAfterInterruption
-                resumesAfterInterruption = false
-                let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-                guard resumes, AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume)
-                else { return }
-                reactivateAndResume()
-            @unknown default:
-                break
-            }
-        }
-
-        /// Brings the session back up, then resumes at the live edge — if
-        /// that's still wanted: the user may have paused, or a hold begun,
-        /// while the interruption lasted.
-        private func reactivateAndResume() {
-            Task { [weak self] in
-                guard let muted = self?.controller.isMuted else { return }
-                await PlaybackAudioSession.shared.activate(muted: muted, force: true)
-                guard let self, self.isLoaded,
-                      self.controller.avPlayer != nil, self.controller.startsPlaying
-                else { return }
-                self.controller.resume()
-            }
-        }
-
-        private func audioRouteChanged(_ notification: Notification) {
-            guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                  AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable,
-                  let player = controller.avPlayer
-            else { return }
-            if player.isMuted {
-                // Nothing audible moved to the speaker: a silent stream the
-                // system paused along with the route carries on.
-                if wasPlayingJustNow { player.play() }
-            } else {
-                // Headphones (or a speaker) gone: stay quiet until the user
-                // says otherwise, like any pause of theirs — no hold
-                // release or interruption end restarts it out loud.
-                controller.wantsPlayback = false
-                player.pause()
-            }
-        }
-
-        /// The media server restarted: the player, its item and the PiP
-        /// controller are dead and the session is back to its defaults.
-        /// Build them again with the mute and intent the stream had.
-        private func mediaServicesWereReset() {
-            PlaybackAudioSession.shared.invalidate()
+        /// Called by `PlaybackCenter` after it invalidates the audio session
+        /// once on `AVAudioSession.mediaServicesWereResetNotification`.
+        func handleMediaServicesReset() {
+            guard isLoaded else { return }
             controller.pictureInPictureEndedAmbiguously()
             controller.update(\.canPictureInPicture, to: false)
             cachedPlaylist = nil
@@ -988,7 +962,6 @@ enum NativePlayer {
             cachedPlaylist = nil
             cachedPlaylistAt = nil
             subscriptions.removeAll()
-            resumesAfterInterruption = false
             discardPlayer()
         }
     }

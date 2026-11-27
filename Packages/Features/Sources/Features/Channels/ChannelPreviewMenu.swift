@@ -1,4 +1,5 @@
 import SwiftUI
+import Core
 import TwitchKit
 import Nuke
 import NukeUI
@@ -36,6 +37,11 @@ private struct ChannelPreviewMenu: ViewModifier {
     let open: (ChatOpenIntent) -> Void
     let close: (() -> Void)?
 
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    @Environment(\.chatTabs) private var chatTabs
+    #endif
+
     /// Sets the preferences the chat header and its More menu use. Written
     /// straight to `UserDefaults` (their `@AppStorage` readers still see
     /// it): nothing here reads them, and an `@AppStorage` pair attached two
@@ -46,47 +52,105 @@ private struct ChannelPreviewMenu: ViewModifier {
         defaults.set(audioOnly, forKey: PlayerSettings.audioOnlyKey)
     }
 
+    /// Reads the user's max-quality cap without attaching `@AppStorage` observers
+    /// to every row carrying this preview menu.
+    private var maxQuality: PlayerQuality {
+        UserDefaults.standard.string(forKey: PlayerSettings.maxQualityKey)
+            .flatMap(PlayerQuality.init(rawValue:)) ?? .auto
+    }
+
     func body(content: Content) -> some View {
-        content.contextMenu {
-            if stream != nil {
-                Button {
-                    setVideo(visible: true, audioOnly: false)
-                    open(.explicit)
-                } label: {
-                    Label("Watch", systemImage: "play.rectangle")
-                }
-                #if os(iOS)
-                // Audio-only is the native engine's; not offered while
-                // that's switched off.
-                if PlayerSettings.isNativePlaybackEnabled {
+        content
+            #if os(iOS)
+            .retainsPinnedAudioFlag(for: stream?.userId ?? "", in: stream != nil ? playback : nil)
+            #endif
+            .contextMenu {
+                if let stream {
                     Button {
-                        setVideo(visible: true, audioOnly: true)
+                        #if os(iOS)
+                        if let playback, playback.isPinnedAudio(stream.userId) {
+                            playback.promotePinnedToPrimary(
+                                channelId: stream.userId,
+                                audioOnly: false,
+                                quality: maxQuality,
+                                syncGlobalDisplayPreferences: true
+                            )
+                        } else {
+                            setVideo(visible: true, audioOnly: false)
+                        }
+                        #else
+                        setVideo(visible: true, audioOnly: false)
+                        #endif
                         open(.explicit)
                     } label: {
-                        Label("Listen (Audio Only)", systemImage: "headphones")
+                        Label("Watch", systemImage: "play.rectangle")
+                    }
+                    #if os(iOS)
+                    // Audio-only and pinned background audio require the native engine.
+                    if PlayerSettings.isNativePlaybackEnabled {
+                        Button {
+                            setVideo(visible: true, audioOnly: true)
+                            open(.explicit)
+                        } label: {
+                            Label("Listen (Audio Only)", systemImage: "headphones")
+                        }
+                        if let playback {
+                            // Uses per-channel flag + non-observing capacity check so
+                            // Home/Search/Chats rows never subscribe to `pinnedAudio`.
+                            let isPinned = playback.pinnedAudioFlag(for: stream.userId).isPinned
+                            let isFull = !isPinned && !playback.canPinMoreBackgroundAudio
+                            Button {
+                                if isPinned {
+                                    if chatTabs?.isPresented == true, chatTabs?.visibleChannelId == stream.userId {
+                                        UserDefaults.standard.set(false, forKey: StreamHeaderView.expandedKey)
+                                    }
+                                    playback.unpinBackgroundAudio(channelId: stream.userId)
+                                } else {
+                                    let descriptor = ChannelDescriptor(
+                                        platform: .twitch,
+                                        channelId: stream.userId,
+                                        channelLoginName: stream.userLogin,
+                                        channelDisplayName: stream.userName,
+                                        profileImageURL: profileImageURL
+                                    )
+                                    _ = playback.pinBackgroundAudio(
+                                        descriptor,
+                                        title: stream.title,
+                                        profileImageURL: profileImageURL,
+                                        stream: stream,
+                                        quality: maxQuality
+                                    )
+                                }
+                            } label: {
+                                Label(
+                                    isPinned ? "Stop Background Audio" : "Listen in Background",
+                                    systemImage: isPinned ? "speaker.slash.fill" : "pin"
+                                )
+                            }
+                            .disabled(isFull)
+                        }
+                    }
+                    #endif
+                    Button {
+                        setVideo(visible: false, audioOnly: false)
+                        open(.explicit)
+                    } label: {
+                        Label("Chat Only", systemImage: "bubble.left.and.bubble.right")
+                    }
+                } else {
+                    Button { open(.implicit) } label: {
+                        Label("Open Chat", systemImage: "bubble.left.and.bubble.right")
                     }
                 }
-                #endif
-                Button {
-                    setVideo(visible: false, audioOnly: false)
-                    open(.explicit)
-                } label: {
-                    Label("Chat Only", systemImage: "bubble.left.and.bubble.right")
+                if let close {
+                    Divider()
+                    Button(role: .destructive, action: close) {
+                        Label("Close Chat", systemImage: "xmark")
+                    }
                 }
-            } else {
-                Button { open(.implicit) } label: {
-                    Label("Open Chat", systemImage: "bubble.left.and.bubble.right")
-                }
+            } preview: {
+                ChannelPreviewCard(name: name, profileImageURL: profileImageURL, stream: stream)
             }
-            if let close {
-                Divider()
-                Button(role: .destructive, action: close) {
-                    Label("Close Chat", systemImage: "xmark")
-                }
-            }
-        } preview: {
-            ChannelPreviewCard(name: name, profileImageURL: profileImageURL, stream: stream)
-        }
     }
 }
 

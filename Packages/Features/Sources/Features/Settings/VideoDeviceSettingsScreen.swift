@@ -15,6 +15,7 @@ struct VideoDeviceSettingsScreen: View {
     @AppStorage(PlaybackPreferences.homePreviewKey) private var homePreview: HomePreviewMode = .wiFiOnly
     @AppStorage(PlaybackPreferences.pictureInPictureKey) private var pictureInPicture: PictureInPictureMode = .whenSoundOn
     @AppStorage(PlayerSettings.systemPictureInPictureKey) private var pictureInPictureLeavingChat = false
+    @AppStorage(PlaybackPreferences.backgroundAudioIndicatorKey) private var backgroundAudioIndicator: BackgroundAudioIndicatorStyle = .strip
     @AppStorage(PlaybackPreferences.keepScreenAwakeKey) private var keepScreenAwake = false
     @AppStorage(HapticSettings.enabledKey) private var hapticsEnabled = true
     /// The native path's kill switch (`PlayerSettings.isNativePlaybackEnabled`).
@@ -102,10 +103,23 @@ struct VideoDeviceSettingsScreen: View {
                         subtitle: "Apple's floating player instead of the mini player"
                     )
                 }
+                Picker(selection: $backgroundAudioIndicator) {
+                    ForEach(BackgroundAudioIndicatorStyle.allCases) { style in
+                        Text(style.label).tag(style)
+                    }
+                } label: {
+                    SettingLabel(
+                        "Background Audio Bar",
+                        systemImage: "headphones.circle",
+                        subtitle: backgroundAudioIndicator.subtitle,
+                        disabledReason: nativePlaybackEnabled ? nil : "Not available right now"
+                    )
+                }
+                .disabled(!nativePlaybackEnabled)
             } header: {
                 Text("Video")
             } footer: {
-                Text("Autoplay starts the stream muted, and only on Wi-Fi; on cellular the video stays closed. Picture in picture opens automatically with the native player; with \"With Sound On\", a muted or paused stream pauses when you leave instead.\n\nThe native player relies on an unofficial Twitch interface; if it can't load a stream, chattr switches back to Twitch's web player. Audio-only mode always uses the native player, since the web player can't play without showing video.")
+                Text("Autoplay starts the stream muted, and only on Wi-Fi; on cellular the video stays closed. Picture in picture opens automatically with the native player; with \"With Sound On\", a muted or paused stream pauses when you leave instead.\n\nThe native player relies on an unofficial Twitch interface; if it can't load a stream, chattr switches back to Twitch's web player. Audio-only and pinned background audio streams always use the native player, since the web player can't play without showing video. Landscape always uses the compact floating pill for pinned audio.")
             }
 
             #if os(iOS)

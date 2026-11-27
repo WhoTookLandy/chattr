@@ -138,22 +138,18 @@ struct LandscapeStreamStage: View {
     #if os(iOS)
     private var player: StreamPlayerController? { playback?.controller }
 
-    /// The stage owns the callbacks while it's shown — the hidden header's
-    /// `wirePlayerCallbacks` stands down whenever `landscapeStage.isActive`,
-    /// and takes them back when the stage goes away.
+    /// The stage owns the primary callbacks while it's shown — wired on
+    /// `playback` so promoting a pinned slot never drops them.
     private func wirePlayerCallbacks() {
-        guard let player else { return }
-        player.onTap = { toggleChrome() }
+        guard let playback else { return }
+        playback.onPrimaryTap = { toggleChrome() }
         // Swipe down on the video → picture in picture, or hide the video
         // when PiP isn't available — same as portrait.
-        // Weak: the player stores this closure, so holding the player in
-        // it would keep the controller (and its `PlaybackCenter`) alive
-        // past sign-out.
-        player.onSwipeDown = { [weak player] in
-            guard let player else { return }
-            if player.canPictureInPicture {
+        playback.onPrimarySwipeDown = { [weak playback] in
+            guard let playback else { return }
+            if playback.controller.canPictureInPicture {
                 chromeVisible = false
-                player.togglePictureInPicture()
+                playback.controller.togglePictureInPicture()
             } else {
                 hideVideo()
             }

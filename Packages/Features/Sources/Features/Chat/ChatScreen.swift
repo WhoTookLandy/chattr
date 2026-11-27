@@ -299,6 +299,13 @@ public struct ChatScreen: View {
         .overlay(alignment: .bottomLeading) {
             ChatDebugOverlay(channelLoginName: channelLoginName)
         }
+        #if os(iOS)
+        // Option 2 (Settings → Floating Pill) and Landscape pinned-audio badge.
+        // Self-contained view so `ChatScreen.body` never observes `playback`.
+        .overlay(alignment: .topTrailing) {
+            ChatFloatingPinnedAudioOverlay(channelId: channelId, tabId: tabId)
+        }
+        #endif
         // Chat surface color — slightly lifted off pure black/white in
         // both schemes (see DesignSystem.Color.chatSurface). Applied here
         // (not on the list) so the empty/connecting states and the area
