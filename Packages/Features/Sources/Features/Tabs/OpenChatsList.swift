@@ -88,6 +88,9 @@ struct OpenChatsList: View {
                     let isPinned = playback.pinnedAudioFlag(for: channel.channelId).isPinned
                     Button {
                         if isPinned {
+                            if chatTabs.isPresented, chatTabs.visibleChannelId == channel.channelId {
+                                UserDefaults.standard.set(false, forKey: StreamHeaderView.expandedKey)
+                            }
                             playback.unpinBackgroundAudio(channelId: channel.channelId)
                         } else {
                             _ = playback.pinBackgroundAudio(

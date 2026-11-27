@@ -250,6 +250,7 @@ struct ChatHeaderPopover: View {
                             channel: channel,
                             stream: tabStream,
                             profileImageURL: tab.profileImageURL ?? followsStore?.profileImageURLs[channel.channelId],
+                            isVisibleChannel: tab.id == visibleTabId,
                             playback: playback
                         )
                     }
@@ -338,6 +339,7 @@ private struct PopoverRowPinButton: View {
     let channel: ChannelDescriptor
     let stream: TwitchStream?
     let profileImageURL: URL?
+    let isVisibleChannel: Bool
     let playback: PlaybackCenter
 
     private var isPinned: Bool {
@@ -352,6 +354,9 @@ private struct PopoverRowPinButton: View {
         Button {
             withAnimation(.snappy(duration: 0.2)) {
                 if isPinned {
+                    if isVisibleChannel {
+                        UserDefaults.standard.set(false, forKey: StreamHeaderView.expandedKey)
+                    }
                     playback.unpinBackgroundAudio(channelId: channel.channelId)
                 } else {
                     _ = playback.pinBackgroundAudio(

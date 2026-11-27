@@ -39,6 +39,7 @@ private struct ChannelPreviewMenu: ViewModifier {
 
     #if os(iOS)
     @Environment(\.playback) private var playback
+    @Environment(\.chatTabs) private var chatTabs
     #endif
 
     /// Sets the preferences the chat header and its More menu use. Written
@@ -100,6 +101,9 @@ private struct ChannelPreviewMenu: ViewModifier {
                             let isFull = !isPinned && !playback.canPinMoreBackgroundAudio
                             Button {
                                 if isPinned {
+                                    if chatTabs?.isPresented == true, chatTabs?.visibleChannelId == stream.userId {
+                                        UserDefaults.standard.set(false, forKey: StreamHeaderView.expandedKey)
+                                    }
                                     playback.unpinBackgroundAudio(channelId: stream.userId)
                                 } else {
                                     let descriptor = ChannelDescriptor(
