@@ -46,6 +46,12 @@ public final class HighlightSoundPlayer {
     /// Throttle window — at most one play per this interval.
     private static let throttleInterval: TimeInterval = 0.5
 
+    /// Built-in iOS system sound used when no custom `highlight.*` asset is
+    /// bundled. `1003` (`ReceivedMessage.caf`) is iOS's short, native in-app
+    /// Messages received ping — brief and crisp instead of the multi-second
+    /// alert jingles (`1320`–`1336`).
+    static let fallbackSystemSoundID: SystemSoundID = 1003
+
     /// Timestamp of the last play, for throttling. nil until first play.
     private var lastPlayedAt: Date?
 
@@ -111,11 +117,10 @@ public final class HighlightSoundPlayer {
         }
         #endif
 
-        // Fallback: built-in system sound. 1336 is a subtle, short
-        // notification tone ("Anticipate") that reads as a ping without
-        // being jarring. AudioServices plays it respecting the device's
-        // ringer state.
-        AudioServicesPlaySystemSound(SystemSoundID(1336))
+        // Fallback: built-in system sound (`ReceivedMessage.caf`, the short
+        // native in-app Messages received ping). AudioServices plays it
+        // respecting the device's ringer state without interrupting stream audio.
+        AudioServicesPlaySystemSound(Self.fallbackSystemSoundID)
     }
 
     // MARK: - Setup
