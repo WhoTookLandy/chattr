@@ -158,6 +158,12 @@ extension PlaybackCenter {
             if !heldPaused, controller.continuesInPictureInPicture { return false }
             return true
         } else {
+            // If a fallback web primary is running alongside pinned native
+            // audio, hold it cleanly on backgrounding unless already in PiP so
+            // WebKit does not fight the background audio session.
+            if !pinnedAudio.isEmpty && !controller.isPictureInPictureActive {
+                return true
+            }
             if controller.isPictureInPictureActive
                 || (!heldPaused && controller.allowsAutomaticPictureInPicture) {
                 return false

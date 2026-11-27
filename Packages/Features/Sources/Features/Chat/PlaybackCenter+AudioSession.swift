@@ -2,6 +2,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import os
 
 extension PlaybackCenter {
 
@@ -11,7 +12,7 @@ extension PlaybackCenter {
     var currentAudioSessionState: AudioSessionClientState {
         let slots = allSlots
         let hasActiveNative = slots.contains { $0.hasActiveNativeEngine }
-        let hasAudibleNative = slots.contains { $0.isAudibleNative }
+        let hasAudibleNative = slots.contains { $0.wantsExclusiveNativeAudio }
         let hasAudibleWeb = primary?.isAudibleWeb ?? false
         return AudioSessionClientState(
             hasActiveNative: hasActiveNative,
@@ -21,22 +22,34 @@ extension PlaybackCenter {
     }
 
     /// Pushes `PlaybackCenter`'s aggregate audio state to `PlaybackAudioSession`.
+    /// Background state is read live by `PlaybackAudioSession` when the driver
+    /// applies the action on its serial queue.
     func reconcileAudioSession(force: Bool = false) {
-        audioSession.updateClientAsync(.playback, state: currentAudioSessionState, force: force)
+        audioSession.updateClientAsync(
+            .playback,
+            state: currentAudioSessionState,
+            force: force
+        )
     }
 
     /// Awaited by `NativePlayer.Coordinator` right before creating an `AVPlayer`
     /// so the audio session is active in the right category before audio starts.
+    /// Always passes `force: true` so a torn-down `WKWebView` that deactivated
+    /// the session asynchronously can never leave `AVAudioSession` inactive.
     func prepareAudioSessionForNativeStart(slotID: UUID) async {
         guard let slot = slot(withID: slotID) else { return }
         var state = currentAudioSessionState
         // The requesting slot's AVPlayer isn't instantiated yet, so ensure its
         // upcoming native state is counted even if `engine` is still resolving.
         state.hasActiveNative = true
-        if !slot.controller.isMuted && slot.controller.volume > 0 && slot.controller.startsPlaying {
+        if !slot.controller.isMuted && slot.controller.volume > 0 {
             state.hasAudibleNative = true
         }
-        await audioSession.updateClient(.playback, state: state, force: false)
+        await audioSession.updateClient(
+            .playback,
+            state: state,
+            force: true
+        )
     }
 
     // MARK: - Centralized System Audio Notifications
@@ -73,6 +86,8 @@ extension PlaybackCenter {
 
         switch type {
         case .began:
+            let reasonRaw = notification.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+            playbackCenterLogger.notice("Audio session interruption began (reason=\(reasonRaw.map(String.init) ?? "nil", privacy: .public), slots=\(self.allSlots.count))")
             for slot in allSlots where slot.engineKind == .native {
                 slot.resumesAfterInterruption = slot.engine?.wasPlayingJustNow ?? false
             }
@@ -80,6 +95,7 @@ extension PlaybackCenter {
         case .ended:
             let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let shouldResume = AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume)
+            playbackCenterLogger.notice("Audio session interruption ended (shouldResume=\(shouldResume))")
             var slotIDsToResume: [UUID] = []
             for slot in allSlots where slot.engineKind == .native {
                 let wasPlaying = slot.resumesAfterInterruption
@@ -91,7 +107,11 @@ extension PlaybackCenter {
             guard !slotIDsToResume.isEmpty else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.audioSession.updateClient(.playback, state: self.currentAudioSessionState, force: true)
+                await self.audioSession.updateClient(
+                    .playback,
+                    state: self.currentAudioSessionState,
+                    force: true
+                )
                 for id in slotIDsToResume {
                     guard let slot = self.slot(withID: id),
                           slot.controller.avPlayer != nil,
@@ -192,6 +212,7 @@ extension PlaybackCenter {
                 if slot.controller.isPaused || !slot.controller.wantsPlayback {
                     slot.controller.remotePlay()
                 }
+                lifecycle?.noteSlotResumedInBackground(slot.id)
             } else {
                 if !slot.controller.isPaused || slot.controller.wantsPlayback {
                     slot.controller.remotePause()

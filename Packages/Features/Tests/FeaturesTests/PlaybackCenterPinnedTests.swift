@@ -504,5 +504,107 @@ struct PlaybackCenterPinnedTests {
         center.drainPendingEvictions()
         #expect(center.pinnedAudioFlagCount == 0)
     }
+
+    // MARK: - Foreground / Background Stability & Multi-Audio Native Upgrade
+
+    @Test("Pinning while a web primary plays upgrades primary to native so all slots share one exclusive AVAudioSession")
+    func pinningUpgradesWebPrimaryToNativeAndPreventsAudioSessionChurn() async {
+        let engines = FakeStreamEngines()
+        let center = engines.center()
+        defer { center.stopAll() }
+
+        center.play(Self.chA, title: "A", profileImageURL: nil, native: false, audioOnly: false, quality: .auto)
+        #expect(center.primary?.engineKind == .web)
+
+        // Pinning B must upgrade primary A to native so WKWebView never fights AVPlayer.
+        #expect(center.pinBackgroundAudio(Self.chB, title: "B", profileImageURL: nil) == .pinned)
+        #expect(center.primary?.engineKind == .native)
+        #expect(center.primary?.promotedToNative == true)
+        #expect(center.currentAudioSessionState.hasAudibleWeb == false)
+        #expect(center.currentAudioSessionState.hasAudibleNative == true)
+
+        // Switching to a new primary C while B is pinned must also start native even with `native: false`.
+        center.play(Self.chC, title: "C", profileImageURL: nil, native: false, audioOnly: false, quality: .auto)
+        #expect(center.primary?.engineKind == .native)
+        #expect(center.primary?.promotedToNative == true)
+
+        // Pausing an unmuted native slot keeps exclusive audio focus (never downgrades to mixWithOthers).
+        let slotB = center.pinnedSlot(for: Self.chB.channelId)!
+        slotB.controller.togglePlay()
+        center.primary?.controller.togglePlay()
+        #expect(center.currentAudioSessionState.hasAudibleNative == true)
+
+        // Preparing audio session before native AVPlayer start always forces activation.
+        await center.prepareAudioSessionForNativeStart(slotID: slotB.id)
+        #expect(engines.audioDriver.actions.last?.force == true)
+        #expect(engines.audioDriver.actions.last?.action == .activate(mixable: false))
+    }
+
+    @Test("Returning to foreground recovers streams paused by the OS without undoing user pauses")
+    func foregroundRecoveryResumesOSPausedStreamsAndRespectsUserPauses() {
+        let engines = FakeStreamEngines()
+        let center = engines.center()
+        defer { center.stopAll() }
+
+        center.play(Self.chA, title: "A", profileImageURL: nil, native: true, audioOnly: false, quality: .auto)
+        #expect(center.pinBackgroundAudio(Self.chB, title: "B", profileImageURL: nil) == .pinned)
+        #expect(center.pinBackgroundAudio(Self.chC, title: "C", profileImageURL: nil) == .pinned)
+
+        let slotA = center.primary!
+        let slotB = center.pinnedSlot(for: Self.chB.channelId)!
+        let slotC = center.pinnedSlot(for: Self.chC.channelId)!
+
+        // Mark all three as having started playing, then manually pause C before backgrounding.
+        slotA.controller.update(\.hasStarted, to: true)
+        slotB.controller.update(\.hasStarted, to: true)
+        slotC.controller.update(\.hasStarted, to: true)
+        slotC.controller.togglePlay() // user pause: wantsPlayback = false
+
+        center.lifecycle?.willResignActive()
+        center.lifecycle?.didEnterBackground()
+
+        // Simulate OS pausing B during foreground/background transition (without clearing wantsPlayback).
+        slotB.controller.update(\.isPaused, to: true)
+        #expect(slotB.controller.wantsPlayback == true)
+        #expect(slotC.controller.wantsPlayback == false)
+
+        // Opening the app back up must keep wantsPlayback true on A & B and leave C paused.
+        center.lifecycle?.willEnterForeground()
+        center.lifecycle?.didBecomeActive()
+        #expect(slotA.controller.wantsPlayback == true)
+        #expect(slotB.controller.wantsPlayback == true)
+        #expect(slotC.controller.wantsPlayback == false)
+        #expect(slotC.controller.isPaused == true)
+
+        // Pinned slots always stay on native engine across transient network stalls.
+        #expect(slotB.controller.staysOnNativeEngine?() == true)
+    }
+
+    @Test("Fallback web primary alongside pinned audio is held on backgrounding")
+    func fallbackWebPrimaryWithPinnedAudioIsHeldInBackground() async {
+        let engines = FakeStreamEngines()
+        let center = engines.center()
+        defer { center.stopAll() }
+
+        #expect(center.pinBackgroundAudio(Self.chB, title: "B", profileImageURL: nil) == .pinned)
+        center.play(Self.chA, title: "A", profileImageURL: nil, native: true, audioOnly: false, quality: .auto)
+        // Native fails on A → falls back to web alongside pinned B.
+        center.fallBackToWeb(quality: .auto)
+        #expect(center.primary?.engineKind == .web)
+        #expect(center.primary?.controller.nativeFailed == true)
+
+        center.lifecycle?.didEnterBackground()
+        #expect(center.primary?.controller.holds.contains(.background) == true)
+        #expect(center.pinnedSlot(for: Self.chB.channelId)?.controller.isHeld == false)
+
+        // Even a Home preview update without an explicit `inBackground` parameter
+        // observes the live background flag when `PlaybackAudioSession` applies it.
+        await engines.audioSession.updateClient(.homePreview, state: .inactive)
+        #expect(engines.audioDriver.actions.last?.inBackground == true)
+
+        center.lifecycle?.willEnterForeground()
+        await engines.audioSession.updateClient(.homePreview, state: .inactive)
+        #expect(engines.audioDriver.actions.last?.inBackground == false)
+    }
 }
 #endif

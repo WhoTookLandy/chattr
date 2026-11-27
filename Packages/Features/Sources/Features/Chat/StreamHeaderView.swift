@@ -322,10 +322,11 @@ struct StreamHeaderView: View {
         #endif
     }
 
-    /// The native engine is selected and hasn't failed over to the web one.
+    /// The native engine is active (either by preference or auto-upgraded for
+    /// multi-audio) and hasn't failed over to the web one.
     private var isNativeEngine: Bool {
         #if os(iOS)
-        useNativePlayer && !player.nativeFailed
+        isActive && (playback?.primary?.engineKind == .native || (useNativePlayer && !player.nativeFailed))
         #else
         false
         #endif

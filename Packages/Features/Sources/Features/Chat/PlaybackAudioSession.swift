@@ -38,7 +38,7 @@ enum AudioSessionAction: Equatable, Sendable {
 /// order on `PlaybackAudioSession`'s single serial queue so state updates can
 /// never overtake each other.
 protocol PlaybackAudioSessionDriver: Sendable {
-    func apply(_ action: AudioSessionAction, force: Bool)
+    func apply(_ action: AudioSessionAction, force: Bool, inBackground: Bool)
     func invalidate()
 }
 
@@ -58,9 +58,19 @@ final class PlaybackAudioSession: @unchecked Sendable {
     private let driver: any PlaybackAudioSessionDriver
     private let queue = DispatchQueue(label: "com.andrewbeshay.chattr.playback-audio", qos: .userInitiated)
     private var clients: [AudioSessionClientID: AudioSessionClientState] = [:]
+    /// Live background flag updated synchronously from the main actor on
+    /// `didEnterBackground` / `willEnterForeground` and read on `queue` at the
+    /// moment `driver.apply` runs, so every client (including Home preview
+    /// fallbacks and queued `willResignActive` reconciles) observes the latest
+    /// background state without race windows.
+    private let backgroundFlag = OSAllocatedUnfairLock(initialState: false)
 
     init(driver: any PlaybackAudioSessionDriver = SystemDriver()) {
         self.driver = driver
+    }
+
+    func setInBackground(_ inBackground: Bool) {
+        backgroundFlag.withLock { $0 = inBackground }
     }
 
     /// Pure decision function over the union of all registered clients.
@@ -84,11 +94,12 @@ final class PlaybackAudioSession: @unchecked Sendable {
     func updateClient(
         _ client: AudioSessionClientID,
         state: AudioSessionClientState,
-        force: Bool = false
+        force: Bool = false,
+        inBackground: Bool = false
     ) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async {
-                self.applyLocked(client: client, state: state, force: force)
+                self.applyLocked(client: client, state: state, force: force, inBackground: inBackground)
                 continuation.resume()
             }
         }
@@ -99,10 +110,11 @@ final class PlaybackAudioSession: @unchecked Sendable {
     func updateClientAsync(
         _ client: AudioSessionClientID,
         state: AudioSessionClientState,
-        force: Bool = false
+        force: Bool = false,
+        inBackground: Bool = false
     ) {
         queue.async {
-            self.applyLocked(client: client, state: state, force: force)
+            self.applyLocked(client: client, state: state, force: force, inBackground: inBackground)
         }
     }
 
@@ -114,14 +126,20 @@ final class PlaybackAudioSession: @unchecked Sendable {
         }
     }
 
-    private func applyLocked(client: AudioSessionClientID, state: AudioSessionClientState, force: Bool) {
+    private func applyLocked(
+        client: AudioSessionClientID,
+        state: AudioSessionClientState,
+        force: Bool,
+        inBackground: Bool
+    ) {
         if state == .inactive {
             clients[client] = nil
         } else {
             clients[client] = state
         }
+        let effectiveInBackground = inBackground || backgroundFlag.withLock { $0 }
         let resolved = Self.resolveAction(for: clients)
-        driver.apply(resolved, force: force)
+        driver.apply(resolved, force: force, inBackground: effectiveInBackground)
     }
 
     // MARK: - Legacy single-stream shims
@@ -151,12 +169,12 @@ final class PlaybackAudioSession: @unchecked Sendable {
         // @unchecked: always called exclusively on `PlaybackAudioSession.queue`.
         private var isActive = false
 
-        func apply(_ action: AudioSessionAction, force: Bool) {
+        func apply(_ action: AudioSessionAction, force: Bool, inBackground: Bool) {
             switch action {
             case .deactivate:
                 performDeactivate()
             case .activate(let mixable):
-                performConfigure(mixable: mixable, forceActivate: force)
+                performConfigure(mixable: mixable, forceActivate: force, inBackground: inBackground)
             }
         }
 
@@ -169,27 +187,37 @@ final class PlaybackAudioSession: @unchecked Sendable {
             isActive = false
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                logger.notice("Audio session deactivated")
             } catch {
                 logger.warning("Audio session deactivation failed: \(error.localizedDescription, privacy: .public)")
             }
         }
 
-        private func performConfigure(mixable: Bool, forceActivate: Bool) {
+        private func performConfigure(mixable: Bool, forceActivate: Bool, inBackground: Bool) {
             let session = AVAudioSession.sharedInstance()
-            let options: AVAudioSession.CategoryOptions = mixable ? [.mixWithOthers] : []
+            // Never attempt a mixable → exclusive upgrade while the app is
+            // already in the background: iOS rejects exclusive activation from
+            // background (`CannotStartPlaying`) or interrupts playing players.
+            let alreadyActiveMixable = isActive
+                && session.category == .playback
+                && session.categoryOptions.contains(.mixWithOthers)
+            let effectiveMixable = (inBackground && !mixable && alreadyActiveMixable) ? true : mixable
+            let options: AVAudioSession.CategoryOptions = effectiveMixable ? [.mixWithOthers] : []
             do {
                 let needsCategory = session.category != .playback
                     || session.mode != .moviePlayback
                     || session.categoryOptions != options
                 if needsCategory {
                     try session.setCategory(.playback, mode: .moviePlayback, options: options)
+                    logger.notice("Audio session category → .playback mixable=\(effectiveMixable) bg=\(inBackground)")
                 }
                 if forceActivate || !isActive || needsCategory {
                     try session.setActive(true)
                     isActive = true
+                    logger.notice("Audio session activated mixable=\(effectiveMixable) force=\(forceActivate) bg=\(inBackground)")
                 }
             } catch {
-                logger.warning("Audio session setup failed: \(error.localizedDescription, privacy: .public)")
+                logger.warning("Audio session setup failed (mixable=\(effectiveMixable) bg=\(inBackground)): \(error.localizedDescription, privacy: .public)")
             }
         }
     }
