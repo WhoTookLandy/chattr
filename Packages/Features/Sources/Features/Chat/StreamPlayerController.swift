@@ -20,6 +20,14 @@ final class StreamPlayerController {
     /// long-pause unload in step.
     @ObservationIgnored var onPausedChange: (() -> Void)?
     var isMuted = false
+    /// Independent loudness (`0.0...1.0`) for native `AVPlayer` slots.
+    /// Re-applied on every player start, warm swap, and media-services reset.
+    var volume: Float = 1.0
+    /// True while this stream is actually producing audible sound (used for
+    /// audio-session exclusivity and background-hold eligibility).
+    var isEffectivelyAudible: Bool {
+        !isMuted && volume > 0 && !isPaused && !isHeld
+    }
     /// The native player is waiting on the network: starting up, stalled
     /// mid-stream, or between tries after a failure.
     var isBuffering = false
@@ -74,6 +82,14 @@ final class StreamPlayerController {
     /// Play was asked for with no engine to play it: `PlaybackCenter`
     /// unloads one after a long pause, and builds it again on this.
     @ObservationIgnored var onResumeRequested: (() -> Void)?
+    /// Mute, volume, or playback audibility changed. `userInitiatedUnmute` is
+    /// true only when the user explicitly unmuted or raised volume above 0
+    /// (exiting Solo / Mute All); programmatic updates pass false.
+    @ObservationIgnored var onAudioStateChange: ((_ userInitiatedUnmute: Bool) -> Void)?
+    /// Called by `NativePlayer.Coordinator` right before creating an `AVPlayer`
+    /// so `PlaybackCenter` configures `PlaybackAudioSession` through the single
+    /// aggregate arbiter.
+    @ObservationIgnored var onPrepareAudioSession: (() async -> Void)?
     /// Audio-only is playing the full stream because Twitch offered no
     /// audio rendition — the video nobody sees is kept as small as it goes
     /// (`applyQualityLimits`).
@@ -185,6 +201,11 @@ final class StreamPlayerController {
     /// reports are that autoplay, not intent (`isSettlingWebStartup`).
     func noteEngineReady(paused: Bool) {
         isAwaitingWebEngine = false
+        // Apply any mute requested while the web page was still loading
+        // (e.g. Solo / Mute All or a mute tap before first state report).
+        if isMuted != webPageReportedMuted {
+            runCall("setMuted", arguments: isMuted ? "true" : "false")
+        }
         if startsPlaying {
             if paused { resume() }
         } else {
@@ -200,6 +221,10 @@ final class StreamPlayerController {
             if isHeld { pauseForHold() } else { pause() }
         }
     }
+
+    /// Last mute state reported by the web page so `noteEngineReady` knows
+    /// whether a mute requested while loading still needs to be pushed.
+    @ObservationIgnored var webPageReportedMuted = false
 
     /// Every web state report, after `noteEngineReady` and before
     /// `noteDidPlay`. A paused report following a suppressed startup play
@@ -404,36 +429,54 @@ final class StreamPlayerController {
     }
 
     func toggleMute() {
-        guard let player = avPlayer else {
-            guard webView != nil else {
-                // Native playlist still resolving: change the mute the
-                // player will start with.
-                startsMuted.toggle()
-                update(\.isMuted, to: startsMuted)
-                return
-            }
-            return run("toggleMute")
-        }
-        player.isMuted.toggle()
-        update(\.isMuted, to: player.isMuted)
-        // Muted mixes with other audio; with sound it's the only one.
-        PlaybackAudioSession.shared.setMuted(player.isMuted)
+        setMuted(!isMuted, programmatic: false)
     }
 
-    /// Sets mute explicitly on the native path (or while it's still loading).
-    /// Used when switching an already-playing native stream into audio-only,
-    /// where the UI has no mute button.
-    func setMuted(_ muted: Bool) {
+    /// Sets mute explicitly on either engine (or while still loading).
+    /// `programmatic: true` is used by Solo, Mute All, and new-slot init so
+    /// programmatic mute updates never accidentally cancel Solo / Mute All.
+    func setMuted(_ muted: Bool, programmatic: Bool = false) {
+        let wasMuted = isMuted
+        let userUnmuted = !programmatic && wasMuted && !muted
         guard let player = avPlayer else {
             startsMuted = muted
             update(\.isMuted, to: muted)
+            if webView != nil, !isAwaitingWebEngine {
+                runCall("setMuted", arguments: muted ? "true" : "false")
+            }
+            if wasMuted != muted || userUnmuted {
+                onAudioStateChange?(userUnmuted)
+            }
             return
         }
         if player.isMuted != muted {
             player.isMuted = muted
         }
         update(\.isMuted, to: player.isMuted)
-        PlaybackAudioSession.shared.setMuted(player.isMuted)
+        if wasMuted != player.isMuted || userUnmuted {
+            onAudioStateChange?(userUnmuted)
+        }
+    }
+
+    /// Sets per-slot loudness (`0.0...1.0`) for native `AVPlayer` slots.
+    /// Only transitioning from muted or 0-volume to >0 counts as a user unmute
+    /// (so lowering volume from 80% → 50% never exits Solo / Mute All), and
+    /// `onAudioStateChange` only fires when audibility crosses the 0 boundary.
+    func setVolume(_ newVolume: Float, programmatic: Bool = false) {
+        let clamped = min(max(newVolume, 0), 1)
+        let wasZeroOrMuted = isMuted || volume == 0
+        let wasAudible = isEffectivelyAudible
+        update(\.volume, to: clamped)
+        avPlayer?.volume = clamped
+        if clamped > 0, isMuted {
+            setMuted(false, programmatic: programmatic)
+            return
+        }
+        let userUnmuted = !programmatic && wasZeroOrMuted && clamped > 0
+        let nowAudible = isEffectivelyAudible
+        if userUnmuted || wasAudible != nowAudible {
+            onAudioStateChange?(userUnmuted)
+        }
     }
 
     func togglePictureInPicture() {
@@ -491,7 +534,17 @@ final class StreamPlayerController {
     }
 
     private func run(_ command: String) {
-        webView?.evaluateJavaScript("window.chattrPlayer && window.chattrPlayer.\(command)()")
+        runCall(command, arguments: "")
+    }
+
+    /// Builds the JS invocation evaluated on `webView`. Exposed `internal` for
+    /// unit-test verification so invalid double-invocations cannot regress.
+    static func webCommandJS(_ command: String, arguments: String = "") -> String {
+        "window.chattrPlayer && window.chattrPlayer.\(command)(\(arguments))"
+    }
+
+    private func runCall(_ command: String, arguments: String) {
+        webView?.evaluateJavaScript(Self.webCommandJS(command, arguments: arguments))
     }
 }
 #endif

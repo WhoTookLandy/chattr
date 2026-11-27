@@ -19,6 +19,9 @@ struct OpenChatsList: View {
     @Environment(\.chatTabs) private var chatTabs
     @Environment(\.channelStatus) private var channelStatus
     @Environment(\.followsStore) private var followsStore
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    #endif
 
     var body: some View {
         if let chatTabs, !chatTabs.tabs.isEmpty {
@@ -75,6 +78,36 @@ struct OpenChatsList: View {
                     Label("Close", systemImage: "xmark")
                 }
             }
+            #if os(iOS)
+            .retainsPinnedAudioFlag(for: tab.channels.first?.channelId ?? "", in: tab.channels.first != nil ? playback : nil)
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if let channel = tab.channels.first,
+                   let playback,
+                   PlayerSettings.isNativePlaybackEnabled,
+                   stream != nil || playback.pinnedAudioFlag(for: channel.channelId).isPinned {
+                    let isPinned = playback.pinnedAudioFlag(for: channel.channelId).isPinned
+                    Button {
+                        if isPinned {
+                            playback.unpinBackgroundAudio(channelId: channel.channelId)
+                        } else {
+                            _ = playback.pinBackgroundAudio(
+                                channel,
+                                title: stream?.title ?? "",
+                                profileImageURL: tab.profileImageURL ?? followsStore?.profileImageURLs[channel.channelId],
+                                stream: stream
+                            )
+                        }
+                    } label: {
+                        Label(
+                            isPinned ? "Unpin Audio" : "Background Audio",
+                            systemImage: isPinned ? "speaker.slash.fill" : "headphones"
+                        )
+                    }
+                    .tint(isPinned ? .red : .accentColor)
+                    .disabled(!isPinned && !playback.canPinMoreBackgroundAudio)
+                }
+            }
+            #endif
             .channelPreviewMenu(
                 name: tab.displayName,
                 profileImageURL: tab.profileImageURL,

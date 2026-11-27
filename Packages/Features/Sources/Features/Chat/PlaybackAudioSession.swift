@@ -5,98 +5,192 @@ import os
 
 private let logger = AppLogger.make("Features.PlaybackAudioSession")
 
-/// The app's audio session as the native player needs it.
+/// Snapshot of one audio client's current needs, sent across actors to
+/// `PlaybackAudioSession` for aggregate category arbitration.
+struct AudioSessionClientState: Equatable, Sendable {
+    /// Any native `AVPlayer` is loaded or loading (paused/held slots still
+    /// count while their `AVPlayer` exists; unloaded slots do not).
+    var hasActiveNative: Bool = false
+    /// At least one native `AVPlayer` is currently audible (not muted,
+    /// volume > 0, not paused, not held).
+    var hasAudibleNative: Bool = false
+    /// Primary `WKWebView` video is actively playing with sound (foreground
+    /// or continuing in background system PiP).
+    var hasAudibleWeb: Bool = false
+
+    static let inactive = AudioSessionClientState()
+}
+
+/// Identifies each subsystem that participates in `PlaybackAudioSession`
+/// arbitration so neither can tear down the session out from under the other.
+enum AudioSessionClientID: Hashable, Sendable {
+    case playback
+    case homePreview
+}
+
+/// Desired `AVAudioSession` action derived from all active clients.
+enum AudioSessionAction: Equatable, Sendable {
+    case deactivate
+    case activate(mixable: Bool)
+}
+
+/// Synchronous abstraction over `AVAudioSession` I/O, invoked strictly in FIFO
+/// order on `PlaybackAudioSession`'s single serial queue so state updates can
+/// never overtake each other.
+protocol PlaybackAudioSessionDriver: Sendable {
+    func apply(_ action: AudioSessionAction, force: Bool)
+    func invalidate()
+}
+
+/// The app's audio session arbiter.
 ///
-/// `setCategory` and `setActive` block — for a noticeable moment when other
-/// audio has to be interrupted or handed back — so they run on one serial
-/// queue: off the main actor, and still in the order they were asked for.
+/// Both snapshot updates and `AVAudioSession` I/O execute sequentially on one
+/// serial queue (off the main actor), preserving exact FIFO ordering.
 ///
-/// A muted stream mixes with other audio, so a video that autoplays silent
-/// doesn't cut the user's music; unmuting makes the session the exclusive
-/// one. The session is taken down only when native playback really stops
-/// (`PlaybackCenter` decides), not for an engine rebuilt on a channel change.
+/// `HighlightSoundPlayer` intentionally stays outside this arbiter;
+/// `SystemDriver` always compares against the live `AVAudioSession.sharedInstance()`
+/// category so external `.ambient` changes are re-asserted cleanly.
 final class PlaybackAudioSession: @unchecked Sendable {
-    // @unchecked: `isActive` is only touched on `queue`.
+    // @unchecked: `clients` and all `driver` calls are serialized on `queue`.
 
     static let shared = PlaybackAudioSession()
 
+    private let driver: any PlaybackAudioSessionDriver
     private let queue = DispatchQueue(label: "com.andrewbeshay.chattr.playback-audio", qos: .userInitiated)
-    /// This object brought the session up and hasn't taken it down since.
-    private var isActive = false
+    private var clients: [AudioSessionClientID: AudioSessionClientState] = [:]
 
-    private init() {}
+    init(driver: any PlaybackAudioSessionDriver = SystemDriver()) {
+        self.driver = driver
+    }
 
-    /// Sets the session up for a stream that is `muted` or not and activates
-    /// it. Returns once that's done, so the player can be started into the
-    /// right category.
+    /// Pure decision function over the union of all registered clients.
     ///
-    /// When `force` is false and this object already has the session active
-    /// with the exact category, mode and options requested, skips the
-    /// redundant `setActive(true)` IPC. Pass `force: true` after an audio
-    /// interruption, when the system may have deactivated the session without
-    /// telling this object.
-    func activate(muted: Bool, force: Bool = false) async {
+    /// Decision table:
+    /// 1. No active native players → `.deactivate`
+    /// 2. Active native players, none audible → `.activate(mixable: true)`
+    /// 3. Audible native player(s), no audible web primary → `.activate(mixable: false)` (exclusive; owns Lock Screen Now Playing)
+    /// 4. Audible native player(s) + audible web primary → `.activate(mixable: true)` (coexists with WebKit media process)
+    static func resolveAction(for clients: [AudioSessionClientID: AudioSessionClientState]) -> AudioSessionAction {
+        let hasActiveNative = clients.values.contains { $0.hasActiveNative }
+        guard hasActiveNative else { return .deactivate }
+        let hasAudibleNative = clients.values.contains { $0.hasAudibleNative }
+        guard hasAudibleNative else { return .activate(mixable: true) }
+        let hasAudibleWeb = clients.values.contains { $0.hasAudibleWeb }
+        return .activate(mixable: hasAudibleWeb)
+    }
+
+    /// Updates `client`'s state and applies the resulting `AVAudioSession`
+    /// action synchronously on the serial queue, returning once applied.
+    func updateClient(
+        _ client: AudioSessionClientID,
+        state: AudioSessionClientState,
+        force: Bool = false
+    ) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async {
-                self.configure(mixable: muted, forceActivate: force)
+                self.applyLocked(client: client, state: state, force: force)
                 continuation.resume()
             }
         }
     }
 
-    /// The stream was muted or unmuted. Does nothing while the session is
-    /// down — the next `activate` picks the right category itself.
-    func setMuted(_ muted: Bool) {
+    /// Enqueues a client state update and driver application on the same
+    /// serial queue in strict FIFO order without blocking the caller.
+    func updateClientAsync(
+        _ client: AudioSessionClientID,
+        state: AudioSessionClientState,
+        force: Bool = false
+    ) {
         queue.async {
-            guard self.isActive else { return }
-            self.configure(mixable: muted, forceActivate: false)
+            self.applyLocked(client: client, state: state, force: force)
         }
     }
 
-    /// Native playback stopped: hand audio back to whatever it interrupted.
-    func deactivate() {
+    /// Media services were reset: invalidate on the serial queue so subsequent
+    /// activations force a fresh category/active configuration.
+    func invalidate() {
         queue.async {
-            guard self.isActive else { return }
-            self.isActive = false
+            self.driver.invalidate()
+        }
+    }
+
+    private func applyLocked(client: AudioSessionClientID, state: AudioSessionClientState, force: Bool) {
+        if state == .inactive {
+            clients[client] = nil
+        } else {
+            clients[client] = state
+        }
+        let resolved = Self.resolveAction(for: clients)
+        driver.apply(resolved, force: force)
+    }
+
+    // MARK: - Legacy single-stream shims
+
+    func activate(muted: Bool, force: Bool = false) async {
+        await updateClient(
+            .playback,
+            state: AudioSessionClientState(hasActiveNative: true, hasAudibleNative: !muted, hasAudibleWeb: false),
+            force: force
+        )
+    }
+
+    func setMuted(_ muted: Bool) {
+        updateClientAsync(
+            .playback,
+            state: AudioSessionClientState(hasActiveNative: true, hasAudibleNative: !muted, hasAudibleWeb: false)
+        )
+    }
+
+    func deactivate() {
+        updateClientAsync(.playback, state: .inactive)
+    }
+
+    // MARK: - System AVAudioSession driver
+
+    final class SystemDriver: PlaybackAudioSessionDriver, @unchecked Sendable {
+        // @unchecked: always called exclusively on `PlaybackAudioSession.queue`.
+        private var isActive = false
+
+        func apply(_ action: AudioSessionAction, force: Bool) {
+            switch action {
+            case .deactivate:
+                performDeactivate()
+            case .activate(let mixable):
+                performConfigure(mixable: mixable, forceActivate: force)
+            }
+        }
+
+        func invalidate() {
+            isActive = false
+        }
+
+        private func performDeactivate() {
+            guard isActive else { return }
+            isActive = false
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
                 logger.warning("Audio session deactivation failed: \(error.localizedDescription, privacy: .public)")
             }
         }
-    }
 
-    /// Media services were reset: the session is down, whatever this object
-    /// did before.
-    func invalidate() {
-        queue.async {
-            self.isActive = false
-        }
-    }
-
-    private func configure(mixable: Bool, forceActivate: Bool) {
-        let session = AVAudioSession.sharedInstance()
-        let options: AVAudioSession.CategoryOptions = mixable ? [.mixWithOthers] : []
-        do {
-            // Compared against the session itself, not a remembered value:
-            // a media services reset, or other audio in the app, can have
-            // changed it since.
-            let needsCategory = session.category != .playback
-                || session.mode != .moviePlayback
-                || session.categoryOptions != options
-            if needsCategory {
-                try session.setCategory(.playback, mode: .moviePlayback, options: options)
+        private func performConfigure(mixable: Bool, forceActivate: Bool) {
+            let session = AVAudioSession.sharedInstance()
+            let options: AVAudioSession.CategoryOptions = mixable ? [.mixWithOthers] : []
+            do {
+                let needsCategory = session.category != .playback
+                    || session.mode != .moviePlayback
+                    || session.categoryOptions != options
+                if needsCategory {
+                    try session.setCategory(.playback, mode: .moviePlayback, options: options)
+                }
+                if forceActivate || !isActive || needsCategory {
+                    try session.setActive(true)
+                    isActive = true
+                }
+            } catch {
+                logger.warning("Audio session setup failed: \(error.localizedDescription, privacy: .public)")
             }
-            // Skip redundant `setActive(true)` IPC when the session is already
-            // active with the requested category (e.g. an in-place audio-only ↔
-            // video switch). `forceActivate` still brings it back up after an
-            // interruption, when the system took it down without telling us.
-            if forceActivate || !isActive || needsCategory {
-                try session.setActive(true)
-                isActive = true
-            }
-        } catch {
-            logger.warning("Audio session setup failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

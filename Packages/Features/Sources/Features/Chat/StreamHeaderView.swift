@@ -43,6 +43,7 @@ struct StreamHeaderView: View {
     @Environment(\.followsStore) private var followsStore
     @Environment(\.channelStatus) private var channelStatus
     @Environment(\.chatTabs) private var chatTabs
+    @Environment(\.openChannel) private var openChannel
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
     /// Landscape: the video is on `LandscapeStreamStage`, not here.
@@ -52,12 +53,14 @@ struct StreamHeaderView: View {
     @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
     @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
     @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
+    @AppStorage(PlaybackPreferences.backgroundAudioIndicatorKey) private var backgroundAudioIndicator: BackgroundAudioIndicatorStyle = .strip
 
     /// Player overlay + tags + action row. Hidden by default so chat keeps
     /// the room; any tap on the video or info row toggles it.
     @State private var chromeVisible = false
     /// Bumped on every interaction so the auto-hide timer restarts.
     @State private var chromeInteraction = 0
+    @State private var showAudioMixer = false
 
     /// Only the page centered in the pager mounts the player — neighbours
     /// stay as posters so swiping never plays two streams at once. Derived
@@ -119,7 +122,13 @@ struct StreamHeaderView: View {
 
     var body: some View {
         Group {
-            if isExpanded, let stream {
+            if isPinnedAudio {
+                // Pinned in background audio: chat takes the whole screen and
+                // `ChatHeaderBar` carries the stream's condensed controls + 1-tap Show Video.
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 0)
+            } else if isExpanded, let stream {
                 // Audio-only / PiP: no inline video, so the header gives
                 // chat the whole screen; stream controls live in
                 // `ChatHeaderBar`.
@@ -184,6 +193,12 @@ struct StreamHeaderView: View {
             if !staged, isActive { wirePlayerCallbacks() }
         }
         .retainsPictureInPictureFlag(for: channel.channelId, in: playback)
+        .retainsPinnedAudioFlag(for: channel.channelId, in: playback)
+        .sheet(isPresented: $showAudioMixer) {
+            if let playback {
+                AudioMixerSheet(playback: playback)
+            }
+        }
         #endif
     }
 
@@ -195,7 +210,7 @@ struct StreamHeaderView: View {
     /// Everything on this page that shapes playback. Not `isActive`:
     /// becoming the visible page has its own, settled task (see `body`).
     private var playbackKey: String {
-        "\(isExpanded)|\(liveStream != nil)|\(statusReadingKey)|\(audioOnly)|\(useNativePlayer)|\(maxQuality.rawValue)"
+        "\(isExpanded)|\(isPinnedAudio)|\(liveStream != nil)|\(statusReadingKey)|\(audioOnly)|\(useNativePlayer)|\(maxQuality.rawValue)"
     }
 
     /// Whether the status has loaded and, while it says offline, which
@@ -237,7 +252,9 @@ struct StreamHeaderView: View {
     /// This page's state, as the playback decision reads it.
     private func playbackPolicy(for playback: PlaybackCenter) -> StreamPlaybackPolicy {
         let playing: StreamPlaybackPolicy.Playing
-        if playback.isPlaying(channel.channelId) {
+        if playback.isPinnedAudio(channel.channelId) {
+            playing = .pinnedAudio
+        } else if playback.isPlaying(channel.channelId) {
             playing = .thisChannel
         } else if playback.isPlaying {
             playing = .anotherChannel
@@ -254,25 +271,25 @@ struct StreamHeaderView: View {
             quality: maxQuality,
             isNativePlaybackEnabled: PlayerSettings.isNativePlaybackEnabled,
             nativeFailed: playback.controller.nativeFailed,
-            playing: playing
+            playing: playing,
+            hasOtherPrimaryPlaying: playback.hasPrimary && !playback.isPlaying(channel.channelId),
+            isPrimaryInPictureInPicture: playback.controller.isPictureInPictureActive
         )
     }
 
-    /// Single owner: while the landscape stage shows, the stage owns the
-    /// player's tap / swipe callbacks and this (hidden) header must not
-    /// overwrite them — e.g. opening a chat already in landscape, or a
-    /// pre-mounted neighbour becoming the visible page, fires this header's
-    /// `onAppear` / `onChange(isActive)` alongside the stage's.
+    /// Single owner: wired on `playback` (not a transient slot controller) so
+    /// promoting a pinned slot into `primary` never drops tap / swipe handlers.
     private func wirePlayerCallbacks() {
-        guard !landscapeStage.isActive else { return }
-        player.onTap = { toggleChrome() }
+        guard !landscapeStage.isActive, let playback else { return }
+        playback.onPrimaryTap = { toggleChrome() }
         // Swipe down on the video → picture in picture (keeps watching
         // while you scroll chat or leave the app). Without PiP support,
         // it hides the video instead.
-        player.onSwipeDown = {
-            if player.canPictureInPicture {
+        playback.onPrimarySwipeDown = { [weak playback] in
+            guard let playback else { return }
+            if playback.controller.canPictureInPicture {
                 chromeVisible = false
-                player.togglePictureInPicture()
+                playback.controller.togglePictureInPicture()
             } else {
                 setExpanded(false)
             }
@@ -358,6 +375,31 @@ struct StreamHeaderView: View {
                 .simultaneousGesture(TapGesture().onEnded { touchChrome() })
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
+
+            #if os(iOS)
+            // Option 1 (default in portrait): slim chip strip right under the
+            // video. Gated on `isActive` so pre-mounted neighbour pages never
+            // observe `playback.pinnedAudio`.
+            if isActive, backgroundAudioIndicator == .strip, let playback {
+                PinnedAudioStripView(
+                    playback: playback,
+                    onOpenMixer: { showAudioMixer = true },
+                    onPromoteToVideo: { slot in
+                        let targetChannel = slot.channel
+                        playback.promotePinnedToPrimary(
+                            channelId: targetChannel.channelId,
+                            audioOnly: false,
+                            quality: maxQuality,
+                            syncGlobalDisplayPreferences: true
+                        )
+                        openChannel?(targetChannel, intent: .explicit)
+                    },
+                    onOpenChat: { targetChannel in
+                        openChannel?(targetChannel, intent: .implicit)
+                    }
+                )
+            }
+            #endif
 
             Divider()
         }
@@ -485,6 +527,14 @@ struct StreamHeaderView: View {
         #endif
     }
 
+    private var isPinnedAudio: Bool {
+        #if os(iOS)
+        playback?.pinnedAudioFlag(for: channel.channelId).isPinned ?? false
+        #else
+        false
+        #endif
+    }
+
     /// Stream thumbnail: what neighbouring pages show, and what sits under
     /// the player until it paints its first frame.
     private func poster(_ stream: TwitchStream) -> some View {
@@ -536,13 +586,27 @@ struct StreamHeaderView: View {
                     Spacer()
                     pageIndicator
                     #if os(iOS)
-                    // Audio-only is the native engine's; not offered while
-                    // that's switched off.
-                    if PlayerSettings.isNativePlaybackEnabled {
-                        glyphButton("headphones", label: "Audio only") {
-                            chromeVisible = false
-                            withAnimation(.snappy(duration: 0.25)) { audioOnly = true }
-                        }
+                    // Audio-only & pinned background audio menu (accessible,
+                    // no hidden long-press gestures). Isolated subview so only
+                    // this button observes `playback.pinnedAudio` while chrome is up.
+                    if PlayerSettings.isNativePlaybackEnabled, let playback {
+                        OverlayAudioMenuButton(
+                            playback: playback,
+                            onAudioOnly: {
+                                chromeVisible = false
+                                withAnimation(.snappy(duration: 0.25)) { audioOnly = true }
+                            },
+                            onPinBackground: {
+                                chromeVisible = false
+                                withAnimation(.snappy(duration: 0.25)) {
+                                    _ = playback.demotePrimaryToPinnedAudio()
+                                }
+                            },
+                            onOpenMixer: {
+                                chromeVisible = false
+                                showAudioMixer = true
+                            }
+                        )
                     }
                     #endif
                     if let channelURL {

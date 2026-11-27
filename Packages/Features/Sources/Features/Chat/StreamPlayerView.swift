@@ -230,7 +230,8 @@ enum TwitchWebPlayer {
 
       window.chattrPlayer = {
         togglePlay: function () { var v = video(); if (!v) return; if (v.paused) { v.play(); } else { v.pause(); } },
-        toggleMute: function () { var v = video(); if (!v) return; v.muted = !v.muted; if (!v.muted && v.volume === 0) { v.volume = 1; } },
+        toggleMute: function () { var v = video(); if (!v) return; v.muted = !v.muted; if (!v.muted && v.volume === 0) { v.volume = 1; } report(); },
+        setMuted: function (m) { var v = video(); if (!v) return; v.muted = !!m; if (!v.muted && v.volume === 0) { v.volume = 1; } report(); },
         fullscreen: function () { var v = video(); if (v && v.webkitEnterFullscreen) { v.webkitEnterFullscreen(); } },
         pip: function () {
           var v = video(); if (!v || !v.webkitSetPresentationMode) return;
@@ -290,12 +291,21 @@ enum TwitchWebPlayer {
                 // was built with `autoplay=true` — mustn't start the stream
                 // behind the clip or in the background.
                 if controller.isHeld, !paused { controller.pauseForHold() }
+                let reportedMuted = body["muted"] as? Bool ?? false
+                controller.webPageReportedMuted = reportedMuted
+                let wasPaused = controller.isPaused
+                let wasMuted = controller.isMuted
                 controller.update(\.isPaused, to: paused)
-                controller.update(\.isMuted, to: body["muted"] as? Bool ?? false)
+                if didReportState {
+                    controller.update(\.isMuted, to: reportedMuted)
+                }
                 controller.update(\.canPictureInPicture, to: body["pip"] as? Bool ?? false)
                 if !didReportState {
                     didReportState = true
                     controller.noteEngineReady(paused: paused)
+                }
+                if wasPaused != controller.isPaused || wasMuted != controller.isMuted {
+                    controller.onAudioStateChange?(false)
                 }
                 controller.noteWebState(paused: paused)
                 // The page only autoplays when it was built meant to play

@@ -1,28 +1,59 @@
 #if os(iOS)
 import MediaPlayer
 
-/// Lock screen / Control Center presence for a stream that keeps playing
-/// with the app in the background (audio-only on the native engine): what's
-/// playing, and play / pause. Owned by `PlaybackCenter`, which publishes
-/// while such a stream is loaded and clears when it goes.
+/// Lock screen / Control Center presence for native audio streams that keep
+/// playing with the app in the background (pinned background audio slots,
+/// plus primary when in native audio-only mode).
+///
+/// Remote command targets resolve current eligible slots dynamically through
+/// `PlaybackCenter` rather than capturing a single `StreamPlayerController`,
+/// so promoting/demoting or pinning/unpinning never leaves stale handlers,
+/// and mixed paused/playing slots are unified rather than inverted.
 @MainActor
 final class StreamNowPlaying {
     private var commandTargets: [(MPRemoteCommand, Any)] = []
     private var isPublished = false
 
-    func publish(title: String, channelName: String, isPaused: Bool, controller: StreamPlayerController) {
+    struct Summary: Equatable, Sendable {
+        let title: String
+        let artist: String
+        let isPaused: Bool
+    }
+
+    static func summarize(slots: [PlaybackSlot]) -> Summary? {
+        guard let first = slots.first else { return nil }
+        let anyPlaying = slots.contains { !$0.controller.isPaused }
+        if slots.count == 1 {
+            let name = first.channel.channelDisplayName
+            let trimmed = first.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return Summary(
+                title: trimmed.isEmpty ? name : trimmed,
+                artist: name,
+                isPaused: !anyPlaying
+            )
+        }
+        let others = slots.count - 1
+        let firstName = first.channel.channelDisplayName
+        return Summary(
+            title: "\(firstName) + \(others) more",
+            artist: "chattr · \(slots.count) live streams",
+            isPaused: !anyPlaying
+        )
+    }
+
+    func publish(summary: Summary, center: PlaybackCenter) {
         if !isPublished {
             isPublished = true
             let commands = MPRemoteCommandCenter.shared()
-            register(commands.playCommand) { [weak controller] in controller?.remotePlay() }
-            register(commands.pauseCommand) { [weak controller] in controller?.remotePause() }
-            register(commands.togglePlayPauseCommand) { [weak controller] in controller?.togglePlay() }
+            register(commands.playCommand) { [weak center] in center?.remotePlayBackgroundAudio() }
+            register(commands.pauseCommand) { [weak center] in center?.remotePauseBackgroundAudio() }
+            register(commands.togglePlayPauseCommand) { [weak center] in center?.remoteTogglePlayPauseBackgroundAudio() }
         }
         let info: [String: Any] = [
-            MPMediaItemPropertyTitle: title.isEmpty ? channelName : title,
-            MPMediaItemPropertyArtist: channelName,
+            MPMediaItemPropertyTitle: summary.title,
+            MPMediaItemPropertyArtist: summary.artist,
             MPNowPlayingInfoPropertyIsLiveStream: true,
-            MPNowPlayingInfoPropertyPlaybackRate: isPaused ? 0.0 : 1.0,
+            MPNowPlayingInfoPropertyPlaybackRate: summary.isPaused ? 0.0 : 1.0,
         ]
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }

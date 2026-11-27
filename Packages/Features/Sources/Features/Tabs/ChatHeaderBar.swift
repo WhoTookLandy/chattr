@@ -34,6 +34,8 @@ struct ChatHeaderBar: View {
 
     @AppStorage(StreamHeaderView.expandedKey) private var isExpanded = false
     @AppStorage(PlayerSettings.audioOnlyKey) private var audioOnly = false
+    @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
+    @State private var showAudioMixer = false
 
     private var visibleTab: ChatTab? {
         guard let visibleId = chatTabs.activeTabId ?? chatTabs.tabs.first?.id else { return nil }
@@ -105,6 +107,11 @@ struct ChatHeaderBar: View {
         }
         .animation(.snappy(duration: 0.25), value: hidesForInlineVideo)
         .animation(.snappy(duration: 0.25), value: condensedMode)
+        .sheet(isPresented: $showAudioMixer) {
+            if let playback {
+                AudioMixerSheet(playback: playback)
+            }
+        }
     }
 
     private var barContent: some View {
@@ -136,19 +143,24 @@ struct ChatHeaderBar: View {
     private var dockCapsule: some View {
         HStack(spacing: 6) {
             infoButton
-            if liveStream != nil {
+            if let playback {
+                HeaderPinnedAudioButton(playback: playback) {
+                    showAudioMixer = true
+                }
+            }
+            if liveStream != nil || condensedMode == .pinnedAudio {
                 transportPill
             }
         }
         .padding(.leading, 14)
-        .padding(.trailing, liveStream != nil ? 4 : 14)
+        .padding(.trailing, (liveStream != nil || condensedMode == .pinnedAudio) ? 4 : 6)
         .frame(minHeight: 42)
         .glassEffect(.regular, in: Capsule())
         // Pull down on the dock to expand straight into video, matching the
         // muscle memory of the old compact stream card.
         .simultaneousGesture(
             DragGesture(minimumDistance: 20).onEnded { value in
-                guard value.translation.height > 40, liveStream != nil else { return }
+                guard value.translation.height > 40, liveStream != nil || condensedMode == .pinnedAudio else { return }
                 if condensedMode == .pictureInPicture {
                     playback?.controller.togglePictureInPicture()
                 } else {
@@ -183,6 +195,10 @@ struct ChatHeaderBar: View {
                 onStopStream: {
                     showPopover = false
                     stopStream()
+                },
+                onOpenMixer: {
+                    showPopover = false
+                    showAudioMixer = true
                 },
                 onEditChats: onEditChats
             )
@@ -298,10 +314,69 @@ struct ChatHeaderBar: View {
 
     @ViewBuilder
     private var transportPill: some View {
-        if let condensedMode, let player = playback?.controller {
+        if condensedMode == .pinnedAudio,
+           let channelId = visibleChannel?.channelId,
+           let slot = playback?.pinnedSlot(for: channelId) {
+            pinnedTransportPill(slot: slot)
+        } else if let condensedMode, let player = playback?.controller {
             activeTransportPill(condensedMode, player: player)
         } else {
             chatOnlyTransportPill
+        }
+    }
+
+    private func pinnedTransportPill(slot: PlaybackSlot) -> some View {
+        let controller = slot.controller
+        let isAudible = !controller.isMuted && controller.volume > 0 && !controller.isPaused
+        return HStack(spacing: 0) {
+            Button { controller.toggleMute() } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: isAudible ? "waveform" : "speaker.slash.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isAudible ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                        .symbolEffect(.variableColor.iterative.dimInactiveLayers, isActive: isAudible)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isAudible ? "Mute pinned audio" : "Unmute pinned audio")
+
+            subPillDivider
+
+            Button(action: startVideo) {
+                Image(systemName: "video.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 34, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Show video")
+        }
+        .background(
+            isAudible ? Color.accentColor.opacity(0.22) : Color.primary.opacity(0.09),
+            in: Capsule()
+        )
+        .overlay {
+            Capsule()
+                .strokeBorder(
+                    isAudible ? Color.accentColor.opacity(0.36) : Color.primary.opacity(0.14),
+                    lineWidth: 0.5
+                )
+        }
+        .contextMenu {
+            Button(controller.isMuted ? "Unmute" : "Mute",
+                   systemImage: controller.isMuted ? "speaker.wave.2.fill" : "speaker.slash.fill") {
+                controller.toggleMute()
+            }
+            Button("Show Video", systemImage: "video.fill") { startVideo() }
+            Button("Audio Mixer", systemImage: "slider.horizontal.3") { showAudioMixer = true }
+            Divider()
+            Button("Unpin Audio", systemImage: "xmark", role: .destructive) {
+                stopStream()
+            }
         }
     }
 
@@ -340,6 +415,9 @@ struct ChatHeaderBar: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Show video")
 
+            case .pinnedAudio:
+                EmptyView()
+
             case .pictureInPicture:
                 Button { player.togglePictureInPicture() } label: {
                     Image(systemName: "pip.exit")
@@ -371,8 +449,20 @@ struct ChatHeaderBar: View {
                     player.togglePlay()
                 }
                 Button("Show Video", systemImage: "video.fill") { startVideo() }
+                if let playback,
+                   playback.canPinMoreBackgroundAudio,
+                   !player.nativeFailed {
+                    Button("Pin to Background Audio", systemImage: "pin") {
+                        withAnimation(.snappy(duration: 0.25)) {
+                            _ = playback.demotePrimaryToPinnedAudio()
+                        }
+                    }
+                }
                 Divider()
                 Button("Stop Audio", systemImage: "xmark", role: .destructive) { stopStream() }
+            case .pinnedAudio:
+                EmptyView()
+
             case .pictureInPicture:
                 Button("Show Video Here", systemImage: "pip.exit") {
                     player.togglePictureInPicture()
@@ -432,6 +522,19 @@ struct ChatHeaderBar: View {
     }
 
     private func startVideo() {
+        if let channelId = visibleChannel?.channelId,
+           let playback,
+           playback.isPinnedAudio(channelId) {
+            withAnimation(.snappy(duration: 0.25)) {
+                playback.promotePinnedToPrimary(
+                    channelId: channelId,
+                    audioOnly: false,
+                    quality: maxQuality,
+                    syncGlobalDisplayPreferences: true
+                )
+            }
+            return
+        }
         withAnimation(.snappy(duration: 0.25)) {
             audioOnly = false
             isExpanded = true
@@ -439,11 +542,21 @@ struct ChatHeaderBar: View {
     }
 
     private func stopStream() {
+        if condensedMode == .pinnedAudio, let channelId = visibleChannel?.channelId {
+            // Collapse `isExpanded` before unpinning so stopping background audio
+            // on the visible channel doesn't immediately reopen its inline video.
+            withAnimation(.snappy(duration: 0.25)) {
+                isExpanded = false
+                audioOnly = false
+                playback?.unpinBackgroundAudio(channelId: channelId)
+            }
+            return
+        }
         withAnimation(.snappy(duration: 0.25)) {
             isExpanded = false
             audioOnly = false
         }
-        playback?.stop()
+        playback?.stopPrimary()
     }
 
     private var dockAccessibilityLabel: String {
@@ -453,11 +566,56 @@ struct ChatHeaderBar: View {
             if !liveStream.gameName.isEmpty { parts.append(liveStream.gameName) }
             if !liveStream.title.isEmpty { parts.append(liveStream.title) }
             if condensedMode == .audioOnly { parts.append("Audio only") }
+            if condensedMode == .pinnedAudio { parts.append("Pinned background audio") }
             if condensedMode == .pictureInPicture { parts.append("Picture in picture") }
             if hasBackgroundMention { parts.append("Unread mention in another chat") }
             return parts.joined(separator: ", ")
         }
         return "\(name), \(offlineSublineText)"
+    }
+}
+
+/// Compact `[waveform N]` badge inside `ChatHeaderBar` whenever pinned
+/// background audio streams are active. Isolated subview so only this pill
+/// observes `playback.pinnedAudio`.
+private struct HeaderPinnedAudioButton: View {
+    let playback: PlaybackCenter
+    let onTap: () -> Void
+
+    private var anyAudible: Bool {
+        playback.pinnedAudio.contains { !$0.controller.isMuted && $0.controller.volume > 0 && !$0.controller.isPaused }
+    }
+
+    var body: some View {
+        if !playback.pinnedAudio.isEmpty {
+            Button(action: onTap) {
+                HStack(spacing: 4) {
+                    Image(systemName: anyAudible ? "waveform" : "speaker.slash.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(anyAudible ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                        .symbolEffect(.variableColor.iterative.dimInactiveLayers, isActive: anyAudible)
+                    Text("\(playback.pinnedAudio.count)")
+                        .font(.caption.weight(.bold).monospacedDigit())
+                        .foregroundStyle(.primary)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 32)
+                .background(
+                    anyAudible ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.08),
+                    in: Capsule()
+                )
+                .overlay {
+                    Capsule()
+                        .strokeBorder(
+                            anyAudible ? Color.accentColor.opacity(0.35) : Color.primary.opacity(0.12),
+                            lineWidth: 0.5
+                        )
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(playback.pinnedAudio.count) background audio \(playback.pinnedAudio.count == 1 ? "stream" : "streams")")
+            .accessibilityHint("Opens audio mixer")
+        }
     }
 }
 #endif

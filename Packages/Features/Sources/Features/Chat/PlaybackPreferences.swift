@@ -15,6 +15,8 @@ enum PlaybackPreferences {
     static let videoOnOpenKey = "chattr.player.videoOnOpen"
     /// When Home feed cards autoplay muted live video previews.
     static let homePreviewKey = "chattr.home.livePreview"
+    /// How pinned background audio streams appear while watching inline video.
+    static let backgroundAudioIndicatorKey = "chattr.player.backgroundAudioIndicator"
 
     static var keepScreenAwake: Bool {
         UserDefaults.standard.bool(forKey: keepScreenAwakeKey)
@@ -33,6 +35,36 @@ enum PlaybackPreferences {
     static var homePreview: HomePreviewMode {
         UserDefaults.standard.string(forKey: homePreviewKey)
             .flatMap(HomePreviewMode.init(rawValue:)) ?? .wiFiOnly
+    }
+
+    static var backgroundAudioIndicator: BackgroundAudioIndicatorStyle {
+        UserDefaults.standard.string(forKey: backgroundAudioIndicatorKey)
+            .flatMap(BackgroundAudioIndicatorStyle.init(rawValue:)) ?? .strip
+    }
+}
+
+/// How pinned background audio streams are shown while watching inline video
+/// in portrait. Landscape always uses `.floatingPill` to preserve height.
+enum BackgroundAudioIndicatorStyle: String, CaseIterable, Identifiable, Sendable {
+    /// Slim horizontal chip strip directly beneath the inline video.
+    case strip
+    /// Compact floating Liquid Glass capsule in the top-trailing corner of chat.
+    case floatingPill
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .strip: "Chip Strip"
+        case .floatingPill: "Floating Pill"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .strip: "Slim bar under video with quick mute and unpin"
+        case .floatingPill: "Compact floating badge in the corner of chat"
+        }
     }
 }
 

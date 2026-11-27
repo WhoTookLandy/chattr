@@ -32,6 +32,9 @@ struct ChatsScreen: View {
     @Environment(\.channelStatus) private var channelStatus
     @Environment(\.followsStore) private var followsStore
     @Environment(\.scenePhase) private var scenePhase
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    #endif
 
     private var openChannelIds: [String] {
         (chatTabs?.tabs ?? []).flatMap { $0.channels.map(\.channelId) }
@@ -161,9 +164,16 @@ struct ChatsScreen: View {
             // back restarts the loop; the store's own staleness check keeps
             // a quick hop from refetching.
             guard let channelStatus else { return }
-            // A closed chat's stream state is never refreshed again; drop it
-            // rather than let it answer "live" from memory.
-            channelStatus.retainStreamState(forOpenChannels: openChannelIds)
+            // Keep pinned background-audio channels out of pruning without
+            // observing `playback.pinnedAudio` in `ChatsScreen.body`
+            // (`PinnedAudioStatusCoordinator` polls pinned channels).
+            var retained = openChannelIds
+            #if os(iOS)
+            if let pinnedIds = playback?.pinnedChannelIDsSnapshot {
+                retained.append(contentsOf: pinnedIds)
+            }
+            #endif
+            channelStatus.retainStreamState(forOpenChannels: retained)
             guard scenePhase != .background else { return }
             while !Task.isCancelled {
                 await channelStatus.refresh(

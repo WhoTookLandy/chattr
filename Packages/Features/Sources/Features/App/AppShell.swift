@@ -79,18 +79,19 @@ public struct AppShell: View {
 
     private func wirePictureInPicture() {
         // PiP's "return to app" → back into that stream's chat.
-        // Weak: the center owns the controller that stores these closures.
-        playback.controller.onRestoreFromPictureInPicture = { [weak playback, weak navigation] in
+        // Wired on `playback` (not `playback.controller`) so promoting a pinned
+        // slot into `primary` never loses these callbacks.
+        playback.onRestoreFromPictureInPicture = { [weak playback, weak navigation] in
             if let channel = playback?.channel {
                 navigation?.openChannel(channel)
             }
         }
-        // PiP closed with its × while no chat shows the stream: stop it
-        // rather than leaving a paused mini player behind.
-        playback.controller.onPictureInPictureClosed = { [weak playback, weak navigation] in
+        // PiP closed with its × while no chat shows the stream: stop primary
+        // only rather than leaving a paused mini player behind (pinned audio stays).
+        playback.onPictureInPictureClosed = { [weak playback, weak navigation] in
             guard let playback, let navigation else { return }
             let chatShowingIt = navigation.selectedTab == .chats && navigation.chatTabs.isPresented
-            if !chatShowingIt { playback.stop() }
+            if !chatShowingIt { playback.stopPrimary() }
         }
     }
     #endif
@@ -215,9 +216,21 @@ public struct AppShell: View {
         // `MiniPlayerHost`'s own body, so a chat push / pop, a tab switch or
         // play / pause invalidates only the overlay — not this shell, whose
         // body rebuilds the TabView and every tab root.
-        .overlay { MiniPlayerHost(navigation: navigation, playback: playback) }
-        // Sign-out / account switch: nothing keeps playing for the old account.
-        .onDisappear { playback.stop() }
+        .overlay {
+            MiniPlayerHost(navigation: navigation, playback: playback)
+                .environment(\.chatTabs, navigation.chatTabs)
+                .environment(\.openChannel, OpenChannelAction(navigation))
+                .environment(\.playback, playback)
+        }
+        .background {
+            PinnedAudioStatusCoordinator(
+                account: account,
+                accountStore: accountStore,
+                playback: playback
+            )
+        }
+        // Sign-out / account switch: tear down primary AND every pinned background stream.
+        .onDisappear { playback.stopAll() }
         // Settings → Video & Device → Keep Screen Awake: while a chat is on
         // screen, or a stream is actually showing video (not paused, not the
         // audio-only pill).

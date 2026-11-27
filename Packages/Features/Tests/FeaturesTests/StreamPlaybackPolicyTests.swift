@@ -164,6 +164,24 @@ struct StreamPlaybackPolicyTests {
         #expect(policy.decision == .stop)
     }
 
+    @Test("Swiping onto a channel pinned in background audio stops non-PiP primary video without duplicating")
+    func pinnedChannelStopsNonPiPPrimary() throws {
+        var policy = try watching()
+        policy.playing = .pinnedAudio
+        policy.hasOtherPrimaryPlaying = true
+        policy.isPrimaryInPictureInPicture = false
+        #expect(policy.decision == .stop)
+
+        // With nothing else playing in primary, leave the pinned stream alone.
+        policy.hasOtherPrimaryPlaying = false
+        #expect(policy.decision == .leaveAlone)
+
+        // When another primary is floating in system PiP, preserve the PiP window.
+        policy.hasOtherPrimaryPlaying = true
+        policy.isPrimaryInPictureInPicture = true
+        #expect(policy.decision == .leaveAlone)
+    }
+
     @Test("Video hidden here: whatever is playing stops, live or not")
     func hiddenVideoStops() throws {
         var policy = try watching()

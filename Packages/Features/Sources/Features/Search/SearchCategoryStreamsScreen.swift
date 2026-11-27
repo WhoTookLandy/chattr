@@ -49,7 +49,7 @@ struct SearchCategoryStreamsScreen: View {
 
     private var bottomClearance: CGFloat {
         #if os(iOS)
-        playback?.isPlaying == true ? 96 : 24
+        playback?.hasAnyPlayback == true ? 96 : 24
         #else
         24
         #endif

@@ -84,9 +84,12 @@ struct CondensedStreamModeTests {
         #expect(ChatHeaderBar.shouldHideForInlineVideo(
             isLive: true, isExpanded: true, condensedMode: nil
         ))
-        // Audio-only and PiP keep the smart dock visible.
+        // Audio-only, pinned audio, and PiP keep the smart dock visible.
         #expect(!ChatHeaderBar.shouldHideForInlineVideo(
             isLive: true, isExpanded: true, condensedMode: .audioOnly
+        ))
+        #expect(!ChatHeaderBar.shouldHideForInlineVideo(
+            isLive: true, isExpanded: true, condensedMode: .pinnedAudio
         ))
         #expect(!ChatHeaderBar.shouldHideForInlineVideo(
             isLive: true, isExpanded: true, condensedMode: .pictureInPicture
