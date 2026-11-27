@@ -11,5 +11,5 @@ PLEASE TEST
 1. Watch Channel A's video (both with Native Video Player OFF / Web player and with Native Video Player ON), open the top switcher popover, and tap 🎧 Listen on Channel B and Channel C — confirm Channel A's video keeps playing while B and C play in background audio.
 2. Tap the Audio Mixer button, adjust individual volume sliders, test 1-tap Solo and Mute All, and tap the video icon on a pinned stream to promote it seamlessly to video.
 3. Switch Settings → Video & Device → Background Audio Bar between Chip Strip and Floating Pill, and rotate to landscape to verify the compact floating pill.
-4. Lock the device while watching Channel A video + pinned B & C audio — confirm Channel A pauses (unless PiP is enabled) while B & C continue playing with Lock Screen Play/Pause controls.
+4. Background the app and lock the device while watching Channel A video + pinned B & C audio, then open chattr back up — confirm background audio stays alive and every stream (primary video + pinned audio) stays playing or auto-resumes seamlessly without pausing or needing to be reopened.
 5. Unplug headphones / disconnect Bluetooth audio, and return to Home to verify the floating video tile + stacked-avatar audio dock and Home live preview audio handoff.

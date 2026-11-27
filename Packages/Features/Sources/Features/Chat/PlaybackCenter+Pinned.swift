@@ -42,6 +42,24 @@ extension PlaybackCenter {
 
         guard pinnedAudio.count < Self.maxPinnedAudioSlots else { return .atCapacity }
 
+        // If the primary stream is currently running in WKWebView, upgrade it
+        // to the native engine before starting pinned native audio so WebKit's
+        // out-of-process media session doesn't fight AVPlayer or pause streams
+        // when returning from the background.
+        if let existingPrimary = primary,
+           existingPrimary.engineKind == .web,
+           !existingPrimary.controller.nativeFailed {
+            existingPrimary.promotedToNative = true
+            play(
+                existingPrimary.channel,
+                title: existingPrimary.title,
+                profileImageURL: existingPrimary.profileImageURL,
+                native: true,
+                audioOnly: existingPrimary.audioOnly,
+                quality: existingPrimary.lastQuality
+            )
+        }
+
         let slot = PlaybackSlot(
             channel: channel,
             title: title,

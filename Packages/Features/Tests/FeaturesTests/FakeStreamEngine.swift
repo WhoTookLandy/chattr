@@ -67,9 +67,11 @@ final class FakeStreamEngine: StreamEngine {
 
 /// Thread-safe recorder for `PlaybackAudioSession` actions in unit tests.
 final class RecordingAudioSessionDriver: PlaybackAudioSessionDriver, @unchecked Sendable {
-    private let state = OSAllocatedUnfairLock(initialState: (actions: [(action: AudioSessionAction, force: Bool)](), invalidations: 0))
+    private let state = OSAllocatedUnfairLock(
+        initialState: (actions: [(action: AudioSessionAction, force: Bool, inBackground: Bool)](), invalidations: 0)
+    )
 
-    var actions: [(action: AudioSessionAction, force: Bool)] {
+    var actions: [(action: AudioSessionAction, force: Bool, inBackground: Bool)] {
         state.withLock { $0.actions }
     }
 
@@ -77,8 +79,8 @@ final class RecordingAudioSessionDriver: PlaybackAudioSessionDriver, @unchecked 
         state.withLock { $0.invalidations }
     }
 
-    func apply(_ action: AudioSessionAction, force: Bool) {
-        state.withLock { $0.actions.append((action, force)) }
+    func apply(_ action: AudioSessionAction, force: Bool, inBackground: Bool) {
+        state.withLock { $0.actions.append((action, force, inBackground)) }
     }
 
     func invalidate() {

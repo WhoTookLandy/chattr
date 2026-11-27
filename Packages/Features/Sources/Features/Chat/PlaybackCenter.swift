@@ -331,7 +331,12 @@ final class PlaybackCenter {
         slot.clearLingeringStream()
 
         let nativeEnabled = PlayerSettings.isNativePlaybackEnabled
-        let wantsNative = native || (sameChannel && slot.promotedToNative)
+        // While pinned native audio is active, run primary video natively too
+        // (unless native failed for this channel) so all streams share one
+        // exclusive AVAudioSession with native PiP, per-stream volume, and no
+        // out-of-process WKWebView audio-session collisions on foreground/background.
+        let wantsNativeForMultiAudio = !pinnedAudio.isEmpty
+        let wantsNative = native || wantsNativeForMultiAudio || (sameChannel && slot.promotedToNative)
         let useNative = wantsNative && nativeEnabled && !(sameChannel && slot.controller.nativeFailed)
         let key = "\(channel.channelLoginName)|\(useNative)"
 
@@ -374,6 +379,10 @@ final class PlaybackCenter {
             slot.controller.wantsPlayback = true
             slot.controller.update(\.volume, to: 1.0)
             slot.advanceGeneration()
+        }
+
+        if wantsNativeForMultiAudio && useNative {
+            slot.promotedToNative = true
         }
 
         if native, !nativeEnabled {
@@ -523,7 +532,10 @@ final class PlaybackCenter {
             if self.primary?.id == slotID {
                 return self.primaryStaysOnNativeEngine
             }
-            return false
+            // Pinned background audio slots have no web fallback, so keep
+            // retrying patiently across transient network blips (e.g. waking
+            // from background) instead of silently unpinning.
+            return self.pinnedAudio.contains { $0.id == slotID }
         }
         ctrl.onStreamEnded = { [weak self] in
             self?.handleStreamEnded(slotID: slotID)

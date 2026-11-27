@@ -82,6 +82,15 @@ final class PlaybackSlot: Identifiable {
         engineKind == .native && engine != nil && controller.isEffectivelyAudible
     }
 
+    /// True while this native slot wants exclusive audio-session focus
+    /// (unmuted with volume > 0 and an active engine). Intentionally ignores
+    /// `isPaused` and `isHeld` so Lock Screen pause, screen-lock video pause,
+    /// and background/foreground transitions never churn `AVAudioSession`
+    /// between exclusive and `.mixWithOthers`.
+    var wantsExclusiveNativeAudio: Bool {
+        engineKind == .native && engine != nil && !controller.isMuted && controller.volume > 0
+    }
+
     /// True while this slot has an active (non-unloaded) native engine.
     var hasActiveNativeEngine: Bool {
         engineKind == .native && engine != nil

@@ -141,24 +141,54 @@ enum NativePlayer {
             guard allowsPictureInPicture != allowed else { return }
             allowsPictureInPicture = allowed
             if !allowed {
-                if let pip = controller.pictureInPicture {
-                    if pip.isPictureInPictureActive {
-                        pip.stopPictureInPicture()
-                    }
-                    pip.delegate = nil
+                tearDownPictureInPicture()
+                if audioOnly {
+                    playerView?.playerLayer.player = nil
                 }
-                controller.pictureInPicture = nil
-                controller.update(\.canPictureInPicture, to: false)
-                controller.pictureInPictureEndedAmbiguously()
-            } else if controller.pictureInPicture == nil,
-                      controller.avPlayer != nil,
-                      let view = playerView,
-                      AVPictureInPictureController.isPictureInPictureSupported(),
-                      let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
-                pip.canStartPictureInPictureAutomaticallyFromInline = true
-                pip.delegate = self
-                controller.pictureInPicture = pip
-                controller.update(\.canPictureInPicture, to: true)
+            } else if let player = controller.avPlayer {
+                syncPlayerLayerAndPiP(for: player, audioOnly: audioOnly)
+            }
+        }
+
+        private func tearDownPictureInPicture() {
+            if let pip = controller.pictureInPicture {
+                if pip.isPictureInPictureActive {
+                    pip.stopPictureInPicture()
+                }
+                pip.delegate = nil
+            }
+            controller.pictureInPicture = nil
+            controller.update(\.canPictureInPicture, to: false)
+            controller.pictureInPictureEndedAmbiguously()
+        }
+
+        /// Keeps `AVPlayerLayer` attachment, `audiovisualBackgroundPlaybackPolicy`,
+        /// and `AVPictureInPictureController` consistent with `audioOnly`.
+        /// Detaching `playerLayer.player = nil` in audio-only / headless pinned
+        /// mode guarantees iOS never pauses a hidden video rendition or demoted
+        /// player across background/foreground transitions (Apple QA1668).
+        private func syncPlayerLayerAndPiP(for player: AVPlayer, audioOnly: Bool) {
+            player.audiovisualBackgroundPlaybackPolicy = audioOnly ? .continuesIfPossible : .automatic
+            guard let view = playerView else { return }
+            if audioOnly {
+                tearDownPictureInPicture()
+                if view.playerLayer.player != nil {
+                    view.playerLayer.player = nil
+                }
+            } else {
+                if view.playerLayer.player !== player {
+                    view.playerLayer.player = player
+                }
+                if allowsPictureInPicture,
+                   controller.pictureInPicture == nil,
+                   AVPictureInPictureController.isPictureInPictureSupported(),
+                   let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
+                    pip.canStartPictureInPictureAutomaticallyFromInline = true
+                    pip.delegate = self
+                    controller.pictureInPicture = pip
+                    controller.update(\.canPictureInPicture, to: true)
+                }
+                controller.refreshAutomaticPictureInPicture()
             }
         }
 
@@ -207,17 +237,18 @@ enum NativePlayer {
             // player: drop any in-flight standby and keep playing seamlessly.
             if newAudioOnly == activeAudioOnly {
                 cancelStandby()
-                currentPlayer.audiovisualBackgroundPlaybackPolicy = newAudioOnly ? .continuesIfPossible : .automatic
+                syncPlayerLayerAndPiP(for: currentPlayer, audioOnly: newAudioOnly)
                 controller.applyQuality(quality)
                 return
             }
 
             cancelStandby()
 
-            // Entering audio-only: allow background audio immediately so
-            // locking the screen during the brief handoff doesn't pause it.
+            // Entering audio-only: detach AVPlayerLayer and allow background
+            // audio immediately so locking the screen during the brief handoff
+            // doesn't pause it.
             if newAudioOnly {
-                currentPlayer.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+                syncPlayerLayerAndPiP(for: currentPlayer, audioOnly: true)
             }
 
             // Already playing the master playlist with hidden video (Twitch
@@ -226,7 +257,7 @@ enum NativePlayer {
             if !newAudioOnly, controller.playsVideoHidden, let currentItem = currentPlayer.currentItem {
                 activeAudioOnly = false
                 controller.playsVideoHidden = false
-                currentPlayer.audiovisualBackgroundPlaybackPolicy = .automatic
+                syncPlayerLayerAndPiP(for: currentPlayer, audioOnly: false)
                 controller.applyQualityLimits(to: currentItem)
                 return
             }
@@ -319,7 +350,7 @@ enum NativePlayer {
                 // A retry or paused mode switch: the same player (and PiP
                 // controller), a fresh playlist.
                 player = existing
-                player.audiovisualBackgroundPlaybackPolicy = audioOnly ? .continuesIfPossible : .automatic
+                syncPlayerLayerAndPiP(for: player, audioOnly: audioOnly)
                 player.replaceCurrentItem(with: item)
             } else {
                 player = AVPlayer(playerItem: item)
@@ -328,18 +359,8 @@ enum NativePlayer {
                 // step while loading), the stream's own after a rebuild.
                 player.isMuted = controller.isMuted
                 player.volume = controller.volume
-                player.audiovisualBackgroundPlaybackPolicy = audioOnly ? .continuesIfPossible : .automatic
-                view.playerLayer.player = player
                 controller.avPlayer = player
-
-                if allowsPictureInPicture,
-                   AVPictureInPictureController.isPictureInPictureSupported(),
-                   let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
-                    pip.canStartPictureInPictureAutomaticallyFromInline = true
-                    pip.delegate = self
-                    controller.pictureInPicture = pip
-                    controller.update(\.canPictureInPicture, to: true)
-                }
+                syncPlayerLayerAndPiP(for: player, audioOnly: audioOnly)
                 observePlayer(player)
             }
 
@@ -639,7 +660,6 @@ enum NativePlayer {
             oldPlayer?.isMuted = true
             standby.isMuted = controller.isMuted
             standby.volume = controller.volume
-            standby.audiovisualBackgroundPlaybackPolicy = targetAudioOnly ? .continuesIfPossible : .automatic
 
             oldPlayer?.pause()
             oldPlayer?.replaceCurrentItem(with: nil)
@@ -649,18 +669,7 @@ enum NativePlayer {
             controller.playsVideoHidden = targetAudioOnly && !isAudioOnlyRendition
             controller.applyQualityLimits(to: item)
             controller.avPlayer = standby
-            view.playerLayer.player = standby
-
-            if allowsPictureInPicture,
-               controller.pictureInPicture == nil,
-               AVPictureInPictureController.isPictureInPictureSupported(),
-               let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
-                pip.canStartPictureInPictureAutomaticallyFromInline = true
-                pip.delegate = self
-                controller.pictureInPicture = pip
-                controller.update(\.canPictureInPicture, to: true)
-            }
-            controller.refreshAutomaticPictureInPicture()
+            syncPlayerLayerAndPiP(for: standby, audioOnly: targetAudioOnly)
 
             observePlayer(standby)
             observeItem(item)
