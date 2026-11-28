@@ -1,15 +1,12 @@
-Multi-audio background streams & Audio Mixer
+Native Low Latency mode & live latency telemetry
 
 NEW
-• Pinned background audio (up to 3 streams): Keep up to 3 live Twitch streams playing in background audio while watching another channel's video, swiping across chats, or locking your screen.
-• Audio Mixer sheet: Independent volume sliders for every native stream, 1-tap Solo, Mute All, promote-to-video, demote primary video to pinned audio, and "+ Add from Open Chats".
-• In-video pinned audio bar: Slim chip strip right under inline video (tap chip to mute/unmute, × to unpin, sliders for mixer) — plus a configurable Floating Pill option in Settings → Video & Device → Background Audio Bar (landscape always uses the compact floating pill).
-• Quick pinning everywhere: Toggle background audio directly from the chat header popover switcher, the video overlay headphones menu, swipe-right on open chats, or long-press channel preview menus.
-• Multi-stream mini player & Lock Screen: Primary video stays corner-snapped above the unified Liquid Glass audio dock, and Lock Screen Play/Pause controls all active background streams together.
+• Low Latency toggle (Settings → Video & Device → Low Latency): Tightens native AVPlayer's live-edge offset (6s → 2s) and forward buffer cap (auto → 2s) for native video, audio-only, and pinned background audio, and applies immediately to active streams.
+• Live playback latency HUD: When Settings → About → Developer → Chat Debug HUD is enabled, a 3rd line shows live stream metrics (mode, LL/std, estimated e2e latency from HLS program date, live-edge lag, forward buffer, configured vs AVPlayer recommended offset, and stall count).
+• Structured playback logs: Native player start, audio/video swap commits, and stalls now log latency and buffer telemetry in Recent Logs and exported Diagnostic Reports.
 
 PLEASE TEST
-1. Watch Channel A's video (both with Native Video Player OFF / Web player and with Native Video Player ON), open the top switcher popover, and tap 🎧 Listen on Channel B and Channel C — confirm Channel A's video keeps playing while B and C play in background audio.
-2. Tap the Audio Mixer button, adjust individual volume sliders, test 1-tap Solo and Mute All, and tap the video icon on a pinned stream to promote it seamlessly to video.
-3. Switch Settings → Video & Device → Background Audio Bar between Chip Strip and Floating Pill, and rotate to landscape to verify the compact floating pill.
-4. Background the app and lock the device while watching Channel A video + pinned B & C audio, then open chattr back up — confirm background audio stays alive and every stream (primary video + pinned audio) stays playing or auto-resumes seamlessly without pausing or needing to be reopened.
-5. Unplug headphones / disconnect Bluetooth audio, and return to Home to verify the floating video tile + stacked-avatar audio dock and Home live preview audio handoff.
+1. Enable Settings → About → Developer → Chat Debug HUD, open a live channel in native video and in audio-only mode, and compare the HUD's `e2e` latency against the Twitch app's Video Stats.
+2. Toggle Settings → Video & Device → Low Latency ON and OFF while a stream is actively playing — confirm it updates live without restarting and pulls playback closer to the live edge.
+3. Compare `cfg` vs `rec` vs `lag` and watch `stl` (stalls) on Wi-Fi and cellular in both video and background audio-only modes.
+4. Pause/resume and background/foreground the app to verify live-edge resume respects the Low Latency offset.

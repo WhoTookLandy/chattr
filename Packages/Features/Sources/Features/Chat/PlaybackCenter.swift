@@ -733,6 +733,79 @@ final class PlaybackCenter {
         pinnedAudio.first { $0.channel.channelId == channelId }
     }
 
+    // MARK: - Latency profile & diagnostics
+
+    /// Re-applies the current `PlaybackLatencyProfile` to every active native
+    /// slot (primary + pinned background audio) when the user flips Low Latency
+    /// in Settings → Video & Device.
+    func applyLatencyPreference(_ profile: PlaybackLatencyProfile = .current) {
+        let nativeSlots = allSlots.filter { $0.engineKind == .native }
+        guard !nativeSlots.isEmpty else { return }
+        for slot in nativeSlots {
+            slot.controller.applyLatencyProfile(profile)
+        }
+        playbackCenterLogger.notice(
+            "Applied latency profile lowLatency=\(profile.isLowLatency) offset=\(profile.liveOffsetSeconds)s fwdCap=\(profile.forwardBufferDuration)s slots=\(nativeSlots.count)"
+        )
+    }
+
+    /// Point-in-time playback latency snapshot for the debug HUD. Prefers a
+    /// slot playing `channelLogin` (primary or pinned audio), falling back to
+    /// `primary` if another channel is playing in the mini player.
+    func latencySnapshot(
+        forChannelLogin channelLogin: String,
+        now: Date = Date()
+    ) -> (snapshot: PlaybackLatencySnapshot, isOtherChannel: Bool)? {
+        let key = channelLogin.lowercased()
+        let match: (slot: PlaybackSlot, isOther: Bool)?
+        if let primary, primary.channel.channelLoginName.lowercased() == key {
+            match = (primary, false)
+        } else if let pinned = pinnedAudio.first(where: { $0.channel.channelLoginName.lowercased() == key }) {
+            match = (pinned, false)
+        } else if let primary {
+            match = (primary, true)
+        } else {
+            match = nil
+        }
+
+        guard let match, let engineKind = match.slot.engineKind else { return nil }
+        let slot = match.slot
+        let login = slot.channel.channelLoginName
+
+        switch engineKind {
+        case .web:
+            let webSnapshot = PlaybackLatencySnapshot(
+                channelLogin: login,
+                mode: .web,
+                isLowLatency: false,
+                endToEndSeconds: nil,
+                liveEdgeLagSeconds: nil,
+                bufferedAheadSeconds: nil,
+                configuredOffsetSeconds: nil,
+                recommendedOffsetSeconds: nil,
+                preferredForwardBufferSeconds: 0,
+                stallCount: nil
+            )
+            return (webSnapshot, match.isOther)
+
+        case .native:
+            guard let item = slot.controller.avPlayer?.currentItem else { return nil }
+            let mode: PlaybackLatencySnapshot.Mode
+            if slot.audioOnly {
+                mode = slot.controller.playsVideoHidden ? .audioHiddenVideo : .audioOnly
+            } else {
+                mode = .video
+            }
+            let snapshot = PlaybackLatencySnapshot.sample(
+                item: item,
+                channelLogin: login,
+                mode: mode,
+                now: now
+            )
+            return (snapshot, match.isOther)
+        }
+    }
+
     // MARK: - Hosts
 
     func claim(_ hostID: UUID) {

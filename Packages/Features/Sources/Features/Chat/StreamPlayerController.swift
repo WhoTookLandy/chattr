@@ -376,16 +376,43 @@ final class StreamPlayerController {
             return run("play")
         }
         // Live: resume at the live edge, not where we paused — less the
-        // offset the item keeps from it (`liveOffset`). At the very end of
-        // the seekable range nothing is buffered yet, and the player
-        // stalls the moment it starts.
+        // active profile's offset (`PlaybackLatencyProfile.current.liveOffset`).
+        // At the very end of the seekable range nothing is buffered yet, and
+        // the player stalls the moment it starts.
+        let latency = PlaybackLatencyProfile.current
         if let item = player.currentItem,
            item.status == .readyToPlay,
            let range = item.seekableTimeRanges.last?.timeRangeValue,
-           let target = Self.liveResumeTarget(for: range) {
+           let target = Self.liveResumeTarget(for: range, offset: latency.liveOffset) {
             player.seek(to: target)
         }
         player.play()
+    }
+
+    /// Applies `profile` to an active native `AVPlayerItem` immediately. When
+    /// switching into Low Latency while already playing further behind live
+    /// than the new target, nudges the playhead forward toward the live edge.
+    func applyLatencyProfile(_ profile: PlaybackLatencyProfile = .current) {
+        guard let player = avPlayer, let item = player.currentItem else { return }
+        item.automaticallyPreservesTimeOffsetFromLive = true
+        item.configuredTimeOffsetFromLive = profile.liveOffset
+        item.preferredForwardBufferDuration = profile.forwardBufferDuration
+
+        guard profile.isLowLatency,
+              player.timeControlStatus == .playing,
+              item.status == .readyToPlay,
+              let range = item.seekableTimeRanges.last?.timeRangeValue,
+              let target = Self.liveResumeTarget(for: range, offset: profile.liveOffset)
+        else { return }
+
+        let current = item.currentTime()
+        let edge = CMTimeRangeGetEnd(range)
+        if current.isNumeric, edge.isNumeric {
+            let currentLag = CMTimeGetSeconds(CMTimeSubtract(edge, current))
+            if currentLag > profile.liveOffsetSeconds + 1.5 {
+                player.seek(to: target)
+            }
+        }
     }
 
     /// Computes the live-edge seek target for `range`, or `nil` when `range`
@@ -396,24 +423,25 @@ final class StreamPlayerController {
     /// Passing a non-numeric `CMTime` to `AVPlayer.seek(to:)` throws
     /// `NSInvalidArgumentException`, so `resume()` skips the seek and lets
     /// `AVPlayer.play()` resume via `configuredTimeOffsetFromLive`.
-    static func liveResumeTarget(for range: CMTimeRange) -> CMTime? {
+    static func liveResumeTarget(for range: CMTimeRange, offset: CMTime = liveOffset) -> CMTime? {
         guard range.isValid, !range.isEmpty,
-              range.start.isNumeric, range.duration.isNumeric
+              range.start.isNumeric, range.duration.isNumeric,
+              offset.isNumeric
         else { return nil }
         let liveEdge = CMTimeRangeGetEnd(range)
         guard liveEdge.isNumeric else { return nil }
-        let offsetTarget = CMTimeSubtract(liveEdge, liveOffset)
+        let offsetTarget = CMTimeSubtract(liveEdge, offset)
         let target = offsetTarget.isNumeric
             ? CMTimeMaximum(range.start, offsetTarget)
             : range.start
         return target.isNumeric ? target : nil
     }
 
-    /// How far behind the live edge the native player sits
+    /// Default live-edge offset for the standard latency profile
     /// (`AVPlayerItem.configuredTimeOffsetFromLive`): about three of
     /// Twitch's two-second segments, enough buffer to play without
     /// stalling.
-    static let liveOffset = CMTime(seconds: 6, preferredTimescale: 600)
+    static let liveOffset = PlaybackLatencyProfile.standard.liveOffset
 
     /// Lock screen / Control Center play and pause (`StreamNowPlaying`):
     /// the user's intent, exactly like `togglePlay`.
