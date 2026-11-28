@@ -76,11 +76,13 @@ struct TwitchMediaPlaylist: Equatable, Sendable {
     }
 
     /// Apple LL-HLS `PART-TARGET` we advertise (must be `>=` every part's
-    /// actual duration and stay constant across reloads).
-    static let partTargetDuration: Double = 0.600
+    /// actual duration and stay constant across reloads; ordinary dependent
+    /// parts target `>= 85%` of this = `>= 0.476s`, matching 5 × ~100ms Twitch
+    /// CMAF chunks ≈ 0.500–0.533s).
+    static let partTargetDuration: Double = 0.560
     /// Apple LL-HLS `PART-HOLD-BACK` (strictly `>= 3 × PART-TARGET` per
     /// RFC 8216bis §4.4.3.8 for `AVPlayer` stability).
-    static let partHoldBack: Double = 1.800
+    static let partHoldBack: Double = 1.680
 
     let version: Int
     let declaredTargetDuration: Int
@@ -154,12 +156,20 @@ struct TwitchMediaPlaylist: Equatable, Sendable {
                 pendingProgramDateTime = String(line.dropFirst("#EXT-X-PROGRAM-DATE-TIME:".count))
             } else if line.hasPrefix("#EXTINF:") {
                 let body = line.dropFirst("#EXTINF:".count)
+                let rawValue: Double?
                 if let comma = body.firstIndex(of: ",") {
-                    pendingDuration = Double(body[..<comma]) ?? 2.0
+                    rawValue = Double(body[..<comma])
                     pendingTitle = String(body[body.index(after: comma)...])
                 } else {
-                    pendingDuration = Double(body) ?? 2.0
+                    rawValue = Double(body)
                     pendingTitle = ""
+                }
+                // Guard against non-finite / negative durations (`#EXTINF:inf`)
+                // so downstream integer target-duration math can never trap.
+                if let rawValue, rawValue.isFinite, rawValue >= 0, rawValue < 3600 {
+                    pendingDuration = rawValue
+                } else {
+                    pendingDuration = 2.0
                 }
             } else if line.hasPrefix("#EXT-X-TWITCH-PREFETCH:") {
                 let raw = String(line.dropFirst("#EXT-X-TWITCH-PREFETCH:".count))
@@ -206,10 +216,14 @@ struct TwitchMediaPlaylist: Equatable, Sendable {
     /// - Parameters:
     ///   - segmentPartsByMSN: Partial-segment state keyed by MSN (covers both
     ///     recent finalized segments and live prefetch segments).
-    ///   - preloadHint: Next upcoming `#EXT-X-PRELOAD-HINT` URI when a live
+    ///   - pinnedSegmentURIs: Stable `/seg/` URIs for MSNs that were previously
+    ///     promoted ahead of Twitch's playlist, so an MSN's advertised URI
+    ///     never changes once Twitch finalizes it (RFC 8216bis).
+    ///   - preloadHintURI: Next upcoming `#EXT-X-PRELOAD-HINT` URI when a live
     ///     prefetch segment is currently streaming.
     func renderLLHLS(
         segmentPartsByMSN: [Int: LLHLSSegmentParts] = [:],
+        pinnedSegmentURIs: [Int: String] = [:],
         preloadHintURI: String? = nil
     ) -> String {
         // Collect any completed prefetch segments contiguous with our upstream
@@ -232,7 +246,7 @@ struct TwitchMediaPlaylist: Equatable, Sendable {
                     mapLineBefore: nil,
                     mapURIBefore: nil,
                     dateRangeLinesBefore: [],
-                    uri: ready.segmentURI
+                    uri: pinnedSegmentURIs[nextMSN] ?? ready.segmentURI
                 ))
                 prevDateTime = extrapolatedDate
                 prevDuration = duration
@@ -258,24 +272,27 @@ struct TwitchMediaPlaylist: Equatable, Sendable {
         let hasAnyParts = !recentFinalizedPartMSNs.isEmpty || (activePartial?.parts.isEmpty == false)
         let emitLLHLS = !isEndList && hasAnyParts
 
-        // Tight target duration: never smaller than any segment's rounded
-        // duration (RFC 8216 §4.3.3.1), fixing Twitch's overly-conservative 6s
-        // declaration when every live segment is 2.000s.
-        let maxSegmentDuration = allFinalized.map(\.duration).max() ?? Double(declaredTargetDuration)
-        let tightTargetDuration = max(2, Int(ceil(maxSegmentDuration)))
-        let holdBack = max(6.0, Double(tightTargetDuration) * 3.0)
+        // Keep `EXT-X-TARGETDURATION` stable across reloads (RFC 8216bis: must
+        // not change mid-stream even when 5.5–6s ad segments enter the window).
+        // In LL-HLS mode `AVPlayer` uses `PART-HOLD-BACK` (1.68s) rather than
+        // `3 × TARGETDURATION`.
+        let finiteDurations = allFinalized.map(\.duration).filter { $0.isFinite && $0 >= 0 && $0 < 3600 }
+        let maxSegmentCeil = finiteDurations.max().flatMap { Int(exactly: ceil($0)) } ?? 2
+        let stableTargetDuration = max(2, declaredTargetDuration, maxSegmentCeil)
+        let holdBack = max(6.0, Double(stableTargetDuration) * 3.0)
 
         // Ensure PART-TARGET is never exceeded by any emitted part.
         let allEmittedPartDurations: [Double] = recentFinalizedPartMSNs.flatMap {
             segmentPartsByMSN[$0]?.parts.map(\.duration) ?? []
         } + (activePartial?.parts.map(\.duration) ?? [])
-        let effectivePartTarget = max(Self.partTargetDuration, (allEmittedPartDurations.max() ?? 0) + 0.01)
+        let maxPartDur = allEmittedPartDurations.filter(\.isFinite).max() ?? 0
+        let effectivePartTarget = max(Self.partTargetDuration, maxPartDur)
         let effectivePartHoldBack = max(Self.partHoldBack, effectivePartTarget * 3.0)
 
         var lines: [String] = [
             "#EXTM3U",
             "#EXT-X-VERSION:\(max(version, emitLLHLS ? 7 : 6))",
-            "#EXT-X-TARGETDURATION:\(tightTargetDuration)",
+            "#EXT-X-TARGETDURATION:\(stableTargetDuration)",
             "#EXT-X-MEDIA-SEQUENCE:\(mediaSequence)",
         ]
         if let discontinuitySequence {
@@ -311,7 +328,7 @@ struct TwitchMediaPlaylist: Equatable, Sendable {
                 }
             }
             lines.append("#EXTINF:\(Self.format3(segment.duration)),\(segment.title)")
-            lines.append(segment.uri)
+            lines.append(pinnedSegmentURIs[segment.msn] ?? segment.uri)
         }
 
         if emitLLHLS {

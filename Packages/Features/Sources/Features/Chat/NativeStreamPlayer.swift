@@ -117,6 +117,9 @@ enum NativePlayer {
         private var bypassLLHLSProxy = false
         /// Latency mode currently active on `controller.avPlayer`.
         private var activeLowLatency = false
+        /// Latest Low Latency mode requested by the user. Checked before
+        /// starting or committing any swap so a superseded toggle can never win.
+        private var desiredLowLatency = false
         /// When the player last went to paused; nil while it isn't.
         private var pausedAt: ContinuousClock.Instant?
 
@@ -218,7 +221,9 @@ enum NativePlayer {
             self.activeAudioOnly = audioOnly
             self.bypassLLHLSProxy = false
             self.activeItemUsesLLHLSProxy = false
-            self.activeLowLatency = PlaybackLatencyProfile.current.isLowLatency
+            let lowLatency = PlaybackLatencyProfile.current.isLowLatency
+            self.activeLowLatency = lowLatency
+            self.desiredLowLatency = lowLatency
             playerView = view
             isLoaded = true
             recovery = PlaybackRecovery()
@@ -302,6 +307,7 @@ enum NativePlayer {
         /// proxy (`TwitchLLHLSProxy`) without interrupting audio.
         func setLowLatency(_ enabled: Bool) {
             guard isLoaded else { return }
+            desiredLowLatency = enabled
             if enabled {
                 bypassLLHLSProxy = false
             }
@@ -311,6 +317,11 @@ enum NativePlayer {
                 return
             }
             if activeLowLatency == enabled && activeItemUsesLLHLSProxy == enabled {
+                // Cancel any superseded pending Low Latency swap (without
+                // cancelling an unrelated Audio-Only ↔ Video transition).
+                if standbyPlayer != nil, standbyLowLatency != enabled, standbyTargetAudioOnly == activeAudioOnly {
+                    cancelStandby()
+                }
                 controller.applyLatencyProfile(profile)
                 return
             }
@@ -402,9 +413,16 @@ enum NativePlayer {
                         await PlaybackAudioSession.shared.activate(muted: self.controller.isMuted)
                     }
                     guard !Task.isCancelled else { return }
-                    let profile = PlaybackLatencyProfile.current
-                    let resolved = await self.resolvePlaybackURL(for: playlist, profile: profile)
+                    var profile = PlaybackLatencyProfile.resolve(lowLatency: self.desiredLowLatency)
+                    var resolved = await self.resolvePlaybackURL(for: playlist, profile: profile)
                     guard !Task.isCancelled else { return }
+                    // Re-check if the user flipped Low Latency while awaiting
+                    // proxy setup so the first item always matches current intent.
+                    if self.desiredLowLatency != profile.isLowLatency {
+                        profile = PlaybackLatencyProfile.resolve(lowLatency: self.desiredLowLatency)
+                        resolved = await self.resolvePlaybackURL(for: playlist, profile: profile)
+                        guard !Task.isCancelled else { return }
+                    }
                     self.start(playlist, playbackURL: resolved.url, usesProxy: resolved.usesProxy, profile: profile)
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -682,7 +700,7 @@ enum NativePlayer {
             bridgeLiveAudio: Bool,
             profile: PlaybackLatencyProfile
         ) {
-            guard isLoaded, audioOnly == targetAudioOnly else { return }
+            guard isLoaded, audioOnly == targetAudioOnly, desiredLowLatency == profile.isLowLatency else { return }
             if bridgeLiveAudio, controller.avPlayer != nil, controller.startsPlaying {
                 beginWarmSwap(
                     to: playlist,
@@ -798,6 +816,10 @@ enum NativePlayer {
 
         private func tryCommitStandby(generation: Int) {
             guard isLoaded, generation == standbyGeneration, standbyIsPlaying, standbyFrameReady else { return }
+            guard standbyLowLatency == desiredLowLatency else {
+                cancelStandby()
+                return
+            }
             guard let standby = standbyPlayer, let item = standby.currentItem, let view = playerView else { return }
 
             let targetAudioOnly = standbyTargetAudioOnly

@@ -84,8 +84,10 @@ actor TwitchLLHLSProxy {
 
     private var listener: NWListener?
     private var listenerGeneration = 0
+    private var listenerStartupTask: Task<UInt16?, Never>?
     private var port: UInt16?
     private var masterURLs: [String: URL] = [:]
+    private var masterOrder: [String] = []
     private var variantTracks: [String: LLHLSVariantTrack] = [:]
     private var variantIDByUpstream: [String: String] = [:]
     private var nextID = 0
@@ -106,10 +108,12 @@ actor TwitchLLHLSProxy {
             nextID += 1
             let masterID = "m\(nextID)"
             masterURLs[masterID] = playlist.url
-            // Keep bounded history of recent master URLs.
-            if masterURLs.count > 24 {
-                let oldestKeys = masterURLs.keys.sorted().prefix(masterURLs.count - 24)
-                for key in oldestKeys { masterURLs[key] = nil }
+            masterOrder.append(masterID)
+            // Evict strictly by registration order (FIFO) so `m100` never
+            // sorts ahead of `m99` and evicts itself.
+            while masterOrder.count > 24 {
+                let evicted = masterOrder.removeFirst()
+                masterURLs[evicted] = nil
             }
             return URL(string: "http://127.0.0.1:\(boundPort)/\(token)/master/\(masterID).m3u8")
         }
@@ -117,6 +121,9 @@ actor TwitchLLHLSProxy {
 
     /// Stops all tracks and tears down the listener (used in tests / cleanup).
     func stopAll() async {
+        listenerStartupTask?.cancel()
+        listenerStartupTask = nil
+        listenerGeneration += 1
         listener?.cancel()
         listener = nil
         port = nil
@@ -126,11 +133,29 @@ actor TwitchLLHLSProxy {
         variantTracks.removeAll()
         variantIDByUpstream.removeAll()
         masterURLs.removeAll()
+        masterOrder.removeAll()
     }
 
     // MARK: - Listener Lifecycle
 
     private func ensureListening() async -> UInt16? {
+        if let port, listener != nil {
+            return port
+        }
+        if let inFlight = listenerStartupTask {
+            return await inFlight.value
+        }
+
+        let task = Task<UInt16?, Never> {
+            await self.startNewListener()
+        }
+        listenerStartupTask = task
+        let result = await task.value
+        listenerStartupTask = nil
+        return result
+    }
+
+    private func startNewListener() async -> UInt16? {
         if let port, listener != nil {
             return port
         }
@@ -198,9 +223,11 @@ actor TwitchLLHLSProxy {
             newListener.start(queue: listenerQueue)
         }
 
-        guard let boundPort else {
+        // If `stopAll()` or another listener superseded us while suspended,
+        // cancel our own listener and never overwrite the committed one.
+        guard let boundPort, generation == listenerGeneration else {
             newListener.cancel()
-            return nil
+            return port
         }
         listener = newListener
         port = boundPort
@@ -230,9 +257,15 @@ actor TwitchLLHLSProxy {
     private func pruneIdleTracks() async {
         for (id, track) in Array(variantTracks) {
             if await track.isIdle {
-                await track.stop()
-                variantTracks[id] = nil
-                variantIDByUpstream[track.upstreamURL.absoluteString] = nil
+                // Suspend background work without permanently disabling the URL
+                // so AVPlayer ABR switches back cleanly; only evict entries when
+                // the table grows large.
+                await track.suspendForIdle()
+                if variantTracks.count > 48 {
+                    await track.stop()
+                    variantTracks[id] = nil
+                    variantIDByUpstream[track.upstreamURL.absoluteString] = nil
+                }
             }
         }
     }
@@ -363,6 +396,8 @@ actor TwitchLLHLSProxy {
                     contentType: "application/vnd.apple.mpegurl",
                     body: Data(text.utf8)
                 )
+            } catch ChunkedHTTPClient.HTTPStreamError.badStatus(503) {
+                return HTTPResponsePayload(status: "503 Service Unavailable", contentType: "text/plain", body: Data())
             } catch {
                 return HTTPResponsePayload(status: "502 Bad Gateway", contentType: "text/plain", body: Data(), allowKeepAlive: false)
             }
@@ -371,7 +406,8 @@ actor TwitchLLHLSProxy {
             guard components.count == 5,
                   let track = variantTracks[components[2]],
                   let msn = Int(components[3]),
-                  let partIndex = Int(components[4].replacingOccurrences(of: ".mp4", with: ""))
+                  let partIndex = Int(components[4].replacingOccurrences(of: ".mp4", with: "")),
+                  partIndex >= 0
             else {
                 return HTTPResponsePayload(status: "400 Bad Request", contentType: "text/plain", body: Data())
             }

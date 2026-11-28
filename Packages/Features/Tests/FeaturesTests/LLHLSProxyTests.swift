@@ -111,7 +111,7 @@ struct LLHLSProxyTests {
     }
 
     @Test("Frames incremental CMAF bytes into exact chunks with duration and IDR flags")
-    func framesChunkedVideoStream() {
+    func framesChunkedVideoStream() throws {
         let info = CMAFInitInfo(
             trackTimescales: [1: 48_000, 2: 1_000_000],
             videoTrackID: 2,
@@ -143,7 +143,7 @@ struct LLHLSProxyTests {
             cursor = next
         }
 
-        #expect(emitted.count == 2)
+        try #require(emitted.count == 2)
         #expect(emitted[0].data == emsg + chunk1Raw)
         #expect(abs(emitted[0].duration - 0.100002) < 0.0001)
         #expect(emitted[0].isIndependent == true)
@@ -154,15 +154,15 @@ struct LLHLSProxyTests {
     }
 
     @Test("Audio-only CMAF chunks are all marked independently decodable")
-    func framesAudioOnlyChunksAsIndependent() {
+    func framesAudioOnlyChunksAsIndependent() throws {
         let info = CMAFInitInfo(trackTimescales: [1: 48_000], videoTrackID: nil, primaryTrackID: 1)
         // 5 AAC frames × 1024 samples / 48000 Hz = 0.106667s
         let c1 = moofChunk(trackID: 1, sampleDurations: Array(repeating: 1024, count: 5), firstSampleFlags: nil)
         let c2 = moofChunk(trackID: 1, sampleDurations: Array(repeating: 1024, count: 5), firstSampleFlags: nil)
         var framer = CMAFChunkFramer(initInfo: info)
         let chunks = framer.append(c1 + c2)
-        #expect(chunks.count == 2)
-        #expect(chunks.allSatisfy(\.isIndependent))
+        try #require(chunks.count == 2)
+        #expect(chunks.allSatisfy { $0.isIndependent })
         #expect(abs(chunks[0].duration - (5120.0 / 48_000.0)) < 0.0001)
     }
 
@@ -225,11 +225,10 @@ struct LLHLSProxyTests {
             8071: LLHLSSegmentParts(
                 msn: 8071,
                 parts: [
-                    LLHLSPartDescriptor(partIndex: 0, duration: 0.400, isIndependent: true, uri: "http://127.0.0.1:9999/t/part/v1/8071/0.mp4"),
-                    LLHLSPartDescriptor(partIndex: 1, duration: 0.400, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8071/1.mp4"),
-                    LLHLSPartDescriptor(partIndex: 2, duration: 0.400, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8071/2.mp4"),
-                    LLHLSPartDescriptor(partIndex: 3, duration: 0.400, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8071/3.mp4"),
-                    LLHLSPartDescriptor(partIndex: 4, duration: 0.400, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8071/4.mp4"),
+                    LLHLSPartDescriptor(partIndex: 0, duration: 0.500, isIndependent: true, uri: "http://127.0.0.1:9999/t/part/v1/8071/0.mp4"),
+                    LLHLSPartDescriptor(partIndex: 1, duration: 0.500, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8071/1.mp4"),
+                    LLHLSPartDescriptor(partIndex: 2, duration: 0.500, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8071/2.mp4"),
+                    LLHLSPartDescriptor(partIndex: 3, duration: 0.500, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8071/3.mp4"),
                 ],
                 isComplete: true,
                 segmentURI: "http://127.0.0.1:9999/t/seg/v1/8071.mp4"
@@ -237,30 +236,67 @@ struct LLHLSProxyTests {
             8072: LLHLSSegmentParts(
                 msn: 8072,
                 parts: [
-                    LLHLSPartDescriptor(partIndex: 0, duration: 0.400, isIndependent: true, uri: "http://127.0.0.1:9999/t/part/v1/8072/0.mp4"),
-                    LLHLSPartDescriptor(partIndex: 1, duration: 0.400, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8072/1.mp4"),
+                    LLHLSPartDescriptor(partIndex: 0, duration: 0.500, isIndependent: true, uri: "http://127.0.0.1:9999/t/part/v1/8072/0.mp4"),
+                    LLHLSPartDescriptor(partIndex: 1, duration: 0.500, isIndependent: false, uri: "http://127.0.0.1:9999/t/part/v1/8072/1.mp4"),
                 ],
                 isComplete: false,
                 segmentURI: "http://127.0.0.1:9999/t/seg/v1/8072.mp4"
             ),
         ]
 
+        let pinned = [8071: "http://127.0.0.1:9999/t/seg/v1/8071.mp4"]
         let rendered = parsed.renderLLHLS(
             segmentPartsByMSN: parts,
+            pinnedSegmentURIs: pinned,
             preloadHintURI: "http://127.0.0.1:9999/t/part/v1/8072/2.mp4"
         )
 
         #expect(rendered.contains("#EXT-X-VERSION:7"))
-        #expect(rendered.contains("#EXT-X-TARGETDURATION:2"))
-        #expect(rendered.contains("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.800,HOLD-BACK=6.000"))
-        #expect(rendered.contains("#EXT-X-PART-INF:PART-TARGET=0.600"))
+        // TARGETDURATION stays stable across reloads (covers 5.5–6s stitched ads).
+        #expect(rendered.contains("#EXT-X-TARGETDURATION:6"))
+        #expect(rendered.contains("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.680,HOLD-BACK=18.000"))
+        #expect(rendered.contains("#EXT-X-PART-INF:PART-TARGET=0.560"))
         // Promoted segment 8071 gets extrapolated program date-time (+2.000s from 04:48:56.693Z)
         #expect(rendered.contains("#EXT-X-PROGRAM-DATE-TIME:2026-11-28T04:48:58.693Z"))
         #expect(rendered.contains("http://127.0.0.1:9999/t/seg/v1/8071.mp4"))
-        #expect(rendered.contains("#EXT-X-PART:DURATION=0.400,URI=\"http://127.0.0.1:9999/t/part/v1/8072/0.mp4\",INDEPENDENT=YES"))
-        #expect(rendered.contains("#EXT-X-PART:DURATION=0.400,URI=\"http://127.0.0.1:9999/t/part/v1/8072/1.mp4\""))
+        #expect(rendered.contains("#EXT-X-PART:DURATION=0.500,URI=\"http://127.0.0.1:9999/t/part/v1/8072/0.mp4\",INDEPENDENT=YES"))
+        #expect(rendered.contains("#EXT-X-PART:DURATION=0.500,URI=\"http://127.0.0.1:9999/t/part/v1/8072/1.mp4\""))
         #expect(rendered.contains("#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"http://127.0.0.1:9999/t/part/v1/8072/2.mp4\""))
         #expect(!rendered.contains("EXT-X-TWITCH-PREFETCH"))
+
+        // Once Twitch publishes MSN 8071 in upstream #EXTINF, the pinned /seg/ URI stays stable.
+        let finalizedUpstream = """
+        #EXTM3U
+        #EXT-X-VERSION:6
+        #EXT-X-TARGETDURATION:6
+        #EXT-X-MEDIA-SEQUENCE:8070
+        #EXT-X-MAP:URI="https://cdn.example.net/init.mp4"
+        #EXTINF:2.000,live
+        https://cdn.example.net/seg-8070.mp4
+        #EXTINF:2.000,live
+        https://cdn.example.net/seg-8071.mp4
+        """
+        let reparsed = TwitchMediaPlaylist.parse(finalizedUpstream, relativeTo: mediaURL)
+        let rerendered = reparsed.renderLLHLS(segmentPartsByMSN: parts, pinnedSegmentURIs: pinned)
+        #expect(rerendered.contains("http://127.0.0.1:9999/t/seg/v1/8071.mp4"))
+        #expect(!rerendered.contains("https://cdn.example.net/seg-8071.mp4"))
+    }
+
+    @Test("Safely handles non-finite EXTINF durations without trapping")
+    func handlesNonFiniteDuration() {
+        let mediaURL = URL(string: "https://video-weaver.example.net/v1/playlist/bad.m3u8")!
+        let bad = """
+        #EXTM3U
+        #EXT-X-VERSION:6
+        #EXT-X-TARGETDURATION:6
+        #EXT-X-MEDIA-SEQUENCE:1
+        #EXTINF:inf,live
+        https://cdn.example.net/seg-1.mp4
+        """
+        let parsed = TwitchMediaPlaylist.parse(bad, relativeTo: mediaURL)
+        #expect(parsed.segments.first?.duration == 2.0)
+        let rendered = parsed.renderLLHLS()
+        #expect(rendered.contains("#EXT-X-TARGETDURATION:6"))
     }
 
     @Test("Keeps TARGETDURATION >= longest ad segment and disables LL-HLS on legacy .ts")

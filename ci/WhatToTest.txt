@@ -1,7 +1,7 @@
 Native Apple LL-HLS Low Latency Proxy (Twitch Prefetch → EXT-X-PART)
 
 NEW
-• Local LL-HLS prefetch translator: When Settings → Video & Device → Low Latency is enabled, native video, audio-only, and pinned background audio now route through an in-process localhost (127.0.0.1) proxy that streams Twitch's #EXT-X-TWITCH-PREFETCH CMAF chunks incrementally and translates them into standard Apple LL-HLS (#EXT-X-PART, #EXT-X-PRELOAD-HINT, CAN-BLOCK-RELOAD=YES, fixed TARGETDURATION:2) — bringing native AVPlayer close to the official Twitch app's ~2–4s latency while keeping native PiP and background audio.
+• Local LL-HLS prefetch translator: When Settings → Video & Device → Low Latency is enabled, native video, audio-only, and pinned background audio now route through an in-process localhost (127.0.0.1) proxy that streams Twitch's #EXT-X-TWITCH-PREFETCH CMAF chunks incrementally and translates them into standard Apple LL-HLS (#EXT-X-PART, #EXT-X-PRELOAD-HINT, CAN-BLOCK-RELOAD=YES, PART-HOLD-BACK=1.68s) — bringing native AVPlayer close to the official Twitch app's ~2–4s latency while keeping native PiP and background audio.
 • Automatic graceful fallback: If the local LL-HLS proxy ever fails on a stream, playback transparently falls back to direct Twitch HLS with zero manual intervention.
 • Seamless live toggle: Flipping Low Latency ON or OFF in Settings warm-swaps active streams in place without audio gaps, and Chat Debug HUD now distinguishes `LL+` (local LL-HLS proxy active) from `LL` (direct) and `std` (standard).
 

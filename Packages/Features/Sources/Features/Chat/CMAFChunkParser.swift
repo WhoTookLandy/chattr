@@ -150,7 +150,7 @@ struct CMAFChunkFramer: Sendable {
                 return emitted
             }
 
-            guard cursor + boxSize <= buffer.endIndex else { break }
+            guard boxSize <= buffer.endIndex - cursor else { break }
             let boxEnd = cursor + boxSize
             let type = MP4BoxScanner.readFourCC(buffer, at: cursor + 4)
             let boxData = Data(buffer[cursor..<boxEnd])
@@ -197,9 +197,15 @@ struct CMAFChunkFramer: Sendable {
                 }
 
             default:
-                // Attach leading metadata boxes (emsg, styp, sidx, prft) to the
-                // next moof+mdat pair so event messages are never lost.
-                pendingPrefix.append(boxData)
+                if pendingMoof != nil {
+                    // Preserve boxes between moof and mdat in-place so trun
+                    // data offsets measured from moof stay exact.
+                    pendingMoof?.append(boxData)
+                } else {
+                    // Attach leading metadata boxes (emsg, styp, sidx, prft) to
+                    // the next moof+mdat pair so event messages are never lost.
+                    pendingPrefix.append(boxData)
+                }
             }
 
             cursor = boxEnd
@@ -232,6 +238,7 @@ struct CMAFChunkFramer: Sendable {
             var defaultSampleFlags: UInt32?
             var totalTicks: UInt64 = 0
             var firstSampleFlags: UInt32?
+            var sawNonEmptyTrun = false
 
             for child in MP4BoxScanner.children(of: traf, in: data) {
                 if child.type == "tfhd" {
@@ -242,7 +249,8 @@ struct CMAFChunkFramer: Sendable {
                 } else if child.type == "trun" {
                     let trun = parseTrun(child, in: data, defaultSampleDuration: defaultSampleDuration)
                     totalTicks += trun.totalDuration
-                    if firstSampleFlags == nil {
+                    if !sawNonEmptyTrun, trun.sampleCount > 0 {
+                        sawNonEmptyTrun = true
                         firstSampleFlags = trun.firstSampleFlags
                     }
                 }
@@ -311,8 +319,8 @@ struct CMAFChunkFramer: Sendable {
         _ box: MP4Box,
         in data: Data,
         defaultSampleDuration: UInt32
-    ) -> (totalDuration: UInt64, firstSampleFlags: UInt32?) {
-        guard box.payloadLength >= 8 else { return (0, nil) }
+    ) -> (sampleCount: UInt32, totalDuration: UInt64, firstSampleFlags: UInt32?) {
+        guard box.payloadLength >= 8 else { return (0, 0, nil) }
         let flags = MP4BoxScanner.readUInt32(data, at: box.payloadOffset) & 0x00FF_FFFF
         let sampleCount = MP4BoxScanner.readUInt32(data, at: box.payloadOffset + 4)
         var offset = box.payloadOffset + 8
@@ -321,7 +329,7 @@ struct CMAFChunkFramer: Sendable {
 
         var firstSampleFlags: UInt32?
         if (flags & 0x000004) != 0 {
-            guard offset + 4 <= box.endOffset else { return (0, nil) }
+            guard offset + 4 <= box.endOffset else { return (sampleCount, 0, nil) }
             firstSampleFlags = MP4BoxScanner.readUInt32(data, at: offset)
             offset += 4
         }
@@ -332,7 +340,7 @@ struct CMAFChunkFramer: Sendable {
         let hasCTO = (flags & 0x000800) != 0
 
         if !hasDuration && !hasSampleFlags {
-            return (UInt64(sampleCount) * UInt64(defaultSampleDuration), firstSampleFlags)
+            return (sampleCount, UInt64(sampleCount) * UInt64(defaultSampleDuration), firstSampleFlags)
         }
 
         var total: UInt64 = 0
@@ -354,7 +362,7 @@ struct CMAFChunkFramer: Sendable {
             }
             if hasCTO { offset += 4 }
         }
-        return (total, firstSampleFlags)
+        return (sampleCount, total, firstSampleFlags)
     }
 }
 

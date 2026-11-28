@@ -115,6 +115,7 @@ actor LLHLSVariantTrack {
         var pendingIndependent = false
         var isComplete = false
         var didFail = false
+        var attempts = 1
 
         var fullData: Data {
             var out = Data()
@@ -127,7 +128,7 @@ actor LLHLSVariantTrack {
 
         mutating func appendChunk(_ chunk: CMAFChunk) -> Bool {
             var flushed = false
-            // Never exceed PART-TARGET (0.600s): flush accumulated chunks first
+            // Never exceed PART-TARGET (0.560s): flush accumulated chunks first
             // if adding this chunk would push past `maxPartDuration`.
             if !pendingData.isEmpty, pendingDuration + chunk.duration > LLHLSVariantTrack.maxPartDuration {
                 flushPending()
@@ -178,10 +179,12 @@ actor LLHLSVariantTrack {
         let continuation: CheckedContinuation<Data?, Never>
     }
 
-    /// Coalesce ~100ms Twitch CMAF chunks into ~0.40s LL-HLS parts (4–5 parts
-    /// per 2s segment), staying strictly under `TwitchMediaPlaylist.partTargetDuration` (0.60s).
-    static let targetPartDuration: Double = 0.38
-    static let maxPartDuration: Double = 0.58
+    /// Coalesce ~100ms Twitch CMAF chunks into ~0.50–0.53s LL-HLS parts (4 parts
+    /// per 2s segment): strictly `>= 85%` of `PART-TARGET` (`0.476s`) and
+    /// `<= PART-TARGET` (`0.560s`) per RFC 8216bis §4.4.4.9.
+    static let targetPartDuration: Double = 0.46
+    static let maxPartDuration: Double = 0.56
+    private static let maxPrefetchAttempts = 3
     /// Maximum time a blocking playlist reload or preload hint request waits.
     private static let blockingTimeout: Duration = .seconds(4)
     /// Maximum time the very first playlist fetch waits to prime initial parts
@@ -189,7 +192,8 @@ actor LLHLSVariantTrack {
     private static let coldStartPrimeTimeout: Duration = .milliseconds(900)
     /// How often the upstream Twitch media playlist is polled while active.
     private static let upstreamPollInterval: Duration = .milliseconds(1000)
-    /// Stop background polling after this long with no `AVPlayer` requests.
+    /// Suspend background polling after this long with no `AVPlayer` requests
+    /// (can seamlessly wake up again if `AVPlayer` ABR-switches back).
     private static let idleShutdownDelay: Duration = .seconds(15)
     /// Retain only the newest N MSNs' part buffers in memory.
     private static let maxRetainedSegments = 6
@@ -204,12 +208,16 @@ actor LLHLSVariantTrack {
     private var segmentBuffers: [Int: SegmentBuffer] = [:]
     private var prefetchTasks: [Int: Task<Void, Never>] = [:]
     private var urlToMSN: [String: Int] = [:]
+    /// Stable `/seg/` URIs for MSNs already promoted ahead of Twitch's playlist,
+    /// so an MSN's advertised URI never changes once Twitch publishes it.
+    private var advertisedSegmentURIs: [Int: String] = [:]
 
+    private var inFlightRefreshTask: Task<Void, any Error>?
     private var playlistWaiters: [UUID: PlaylistWaiter] = [:]
     private var partWaiters: [UUID: PartWaiter] = [:]
     private var pollTask: Task<Void, Never>?
     private var lastClientActivity = ContinuousClock.now
-    private var isStopped = false
+    private var isPermanentlyStopped = false
 
     init(id: String, upstreamURL: URL, client: ChunkedHTTPClient = .shared) {
         self.id = id
@@ -221,10 +229,14 @@ actor LLHLSVariantTrack {
         ContinuousClock.now - lastClientActivity > Self.idleShutdownDelay
     }
 
-    func stop() {
-        isStopped = true
+    /// Suspends background polling and frees transient prefetch buffers after
+    /// inactivity without permanently killing the rendition, so `AVPlayer` can
+    /// ABR-switch back to this variant URL later.
+    func suspendForIdle() {
         pollTask?.cancel()
         pollTask = nil
+        inFlightRefreshTask?.cancel()
+        inFlightRefreshTask = nil
         for task in prefetchTasks.values { task.cancel() }
         prefetchTasks.removeAll()
         for waiter in playlistWaiters.values {
@@ -237,6 +249,14 @@ actor LLHLSVariantTrack {
         partWaiters.removeAll()
         segmentBuffers.removeAll()
         urlToMSN.removeAll()
+        latestPlaylist = nil
+    }
+
+    /// Permanent teardown (called only when the proxy itself shuts down).
+    func stop() {
+        isPermanentlyStopped = true
+        suspendForIdle()
+        advertisedSegmentURIs.removeAll()
     }
 
     // MARK: - HTTP endpoints
@@ -249,7 +269,7 @@ actor LLHLSVariantTrack {
         basePartPrefix: String,
         baseSegmentPrefix: String
     ) async throws -> String {
-        guard !isStopped else { throw CancellationError() }
+        guard !isPermanentlyStopped else { throw CancellationError() }
         lastClientActivity = ContinuousClock.now
         ensurePolling()
 
@@ -262,13 +282,18 @@ actor LLHLSVariantTrack {
             }
         } else if let requestedMSN {
             if !isPlaylistRequestSatisfied(msn: requestedMSN, part: requestedPart) {
-                // Kick an immediate upstream refresh if the requested MSN isn't
-                // even tracked as an active prefetch yet.
-                if segmentBuffers[requestedMSN] == nil {
+                let normalized = normalizeBlockingRequest(msn: requestedMSN, part: requestedPart)
+                if segmentBuffers[normalized.msn] == nil {
                     try? await refreshUpstream()
                 }
                 if !isPlaylistRequestSatisfied(msn: requestedMSN, part: requestedPart) {
                     await waitForPlaylistUpdate(msn: requestedMSN, part: requestedPart)
+                }
+                // RFC 8216bis: a blocking reload that timed out without
+                // satisfying the requested MSN/part must return an error (503),
+                // not an unchanged 200 OK playlist.
+                if !isPlaylistRequestSatisfied(msn: requestedMSN, part: requestedPart) {
+                    throw ChunkedHTTPClient.HTTPStreamError.badStatus(503)
                 }
             }
         } else {
@@ -289,7 +314,7 @@ actor LLHLSVariantTrack {
     /// Serves one LL-HLS partial segment (blocking if it is the current
     /// `#EXT-X-PRELOAD-HINT` still arriving from Twitch's chunked prefetch).
     func partData(msn: Int, partIndex: Int) async -> Data? {
-        guard !isStopped else { return nil }
+        guard !isPermanentlyStopped, partIndex >= 0 else { return nil }
         lastClientActivity = ContinuousClock.now
         ensurePolling()
 
@@ -301,10 +326,8 @@ actor LLHLSVariantTrack {
                 return nil
             }
         } else if let lastFinal = latestPlaylist?.lastFinalizedMSN, msn <= lastFinal {
-            // Segment already passed without cached parts.
             return nil
         } else {
-            // Maybe prefetch hasn't started yet; wait briefly for it to appear.
             try? await refreshUpstream()
             if let buffer = segmentBuffers[msn] {
                 if partIndex < buffer.parts.count { return buffer.parts[partIndex].data }
@@ -317,7 +340,6 @@ actor LLHLSVariantTrack {
         let waiterID = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
-                // Re-check inside actor isolation right before suspending.
                 if let buffer = segmentBuffers[msn] {
                     if partIndex < buffer.parts.count {
                         continuation.resume(returning: buffer.parts[partIndex].data)
@@ -366,10 +388,10 @@ actor LLHLSVariantTrack {
         return (nil, nil)
     }
 
-    // MARK: - Polling & Prefetch Ingestion
+    // MARK: - Polling & Coalesced Prefetch Ingestion
 
     private func ensurePolling() {
-        guard !isStopped, pollTask == nil else { return }
+        guard !isPermanentlyStopped, pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.upstreamPollInterval)
@@ -381,9 +403,9 @@ actor LLHLSVariantTrack {
     }
 
     private func pollTick() async -> Bool {
-        guard !isStopped else { return false }
+        guard !isPermanentlyStopped else { return false }
         if ContinuousClock.now - lastClientActivity > Self.idleShutdownDelay {
-            stop()
+            suspendForIdle()
             return false
         }
         try? await refreshUpstream()
@@ -394,12 +416,41 @@ actor LLHLSVariantTrack {
         return true
     }
 
+    /// Coalesces concurrent upstream playlist + init-map refreshes so older
+    /// responses can never overtake newer ones or start prefetching with stale
+    /// `initInfo`.
     private func refreshUpstream() async throws {
+        if let existing = inFlightRefreshTask {
+            try await existing.value
+            return
+        }
+        let task = Task<Void, any Error> {
+            try await self.performRefreshUpstream()
+        }
+        inFlightRefreshTask = task
+        defer { inFlightRefreshTask = nil }
+        try await task.value
+    }
+
+    private func performRefreshUpstream() async throws {
         let (data, status) = try await client.fetchData(from: upstreamURL)
         guard (200...299).contains(status), let text = String(data: data, encoding: .utf8) else {
             throw ChunkedHTTPClient.HTTPStreamError.badStatus(status)
         }
         let parsed = TwitchMediaPlaylist.parse(text, relativeTo: upstreamURL)
+
+        // Fetch `#EXT-X-MAP` whenever it changes, committing `fetchedMapURL`
+        // ONLY after a successful parse so transient errors are retried and
+        // stale metadata is never applied to a new init segment.
+        if let mapURL = parsed.latestMapURL, mapURL != fetchedMapURL {
+            initInfo = nil
+            if let (mapData, mapStatus) = try? await client.fetchData(from: mapURL),
+               (200...299).contains(mapStatus),
+               let info = CMAFInitInfo.parse(initSegment: mapData) {
+                fetchedMapURL = mapURL
+                initInfo = info
+            }
+        }
 
         // Detect discontinuity or backwards media-sequence jump (e.g. ad break
         // splice): clear stale prefetch buffers so we never emit mismatched MSNs.
@@ -412,27 +463,22 @@ actor LLHLSVariantTrack {
 
         latestPlaylist = parsed
 
-        // Fetch `#EXT-X-MAP` once (or whenever Twitch rotates the init map) so
-        // `CMAFChunkFramer` knows exact track timescales and video/audio IDs.
-        if let mapURL = parsed.latestMapURL, mapURL != fetchedMapURL {
-            fetchedMapURL = mapURL
-            if let (mapData, mapStatus) = try? await client.fetchData(from: mapURL),
-               (200...299).contains(mapStatus),
-               let info = CMAFInitInfo.parse(initSegment: mapData) {
-                initInfo = info
-            }
-        }
-
-        // Start streaming up to 2 `#EXT-X-TWITCH-PREFETCH` segments in parallel.
-        if parsed.supportsLLHLS, let baseLastMSN = parsed.lastFinalizedMSN {
+        // Start streaming up to 2 `#EXT-X-TWITCH-PREFETCH` segments in parallel
+        // once init metadata for the current map is available.
+        if parsed.supportsLLHLS, initInfo != nil, let baseLastMSN = parsed.lastFinalizedMSN {
             for (offset, prefetchURL) in parsed.prefetchURIs.prefix(2).enumerated() {
                 let expectedMSN = baseLastMSN + 1 + offset
                 let key = prefetchURL.absoluteString
-                // If already tracked under the same URL, keep its existing buffer/task.
-                if let existingMSN = urlToMSN[key], existingMSN == expectedMSN {
+                if let existingMSN = urlToMSN[key], existingMSN == expectedMSN,
+                   let existing = segmentBuffers[expectedMSN] {
+                    // Retry a failed prefetch with no advertised parts up to
+                    // `maxPrefetchAttempts`; never disturb already-advertised parts.
+                    if existing.didFail, existing.parts.isEmpty, existing.attempts < Self.maxPrefetchAttempts {
+                        startPrefetch(msn: expectedMSN, url: prefetchURL, attempt: existing.attempts + 1)
+                    }
                     continue
                 }
-                startPrefetch(msn: expectedMSN, url: prefetchURL)
+                startPrefetch(msn: expectedMSN, url: prefetchURL, attempt: 1)
             }
         }
 
@@ -440,10 +486,15 @@ actor LLHLSVariantTrack {
         notifyAllWaiters()
     }
 
-    private func startPrefetch(msn: Int, url: URL) {
-        guard !isStopped, segmentBuffers[msn] == nil else { return }
+    private func startPrefetch(msn: Int, url: URL, attempt: Int) {
+        guard !isPermanentlyStopped else { return }
+        if attempt == 1, segmentBuffers[msn] != nil { return }
+
+        prefetchTasks[msn]?.cancel()
         urlToMSN[url.absoluteString] = msn
-        segmentBuffers[msn] = SegmentBuffer(msn: msn, upstreamURL: url)
+        var buffer = SegmentBuffer(msn: msn, upstreamURL: url)
+        buffer.attempts = attempt
+        segmentBuffers[msn] = buffer
 
         let info = initInfo
         let client = self.client
@@ -461,7 +512,7 @@ actor LLHLSVariantTrack {
                 await self?.finishPrefetch(msn: msn, failed: false)
             } catch {
                 guard !Task.isCancelled else { return }
-                llhlsLogger.debug("Prefetch failed msn=\(msn): \(error.localizedDescription, privacy: .public)")
+                llhlsLogger.debug("Prefetch failed msn=\(msn) attempt=\(attempt): \(error.localizedDescription, privacy: .public)")
                 await self?.finishPrefetch(msn: msn, failed: true)
             }
         }
@@ -510,6 +561,12 @@ actor LLHLSVariantTrack {
                 urlToMSN[removed.upstreamURL.absoluteString] = nil
             }
         }
+        // Keep advertised `/seg/` URIs pinned for the full sliding playlist window.
+        if let windowStart = latestPlaylist?.mediaSequence {
+            for msn in Array(advertisedSegmentURIs.keys) where msn < windowStart {
+                advertisedSegmentURIs[msn] = nil
+            }
+        }
     }
 
     // MARK: - Playlist Rendering & Waiter Resolution
@@ -544,14 +601,43 @@ actor LLHLSVariantTrack {
         return hasIndependent && totalDuration >= TwitchMediaPlaylist.partHoldBack
     }
 
+    /// RFC 8216bis §6.2.5.2: if a client requests `_HLS_part` beyond a parent
+    /// segment that has already completed with fewer parts, normalize to part 0
+    /// of the next media sequence (`msn + 1`).
+    private func normalizeBlockingRequest(msn: Int, part: Int?) -> (msn: Int, part: Int?) {
+        guard let part else { return (msn, nil) }
+        if let buffer = segmentBuffers[msn], buffer.isComplete, part >= buffer.parts.count {
+            return (msn + 1, 0)
+        }
+        return (msn, part)
+    }
+
     private func isPlaylistRequestSatisfied(msn: Int, part: Int?) -> Bool {
         if latestPlaylist?.isEndList == true { return true }
-        if let finalized = effectiveFinalizedMSN, finalized >= msn { return true }
-        if let buffer = segmentBuffers[msn] {
-            if buffer.isComplete || buffer.didFail { return true }
-            if let part, buffer.parts.count > part { return true }
+        let normalized = normalizeBlockingRequest(msn: msn, part: part)
+        let targetMSN = normalized.msn
+        let targetPart = normalized.part
+
+        if let targetPart {
+            if let buffer = segmentBuffers[targetMSN] {
+                if buffer.parts.count > targetPart { return true }
+                if buffer.isComplete {
+                    // Normalized target itself completed with fewer parts: wait
+                    // unless a subsequent segment is already finalized or has parts.
+                    if let nextBuf = segmentBuffers[targetMSN + 1], !nextBuf.parts.isEmpty { return true }
+                    if let finalized = effectiveFinalizedMSN, finalized > targetMSN { return true }
+                    return false
+                }
+                if buffer.didFail { return true }
+                return false
+            }
+            if let finalized = effectiveFinalizedMSN, finalized >= targetMSN { return true }
+            return false
+        } else {
+            if let finalized = effectiveFinalizedMSN, finalized >= targetMSN { return true }
+            if let buffer = segmentBuffers[targetMSN], buffer.isComplete || buffer.didFail { return true }
+            return false
         }
-        return false
     }
 
     private func waitForColdStartPrime() async {
@@ -561,8 +647,6 @@ actor LLHLSVariantTrack {
                 continuation.resume()
                 return
             }
-            // Wait for any part progress, resolved once `hasEnoughPartsForColdStart`
-            // becomes true or after `coldStartPrimeTimeout`.
             playlistWaiters[waiterID] = PlaylistWaiter(
                 requestedMSN: Int.max,
                 requestedPart: nil,
@@ -611,7 +695,6 @@ actor LLHLSVariantTrack {
     }
 
     private func notifyAllWaiters() {
-        // 1. Wake satisfied part waiters (and fail any whose segment finished early).
         for (id, waiter) in Array(partWaiters) {
             if let buffer = segmentBuffers[waiter.msn] {
                 if waiter.partIndex < buffer.parts.count {
@@ -624,7 +707,6 @@ actor LLHLSVariantTrack {
             }
         }
 
-        // 2. Wake satisfied playlist waiters (including cold-start prime waiter).
         let coldStartReady = hasEnoughPartsForColdStart()
         for (id, waiter) in Array(playlistWaiters) {
             let ready: Bool
@@ -646,7 +728,15 @@ actor LLHLSVariantTrack {
         baseSegmentPrefix: String
     ) -> String {
         var partsByMSN: [Int: LLHLSSegmentParts] = [:]
+        let baseLastMSN = playlist.lastFinalizedMSN ?? -1
+
         for (msn, buffer) in segmentBuffers where !buffer.didFail && !buffer.parts.isEmpty {
+            let segURI = advertisedSegmentURIs[msn] ?? "\(baseSegmentPrefix)/\(msn).mp4"
+            // Pin the `/seg/` URI whenever this MSN is being promoted ahead of
+            // Twitch's upstream playlist so future reloads never change its URI.
+            if buffer.isComplete, msn > baseLastMSN {
+                advertisedSegmentURIs[msn] = segURI
+            }
             let descriptors = buffer.parts.map { part in
                 LLHLSPartDescriptor(
                     partIndex: part.index,
@@ -659,12 +749,10 @@ actor LLHLSVariantTrack {
                 msn: msn,
                 parts: descriptors,
                 isComplete: buffer.isComplete,
-                segmentURI: "\(baseSegmentPrefix)/\(msn).mp4"
+                segmentURI: segURI
             )
         }
 
-        // Emit `#EXT-X-PRELOAD-HINT` for the next upcoming part of the active
-        // in-progress prefetch segment (immediately after the last finalized MSN).
         var preloadHintURI: String?
         if playlist.supportsLLHLS, let finalized = effectiveFinalizedMSN {
             let activeMSN = finalized + 1
@@ -675,6 +763,7 @@ actor LLHLSVariantTrack {
 
         return playlist.renderLLHLS(
             segmentPartsByMSN: partsByMSN,
+            pinnedSegmentURIs: advertisedSegmentURIs,
             preloadHintURI: preloadHintURI
         )
     }
