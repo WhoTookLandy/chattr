@@ -152,7 +152,7 @@ actor TwitchLLHLSProxy {
 
         let boundPort: UInt16? = await withCheckedContinuation { continuation in
             let resumed = OSAllocatedUnfairLock(initialState: false)
-            func finish(_ value: UInt16?) {
+            let finish: @Sendable (UInt16?) -> Void = { value in
                 let first = resumed.withLock { flag -> Bool in
                     guard !flag else { return false }
                     flag = true
