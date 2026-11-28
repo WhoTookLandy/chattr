@@ -18,6 +18,16 @@ struct StreamPlayerResumeTargetTests {
         #expect(target == seconds(124))
     }
 
+    @Test("Respects a custom low-latency offset")
+    func lowLatencyLiveRange() {
+        let range = CMTimeRange(start: seconds(100), duration: seconds(30))
+        let target = StreamPlayerController.liveResumeTarget(
+            for: range,
+            offset: PlaybackLatencyProfile.lowLatency.liveOffset
+        )
+        #expect(target == seconds(128))
+    }
+
     @Test("Clamps to range start when the seekable window is shorter than liveOffset")
     func shortLiveRangeClampsToStart() {
         let range = CMTimeRange(start: seconds(100), duration: seconds(3))

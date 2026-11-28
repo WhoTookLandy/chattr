@@ -8,6 +8,10 @@ enum PlayerSettings {
     static let nativePlayerKey = "chattr.player.native"
     /// Native player only — caps the HLS variant AVPlayer may pick.
     static let maxQualityKey = "chattr.player.maxQuality"
+    /// Native player (video, audio-only, and pinned background audio) — uses
+    /// a tighter live-edge offset and forward-buffer cap to reduce delay
+    /// relative to chat, at the cost of a smaller stall margin.
+    static let lowLatencyKey = "chattr.player.lowLatency"
     /// Listen-only mode: no video surface, just chat + stream audio. The
     /// native player switches to Twitch's audio-only rendition (saves data).
     static let audioOnlyKey = "chattr.player.audioOnly"
@@ -27,5 +31,10 @@ enum PlayerSettings {
     /// engine with it; the views use it only to stop offering audio-only.
     static var isNativePlaybackEnabled: Bool {
         !UserDefaults.standard.bool(forKey: nativePlaybackDisabledKey)
+    }
+
+    /// True when the user enabled Low Latency mode for native playback.
+    static var isLowLatencyEnabled: Bool {
+        UserDefaults.standard.bool(forKey: lowLatencyKey)
     }
 }

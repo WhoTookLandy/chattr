@@ -292,11 +292,12 @@ enum DiagnosticReportBuilder {
         let videoExpanded = defaults.bool(forKey: StreamHeaderView.expandedKey)
         let audioOnly = defaults.bool(forKey: PlayerSettings.audioOnlyKey)
         let nativePlayer = defaults.bool(forKey: PlayerSettings.nativePlayerKey)
+        let lowLatency = defaults.bool(forKey: PlayerSettings.lowLatencyKey)
         let hideCommands = ChatFilterSettings.hideCommands()
         let hideBots = ChatFilterSettings.hideBots()
         let historyCap = ChatAppearance.chatHistoryLines(defaults: defaults)
         lines.append(
-            "Settings: edgeToEdge=\(edgeToEdge) videoExpanded=\(videoExpanded) audioOnly=\(audioOnly) nativePlayer=\(nativePlayer) hideCommands=\(hideCommands) hideBots=\(hideBots) historyCap=\(historyCap)"
+            "Settings: edgeToEdge=\(edgeToEdge) videoExpanded=\(videoExpanded) audioOnly=\(audioOnly) nativePlayer=\(nativePlayer) lowLatency=\(lowLatency) hideCommands=\(hideCommands) hideBots=\(hideBots) historyCap=\(historyCap)"
         )
         return lines
     }

@@ -45,6 +45,8 @@ struct SettingsRegistryTests {
         #expect(SettingsRegistry.search("pip").map(\.id).contains("pictureInPicture"))
         #expect(SettingsRegistry.search("autoplay").map(\.id).contains("videoOnOpen"))
         #expect(SettingsRegistry.search("home preview").map(\.id).contains("homeLivePreviews"))
+        #expect(SettingsRegistry.search("low latency").map(\.id).contains("lowLatency"))
+        #expect(SettingsRegistry.search("delay").map(\.id).contains("lowLatency"))
         #expect(SettingsRegistry.search("mixer").map(\.id).contains("backgroundAudioIndicator"))
         #expect(SettingsRegistry.search("wifi").map(\.id).contains("videoOnOpen"))
         #expect(SettingsRegistry.search("vibration").map(\.id).contains("haptics"))

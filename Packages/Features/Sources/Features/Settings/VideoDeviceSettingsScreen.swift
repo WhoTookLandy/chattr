@@ -8,9 +8,13 @@ import SwiftUI
 /// register it in `SettingsRegistry.entries` with `in: .videoAndDevice` so
 /// search finds it.
 struct VideoDeviceSettingsScreen: View {
+    #if os(iOS)
+    @Environment(\.playback) private var playback
+    #endif
     @AppStorage(StreamHeaderView.expandedKey) private var showVideoInChat = false
     @AppStorage(PlayerSettings.nativePlayerKey) private var useNativePlayer = false
     @AppStorage(PlayerSettings.maxQualityKey) private var maxQuality: PlayerQuality = .auto
+    @AppStorage(PlayerSettings.lowLatencyKey) private var lowLatency = false
     @AppStorage(PlaybackPreferences.videoOnOpenKey) private var videoOnOpen: VideoOnOpen = .lastUsed
     @AppStorage(PlaybackPreferences.homePreviewKey) private var homePreview: HomePreviewMode = .wiFiOnly
     @AppStorage(PlaybackPreferences.pictureInPictureKey) private var pictureInPicture: PictureInPictureMode = .whenSoundOn
@@ -85,6 +89,20 @@ struct VideoDeviceSettingsScreen: View {
                     )
                 }
                 .disabled(!useNativePlayer || !nativePlaybackEnabled)
+                Toggle(isOn: $lowLatency) {
+                    SettingLabel(
+                        "Low Latency",
+                        systemImage: "bolt",
+                        subtitle: "Tighter live buffer for native video and audio-only; may buffer more on weak connections",
+                        disabledReason: nativePlaybackEnabled ? nil : "Not available right now"
+                    )
+                }
+                .disabled(!nativePlaybackEnabled)
+                #if os(iOS)
+                .onChange(of: lowLatency) { _, enabled in
+                    playback?.applyLatencyPreference(PlaybackLatencyProfile.resolve(lowLatency: enabled))
+                }
+                #endif
                 Picker(selection: $pictureInPicture) {
                     ForEach(PictureInPictureMode.allCases) { mode in
                         Text(mode.label).tag(mode)

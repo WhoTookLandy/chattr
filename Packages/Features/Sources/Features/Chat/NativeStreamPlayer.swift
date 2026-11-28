@@ -7,9 +7,12 @@ import AVKit
 import AVFoundation
 import Combine
 import WebKit
+import os
 #endif
 
 #if os(iOS)
+
+private let nativePlayerLogger = AppLogger.make("Features.NativePlayer")
 
 /// AVPlayer-backed player pieces, assembled by `NativeStreamEngine`. Taps
 /// toggle the header chrome and a swipe down hides the video, the same
@@ -104,6 +107,9 @@ enum NativePlayer {
         /// Bumped for each item and each failure, so a late report from an
         /// item that was replaced (or already counted as failed) is dropped.
         private var itemGeneration = 0
+        /// Item generation for which initial `.playing` latency telemetry has
+        /// already been logged, so transient stalls don't spam the log.
+        private var loggedStartForGeneration = 0
         /// When the player last went to paused; nil while it isn't.
         private var pausedAt: ContinuousClock.Instant?
 
@@ -337,11 +343,13 @@ enum NativePlayer {
             controller.playsVideoHidden = audioOnly && !playlist.isAudioOnlyRendition
 
             let item = AVPlayerItem(url: playlist.url)
+            let latency = PlaybackLatencyProfile.current
             // Hold a fixed distance behind the live edge. Left alone, each
             // stall adds its length to the delay for good, and chat runs
             // further and further ahead of the video.
             item.automaticallyPreservesTimeOffsetFromLive = true
-            item.configuredTimeOffsetFromLive = StreamPlayerController.liveOffset
+            item.configuredTimeOffsetFromLive = latency.liveOffset
+            item.preferredForwardBufferDuration = latency.forwardBufferDuration
             controller.applyQualityLimits(to: item)
             observeItem(item)
 
@@ -542,8 +550,9 @@ enum NativePlayer {
             standbyFrameReady = targetAudioOnly
 
             let item = AVPlayerItem(url: playlist.url)
+            let latency = PlaybackLatencyProfile.current
             item.automaticallyPreservesTimeOffsetFromLive = true
-            item.configuredTimeOffsetFromLive = StreamPlayerController.liveOffset
+            item.configuredTimeOffsetFromLive = latency.liveOffset
             item.preferredForwardBufferDuration = Self.warmStartBufferDuration
             controller.applyQualityLimits(to: item, videoIsHidden: targetAudioOnly && !playlist.isAudioOnlyRendition)
 
@@ -664,7 +673,9 @@ enum NativePlayer {
             oldPlayer?.pause()
             oldPlayer?.replaceCurrentItem(with: nil)
 
-            item.preferredForwardBufferDuration = 0
+            let latency = PlaybackLatencyProfile.current
+            item.configuredTimeOffsetFromLive = latency.liveOffset
+            item.preferredForwardBufferDuration = latency.forwardBufferDuration
             activeAudioOnly = targetAudioOnly
             controller.playsVideoHidden = targetAudioOnly && !isAudioOnlyRendition
             controller.applyQualityLimits(to: item)
@@ -673,6 +684,8 @@ enum NativePlayer {
 
             observePlayer(standby)
             observeItem(item)
+            loggedStartForGeneration = itemGeneration
+            logLatencySnapshot(event: "swap-commit")
 
             if shouldPlay {
                 controller.update(\.isPaused, to: false)
@@ -788,6 +801,10 @@ enum NativePlayer {
                         self.stallTask?.cancel()
                         self.stallTask = nil
                         self.controller.noteDidPlay()
+                        if self.loggedStartForGeneration != self.itemGeneration {
+                            self.loggedStartForGeneration = self.itemGeneration
+                            self.logLatencySnapshot(event: "playing")
+                        }
                     }
                 }
                 .store(in: &playerSubscriptions)
@@ -853,6 +870,7 @@ enum NativePlayer {
         /// that hasn't after `stallPatience` is treated like a failure: a
         /// fresh playlist, with the same backoff.
         private func playbackStalled() {
+            logLatencySnapshot(event: "stalled", isWarning: true)
             guard stallTask == nil else { return }
             stallTask = Task { [weak self] in
                 try? await Task.sleep(for: Coordinator.stallPatience)
@@ -942,11 +960,33 @@ enum NativePlayer {
             resolveAndStart(after: nil, invalidateCache: true)
         }
 
+        private var currentLatencyMode: PlaybackLatencySnapshot.Mode {
+            if activeAudioOnly {
+                return controller.playsVideoHidden ? .audioHiddenVideo : .audioOnly
+            }
+            return .video
+        }
+
+        private func logLatencySnapshot(event: String, isWarning: Bool = false) {
+            guard let item = controller.avPlayer?.currentItem else { return }
+            let snapshot = PlaybackLatencySnapshot.sample(
+                item: item,
+                channelLogin: login,
+                mode: currentLatencyMode
+            )
+            if isWarning {
+                nativePlayerLogger.warning("\(event, privacy: .public) \(snapshot.logSummary, privacy: .public)")
+            } else {
+                nativePlayerLogger.info("\(event, privacy: .public) \(snapshot.logSummary, privacy: .public)")
+            }
+        }
+
         private func discardPlayer() {
             cancelStandby()
             stallTask?.cancel()
             stallTask = nil
             itemGeneration += 1
+            loggedStartForGeneration = 0
             playerSubscriptions.removeAll()
             itemSubscriptions.removeAll()
             pausedAt = nil
