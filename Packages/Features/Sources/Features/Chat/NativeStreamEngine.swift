@@ -45,6 +45,10 @@ final class NativeStreamEngine: StreamEngine {
         coordinator.setAudioOnly(audioOnly, quality: quality)
     }
 
+    func setLowLatency(_ enabled: Bool) {
+        coordinator.setLowLatency(enabled)
+    }
+
     func setInteractive(_ interactive: Bool) {
         if interactive {
             installInteraction()
