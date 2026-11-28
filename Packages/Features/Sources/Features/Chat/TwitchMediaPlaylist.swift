@@ -371,9 +371,22 @@ struct TwitchMediaPlaylist: Equatable, Sendable {
     }
 
     static func advanceProgramDateTime(_ isoString: String?, by seconds: Double) -> String? {
-        guard let isoString else { return nil }
-        let style = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-        guard let date = try? Date(isoString, strategy: style) else { return nil }
-        return date.addingTimeInterval(seconds).formatted(style)
+        guard let isoString, seconds.isFinite else { return nil }
+        let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let whole = Date.ISO8601FormatStyle(includingFractionalSeconds: false)
+        guard let date = (try? Date(isoString, strategy: fractional))
+            ?? (try? Date(isoString, strategy: whole))
+        else { return nil }
+        // Advance in integer milliseconds so IEEE-754 floor truncation in
+        // `ISO8601FormatStyle` never turns `.693 + 2.0s` into `.692`.
+        let totalMs = Int64((date.timeIntervalSince1970 * 1000.0).rounded())
+            + Int64((seconds * 1000.0).rounded())
+        let wholeSeconds = totalMs >= 0 ? totalMs / 1000 : ((totalMs - 999) / 1000)
+        let millis = Int(totalMs - wholeSeconds * 1000)
+        let prefix = Date(timeIntervalSince1970: TimeInterval(wholeSeconds)).formatted(whole)
+        guard prefix.hasSuffix("Z") else {
+            return Date(timeIntervalSince1970: Double(totalMs) / 1000.0).formatted(fractional)
+        }
+        return String(prefix.dropLast()) + String(format: ".%03dZ", locale: Locale(identifier: "en_US_POSIX"), millis)
     }
 }
