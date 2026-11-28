@@ -17,6 +17,9 @@ protocol StreamEngine: AnyObject {
     /// Switches between audio-only and video in place for the same channel,
     /// keeping playback alive instead of tearing the engine down.
     func setAudioOnly(_ audioOnly: Bool, quality: PlayerQuality)
+    /// Switches between standard HLS and Low Latency (LL-HLS proxy + tighter
+    /// buffer) in place for the same channel.
+    func setLowLatency(_ enabled: Bool)
     /// Toggles interactive video capabilities (gestures, hostView, PiP) when
     /// a slot is promoted from headless background audio to primary video or
     /// demoted from primary to pinned background audio.
@@ -29,6 +32,7 @@ protocol StreamEngine: AnyObject {
 extension StreamEngine {
     var wasPlayingJustNow: Bool { false }
     func setAudioOnly(_ audioOnly: Bool, quality: PlayerQuality) {}
+    func setLowLatency(_ enabled: Bool) {}
     func setInteractive(_ interactive: Bool) {}
     func handleMediaServicesReset() {}
 }

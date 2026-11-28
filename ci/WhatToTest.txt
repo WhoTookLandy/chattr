@@ -1,12 +1,13 @@
-Native Low Latency mode & live latency telemetry
+Native Apple LL-HLS Low Latency Proxy (Twitch Prefetch → EXT-X-PART)
 
 NEW
-• Low Latency toggle (Settings → Video & Device → Low Latency): Tightens native AVPlayer's live-edge offset (6s → 2s) and forward buffer cap (auto → 2s) for native video, audio-only, and pinned background audio, and applies immediately to active streams.
-• Live playback latency HUD: When Settings → About → Developer → Chat Debug HUD is enabled, a 3rd line shows live stream metrics (mode, LL/std, estimated e2e latency from HLS program date, live-edge lag, forward buffer, configured vs AVPlayer recommended offset, and stall count).
-• Structured playback logs: Native player start, audio/video swap commits, and stalls now log latency and buffer telemetry in Recent Logs and exported Diagnostic Reports.
+• Local LL-HLS prefetch translator: When Settings → Video & Device → Low Latency is enabled, native video, audio-only, and pinned background audio now route through an in-process localhost (127.0.0.1) proxy that streams Twitch's #EXT-X-TWITCH-PREFETCH CMAF chunks incrementally and translates them into standard Apple LL-HLS (#EXT-X-PART, #EXT-X-PRELOAD-HINT, CAN-BLOCK-RELOAD=YES, PART-HOLD-BACK=1.68s) — bringing native AVPlayer close to the official Twitch app's ~2–4s latency while keeping native PiP and background audio.
+• Automatic graceful fallback: If the local LL-HLS proxy ever fails on a stream, playback transparently falls back to direct Twitch HLS with zero manual intervention.
+• Seamless live toggle: Flipping Low Latency ON or OFF in Settings warm-swaps active streams in place without audio gaps, and Chat Debug HUD now distinguishes `LL+` (local LL-HLS proxy active) from `LL` (direct) and `std` (standard).
 
 PLEASE TEST
-1. Enable Settings → About → Developer → Chat Debug HUD, open a live channel in native video and in audio-only mode, and compare the HUD's `e2e` latency against the Twitch app's Video Stats.
-2. Toggle Settings → Video & Device → Low Latency ON and OFF while a stream is actively playing — confirm it updates live without restarting and pulls playback closer to the live edge.
-3. Compare `cfg` vs `rec` vs `lag` and watch `stl` (stalls) on Wi-Fi and cellular in both video and background audio-only modes.
-4. Pause/resume and background/foreground the app to verify live-edge resume respects the Low Latency offset.
+1. Enable Settings → Video & Device → Low Latency AND Settings → About → Developer → Chat Debug HUD.
+2. Open a live stream in native video and confirm the HUD shows `vid(LL+)` and compare `e2e` latency against the Twitch app's Video Stats.
+3. Switch to Audio-Only (and pin background audio), lock the screen, and confirm `aud(LL+)` stays low-latency and uninterrupted.
+4. Toggle Low Latency OFF → ON while actively playing to verify a smooth warm swap between `std` and `LL+`.
+5. Watch through a quality change or ad break to verify clean ABR switching and zero stalls/freezes.

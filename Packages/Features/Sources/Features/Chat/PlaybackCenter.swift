@@ -743,6 +743,7 @@ final class PlaybackCenter {
         guard !nativeSlots.isEmpty else { return }
         for slot in nativeSlots {
             slot.controller.applyLatencyProfile(profile)
+            slot.engine?.setLowLatency(profile.isLowLatency)
         }
         playbackCenterLogger.notice(
             "Applied latency profile lowLatency=\(profile.isLowLatency) offset=\(profile.liveOffsetSeconds)s fwdCap=\(profile.forwardBufferDuration)s slots=\(nativeSlots.count)"
@@ -778,6 +779,7 @@ final class PlaybackCenter {
                 channelLogin: login,
                 mode: .web,
                 isLowLatency: false,
+                isUsingLLHLSProxy: false,
                 endToEndSeconds: nil,
                 liveEdgeLagSeconds: nil,
                 bufferedAheadSeconds: nil,

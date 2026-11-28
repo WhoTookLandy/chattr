@@ -58,6 +58,9 @@ struct PlaybackLatencySnapshot: Equatable, Sendable {
     let channelLogin: String
     let mode: Mode
     let isLowLatency: Bool
+    /// True when the active `AVPlayerItem` is served through the local
+    /// `TwitchLLHLSProxy` (`#EXT-X-TWITCH-PREFETCH` → Apple LL-HLS).
+    let isUsingLLHLSProxy: Bool
     /// Wall-clock delay estimated from HLS `#EXT-X-PROGRAM-DATE-TIME`
     /// (`now - item.currentDate()`), when the stream provides program dates.
     let endToEndSeconds: Double?
@@ -81,7 +84,7 @@ struct PlaybackLatencySnapshot: Equatable, Sendable {
         if mode == .web {
             return "\(prefix)web (WKWebView HLS)"
         }
-        let profile = isLowLatency ? "LL" : "std"
+        let profile = profileTag
         var parts = ["\(prefix)\(mode.rawValue)(\(profile))"]
         if let e2e = endToEndSeconds {
             parts.append("e2e:\(Self.formatSeconds(e2e))")
@@ -109,7 +112,7 @@ struct PlaybackLatencySnapshot: Equatable, Sendable {
         if mode == .web {
             return "channel=@\(channelLogin) mode=web"
         }
-        let profile = isLowLatency ? "LL" : "std"
+        let profile = profileTag
         let e2e = endToEndSeconds.map(Self.formatSeconds) ?? "n/a"
         let lag = liveEdgeLagSeconds.map(Self.formatSeconds) ?? "n/a"
         let buf = bufferedAheadSeconds.map(Self.formatSeconds) ?? "n/a"
@@ -118,6 +121,13 @@ struct PlaybackLatencySnapshot: Equatable, Sendable {
         let fwd = preferredForwardBufferSeconds > 0 ? Self.formatSeconds(preferredForwardBufferSeconds) : "auto"
         let stl = stallCount.map(String.init) ?? "n/a"
         return "channel=@\(channelLogin) mode=\(mode.rawValue) profile=\(profile) e2e=\(e2e) lag=\(lag) buf=\(buf) cfg=\(cfg) rec=\(rec) fwdCap=\(fwd) stalls=\(stl)"
+    }
+
+    private var profileTag: String {
+        if isLowLatency {
+            return isUsingLLHLSProxy ? "LL+" : "LL"
+        }
+        return "std"
     }
 
     private static func formatSeconds(_ value: Double) -> String {
@@ -130,6 +140,7 @@ struct PlaybackLatencySnapshot: Equatable, Sendable {
         channelLogin: String,
         mode: Mode,
         isLowLatency: Bool,
+        isUsingLLHLSProxy: Bool = false,
         currentTime: CMTime,
         currentDate: Date?,
         now: Date = Date(),
@@ -197,6 +208,7 @@ struct PlaybackLatencySnapshot: Equatable, Sendable {
             channelLogin: channelLogin,
             mode: mode,
             isLowLatency: isLowLatency,
+            isUsingLLHLSProxy: isUsingLLHLSProxy,
             endToEndSeconds: e2e,
             liveEdgeLagSeconds: liveLag,
             bufferedAheadSeconds: bufferedAhead,
@@ -219,10 +231,12 @@ struct PlaybackLatencySnapshot: Equatable, Sendable {
         let seekable = item.seekableTimeRanges.map(\.timeRangeValue)
         let loaded = item.loadedTimeRanges.map(\.timeRangeValue)
         let stalls = item.accessLog()?.events.map(\.numberOfStalls)
+        let usesProxy = (item.asset as? AVURLAsset)?.url.host == "127.0.0.1"
         return make(
             channelLogin: channelLogin,
             mode: mode,
             isLowLatency: isLowLatency,
+            isUsingLLHLSProxy: usesProxy,
             currentTime: item.currentTime(),
             currentDate: item.currentDate(),
             now: now,

@@ -110,6 +110,16 @@ enum NativePlayer {
         /// Item generation for which initial `.playing` latency telemetry has
         /// already been logged, so transient stalls don't spam the log.
         private var loggedStartForGeneration = 0
+        /// True when the active `AVPlayerItem` is backed by `TwitchLLHLSProxy`.
+        private var activeItemUsesLLHLSProxy = false
+        /// Set after a proxied LL-HLS failure on this channel so retries fall
+        /// back cleanly to direct Twitch HLS before ever giving up to web.
+        private var bypassLLHLSProxy = false
+        /// Latency mode currently active on `controller.avPlayer`.
+        private var activeLowLatency = false
+        /// Latest Low Latency mode requested by the user. Checked before
+        /// starting or committing any swap so a superseded toggle can never win.
+        private var desiredLowLatency = false
         /// When the player last went to paused; nil while it isn't.
         private var pausedAt: ContinuousClock.Instant?
 
@@ -120,6 +130,8 @@ enum NativePlayer {
         private var standbyTargetAudioOnly = false
         private var standbyIsAudioOnlyRendition = false
         private var standbyUsedCachedURL = false
+        private var standbyUsesLLHLSProxy = false
+        private var standbyLowLatency = false
         private var standbyIsPlaying = false
         private var standbyFrameReady = false
         private var standbyTimeoutTask: Task<Void, Never>?
@@ -207,6 +219,11 @@ enum NativePlayer {
             self.login = login
             self.audioOnly = audioOnly
             self.activeAudioOnly = audioOnly
+            self.bypassLLHLSProxy = false
+            self.activeItemUsesLLHLSProxy = false
+            let lowLatency = PlaybackLatencyProfile.current.isLowLatency
+            self.activeLowLatency = lowLatency
+            self.desiredLowLatency = lowLatency
             playerView = view
             isLoaded = true
             recovery = PlaybackRecovery()
@@ -286,6 +303,76 @@ enum NativePlayer {
             transitionToMode(audioOnly: newAudioOnly, bridgeLiveAudio: bridgeLiveAudio)
         }
 
+        /// Switches live between Standard HLS and the local Low Latency LL-HLS
+        /// proxy (`TwitchLLHLSProxy`) without interrupting audio.
+        func setLowLatency(_ enabled: Bool) {
+            guard isLoaded else { return }
+            desiredLowLatency = enabled
+            if enabled {
+                bypassLLHLSProxy = false
+            }
+            let profile = PlaybackLatencyProfile.resolve(lowLatency: enabled)
+            guard let currentPlayer = controller.avPlayer else {
+                activeLowLatency = enabled
+                return
+            }
+            if activeLowLatency == enabled && activeItemUsesLLHLSProxy == enabled {
+                // Cancel any superseded pending Low Latency swap (without
+                // cancelling an unrelated Audio-Only ↔ Video transition).
+                if standbyPlayer != nil, standbyLowLatency != enabled, standbyTargetAudioOnly == activeAudioOnly {
+                    cancelStandby()
+                }
+                controller.applyLatencyProfile(profile)
+                return
+            }
+            cancelStandby()
+            let bridgeLiveAudio = controller.startsPlaying && currentPlayer.timeControlStatus != .paused
+            if let cached = freshCachedPlaylist {
+                let target: StreamPlaylist
+                if !audioOnly {
+                    target = StreamPlaylist(
+                        url: cached.masterURL,
+                        isAudioOnlyRendition: false,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: cached.audioOnlyURL,
+                        didProbeAudioOnly: cached.didProbeAudioOnly
+                    )
+                } else if let audioURL = cached.audioOnlyURL {
+                    target = StreamPlaylist(
+                        url: audioURL,
+                        isAudioOnlyRendition: true,
+                        masterURL: cached.masterURL,
+                        audioOnlyURL: audioURL,
+                        didProbeAudioOnly: true
+                    )
+                } else {
+                    target = cached
+                }
+                startOrSwap(
+                    to: target,
+                    targetAudioOnly: audioOnly,
+                    usedCachedURL: true,
+                    bridgeLiveAudio: bridgeLiveAudio,
+                    profile: profile
+                )
+            } else {
+                transitionToMode(audioOnly: audioOnly, bridgeLiveAudio: bridgeLiveAudio, profile: profile)
+            }
+        }
+
+        private func resolvePlaybackURL(
+            for playlist: StreamPlaylist,
+            profile: PlaybackLatencyProfile
+        ) async -> (url: URL, usesProxy: Bool) {
+            guard profile.isLowLatency, !bypassLLHLSProxy else {
+                return (playlist.url, false)
+            }
+            if let proxied = await TwitchLLHLSProxy.shared.proxiedURL(for: playlist) {
+                return (proxied, true)
+            }
+            return (playlist.url, false)
+        }
+
         // MARK: Resolve, start, retry
 
         private var freshCachedPlaylist: StreamPlaylist? {
@@ -326,7 +413,17 @@ enum NativePlayer {
                         await PlaybackAudioSession.shared.activate(muted: self.controller.isMuted)
                     }
                     guard !Task.isCancelled else { return }
-                    self.start(playlist)
+                    var profile = PlaybackLatencyProfile.resolve(lowLatency: self.desiredLowLatency)
+                    var resolved = await self.resolvePlaybackURL(for: playlist, profile: profile)
+                    guard !Task.isCancelled else { return }
+                    // Re-check if the user flipped Low Latency while awaiting
+                    // proxy setup so the first item always matches current intent.
+                    if self.desiredLowLatency != profile.isLowLatency {
+                        profile = PlaybackLatencyProfile.resolve(lowLatency: self.desiredLowLatency)
+                        resolved = await self.resolvePlaybackURL(for: playlist, profile: profile)
+                        guard !Task.isCancelled else { return }
+                    }
+                    self.start(playlist, playbackURL: resolved.url, usesProxy: resolved.usesProxy, profile: profile)
                 } catch {
                     guard !Task.isCancelled else { return }
                     self?.playbackFailed(error)
@@ -334,22 +431,28 @@ enum NativePlayer {
             }
         }
 
-        private func start(_ playlist: StreamPlaylist) {
+        private func start(
+            _ playlist: StreamPlaylist,
+            playbackURL: URL? = nil,
+            usesProxy: Bool = false,
+            profile: PlaybackLatencyProfile = .current
+        ) {
             guard isLoaded, let view = playerView else { return }
             cancelStandby()
             cachedPlaylist = playlist
             cachedPlaylistAt = ContinuousClock.now
             activeAudioOnly = audioOnly
+            activeItemUsesLLHLSProxy = usesProxy
+            activeLowLatency = profile.isLowLatency
             controller.playsVideoHidden = audioOnly && !playlist.isAudioOnlyRendition
 
-            let item = AVPlayerItem(url: playlist.url)
-            let latency = PlaybackLatencyProfile.current
+            let item = AVPlayerItem(url: playbackURL ?? playlist.url)
             // Hold a fixed distance behind the live edge. Left alone, each
             // stall adds its length to the delay for good, and chat runs
             // further and further ahead of the video.
             item.automaticallyPreservesTimeOffsetFromLive = true
-            item.configuredTimeOffsetFromLive = latency.liveOffset
-            item.preferredForwardBufferDuration = latency.forwardBufferDuration
+            item.configuredTimeOffsetFromLive = profile.liveOffset
+            item.preferredForwardBufferDuration = profile.forwardBufferDuration
             controller.applyQualityLimits(to: item)
             observeItem(item)
 
@@ -426,7 +529,11 @@ enum NativePlayer {
             }
         }
 
-        private func transitionToMode(audioOnly targetAudioOnly: Bool, bridgeLiveAudio: Bool) {
+        private func transitionToMode(
+            audioOnly targetAudioOnly: Bool,
+            bridgeLiveAudio: Bool,
+            profile: PlaybackLatencyProfile = .current
+        ) {
             if let cached = freshCachedPlaylist {
                 if !targetAudioOnly {
                     let target = StreamPlaylist(
@@ -436,11 +543,13 @@ enum NativePlayer {
                         audioOnlyURL: cached.audioOnlyURL,
                         didProbeAudioOnly: cached.didProbeAudioOnly
                     )
-                    if bridgeLiveAudio {
-                        beginWarmSwap(to: target, targetAudioOnly: false, usedCachedURL: true)
-                    } else {
-                        start(target)
-                    }
+                    startOrSwap(
+                        to: target,
+                        targetAudioOnly: false,
+                        usedCachedURL: true,
+                        bridgeLiveAudio: bridgeLiveAudio,
+                        profile: profile
+                    )
                     return
                 }
                 if let audioURL = cached.audioOnlyURL {
@@ -451,11 +560,13 @@ enum NativePlayer {
                         audioOnlyURL: audioURL,
                         didProbeAudioOnly: true
                     )
-                    if bridgeLiveAudio {
-                        beginWarmSwap(to: target, targetAudioOnly: true, usedCachedURL: true)
-                    } else {
-                        start(target)
-                    }
+                    startOrSwap(
+                        to: target,
+                        targetAudioOnly: true,
+                        usedCachedURL: true,
+                        bridgeLiveAudio: bridgeLiveAudio,
+                        profile: profile
+                    )
                     return
                 }
             }
@@ -482,7 +593,7 @@ enum NativePlayer {
                                     didProbeAudioOnly: true
                                 )
                                 self.cachedPlaylist = target
-                                self.applyResolvedModeSwitch(target, targetAudioOnly: true, usedCachedURL: true, bridgeLiveAudio: bridgeLiveAudio)
+                                self.applyResolvedModeSwitch(target, targetAudioOnly: true, usedCachedURL: true, bridgeLiveAudio: bridgeLiveAudio, profile: profile)
                                 return
                             case .unavailable:
                                 self.cachedPlaylist = StreamPlaylist(
@@ -511,7 +622,7 @@ enum NativePlayer {
                     guard !Task.isCancelled, let self, self.isLoaded, self.audioOnly == targetAudioOnly else { return }
                     self.cachedPlaylist = playlist
                     self.cachedPlaylistAt = ContinuousClock.now
-                    self.applyResolvedModeSwitch(playlist, targetAudioOnly: targetAudioOnly, usedCachedURL: false, bridgeLiveAudio: bridgeLiveAudio)
+                    self.applyResolvedModeSwitch(playlist, targetAudioOnly: targetAudioOnly, usedCachedURL: false, bridgeLiveAudio: bridgeLiveAudio, profile: profile)
                 } catch {
                     guard !Task.isCancelled, let self, self.isLoaded, self.audioOnly == targetAudioOnly else { return }
                     self.playbackFailed(error)
@@ -523,36 +634,109 @@ enum NativePlayer {
             _ playlist: StreamPlaylist,
             targetAudioOnly: Bool,
             usedCachedURL: Bool,
-            bridgeLiveAudio: Bool
+            bridgeLiveAudio: Bool,
+            profile: PlaybackLatencyProfile = .current
         ) {
             if targetAudioOnly, !playlist.isAudioOnlyRendition,
-               !activeAudioOnly, let currentItem = controller.avPlayer?.currentItem {
+               !activeAudioOnly, activeLowLatency == profile.isLowLatency,
+               let currentItem = controller.avPlayer?.currentItem {
                 activeAudioOnly = true
                 controller.playsVideoHidden = true
                 controller.applyQualityLimits(to: currentItem)
                 return
             }
-            if bridgeLiveAudio, controller.avPlayer != nil, controller.startsPlaying {
-                beginWarmSwap(to: playlist, targetAudioOnly: targetAudioOnly, usedCachedURL: usedCachedURL)
-            } else {
-                start(playlist)
+            startOrSwap(
+                to: playlist,
+                targetAudioOnly: targetAudioOnly,
+                usedCachedURL: usedCachedURL,
+                bridgeLiveAudio: bridgeLiveAudio,
+                profile: profile
+            )
+        }
+
+        private func startOrSwap(
+            to playlist: StreamPlaylist,
+            targetAudioOnly: Bool,
+            usedCachedURL: Bool,
+            bridgeLiveAudio: Bool,
+            profile: PlaybackLatencyProfile
+        ) {
+            if !profile.isLowLatency || bypassLLHLSProxy {
+                commitStartOrSwap(
+                    to: playlist,
+                    playbackURL: playlist.url,
+                    usesProxy: false,
+                    targetAudioOnly: targetAudioOnly,
+                    usedCachedURL: usedCachedURL,
+                    bridgeLiveAudio: bridgeLiveAudio,
+                    profile: profile
+                )
+                return
+            }
+
+            modeSwitchTask?.cancel()
+            modeSwitchTask = Task { [weak self] in
+                guard let self else { return }
+                let resolved = await self.resolvePlaybackURL(for: playlist, profile: profile)
+                guard !Task.isCancelled else { return }
+                self.commitStartOrSwap(
+                    to: playlist,
+                    playbackURL: resolved.url,
+                    usesProxy: resolved.usesProxy,
+                    targetAudioOnly: targetAudioOnly,
+                    usedCachedURL: usedCachedURL,
+                    bridgeLiveAudio: bridgeLiveAudio,
+                    profile: profile
+                )
             }
         }
 
-        private func beginWarmSwap(to playlist: StreamPlaylist, targetAudioOnly: Bool, usedCachedURL: Bool) {
+        private func commitStartOrSwap(
+            to playlist: StreamPlaylist,
+            playbackURL: URL,
+            usesProxy: Bool,
+            targetAudioOnly: Bool,
+            usedCachedURL: Bool,
+            bridgeLiveAudio: Bool,
+            profile: PlaybackLatencyProfile
+        ) {
+            guard isLoaded, audioOnly == targetAudioOnly, desiredLowLatency == profile.isLowLatency else { return }
+            if bridgeLiveAudio, controller.avPlayer != nil, controller.startsPlaying {
+                beginWarmSwap(
+                    to: playlist,
+                    playbackURL: playbackURL,
+                    usesProxy: usesProxy,
+                    targetAudioOnly: targetAudioOnly,
+                    usedCachedURL: usedCachedURL,
+                    profile: profile
+                )
+            } else {
+                start(playlist, playbackURL: playbackURL, usesProxy: usesProxy, profile: profile)
+            }
+        }
+
+        private func beginWarmSwap(
+            to playlist: StreamPlaylist,
+            playbackURL: URL? = nil,
+            usesProxy: Bool = false,
+            targetAudioOnly: Bool,
+            usedCachedURL: Bool,
+            profile: PlaybackLatencyProfile = .current
+        ) {
             guard isLoaded, let view = playerView else { return }
             standbyGeneration += 1
             let generation = standbyGeneration
             standbyTargetAudioOnly = targetAudioOnly
             standbyIsAudioOnlyRendition = playlist.isAudioOnlyRendition
             standbyUsedCachedURL = usedCachedURL
+            standbyUsesLLHLSProxy = usesProxy
+            standbyLowLatency = profile.isLowLatency
             standbyIsPlaying = false
             standbyFrameReady = targetAudioOnly
 
-            let item = AVPlayerItem(url: playlist.url)
-            let latency = PlaybackLatencyProfile.current
+            let item = AVPlayerItem(url: playbackURL ?? playlist.url)
             item.automaticallyPreservesTimeOffsetFromLive = true
-            item.configuredTimeOffsetFromLive = latency.liveOffset
+            item.configuredTimeOffsetFromLive = profile.liveOffset
             item.preferredForwardBufferDuration = Self.warmStartBufferDuration
             controller.applyQualityLimits(to: item, videoIsHidden: targetAudioOnly && !playlist.isAudioOnlyRendition)
 
@@ -632,6 +816,10 @@ enum NativePlayer {
 
         private func tryCommitStandby(generation: Int) {
             guard isLoaded, generation == standbyGeneration, standbyIsPlaying, standbyFrameReady else { return }
+            guard standbyLowLatency == desiredLowLatency else {
+                cancelStandby()
+                return
+            }
             guard let standby = standbyPlayer, let item = standby.currentItem, let view = playerView else { return }
 
             let targetAudioOnly = standbyTargetAudioOnly
@@ -673,10 +861,12 @@ enum NativePlayer {
             oldPlayer?.pause()
             oldPlayer?.replaceCurrentItem(with: nil)
 
-            let latency = PlaybackLatencyProfile.current
+            let latency = PlaybackLatencyProfile.resolve(lowLatency: standbyLowLatency)
             item.configuredTimeOffsetFromLive = latency.liveOffset
             item.preferredForwardBufferDuration = latency.forwardBufferDuration
             activeAudioOnly = targetAudioOnly
+            activeItemUsesLLHLSProxy = standbyUsesLLHLSProxy
+            activeLowLatency = standbyLowLatency
             controller.playsVideoHidden = targetAudioOnly && !isAudioOnlyRendition
             controller.applyQualityLimits(to: item)
             controller.avPlayer = standby
@@ -743,7 +933,18 @@ enum NativePlayer {
             guard isLoaded, generation == standbyGeneration else { return }
             let targetAudioOnly = standbyTargetAudioOnly
             let wasCached = standbyUsedCachedURL
+            let wasProxied = standbyUsesLLHLSProxy
             cancelStandby()
+
+            if wasProxied, !bypassLLHLSProxy {
+                // Local LL-HLS proxy swap failed: fall back directly to Twitch
+                // HLS while keeping the current player live.
+                nativePlayerLogger.warning("LL-HLS proxy warm swap failed for @\(self.login, privacy: .public); falling back to direct HLS")
+                bypassLLHLSProxy = true
+                let bridgeLiveAudio = controller.startsPlaying && controller.avPlayer?.timeControlStatus != .paused
+                transitionToMode(audioOnly: targetAudioOnly, bridgeLiveAudio: bridgeLiveAudio)
+                return
+            }
 
             if wasCached {
                 // Cached token/playlist may have expired: evict and retry once
@@ -889,6 +1090,7 @@ enum NativePlayer {
         /// Tries again with backoff (`PlaybackRecovery`) before giving the
         /// stream to the web player.
         private func playbackFailed(_ error: (any Error)?) {
+            let wasProxied = activeItemUsesLLHLSProxy
             // One failure per item, however many of its observers report it.
             itemGeneration += 1
             itemSubscriptions.removeAll()
@@ -897,13 +1099,28 @@ enum NativePlayer {
             warmAudioOnlyTask?.cancel()
             warmAudioOnlyTask = nil
             cancelStandby()
-            cachedPlaylist = nil
-            cachedPlaylistAt = nil
 
             if let refusal = error as? StreamPlaylistError, refusal == .offline {
+                cachedPlaylist = nil
+                cachedPlaylistAt = nil
                 controller.onStreamEnded?()
                 return
             }
+
+            // If the failure came from the local LL-HLS proxy, fall back
+            // immediately to direct Twitch HLS without burning a recovery retry.
+            if wasProxied, !bypassLLHLSProxy {
+                nativePlayerLogger.warning("LL-HLS proxy playback failed for @\(self.login, privacy: .public); falling back to direct HLS")
+                bypassLLHLSProxy = true
+                activeItemUsesLLHLSProxy = false
+                controller.update(\.isBuffering, to: true)
+                resolveAndStart(after: nil, invalidateCache: false)
+                return
+            }
+
+            cachedPlaylist = nil
+            cachedPlaylistAt = nil
+
             let staysNative = controller.staysOnNativeEngine?() ?? false
             switch recovery.step(after: error, staysNative: staysNative) {
             case .retry(let delay):

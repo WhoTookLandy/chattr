@@ -93,7 +93,7 @@ struct VideoDeviceSettingsScreen: View {
                     SettingLabel(
                         "Low Latency",
                         systemImage: "bolt",
-                        subtitle: "Tighter live buffer for native video and audio-only; may buffer more on weak connections",
+                        subtitle: "Local LL-HLS prefetch & tighter buffer for native video and audio-only",
                         disabledReason: nativePlaybackEnabled ? nil : "Not available right now"
                     )
                 }

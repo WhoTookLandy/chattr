@@ -35,6 +35,7 @@ struct PlaybackLatencyTests {
             channelLogin: "hasanabi",
             mode: .audioOnly,
             isLowLatency: true,
+            isUsingLLHLSProxy: true,
             currentTime: seconds(125.5),
             currentDate: programDate,
             now: now,
@@ -59,14 +60,14 @@ struct PlaybackLatencyTests {
         #expect(snapshot.stallCount == 3)
 
         let hud = snapshot.compactHUDLine()
-        #expect(hud == "play:aud(LL) e2e:7.4s lag:4.5s buf:2.0s cfg:2.0s rec:4.5s stl:3")
+        #expect(hud == "play:aud(LL+) e2e:7.4s lag:4.5s buf:2.0s cfg:2.0s rec:4.5s stl:3")
 
         let otherChannelHUD = snapshot.compactHUDLine(showChannel: true)
-        #expect(otherChannelHUD.hasPrefix("play:@hasanabi aud(LL) "))
+        #expect(otherChannelHUD.hasPrefix("play:@hasanabi aud(LL+) "))
 
         #expect(snapshot.logSummary.contains("channel=@hasanabi"))
         #expect(snapshot.logSummary.contains("mode=aud"))
-        #expect(snapshot.logSummary.contains("profile=LL"))
+        #expect(snapshot.logSummary.contains("profile=LL+"))
         #expect(snapshot.logSummary.contains("fwdCap=2.0s"))
         #expect(snapshot.logSummary.contains("stalls=3"))
     }
@@ -106,6 +107,7 @@ struct PlaybackLatencyTests {
             channelLogin: "lirik",
             mode: .web,
             isLowLatency: false,
+            isUsingLLHLSProxy: false,
             endToEndSeconds: nil,
             liveEdgeLagSeconds: nil,
             bufferedAheadSeconds: nil,
